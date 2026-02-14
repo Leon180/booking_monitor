@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS orders (
+    id SERIAL PRIMARY KEY,
+    event_id INT NOT NULL,
+    user_id INT NOT NULL,
+    quantity INT NOT NULL DEFAULT 1,
+    status VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

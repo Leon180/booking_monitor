@@ -1,0 +1,32 @@
+groups:
+  - name: booking_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[1m])) 
+          / 
+          sum(rate(http_requests_total[1m])) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High Error Rate detected"
+          description: "Error rate is above 5% (current: {{ $value }})"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) > 2.0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Latency detected"
+          description: "p99 Latency is above 2s (current: {{ $value }}s)"
+
+      - alert: InventorySoldOut
+        expr: booking_sold_out_total > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Event Sold Out"
+          description: "An event has been sold out."
