@@ -63,7 +63,7 @@ echo "| Container | Peak CPU | Peak Mem |" >> "$REPORT_FILE"
 echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
 
 # Simple awk to find max CPU/Mem (approximate parsing)
-for container in booking_db booking_app; do
+for container in booking_db booking_redis booking_app; do
   peak_cpu=$(grep "$container" "$STATS_FILE" | awk -F',' '{print $3}' | sort -nr | head -1)
   peak_mem=$(grep "$container" "$STATS_FILE" | awk -F',' '{print $4}' | sort -hr | head -1)
   echo "| **$container** | $peak_cpu | $peak_mem |" >> "$REPORT_FILE"

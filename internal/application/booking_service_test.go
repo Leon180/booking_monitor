@@ -25,7 +25,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 		userID        int
 		eventID       int
 		quantity      int
-		mockSetup     func(*mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockUnitOfWork)
+		mockSetup     func(*mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockInventoryRepository, *mocks.MockUnitOfWork)
 		expectedError error
 	}{
 		{
@@ -33,67 +33,33 @@ func TestBookingService_BookTicket(t *testing.T) {
 			userID:   1,
 			eventID:  1,
 			quantity: 2,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, u *mocks.MockUnitOfWork) {
-				event := &domain.Event{ID: 1, AvailableTickets: 10}
-
-				// UoW Do passthrough
-				u.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
-				})
-
-				e.EXPECT().GetByID(gomock.Any(), 1).Return(event, nil)
-				e.EXPECT().Update(gomock.Any(), event).Return(nil)
-
-				// Match Order fields
-				o.EXPECT().Create(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, order *domain.Order) error {
-					if order.UserID != 1 || order.EventID != 1 || order.Quantity != 2 {
-						return errors.New("order fields mismatch")
-					}
-					return nil
-				})
+			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+				// Phase 2: Expect Redis Deduct
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 2).Return(true, nil)
+				// Order creation skipped in Phase 2
 			},
 			expectedError: nil,
 		},
 		{
-			name:     "Sold Out Domain Logic",
+			name:     "Sold Out (Redis)",
 			userID:   1,
 			eventID:  1,
 			quantity: 5,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, u *mocks.MockUnitOfWork) {
-				event := &domain.Event{ID: 1, AvailableTickets: 2} // Less than requested
-
-				u.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
-				})
-
-				e.EXPECT().GetByID(gomock.Any(), 1).Return(event, nil)
-				// Update and Create should NOT be called
+			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+				// Redis returns false (Sold Out)
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 5).Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
 		{
-			name:     "Event Not Found",
-			userID:   1,
-			eventID:  99,
-			quantity: 1,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, u *mocks.MockUnitOfWork) {
-				u.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
-				})
-
-				e.EXPECT().GetByID(gomock.Any(), 99).Return(nil, domain.ErrEventNotFound)
-			},
-			expectedError: domain.ErrEventNotFound,
-		},
-		{
-			name:     "Invalid Quantity",
+			name:     "Redis Error",
 			userID:   1,
 			eventID:  1,
-			quantity: 0,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, u *mocks.MockUnitOfWork) {
-				// No mocks needed as validation happens before UoW
+			quantity: 1,
+			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 1).Return(false, errors.New("connection failed"))
 			},
-			expectedError: errors.New("invalid quantity: must be between 1 and 10"),
+			expectedError: errors.New("redis inventory error: connection failed"),
 		},
 	}
 
@@ -105,14 +71,15 @@ func TestBookingService_BookTicket(t *testing.T) {
 			// Setup Mocks
 			mockEventRepo := mocks.NewMockEventRepository(ctrl)
 			mockOrderRepo := mocks.NewMockOrderRepository(ctrl)
+			mockInventoryRepo := mocks.NewMockInventoryRepository(ctrl)
 			mockUoW := mocks.NewMockUnitOfWork(ctrl)
 
 			if tt.mockSetup != nil {
-				tt.mockSetup(mockEventRepo, mockOrderRepo, mockUoW)
+				tt.mockSetup(mockEventRepo, mockOrderRepo, mockInventoryRepo, mockUoW)
 			}
 
 			// Service
-			service := application.NewBookingService(mockEventRepo, mockOrderRepo, mockUoW)
+			service := application.NewBookingService(mockEventRepo, mockOrderRepo, mockInventoryRepo, mockUoW)
 
 			// Execute
 			err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)

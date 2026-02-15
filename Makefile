@@ -85,7 +85,8 @@ reset-db: ## Reset database (clear orders, reset event inventory to 100)
 	@docker exec booking_db psql -U user -d booking -c "DELETE FROM events WHERE id != 1;"
 	@docker exec booking_db psql -U user -d booking -c "UPDATE events SET total_tickets = 100, available_tickets = 100, name = 'Jay Chou Concert', version = 0 WHERE id = 1;"
 	@docker exec booking_db psql -U user -d booking -c "INSERT INTO events (id, name, total_tickets, available_tickets, version) VALUES (1, 'Jay Chou Concert', 100, 100, 0) ON CONFLICT (id) DO NOTHING;"
-	@echo "Database reset complete."
+	@docker exec booking_redis redis-cli FLUSHALL || true
+	@echo "Database and Redis reset complete."
 
 help: ## Show help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

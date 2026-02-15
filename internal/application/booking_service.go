@@ -3,10 +3,8 @@ package application
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"booking_monitor/internal/domain"
-	"booking_monitor/pkg/logger"
 )
 
 const tracerName = "application/service"
@@ -17,16 +15,18 @@ type BookingService interface {
 }
 
 type bookingService struct {
-	eventRepo domain.EventRepository
-	orderRepo domain.OrderRepository
-	uow       domain.UnitOfWork
+	eventRepo     domain.EventRepository
+	orderRepo     domain.OrderRepository
+	inventoryRepo domain.InventoryRepository
+	uow           domain.UnitOfWork
 }
 
-func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderRepository, uow domain.UnitOfWork) BookingService {
+func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderRepository, inventoryRepo domain.InventoryRepository, uow domain.UnitOfWork) BookingService {
 	return &bookingService{
-		eventRepo: eventRepo,
-		orderRepo: orderRepo,
-		uow:       uow,
+		eventRepo:     eventRepo,
+		orderRepo:     orderRepo,
+		inventoryRepo: inventoryRepo,
+		uow:           uow,
 	}
 }
 
@@ -43,61 +43,26 @@ func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize i
 }
 
 func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
-	log := logger.FromCtx(ctx)
-	log.Infow("processing booking request",
-		"user_id", userID,
-		"event_id", eventID,
-		"quantity", quantity,
-	)
+	// Phase 2: Redis-Only Implementation
+	// We rely on Redis Atomic DECR for inventory management.
+	// We DO NOT persist to Postgres in this phase to demonstrate raw throughput.
 
-	// Business Logic: Validate Quantity
-	if quantity < 1 || quantity > 10 {
-		return fmt.Errorf("invalid quantity: must be between 1 and 10")
-	}
-
-	// 1. Transaction (Unit of Work)
-	err := s.uow.Do(ctx, func(txCtx context.Context) error {
-		// Re-fetch logger from txCtx just in case, though usually it's the same
-		log := logger.FromCtx(txCtx)
-
-		// 1.1 Fetch
-		event, err := s.eventRepo.GetByID(txCtx, eventID)
-		if err != nil {
-			return fmt.Errorf("fetch event: %w", err)
-		}
-
-		// 1.2 Domain Logic (Lifecycle)
-		if err := event.Deduct(quantity); err != nil {
-			// e.g. Domain ErrSoldOut
-			log.Warnw("domain logic failed", "error", err)
-			return err
-		}
-
-		// 1.3 Persist
-		if err := s.eventRepo.Update(txCtx, event); err != nil {
-			return fmt.Errorf("update event: %w", err)
-		}
-
-		// Create Order
-		order := &domain.Order{
-			EventID:   eventID,
-			UserID:    userID,
-			Quantity:  quantity,
-			Status:    domain.OrderStatusConfirmed,
-			CreatedAt: time.Now(),
-		}
-		if err := s.orderRepo.Create(txCtx, order); err != nil {
-			return fmt.Errorf("create order: %w", err)
-		}
-
-		log.Infow("booking successful", "order_id", order.ID)
-		return nil
-	})
-
+	// 1. Atomic Deduct from Redis
+	success, err := s.inventoryRepo.DeductInventory(ctx, eventID, quantity)
 	if err != nil {
-		log.Errorw("booking failed", "error", err)
-		return err
+		return fmt.Errorf("redis inventory error: %w", err)
 	}
 
+	if !success {
+		return domain.ErrSoldOut
+	}
+
+	// 2. Success!
+	// In Phase 3, we will push a message to Kafka here.
 	return nil
+
+	/*
+		// OLD LOGIC (Phase 1: DB Transaction)
+		// ...
+	*/
 }

@@ -12,11 +12,15 @@ type EventService interface {
 }
 
 type eventService struct {
-	repo domain.EventRepository
+	repo          domain.EventRepository
+	inventoryRepo domain.InventoryRepository
 }
 
-func NewEventService(repo domain.EventRepository) EventService {
-	return &eventService{repo: repo}
+func NewEventService(repo domain.EventRepository, inventoryRepo domain.InventoryRepository) EventService {
+	return &eventService{
+		repo:          repo,
+		inventoryRepo: inventoryRepo,
+	}
 }
 
 func (s *eventService) CreateEvent(ctx context.Context, name string, totalTickets int) (*domain.Event, error) {
@@ -31,8 +35,15 @@ func (s *eventService) CreateEvent(ctx context.Context, name string, totalTicket
 		Version:          0,
 	}
 
+	// 1. Create in DB (Source of Truth for Metadata)
 	if err := s.repo.Create(ctx, event); err != nil {
 		return nil, err
+	}
+
+	// 2. Set in Redis (Hot Inventory)
+	if err := s.inventoryRepo.SetInventory(ctx, event.ID, totalTickets); err != nil {
+		// Just log warning? Or fail? For now, let's fail to ensure consistency.
+		return nil, fmt.Errorf("failed to set redis inventory: %w", err)
 	}
 
 	return event, nil

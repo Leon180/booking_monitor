@@ -17,6 +17,7 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/api"
+	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/observability"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
 	"booking_monitor/pkg/logger"
@@ -131,6 +132,7 @@ func runServer(cmd *cobra.Command, args []string) {
 
 		// Provide Modules
 		postgresRepo.Module,
+		cache.Module,
 		application.Module,
 		api.Module,
 
