@@ -5,26 +5,17 @@ import (
 	"database/sql"
 
 	"booking_monitor/internal/domain"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "infrastructure/persistence/postgres"
-
-type PostgresEventRepository struct {
+type postgresEventRepository struct {
 	db *sql.DB
 }
 
-func NewPostgresEventRepository(db *sql.DB) *PostgresEventRepository {
-	return &PostgresEventRepository{db: db}
+func NewPostgresEventRepository(db *sql.DB) domain.EventRepository {
+	return &postgresEventRepository{db: db}
 }
 
-func (r *PostgresEventRepository) GetByID(ctx context.Context, id int) (*domain.Event, error) {
-	_, span := otel.Tracer(tracerName).Start(ctx, "GetByID", trace.WithAttributes(attribute.Int("event_id", id)))
-	defer span.End()
-
+func (r *postgresEventRepository) GetByID(ctx context.Context, id int) (*domain.Event, error) {
 	// Use FOR UPDATE in transaction? Here we just read.
 	// Actually, for booking we need transactional context.
 	// For simplicity in this stage, we assume the Service manages the Transaction if needed,
@@ -35,8 +26,8 @@ func (r *PostgresEventRepository) GetByID(ctx context.Context, id int) (*domain.
 	// However, the `GetByID` is usually just for display.
 	// `DeductInventory` is the one that needs transaction or atomic update.
 
-	query := "SELECT id, name, total_tickets, available_tickets FROM events WHERE id = $1"
-	row := r.db.QueryRowContext(ctx, query, id)
+	query := "SELECT id, name, total_tickets, available_tickets FROM events WHERE id = $1 FOR UPDATE"
+	row := r.getExecutor(ctx).QueryRowContext(ctx, query, id)
 
 	var event domain.Event
 	err := row.Scan(&event.ID, &event.Name, &event.TotalTickets, &event.AvailableTickets)
@@ -49,22 +40,23 @@ func (r *PostgresEventRepository) GetByID(ctx context.Context, id int) (*domain.
 	return &event, nil
 }
 
-// DeductInventory Transactional logic is tricky to abstract perfectly without a Tx manager.
-// For this specific 'DeductInventory' method, we can encapsulate the whole atomic update
-// OR we can require valid Tx in context.
-// Let's go with the single-statement update for simplicity and performance which works for Postgres efficiently.
-// "UPDATE events SET available_tickets = available_tickets - 1 WHERE id = $1 AND available_tickets > 0"
-func (r *PostgresEventRepository) DeductInventory(ctx context.Context, eventID, quantity int) error {
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "DeductInventory", trace.WithAttributes(
-		attribute.Int("event_id", eventID),
-		attribute.Int("quantity", quantity),
-	))
-	defer span.End()
+func (r *postgresEventRepository) Create(ctx context.Context, event *domain.Event) error {
+	query := "INSERT INTO events (name, total_tickets, available_tickets, version) VALUES ($1, $2, $3, $4) RETURNING id"
+	return r.getExecutor(ctx).QueryRowContext(ctx, query, event.Name, event.TotalTickets, event.AvailableTickets, event.Version).Scan(&event.ID)
+}
 
-	// Atomic update: only deduct if enough tickets are available.
-	// "available_tickets >= $2" ensures we don't oversell.
+// Update persists the event state.
+// We use simple update here, relying on FOR UPDATE in GetByID for concurrency control in UoW.
+func (r *postgresEventRepository) Update(ctx context.Context, event *domain.Event) error {
+	query := "UPDATE events SET available_tickets = $1 WHERE id = $2"
+	_, err := r.getExecutor(ctx).ExecContext(ctx, query, event.AvailableTickets, event.ID)
+	return err
+}
+
+// DeductInventory - Keeping for backward compatibility or direct atomic usage if not using UoW/Entity pattern strictly
+func (r *postgresEventRepository) DeductInventory(ctx context.Context, eventID, quantity int) error {
 	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
-	res, err := r.db.ExecContext(ctx, query, eventID, quantity)
+	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
 	if err != nil {
 		return err
 	}
@@ -81,18 +73,59 @@ func (r *PostgresEventRepository) DeductInventory(ctx context.Context, eventID, 
 	return nil
 }
 
-type PostgresOrderRepository struct {
+type postgresOrderRepository struct {
 	db *sql.DB
 }
 
-func NewPostgresOrderRepository(db *sql.DB) *PostgresOrderRepository {
-	return &PostgresOrderRepository{db: db}
+func NewPostgresOrderRepository(db *sql.DB) domain.OrderRepository {
+	return &postgresOrderRepository{db: db}
 }
 
-func (r *PostgresOrderRepository) Create(ctx context.Context, order *domain.Order) error {
-	_, span := otel.Tracer(tracerName).Start(ctx, "CreateOrder", trace.WithAttributes(attribute.Int("user_id", order.UserID)))
-	defer span.End()
-
+func (r *postgresOrderRepository) Create(ctx context.Context, order *domain.Order) error {
 	query := "INSERT INTO orders (event_id, user_id, quantity, status) VALUES ($1, $2, $3, $4) RETURNING id, created_at"
-	return r.db.QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&order.ID, &order.CreatedAt)
+	return r.getExecutor(ctx).QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&order.ID, &order.CreatedAt)
+}
+
+func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+	var total int
+	var rows *sql.Rows
+	var err error
+
+	if status != nil {
+		// Filter by status
+		if err := r.getExecutor(ctx).QueryRowContext(ctx, "SELECT count(*) FROM orders WHERE status = $1", status).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+
+		query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+		rows, err = r.getExecutor(ctx).QueryContext(ctx, query, status, limit, offset)
+	} else {
+		// No filter
+		if err := r.getExecutor(ctx).QueryRowContext(ctx, "SELECT count(*) FROM orders").Scan(&total); err != nil {
+			return nil, 0, err
+		}
+
+		query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+		rows, err = r.getExecutor(ctx).QueryContext(ctx, query, limit, offset)
+	}
+
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var orders []*domain.Order
+	for rows.Next() {
+		var o domain.Order
+		if err := rows.Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		orders = append(orders, &o)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	return orders, total, nil
 }

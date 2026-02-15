@@ -6,38 +6,45 @@ import (
 	"time"
 
 	"booking_monitor/internal/domain"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
+	"booking_monitor/pkg/logger"
 )
 
 const tracerName = "application/service"
 
-type BookingService struct {
-	eventRepo domain.EventRepository
-	orderRepo domain.OrderRepository
-	logger    *zap.SugaredLogger
+type BookingService interface {
+	BookTicket(ctx context.Context, userID, eventID, quantity int) error
+	GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error)
 }
 
-func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderRepository, logger *zap.SugaredLogger) *BookingService {
-	return &BookingService{
+type bookingService struct {
+	eventRepo domain.EventRepository
+	orderRepo domain.OrderRepository
+	uow       domain.UnitOfWork
+}
+
+func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderRepository, uow domain.UnitOfWork) BookingService {
+	return &bookingService{
 		eventRepo: eventRepo,
 		orderRepo: orderRepo,
-		logger:    logger,
+		uow:       uow,
 	}
 }
 
-func (s *BookingService) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "BookTicket", trace.WithAttributes(
-		attribute.Int("user_id", userID),
-		attribute.Int("event_id", eventID),
-		attribute.Int("quantity", quantity),
-	))
-	defer span.End()
+func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	offset := (page - 1) * pageSize
 
-	s.logger.Infow("processing booking request",
+	return s.orderRepo.ListOrders(ctx, pageSize, offset, status)
+}
+
+func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
+	log := logger.FromCtx(ctx)
+	log.Infow("processing booking request",
 		"user_id", userID,
 		"event_id", eventID,
 		"quantity", quantity,
@@ -48,37 +55,49 @@ func (s *BookingService) BookTicket(ctx context.Context, userID, eventID, quanti
 		return fmt.Errorf("invalid quantity: must be between 1 and 10")
 	}
 
-	// 1. Deduct Inventory (Atomic)
-	if err := s.eventRepo.DeductInventory(ctx, eventID, quantity); err != nil {
-		span.RecordError(err)
-		if err == domain.ErrSoldOut {
-			s.logger.Warnw("event sold out", "event_id", eventID)
+	// 1. Transaction (Unit of Work)
+	err := s.uow.Do(ctx, func(txCtx context.Context) error {
+		// Re-fetch logger from txCtx just in case, though usually it's the same
+		log := logger.FromCtx(txCtx)
+
+		// 1.1 Fetch
+		event, err := s.eventRepo.GetByID(txCtx, eventID)
+		if err != nil {
+			return fmt.Errorf("fetch event: %w", err)
+		}
+
+		// 1.2 Domain Logic (Lifecycle)
+		if err := event.Deduct(quantity); err != nil {
+			// e.g. Domain ErrSoldOut
+			log.Warnw("domain logic failed", "error", err)
 			return err
 		}
-		s.logger.Errorw("failed to deduct inventory", "error", err)
-		return fmt.Errorf("deduct inventory: %w", err)
+
+		// 1.3 Persist
+		if err := s.eventRepo.Update(txCtx, event); err != nil {
+			return fmt.Errorf("update event: %w", err)
+		}
+
+		// Create Order
+		order := &domain.Order{
+			EventID:   eventID,
+			UserID:    userID,
+			Quantity:  quantity,
+			Status:    domain.OrderStatusConfirmed,
+			CreatedAt: time.Now(),
+		}
+		if err := s.orderRepo.Create(txCtx, order); err != nil {
+			return fmt.Errorf("create order: %w", err)
+		}
+
+		log.Infow("booking successful", "order_id", order.ID)
+		return nil
+	})
+
+	if err != nil {
+		log.Errorw("booking failed", "error", err)
+		return err
 	}
 
-	// 2. Create Order
-	order := &domain.Order{
-		EventID:   eventID,
-		UserID:    userID,
-		Quantity:  quantity,
-		Status:    domain.OrderStatusConfirmed,
-		CreatedAt: time.Now(),
-	}
-
-	if err := s.orderRepo.Create(ctx, order); err != nil {
-		span.RecordError(err)
-		s.logger.Errorw("failed to create order", "error", err)
-		// Note: In a real system, we'd need to roll back the inventory deduction here!
-		// But since we did a direct DB decrement, we'd need a compensating action or wrap in TX.
-		// For Stage 1 simplicity (and keeping similar behavior to original), we acknowledge this gap.
-		// Or we could have used a Tx across both calls if we exposed Tx management.
-		// For now, let's log critical error.
-		return fmt.Errorf("create order: %w", err)
-	}
-
-	s.logger.Infow("booking successful", "order_id", order.ID)
 	return nil
 }

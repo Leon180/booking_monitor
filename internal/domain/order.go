@@ -22,6 +22,8 @@ type Order struct {
 	CreatedAt time.Time   `json:"created_at"`
 }
 
+//go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
 	Create(ctx context.Context, order *Order) error
+	ListOrders(ctx context.Context, limit, offset int, status *OrderStatus) ([]*Order, int, error)
 }

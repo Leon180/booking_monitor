@@ -25,6 +25,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -33,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	"go.uber.org/fx"
 )
 
 var (
@@ -103,60 +105,68 @@ func initTracer() *trace.TracerProvider {
 }
 
 func runServer(cmd *cobra.Command, args []string) {
-	logger := logger.New("info")
-	// slog.SetDefault(logger) // zap isn't stdlib slog compatible directly without more work, skipping global default set for now
+	app := fx.New(
+		// Provide Logger
+		logger.Module,
 
-	tp := initTracer()
-	defer func() {
-		if err := tp.Shutdown(context.Background()); err != nil {
-			logger.Errorw("Error shutting down tracer provider", "error", err)
-		}
-	}()
+		// Provide DB connection
+		fx.Provide(func(log *zap.SugaredLogger) (*sql.DB, error) {
+			db, err := sql.Open("postgres", dbConnStr)
+			if err != nil {
+				return nil, err
+			}
 
-	db, err := sql.Open("postgres", dbConnStr)
-	if err != nil {
-		logger.Errorw("Failed to connect to DB", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			logger.Errorw("Error closing DB", "error", err)
-		}
-	}()
+			// Simple retry logic could be here, or use a robust opener
+			for i := 0; i < 10; i++ {
+				if err = db.Ping(); err == nil {
+					break
+				}
+				time.Sleep(1 * time.Second)
+			}
 
-	// Simple retry
-	for i := 0; i < 10; i++ {
-		if err = db.Ping(); err == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
+			db.SetMaxOpenConns(50)
+			db.SetMaxIdleConns(50)
+			return db, nil
+		}),
 
-	db.SetMaxOpenConns(50)
-	db.SetMaxIdleConns(50)
+		// Provide Modules
+		postgresRepo.Module,
+		application.Module,
+		api.Module,
 
-	eventRepo := postgresRepo.NewPostgresEventRepository(db)
-	orderRepo := postgresRepo.NewPostgresOrderRepository(db)
-	bookingService := application.NewBookingService(eventRepo, orderRepo, logger)
-	bookingHandler := api.NewBookingHandler(bookingService)
+		// Run Server -> Invoke
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger) {
+			tp := initTracer()
 
-	r := gin.Default()
-	// Add Metrics Middleware
-	r.Use(observability.MetricsMiddleware())
+			// Hooks
+			lc.Append(fx.Hook{
+				OnStart: func(context.Context) error {
+					r := gin.Default()
+					r.Use(api.LoggerMiddleware(log)) // Inject Logger Middleware
+					r.Use(observability.MetricsMiddleware())
+					r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// Expose Prometheus Metrics
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+					v1 := r.Group("/api/v1")
+					api.RegisterRoutes(v1, handler)
+					r.POST("/book", handler.HandleBook) // Legacy
 
-	v1 := r.Group("/api/v1")
-	api.RegisterRoutes(v1, bookingHandler)
-	// Also register at root for backward compatibility with stress test?
-	// The original stress test used /book. Let's keep /book at root or update stress test.
-	r.POST("/book", bookingHandler.HandleBook)
+					go func() {
+						log.Infow("Starting server", "port", serverPort)
+						if err := r.Run(":" + serverPort); err != nil {
+							log.Errorw("Server failed", "error", err)
+						}
+					}()
+					return nil
+				},
+				OnStop: func(ctx context.Context) error {
+					log.Info("Shutting down tracer provider")
+					return tp.Shutdown(ctx)
+				},
+			})
+		}),
+	)
 
-	logger.Infow("Starting server", "port", serverPort)
-	if err := r.Run(":" + serverPort); err != nil {
-		logger.Errorw("Server failed", "error", err)
-	}
+	app.Run()
 }
 
 // Ported from stress_test/main.go

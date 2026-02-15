@@ -51,3 +51,11 @@ trigger: always_on
 
 ## 6. Security
 - always check and hide security info before commit
+
+## 7. Testing Standards
+- **Unit Tests**:
+  - Required for all **Domain Entities** and **Application Services**.
+  - **Mocks**: Use mocks for external dependencies (Repositories, UoW) to test business logic in isolation.
+  - **Coverage**: Aim for high coverage (>80%) in `internal/domain` and `internal/application`.
+- **Table-Driven Tests**: Use table-driven tests for multiple scenarios (happy path, edge cases, errors).
+- **Parallel Execution**: Use `t.Parallel()` where safe.

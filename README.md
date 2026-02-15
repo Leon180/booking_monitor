@@ -54,6 +54,8 @@ This project follows **Domain-Driven Design (DDD)** and **Clean Architecture** p
 5. **Run Stress Test**:
    ```bash
    make run-stress
+   # Or with custom parameters:
+   make run-stress C=100 N=500
    ```
 
 ## Development Commands
@@ -87,4 +89,29 @@ This project follows **Domain-Driven Design (DDD)** and **Clean Architecture** p
 Database connection can be configured via flags:
 ```bash
 ./bin/booking-cli server --db "postgres://user:password@localhost:5433/booking?sslmode=disable"
+```
+
+## CLI Reference
+
+### Server
+Start the API server.
+```bash
+./bin/booking-cli server [flags]
+
+Flags:
+      --db string     Database connection string (default "postgres://user:password@localhost:5433/booking?sslmode=disable")
+      --port string   Server port (default "8080")
+  -h, --help          help for server
+```
+
+### Stress Test
+Run a load test against the server.
+```bash
+./bin/booking-cli stress [flags]
+
+Flags:
+  -c, --concurrency int   Concurrency level (default 1000)
+  -n, --requests int      Total requests (default 2000)
+      --port string       Target server port (default "8080")
+  -h, --help              help for stress
 ```

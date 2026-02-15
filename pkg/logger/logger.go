@@ -3,6 +3,7 @@ package logger
 import (
 	"os"
 
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -37,8 +38,14 @@ func New(level string) *zap.SugaredLogger {
 		atomicLevel,
 	)
 
-	// AddCallerSkip(0) is default, but if we wrapped it we'd need more.
 	// AddCaller() adds file/line number.
 	logger := zap.New(core, zap.AddCaller())
 	return logger.Sugar()
 }
+
+// Module exports the Logger module
+var Module = fx.Module("logger",
+	fx.Provide(func() *zap.SugaredLogger {
+		return New(os.Getenv("LOG_LEVEL")) // Use env var or default
+	}),
+)
