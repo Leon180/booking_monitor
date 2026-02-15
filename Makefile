@@ -54,6 +54,10 @@ DURATION ?= 30s
 stress-k6: ## Run K6 load test via Docker (usage: make stress-k6 VUS=1000 DURATION=60s)
 	docker run --rm -i --network=booking_monitor_default -e VUS=$(VUS) -e DURATION=$(DURATION) -v $(PWD)/scripts/k6_load.js:/script.js grafana/k6 run /script.js
 
+benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 DURATION=60s)
+	@chmod +x scripts/benchmark_k6.sh
+	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)
+
 PAGE ?= 1
 SIZE ?= 10
 STATUS ?=

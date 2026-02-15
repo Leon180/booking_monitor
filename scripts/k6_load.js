@@ -1,5 +1,9 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { Rate } from 'k6/metrics';
+
+// Custom metric: failures (excluding 409)
+export const businessErrors = new Rate('business_errors');
 
 // Helper function to replace k6/utils
 function randomIntBetween(min, max) {
@@ -11,13 +15,13 @@ export const options = {
         booking_stress: {
             executor: 'constant-vus',
             vus: __ENV.VUS || 500,
-            duration: __ENV.DURATION || '30s',
+            duration: __ENV.DURATION || '60s',
         },
     },
     thresholds: {
-        // 409s count as failures in K6 by default, so we remove this threshold
-        // http_req_failed: ['rate<0.01'], 
-        http_req_duration: ['p(95)<1000'], // Relaxed duration threshold for 500 VUs
+        http_req_failed: [], // Ignore raw HTTP failures (since 409 is expected)
+        business_errors: ['rate<0.01'], // Fail if real errors > 1%
+        http_req_duration: ['p(95)<200'], // Expect <200ms response time at 500 VUs
     },
 };
 
@@ -61,9 +65,11 @@ export default function (data) {
 
     const res = http.post(`${BASE_URL}/book`, payload, params);
 
+    // Record error only if status is NOT 200 AND NOT 409
+    businessErrors.add(res.status !== 200 && res.status !== 409);
+
     check(res, {
         'status is 200 or 409': (r) => r.status === 200 || r.status === 409,
-        'status is 200': (r) => r.status === 200,
     });
 
     // Short sleep to simulate user think time (optional, remove for max stress)
