@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"booking_monitor/internal/infrastructure/config"
 	"os"
 
 	"go.uber.org/fx"
@@ -45,7 +46,7 @@ func New(level string) *zap.SugaredLogger {
 
 // Module exports the Logger module
 var Module = fx.Module("logger",
-	fx.Provide(func() *zap.SugaredLogger {
-		return New(os.Getenv("LOG_LEVEL")) // Use env var or default
+	fx.Provide(func(cfg *config.Config) *zap.SugaredLogger {
+		return New(cfg.App.LogLevel)
 	}),
 )

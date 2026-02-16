@@ -70,6 +70,8 @@ export default function (data) {
 
     check(res, {
         'status is 200 or 409': (r) => r.status === 200 || r.status === 409,
+        'is sold out': (r) => r.status === 409 && r.json('error') === 'sold out',
+        'is duplicate': (r) => r.status === 409 && r.json('error') === 'user already bought ticket',
     });
 
     // Short sleep to simulate user think time (optional, remove for max stress)

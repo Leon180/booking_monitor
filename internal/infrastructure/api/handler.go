@@ -99,6 +99,10 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "sold out"})
 			return
 		}
+		if err == domain.ErrUserAlreadyBought {
+			c.JSON(http.StatusConflict, gin.H{"error": "user already bought ticket"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

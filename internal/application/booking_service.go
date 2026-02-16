@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"booking_monitor/internal/domain"
@@ -48,8 +49,11 @@ func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quanti
 	// We DO NOT persist to Postgres in this phase to demonstrate raw throughput.
 
 	// 1. Atomic Deduct from Redis
-	success, err := s.inventoryRepo.DeductInventory(ctx, eventID, quantity)
+	success, err := s.inventoryRepo.DeductInventory(ctx, eventID, userID, quantity)
 	if err != nil {
+		if errors.Is(err, domain.ErrUserAlreadyBought) {
+			return domain.ErrUserAlreadyBought
+		}
 		return fmt.Errorf("redis inventory error: %w", err)
 	}
 

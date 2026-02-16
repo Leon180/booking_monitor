@@ -12,5 +12,5 @@ type InventoryRepository interface {
 
 	// DeductInventory atomically decrements the inventory count.
 	// Returns true if successful, false if insufficient inventory (ErrSoldOut).
-	DeductInventory(ctx context.Context, eventID int, count int) (bool, error)
+	DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error)
 }

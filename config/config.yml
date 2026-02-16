@@ -1,0 +1,22 @@
+app:
+  name: "booking_monitor"
+  version: "1.0.0"
+  log_level: "info"
+
+server:
+  port: "8080"
+  read_timeout: "5s"
+  write_timeout: "10s"
+
+redis:
+  addr: "localhost:6379"
+  pool_size: 200
+  min_idle_conns: 20
+  read_timeout: "500ms"
+  write_timeout: "500ms"
+  pool_timeout: "2s"
+
+postgres:
+  max_open_conns: 50
+  max_idle_conns: 50
+  max_idle_time: "5m"

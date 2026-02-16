@@ -41,18 +41,18 @@ func (m *MockInventoryRepository) EXPECT() *MockInventoryRepositoryMockRecorder 
 }
 
 // DeductInventory mocks base method.
-func (m *MockInventoryRepository) DeductInventory(ctx context.Context, eventID, count int) (bool, error) {
+func (m *MockInventoryRepository) DeductInventory(ctx context.Context, eventID, userID, count int) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeductInventory", ctx, eventID, count)
+	ret := m.ctrl.Call(m, "DeductInventory", ctx, eventID, userID, count)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // DeductInventory indicates an expected call of DeductInventory.
-func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, eventID, count any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, eventID, userID, count any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, eventID, count)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, eventID, userID, count)
 }
 
 // SetInventory mocks base method.

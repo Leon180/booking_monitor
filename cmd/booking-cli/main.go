@@ -18,6 +18,7 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/api"
 	"booking_monitor/internal/infrastructure/cache"
+	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
 	"booking_monitor/pkg/logger"
@@ -26,6 +27,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -35,14 +37,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
-	"go.uber.org/fx"
-)
-
-var (
-	dbConnStr    string
-	serverPort   string
-	concurrency  int
-	totalRequest int
 )
 
 func main() {
@@ -54,17 +48,16 @@ func main() {
 		Run:   runServer,
 	}
 
-	serverCmd.Flags().StringVar(&dbConnStr, "db", "postgres://user:password@localhost:5433/booking?sslmode=disable", "Database connection string")
-	serverCmd.Flags().StringVar(&serverPort, "port", "8080", "Server port")
-
 	var stressCmd = &cobra.Command{
 		Use:   "stress",
 		Short: "Run stress test",
 		Run:   runStress,
 	}
-	stressCmd.Flags().IntVarP(&concurrency, "concurrency", "c", 1000, "Concurrency level")
-	stressCmd.Flags().IntVarP(&totalRequest, "requests", "n", 2000, "Total requests")
-	stressCmd.Flags().StringVar(&serverPort, "port", "8080", "Target server port")
+
+	// Flags for stress test (still useful to keep as flags since they are runtime args)
+	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
+	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
+	stressCmd.Flags().String("port", "8080", "Target server port")
 
 	rootCmd.AddCommand(serverCmd, stressCmd)
 
@@ -106,18 +99,29 @@ func initTracer() *trace.TracerProvider {
 }
 
 func runServer(cmd *cobra.Command, args []string) {
+	// 1. Load Config
+	cfg, err := config.LoadConfig("config/config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	app := fx.New(
 		// Provide Logger
 		logger.Module,
 
-		// Provide DB connection
-		fx.Provide(func(log *zap.SugaredLogger) (*sql.DB, error) {
-			db, err := sql.Open("postgres", dbConnStr)
+		// Provide Config
+		fx.Provide(func() *config.Config {
+			return cfg
+		}),
+
+		// Provide DB connection using Config
+		fx.Provide(func(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
+			db, err := sql.Open("postgres", cfg.Postgres.DSN)
 			if err != nil {
 				return nil, err
 			}
 
-			// Simple retry logic could be here, or use a robust opener
+			// Simple retry logic
 			for i := 0; i < 10; i++ {
 				if err = db.Ping(); err == nil {
 					break
@@ -125,8 +129,9 @@ func runServer(cmd *cobra.Command, args []string) {
 				time.Sleep(1 * time.Second)
 			}
 
-			db.SetMaxOpenConns(50)
-			db.SetMaxIdleConns(50)
+			db.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
+			db.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
+			db.SetConnMaxIdleTime(cfg.Postgres.MaxIdleTime)
 			return db, nil
 		}),
 
@@ -137,7 +142,7 @@ func runServer(cmd *cobra.Command, args []string) {
 		api.Module,
 
 		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger) {
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config) {
 			tp := initTracer()
 
 			// Hooks
@@ -153,8 +158,8 @@ func runServer(cmd *cobra.Command, args []string) {
 					r.POST("/book", handler.HandleBook) // Legacy
 
 					go func() {
-						log.Infow("Starting server", "port", serverPort)
-						if err := r.Run(":" + serverPort); err != nil {
+						log.Infow("Starting server", "port", cfg.Server.Port)
+						if err := r.Run(":" + cfg.Server.Port); err != nil {
 							log.Errorw("Server failed", "error", err)
 						}
 					}()
@@ -173,22 +178,15 @@ func runServer(cmd *cobra.Command, args []string) {
 
 // Ported from stress_test/main.go
 func runStress(cmd *cobra.Command, args []string) {
-	// ... (Implementation of stress test using flags) ...
-	// Since the file content is large, I will simplify or include the logic.
-	// For brevity in this tool call, I will include a shortened version that calls the actual logic.
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	totalRequests, _ := cmd.Flags().GetInt("requests")
+	port, _ := cmd.Flags().GetString("port")
 
-	// Re-implementing the logic here inline or moving the file.
-	// Let's implement it cleanly here.
-
-	targetURL := fmt.Sprintf("http://localhost:%s/book", serverPort)
-	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s\n", concurrency, totalRequest, targetURL)
-
-	// ... copy logic from stress_test/main.go ...
-	// Actually, I should probably put this in `internal/application/stress_test.go` or similar,
-	// but to keep it simple I'll put it here for now as requested.
+	targetURL := fmt.Sprintf("http://localhost:%s/book", port)
+	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s\n", concurrency, totalRequests, targetURL)
 
 	// Start the stress test
-	startStressTest(concurrency, totalRequest, targetURL)
+	startStressTest(concurrency, totalRequests, targetURL)
 }
 
 func startStressTest(concurrency, totalRequests int, url string) {

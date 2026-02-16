@@ -6,14 +6,17 @@ services:
     container_name: booking_app
     ports:
       - "8080:8080"
-    command: [ "/app/booking-cli", "server", "--db", "postgres://user:password@postgres:5432/booking?sslmode=disable", "--port", "8080" ]
+    command: [ "/app/booking-cli", "server" ]
     depends_on:
       - postgres
       - jaeger
     environment:
-      # OTEL configuration to point to Jaeger
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
       - OTEL_SERVICE_NAME=booking-service
+      - REDIS_ADDR=booking_redis:6379
+      - DATABASE_URL=postgres://user:password@postgres:5432/booking?sslmode=disable
+      - GIN_MODE=release
+      - APP_ENV=production
 
   postgres:
     image: postgres:15-alpine
@@ -31,6 +34,10 @@ services:
     container_name: booking_redis
     ports:
       - "6379:6379"
+    volumes:
+      - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis_data:/data
+    command: [ "redis-server", "/usr/local/etc/redis/redis.conf" ]
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
@@ -70,3 +77,6 @@ services:
       - "4318:4318" # OTLP HTTP
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+
+volumes:
+  redis_data:

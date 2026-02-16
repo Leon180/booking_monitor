@@ -7,8 +7,9 @@ import (
 )
 
 var (
-	ErrEventNotFound = errors.New("event not found")
-	ErrSoldOut       = errors.New("event sold out")
+	ErrEventNotFound     = errors.New("event not found")
+	ErrSoldOut           = errors.New("event sold out")
+	ErrUserAlreadyBought = errors.New("user already bought ticket")
 )
 
 type Event struct {

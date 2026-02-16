@@ -58,6 +58,13 @@ benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 
 	@chmod +x scripts/benchmark_k6.sh
 	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)
 
+docker-restart: ## Restart the API server in Docker (Rebuild and Up)
+	@echo "Restarting booking_app container..."
+	@docker-compose stop app
+	@docker-compose build app
+	@docker-compose up -d app
+	@echo "App restarted in Docker."
+
 PAGE ?= 1
 SIZE ?= 10
 STATUS ?=
@@ -86,6 +93,7 @@ reset-db: ## Reset database (clear orders, reset event inventory to 100)
 	@docker exec booking_db psql -U user -d booking -c "UPDATE events SET total_tickets = 100, available_tickets = 100, name = 'Jay Chou Concert', version = 0 WHERE id = 1;"
 	@docker exec booking_db psql -U user -d booking -c "INSERT INTO events (id, name, total_tickets, available_tickets, version) VALUES (1, 'Jay Chou Concert', 100, 100, 0) ON CONFLICT (id) DO NOTHING;"
 	@docker exec booking_redis redis-cli FLUSHALL || true
+	@docker exec booking_redis redis-cli SET event:1:qty 100
 	@echo "Database and Redis reset complete."
 
 help: ## Show help message

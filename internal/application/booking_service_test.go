@@ -34,8 +34,8 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  1,
 			quantity: 2,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
-				// Phase 2: Expect Redis Deduct
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 2).Return(true, nil)
+				// Phase 2: Expect Redis Deduct with userID
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 2).Return(true, nil)
 				// Order creation skipped in Phase 2
 			},
 			expectedError: nil,
@@ -47,9 +47,20 @@ func TestBookingService_BookTicket(t *testing.T) {
 			quantity: 5,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 5).Return(false, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 5).Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
+		},
+		{
+			name:     "Duplicate Purchase",
+			userID:   1,
+			eventID:  1,
+			quantity: 1,
+			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+				// Redis returns ErrUserAlreadyBought
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 1).Return(false, domain.ErrUserAlreadyBought)
+			},
+			expectedError: domain.ErrUserAlreadyBought,
 		},
 		{
 			name:     "Redis Error",
@@ -57,7 +68,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  1,
 			quantity: 1,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 1).Return(false, errors.New("connection failed"))
+				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 1).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},

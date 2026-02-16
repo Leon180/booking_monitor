@@ -35,5 +35,8 @@ COPY --from=builder /app/bin/booking-cli /app/booking-cli
 # Expose port
 EXPOSE 8080
 
+# Copy config
+COPY config/ config/
+
 # Command to run (can be overridden in docker-compose)
 CMD ["/app/booking-cli", "server"]
