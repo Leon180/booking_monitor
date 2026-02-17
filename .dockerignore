@@ -1,0 +1,35 @@
+# Version Control
+.git
+.gitignore
+
+# Build Artifacts
+bin/
+booking-cli
+*.out
+*.test
+
+# Dependencies
+vendor/
+
+# Environment Variables
+.env
+.env.*
+
+# Logs and Reports
+*.log
+docs/benchmarks/
+coverage.out
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# MacOS
+.DS_Store
+
+# Docker
+docker-compose.yml
+Dockerfile
+Makefile

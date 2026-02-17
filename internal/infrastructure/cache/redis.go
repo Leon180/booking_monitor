@@ -21,7 +21,8 @@ var Module = fx.Options(
 )
 
 type redisInventoryRepository struct {
-	client *redis.Client
+	client  *redis.Client
+	scripts map[string]*redis.Script
 }
 
 func NewRedisClient(cfg *config.Config, log *zap.SugaredLogger) *redis.Client {
@@ -47,34 +48,21 @@ func NewRedisClient(cfg *config.Config, log *zap.SugaredLogger) *redis.Client {
 		log.Fatalw("Failed to connect to Redis", "error", err)
 	}
 
-	// Load scripts
-	if err := loadLuaScript(client); err != nil {
-		log.Errorw("Failed to load Lua script", "error", err)
-	} else {
-		log.Infow("Lua script loaded successfully")
-	}
-
+	// Scripts are loaded lazily by redis.Script
 	log.Infow("Connected to Redis successfully", "addr", redisCfg.Addr, "pool_size", redisCfg.PoolSize)
 	return client
 }
 
 //go:embed lua/deduct.lua
-var deductScript string
-
-var deductSha string
-
-func loadLuaScript(client *redis.Client) error {
-	var err error
-	deductSha, err = client.ScriptLoad(context.Background(), deductScript).Result()
-	return err
-}
+var deductScriptSource string
 
 func NewRedisInventoryRepository(client *redis.Client) domain.InventoryRepository {
-	// Ensure script is loaded if not already (simple singleton-ish check for this demo)
-	if deductSha == "" {
-		_ = loadLuaScript(client)
+	return &redisInventoryRepository{
+		client: client,
+		scripts: map[string]*redis.Script{
+			"deduct": redis.NewScript(deductScriptSource),
+		},
 	}
-	return &redisInventoryRepository{client: client}
 }
 
 // key helper: event:{id}:qty
@@ -95,17 +83,14 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	keys := []string{inventoryKey(eventID), buyersKey(eventID)}
 	args := []interface{}{userID, count}
 
-	// EXEC LUA
-	res, err := r.client.EvalSha(ctx, deductSha, keys, args...).Int()
-
-	// Handle Script Missing (Redis restart? Re-load)
-	if err != nil && isScriptMissing(err) {
-		if loadErr := loadLuaScript(r.client); loadErr != nil {
-			return false, fmt.Errorf("reload script failed: %w", loadErr)
-		}
-		// Retry once
-		res, err = r.client.EvalSha(ctx, deductSha, keys, args...).Int()
+	// Get script
+	script, ok := r.scripts["deduct"]
+	if !ok {
+		return false, fmt.Errorf("script 'deduct' not found")
 	}
+
+	// EXEC LUA using redis.Script (handles LOAD if missing)
+	res, err := script.Run(ctx, r.client, keys, args...).Int()
 
 	if err != nil {
 		return false, err
@@ -121,8 +106,4 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	default:
 		return false, fmt.Errorf("unexpected lua result: %d", res)
 	}
-}
-
-func isScriptMissing(err error) bool {
-	return err.Error() == "NOSCRIPT No matching script. Please use EVAL."
 }

@@ -42,6 +42,12 @@ export function setup() {
     };
 
     const res = http.post(`${BASE_URL}/events`, payload, params);
+
+    if (res.status !== 201) {
+        console.error(`Setup failed: ${res.status} ${res.body}`);
+        throw new Error(`Setup failed: ${res.status} ${res.body}`);
+    }
+
     check(res, {
         'setup event created': (r) => r.status === 201,
     });

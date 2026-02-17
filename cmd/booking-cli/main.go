@@ -17,6 +17,7 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/api"
+	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
@@ -148,8 +149,12 @@ func runServer(cmd *cobra.Command, args []string) {
 			// Hooks
 			lc.Append(fx.Hook{
 				OnStart: func(context.Context) error {
-					r := gin.Default()
-					r.Use(api.LoggerMiddleware(log)) // Inject Logger Middleware
+					r := gin.New()        // Use New() to control middleware
+					r.Use(gin.Recovery()) // Recovery from panics
+
+					r.Use(api.LoggerMiddleware(log))            // 1. Inject Logger
+					r.Use(middleware.CorrelationIDMiddleware()) // 2. Inject Correlation ID (Enriches Logger)
+
 					r.Use(observability.MetricsMiddleware())
 					r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 

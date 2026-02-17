@@ -1,0 +1,3 @@
+Timestamp,Container,CPU,MemUsage
+09:12:16,booking_db,0.00%,87MiB / 3.827GiB
+09:12:16,booking_jaeger,0.04%,43.91MiB / 3.827GiB
