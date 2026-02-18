@@ -3,6 +3,9 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
+
+	"github.com/lib/pq"
 
 	"booking_monitor/internal/domain"
 )
@@ -83,7 +86,15 @@ func NewPostgresOrderRepository(db *sql.DB) domain.OrderRepository {
 
 func (r *postgresOrderRepository) Create(ctx context.Context, order *domain.Order) error {
 	query := "INSERT INTO orders (event_id, user_id, quantity, status) VALUES ($1, $2, $3, $4) RETURNING id, created_at"
-	return r.getExecutor(ctx).QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&order.ID, &order.CreatedAt)
+	err := r.getExecutor(ctx).QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&order.ID, &order.CreatedAt)
+	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return domain.ErrUserAlreadyBought
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
@@ -128,4 +139,44 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	}
 
 	return orders, total, nil
+}
+
+// DecrementTicket implements atomic inventory deduction using DB constraints
+func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, quantity int) error {
+	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
+	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrSoldOut
+	}
+
+	return nil
+}
+
+type postgresOutboxRepository struct {
+	db *sql.DB
+}
+
+func NewPostgresOutboxRepository(db *sql.DB) domain.OutboxRepository {
+	return &postgresOutboxRepository{db: db}
+}
+
+func (r *postgresOutboxRepository) getExecutor(ctx context.Context) DBExecutor {
+	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return r.db
+}
+
+func (r *postgresOutboxRepository) Create(ctx context.Context, event *domain.OutboxEvent) error {
+	query := "INSERT INTO events_outbox (event_type, payload, status) VALUES ($1, $2, $3) RETURNING id"
+	return r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&event.ID)
 }

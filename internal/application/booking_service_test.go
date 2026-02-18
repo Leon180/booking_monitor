@@ -34,9 +34,8 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  1,
 			quantity: 2,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
-				// Phase 2: Expect Redis Deduct with userID
+				// Phase 6: buyers set removed from Redis, userID still passed for stream publishing
 				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 2).Return(true, nil)
-				// Order creation skipped in Phase 2
 			},
 			expectedError: nil,
 		},
@@ -52,17 +51,9 @@ func TestBookingService_BookTicket(t *testing.T) {
 			expectedError: domain.ErrSoldOut,
 		},
 		{
-			name:     "Duplicate Purchase",
-			userID:   1,
-			eventID:  1,
-			quantity: 1,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
-				// Redis returns ErrUserAlreadyBought
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 1).Return(false, domain.ErrUserAlreadyBought)
-			},
-			expectedError: domain.ErrUserAlreadyBought,
-		},
-		{
+			// Duplicate purchase is now enforced by DB UNIQUE constraint (not Redis).
+			// At the BookingService level, Redis just returns success — the worker handles the duplicate.
+			// This test verifies that a Redis error is propagated correctly.
 			name:     "Redis Error",
 			userID:   1,
 			eventID:  1,
@@ -97,10 +88,10 @@ func TestBookingService_BookTicket(t *testing.T) {
 
 			// Assert
 			if tt.expectedError != nil {
-				if tt.name == "Invalid Quantity" {
+				if tt.name == "Redis Error" {
 					assert.EqualError(t, err, tt.expectedError.Error())
 				} else {
-					assert.Error(t, err)
+					assert.ErrorIs(t, err, tt.expectedError)
 				}
 			} else {
 				assert.NoError(t, err)

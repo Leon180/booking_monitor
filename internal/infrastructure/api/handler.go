@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"booking_monitor/internal/application"
@@ -17,12 +18,13 @@ type BookingHandler interface {
 }
 
 type bookingHandler struct {
-	service      application.BookingService
-	eventService application.EventService
+	service         application.BookingService
+	eventService    application.EventService
+	idempotencyRepo domain.IdempotencyRepository
 }
 
-func NewBookingHandler(service application.BookingService, eventService application.EventService) BookingHandler {
-	return &bookingHandler{service: service, eventService: eventService}
+func NewBookingHandler(service application.BookingService, eventService application.EventService, idempotencyRepo domain.IdempotencyRepository) BookingHandler {
+	return &bookingHandler{service: service, eventService: eventService, idempotencyRepo: idempotencyRepo}
 }
 
 type bookRequest struct {
@@ -84,7 +86,6 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 }
 
 func (h *bookingHandler) HandleBook(c *gin.Context) {
-	// Propagate context from Gin (which might include OTEL headers if middleware used)
 	ctx := c.Request.Context()
 
 	var req bookRequest
@@ -93,21 +94,51 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
-	if err != nil {
-		if err == domain.ErrSoldOut {
-			c.JSON(http.StatusConflict, gin.H{"error": "sold out"})
-			return
-		}
-		if err == domain.ErrUserAlreadyBought {
-			c.JSON(http.StatusConflict, gin.H{"error": "user already bought ticket"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	// Idempotency key check
+	idempotencyKey := c.GetHeader("Idempotency-Key")
+	if len(idempotencyKey) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key must be 128 characters or fewer"})
 		return
 	}
+	if idempotencyKey != "" {
+		if cached, err := h.idempotencyRepo.Get(ctx, idempotencyKey); err == nil && cached != nil {
+			c.Header("X-Idempotency-Replayed", "true")
+			c.Data(cached.StatusCode, "application/json", []byte(cached.Body))
+			return
+		}
+	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "booking successful"})
+	err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
+
+	var statusCode int
+	var body string
+	if err != nil {
+		if err == domain.ErrSoldOut {
+			statusCode = http.StatusConflict
+			body = `{"error":"sold out"}`
+		} else if err == domain.ErrUserAlreadyBought {
+			statusCode = http.StatusConflict
+			body = `{"error":"user already bought ticket"}`
+		} else {
+			// Use json.Marshal to safely encode the error message (handles quotes, backslashes, etc.)
+			errJSON, _ := json.Marshal(gin.H{"error": err.Error()})
+			statusCode = http.StatusInternalServerError
+			body = string(errJSON)
+		}
+	} else {
+		statusCode = http.StatusOK
+		body = `{"message":"booking successful"}`
+	}
+
+	// Cache the result for idempotency
+	if idempotencyKey != "" {
+		_ = h.idempotencyRepo.Set(ctx, idempotencyKey, &domain.IdempotencyResult{
+			StatusCode: statusCode,
+			Body:       body,
+		})
+	}
+
+	c.Data(statusCode, "application/json", []byte(body))
 }
 
 type createEventRequest struct {

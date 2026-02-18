@@ -12,6 +12,8 @@ type OrderMessage struct {
 }
 
 // OrderQueue defines abstract queue operations
+//
+//go:generate mockgen -source=queue.go -destination=../mocks/queue_mock.go -package=mocks
 type OrderQueue interface {
 	// EnsureGroup creates the consumer group if not exists
 	EnsureGroup(ctx context.Context) error

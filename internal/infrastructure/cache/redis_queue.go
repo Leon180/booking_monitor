@@ -129,7 +129,7 @@ func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.Or
 	// 1. Compensate Inventory
 	// We use background context because we must ensure compensation happens even if request ctx is cancelled
 	bgCtx := context.Background()
-	_ = q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.UserID, orderMsg.Quantity)
+	_ = q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity)
 
 	// 2. Move to DLQ
 	q.moveToDLQ(bgCtx, rawMsg, err)

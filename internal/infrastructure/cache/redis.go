@@ -19,6 +19,7 @@ var Module = fx.Options(
 	fx.Provide(NewRedisClient),
 	fx.Provide(NewRedisInventoryRepository),
 	fx.Provide(NewRedisOrderQueue),
+	fx.Provide(NewRedisIdempotencyRepository),
 )
 
 type redisInventoryRepository struct {
@@ -75,28 +76,21 @@ func inventoryKey(eventID int) string {
 	return fmt.Sprintf("event:%d:qty", eventID)
 }
 
-// key helper: event:{id}:buyers
-func buyersKey(eventID int) string {
-	return fmt.Sprintf("event:%d:buyers", eventID)
-}
-
 func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID int, count int) error {
 	return r.client.Set(ctx, inventoryKey(eventID), count, 0).Err()
 }
 
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error) {
-	keys := []string{inventoryKey(eventID), buyersKey(eventID)}
-	args := []interface{}{userID, count, eventID}
+	keys := []string{inventoryKey(eventID)}
+	// ARGV[1]=count, ARGV[2]=event_id, ARGV[3]=user_id (for stream message)
+	args := []interface{}{count, eventID, userID}
 
-	// Get script
 	script, ok := r.scripts["deduct"]
 	if !ok {
 		return false, fmt.Errorf("script 'deduct' not found")
 	}
 
-	// EXEC LUA using redis.Script (handles LOAD if missing)
 	res, err := script.Run(ctx, r.client, keys, args...).Int()
-
 	if err != nil {
 		return false, err
 	}
@@ -106,16 +100,14 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 		return true, nil
 	case -1:
 		return false, nil // Sold Out
-	case -2:
-		return false, domain.ErrUserAlreadyBought
 	default:
 		return false, fmt.Errorf("unexpected lua result: %d", res)
 	}
 }
 
-func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, userID int, count int) error {
-	keys := []string{inventoryKey(eventID), buyersKey(eventID)}
-	args := []interface{}{userID, count}
+func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, count int) error {
+	keys := []string{inventoryKey(eventID)}
+	args := []interface{}{count}
 
 	script, ok := r.scripts["revert"]
 	if !ok {

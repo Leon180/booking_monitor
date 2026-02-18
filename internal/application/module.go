@@ -9,6 +9,15 @@ var Module = fx.Module("application",
 		NewWorkerService,
 	),
 	fx.Decorate(
-		NewBookingServiceTracingDecorator,
+		// BookingService chain: base -> tracing -> metrics
+		func(svc BookingService) BookingService {
+			return NewBookingServiceMetricsDecorator(
+				NewBookingServiceTracingDecorator(svc),
+			)
+		},
+		// WorkerService chain: base -> metrics
+		func(svc WorkerService) WorkerService {
+			return NewWorkerServiceMetricsDecorator(svc)
+		},
 	),
 )

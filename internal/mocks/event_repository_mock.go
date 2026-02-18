@@ -55,6 +55,20 @@ func (mr *MockEventRepositoryMockRecorder) Create(ctx, event any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockEventRepository)(nil).Create), ctx, event)
 }
 
+// DecrementTicket mocks base method.
+func (m *MockEventRepository) DecrementTicket(ctx context.Context, eventID, quantity int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DecrementTicket", ctx, eventID, quantity)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DecrementTicket indicates an expected call of DecrementTicket.
+func (mr *MockEventRepositoryMockRecorder) DecrementTicket(ctx, eventID, quantity any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DecrementTicket", reflect.TypeOf((*MockEventRepository)(nil).DecrementTicket), ctx, eventID, quantity)
+}
+
 // DeductInventory mocks base method.
 func (m *MockEventRepository) DeductInventory(ctx context.Context, eventID, quantity int) error {
 	m.ctrl.T.Helper()
@@ -96,4 +110,42 @@ func (m *MockEventRepository) Update(ctx context.Context, event *domain.Event) e
 func (mr *MockEventRepositoryMockRecorder) Update(ctx, event any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Update", reflect.TypeOf((*MockEventRepository)(nil).Update), ctx, event)
+}
+
+// MockOutboxRepository is a mock of OutboxRepository interface.
+type MockOutboxRepository struct {
+	ctrl     *gomock.Controller
+	recorder *MockOutboxRepositoryMockRecorder
+	isgomock struct{}
+}
+
+// MockOutboxRepositoryMockRecorder is the mock recorder for MockOutboxRepository.
+type MockOutboxRepositoryMockRecorder struct {
+	mock *MockOutboxRepository
+}
+
+// NewMockOutboxRepository creates a new mock instance.
+func NewMockOutboxRepository(ctrl *gomock.Controller) *MockOutboxRepository {
+	mock := &MockOutboxRepository{ctrl: ctrl}
+	mock.recorder = &MockOutboxRepositoryMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockOutboxRepository) EXPECT() *MockOutboxRepositoryMockRecorder {
+	return m.recorder
+}
+
+// Create mocks base method.
+func (m *MockOutboxRepository) Create(ctx context.Context, event *domain.OutboxEvent) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Create", ctx, event)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Create indicates an expected call of Create.
+func (mr *MockOutboxRepositoryMockRecorder) Create(ctx, event any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockOutboxRepository)(nil).Create), ctx, event)
 }

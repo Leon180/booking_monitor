@@ -2,7 +2,6 @@ package application
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"booking_monitor/internal/domain"
@@ -44,16 +43,9 @@ func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize i
 }
 
 func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
-	// Phase 2: Redis-Only Implementation
-	// We rely on Redis Atomic DECR for inventory management.
-	// We DO NOT persist to Postgres in this phase to demonstrate raw throughput.
-
-	// 1. Atomic Deduct from Redis
+	// 1. Atomic Deduct from Redis (hot path — buyers set removed, no SISMEMBER)
 	success, err := s.inventoryRepo.DeductInventory(ctx, eventID, userID, quantity)
 	if err != nil {
-		if errors.Is(err, domain.ErrUserAlreadyBought) {
-			return domain.ErrUserAlreadyBought
-		}
 		return fmt.Errorf("redis inventory error: %w", err)
 	}
 
@@ -61,12 +53,7 @@ func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quanti
 		return domain.ErrSoldOut
 	}
 
-	// 2. Success!
-	// In Phase 3, we will push a message to Kafka here.
+	// 2. Success — order will be persisted async by the worker.
+	// Duplicate purchase is enforced by DB UNIQUE(user_id, event_id) constraint.
 	return nil
-
-	/*
-		// OLD LOGIC (Phase 1: DB Transaction)
-		// ...
-	*/
 }

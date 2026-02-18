@@ -142,6 +142,9 @@ func runServer(cmd *cobra.Command, args []string) {
 		application.Module,
 		api.Module,
 
+		// Provide concrete implementations of application interfaces
+		fx.Provide(observability.NewWorkerMetrics),
+
 		// Run Server -> Invoke
 		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService) {
 			tp := initTracer()
@@ -236,9 +239,9 @@ func startStressTest(concurrency, totalRequests int, url string) {
 
 			for range jobs {
 				reqBody, _ := json.Marshal(map[string]int{
-					"user_id":  1,
+					"user_id":  rand.IntN(10000) + 1,
 					"event_id": 1,
-					"quantity": rand.IntN(5) + 1,
+					"quantity": 1, // Fix quantity to 1 for easier calculation
 				})
 
 				resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))

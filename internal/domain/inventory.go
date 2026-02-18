@@ -11,10 +11,12 @@ type InventoryRepository interface {
 	SetInventory(ctx context.Context, eventID int, count int) error
 
 	// DeductInventory atomically decrements the inventory count.
+	// userID is passed through to the Redis stream for async order processing.
+	// Duplicate purchase prevention is handled by the database UNIQUE constraint.
 	// Returns true if successful, false if insufficient inventory (ErrSoldOut).
 	DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error)
 
-	// RevertInventory restores inventory and removes user from buyers list.
+	// RevertInventory restores inventory count.
 	// Used for compensation in DLQ scenarios.
-	RevertInventory(ctx context.Context, eventID int, userID int, count int) error
+	RevertInventory(ctx context.Context, eventID int, count int) error
 }

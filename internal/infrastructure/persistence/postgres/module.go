@@ -10,6 +10,7 @@ var Module = fx.Module("postgres",
 		// Provide basic repositories
 		NewPostgresEventRepository,
 		NewPostgresOrderRepository,
+		NewPostgresOutboxRepository,
 		NewPostgresUnitOfWork,
 	),
 	// Apply Decorators

@@ -37,4 +37,16 @@ type EventRepository interface {
 	GetByID(ctx context.Context, id int) (*Event, error)
 	DeductInventory(ctx context.Context, eventID, quantity int) error // Deprecated in favor of Lifecycle, but kept for legacy
 	Update(ctx context.Context, event *Event) error
+	DecrementTicket(ctx context.Context, eventID, quantity int) error
+}
+
+type OutboxEvent struct {
+	ID        int
+	EventType string
+	Payload   []byte // JSON
+	Status    string
+}
+
+type OutboxRepository interface {
+	Create(ctx context.Context, event *OutboxEvent) error
 }

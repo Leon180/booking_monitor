@@ -61,6 +61,20 @@ func (d *eventRepositoryTracingDecorator) DeductInventory(ctx context.Context, e
 	return err
 }
 
+func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, eventID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DecrementTicket", trace.WithAttributes(
+		attribute.Int("event_id", eventID),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.DecrementTicket(ctx, eventID, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
 func (d *eventRepositoryTracingDecorator) Update(ctx context.Context, event *domain.Event) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateEvent", trace.WithAttributes(
 		attribute.Int("event_id", event.ID),

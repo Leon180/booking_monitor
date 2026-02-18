@@ -83,8 +83,19 @@ curl-history-input: ## Get booking history with interactive prompts
 	echo "Fetching: $$url"; \
 	curl "$$url" | jq
 
-mocks: ## Generate mocks
-	@go generate ./...
+
+MOCKGEN := $(shell pwd)/bin/mockgen
+
+tools: ## Install development tools (mockgen wrapper)
+	@mkdir -p bin
+	@echo "Creating mockgen wrapper..."
+	@echo '#!/bin/sh' > bin/mockgen
+	@echo 'go run go.uber.org/mock/mockgen@v0.6.0 "$$@"' >> bin/mockgen
+	@chmod +x bin/mockgen
+
+mocks: tools ## Generate mocks using local wrapper
+	@echo "Generating mocks..."
+	@PATH=$(shell pwd)/bin:$(PATH) go generate ./...
 
 reset-db: ## Reset database (clear orders, reset event inventory to 100)
 	@echo "Resetting database..."

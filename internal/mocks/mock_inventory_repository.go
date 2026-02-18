@@ -55,6 +55,20 @@ func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, eventID, use
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, eventID, userID, count)
 }
 
+// RevertInventory mocks base method.
+func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID, count int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RevertInventory indicates an expected call of RevertInventory.
+func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, count any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, count)
+}
+
 // SetInventory mocks base method.
 func (m *MockInventoryRepository) SetInventory(ctx context.Context, eventID, count int) error {
 	m.ctrl.T.Helper()
@@ -67,18 +81,4 @@ func (m *MockInventoryRepository) SetInventory(ctx context.Context, eventID, cou
 func (mr *MockInventoryRepositoryMockRecorder) SetInventory(ctx, eventID, count any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetInventory", reflect.TypeOf((*MockInventoryRepository)(nil).SetInventory), ctx, eventID, count)
-}
-
-// RevertInventory mocks base method.
-func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID, userID, count int) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, userID, count)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// RevertInventory indicates an expected call of RevertInventory.
-func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, userID, count any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, userID, count)
 }
