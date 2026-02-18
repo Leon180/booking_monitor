@@ -13,4 +13,8 @@ type InventoryRepository interface {
 	// DeductInventory atomically decrements the inventory count.
 	// Returns true if successful, false if insufficient inventory (ErrSoldOut).
 	DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error)
+
+	// RevertInventory restores inventory and removes user from buyers list.
+	// Used for compensation in DLQ scenarios.
+	RevertInventory(ctx context.Context, eventID int, userID int, count int) error
 }

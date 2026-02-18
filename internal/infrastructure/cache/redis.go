@@ -18,6 +18,7 @@ import (
 var Module = fx.Options(
 	fx.Provide(NewRedisClient),
 	fx.Provide(NewRedisInventoryRepository),
+	fx.Provide(NewRedisOrderQueue),
 )
 
 type redisInventoryRepository struct {
@@ -56,11 +57,15 @@ func NewRedisClient(cfg *config.Config, log *zap.SugaredLogger) *redis.Client {
 //go:embed lua/deduct.lua
 var deductScriptSource string
 
+//go:embed lua/revert.lua
+var revertScriptSource string
+
 func NewRedisInventoryRepository(client *redis.Client) domain.InventoryRepository {
 	return &redisInventoryRepository{
 		client: client,
 		scripts: map[string]*redis.Script{
 			"deduct": redis.NewScript(deductScriptSource),
+			"revert": redis.NewScript(revertScriptSource),
 		},
 	}
 }
@@ -81,7 +86,7 @@ func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID int
 
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error) {
 	keys := []string{inventoryKey(eventID), buyersKey(eventID)}
-	args := []interface{}{userID, count}
+	args := []interface{}{userID, count, eventID}
 
 	// Get script
 	script, ok := r.scripts["deduct"]
@@ -106,4 +111,16 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	default:
 		return false, fmt.Errorf("unexpected lua result: %d", res)
 	}
+}
+
+func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, userID int, count int) error {
+	keys := []string{inventoryKey(eventID), buyersKey(eventID)}
+	args := []interface{}{userID, count}
+
+	script, ok := r.scripts["revert"]
+	if !ok {
+		return fmt.Errorf("script 'revert' not found")
+	}
+
+	return script.Run(ctx, r.client, keys, args...).Err()
 }

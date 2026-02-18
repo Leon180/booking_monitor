@@ -17,4 +17,9 @@ end
 -- 3. Deduct & Record
 redis.call("DECRBY", KEYS[1], ARGV[2])
 redis.call("SADD", KEYS[2], ARGV[1])
+
+-- 4. Publish to Stream (Atomic)
+-- ARGV[3]: event_id
+redis.call("XADD", "orders:stream", "*", "user_id", ARGV[1], "event_id", ARGV[3], "quantity", ARGV[2])
+
 return 1 -- Success

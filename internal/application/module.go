@@ -6,6 +6,7 @@ var Module = fx.Module("application",
 	fx.Provide(
 		NewBookingService,
 		NewEventService,
+		NewWorkerService,
 	),
 	fx.Decorate(
 		NewBookingServiceTracingDecorator,

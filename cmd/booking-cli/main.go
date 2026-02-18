@@ -143,8 +143,11 @@ func runServer(cmd *cobra.Command, args []string) {
 		api.Module,
 
 		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config) {
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService) {
 			tp := initTracer()
+
+			// Context for worker shutdown
+			workerCtx, workerCancel := context.WithCancel(context.Background())
 
 			// Hooks
 			lc.Append(fx.Hook{
@@ -162,15 +165,23 @@ func runServer(cmd *cobra.Command, args []string) {
 					api.RegisterRoutes(v1, handler)
 					r.POST("/book", handler.HandleBook) // Legacy
 
+					// Start HTTP Server
 					go func() {
 						log.Infow("Starting server", "port", cfg.Server.Port)
 						if err := r.Run(":" + cfg.Server.Port); err != nil {
 							log.Errorw("Server failed", "error", err)
 						}
 					}()
+
+					// Start Background Worker
+					go worker.Start(workerCtx)
+
 					return nil
 				},
 				OnStop: func(ctx context.Context) error {
+					log.Info("Stopping worker service...")
+					workerCancel()
+
 					log.Info("Shutting down tracer provider")
 					return tp.Shutdown(ctx)
 				},
