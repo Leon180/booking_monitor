@@ -3,7 +3,7 @@ name: Go Unit Testing & Coverage
 description: Best practices for writing unit tests, mocking dependencies, and measuring code coverage in Go projects.
 ---
 
-# Go Unit Testing & Coverage Standardization
+# Go Unit Testing & Coverage Stan@dardization
 
 ## 1. Testing Philosophy
 - **Table-Driven Tests**: Use table-driven tests for all unit tests to cover multiple scenarios (happy path, edge cases, partial failures) efficiently.

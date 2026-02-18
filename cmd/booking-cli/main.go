@@ -20,6 +20,7 @@ import (
 	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
 	"booking_monitor/pkg/logger"
@@ -141,6 +142,17 @@ func runServer(cmd *cobra.Command, args []string) {
 		cache.Module,
 		application.Module,
 		api.Module,
+
+		// Provide Kafka publisher (lifecycle-managed: Close() called on shutdown)
+		messaging.Module,
+		fx.Provide(func(cfg *config.Config) messaging.MessagingConfig {
+			return messaging.MessagingConfig{
+				Brokers:      messaging.ParseBrokers(cfg.Kafka.Brokers),
+				WriteTimeout: cfg.Kafka.WriteTimeout,
+			}
+		}),
+		// Provide OutboxBatchSize so Fx can inject it into NewOutboxRelay.
+		fx.Provide(func(cfg *config.Config) int { return cfg.Kafka.OutboxBatchSize }),
 
 		// Provide concrete implementations of application interfaces
 		fx.Provide(observability.NewWorkerMetrics),

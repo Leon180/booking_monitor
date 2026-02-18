@@ -20,3 +20,11 @@ postgres:
   max_open_conns: 50
   max_idle_conns: 50
   max_idle_time: "5m"
+
+kafka:
+  # Local dev default. In production, set KAFKA_BROKERS env var instead — never commit real broker addresses.
+  brokers: "localhost:9092"
+  # Max time to wait for a Kafka write to complete. Override via KAFKA_WRITE_TIMEOUT.
+  write_timeout: "5s"
+  # Number of outbox events processed per relay tick. Override via KAFKA_OUTBOX_BATCH_SIZE.
+  outbox_batch_size: 100

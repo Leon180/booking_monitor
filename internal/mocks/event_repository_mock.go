@@ -149,3 +149,32 @@ func (mr *MockOutboxRepositoryMockRecorder) Create(ctx, event any) *gomock.Call 
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockOutboxRepository)(nil).Create), ctx, event)
 }
+
+// ListPending mocks base method.
+func (m *MockOutboxRepository) ListPending(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListPending", ctx, limit)
+	ret0, _ := ret[0].([]*domain.OutboxEvent)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListPending indicates an expected call of ListPending.
+func (mr *MockOutboxRepositoryMockRecorder) ListPending(ctx, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPending", reflect.TypeOf((*MockOutboxRepository)(nil).ListPending), ctx, limit)
+}
+
+// MarkProcessed mocks base method.
+func (m *MockOutboxRepository) MarkProcessed(ctx context.Context, id int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkProcessed", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkProcessed indicates an expected call of MarkProcessed.
+func (mr *MockOutboxRepositoryMockRecorder) MarkProcessed(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkProcessed", reflect.TypeOf((*MockOutboxRepository)(nil).MarkProcessed), ctx, id)
+}

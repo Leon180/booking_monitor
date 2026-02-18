@@ -41,7 +41,11 @@ func New(level string) *zap.SugaredLogger {
 
 	// AddCaller() adds file/line number.
 	logger := zap.New(core, zap.AddCaller())
-	return logger.Sugar()
+	sugar := logger.Sugar()
+	// Register as the global logger so zap.S() / zap.L() work for
+	// background goroutines that don't carry a context-injected logger.
+	zap.ReplaceGlobals(logger)
+	return sugar
 }
 
 // Module exports the Logger module

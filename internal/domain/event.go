@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -41,12 +42,15 @@ type EventRepository interface {
 }
 
 type OutboxEvent struct {
-	ID        int
-	EventType string
-	Payload   []byte // JSON
-	Status    string
+	ID          int
+	EventType   string
+	Payload     []byte // JSON
+	Status      string
+	ProcessedAt *time.Time
 }
 
 type OutboxRepository interface {
 	Create(ctx context.Context, event *OutboxEvent) error
+	ListPending(ctx context.Context, limit int) ([]*OutboxEvent, error)
+	MarkProcessed(ctx context.Context, id int) error
 }

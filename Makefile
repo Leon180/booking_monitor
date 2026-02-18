@@ -58,6 +58,10 @@ benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 
 	@chmod +x scripts/benchmark_k6.sh
 	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)
 
+benchmark-compare: ## Run two-run comparison benchmark (usage: make benchmark-compare VUS=500 DURATION=60s)
+	@chmod +x scripts/benchmark_compare.sh
+	@./scripts/benchmark_compare.sh $(VUS) $(DURATION)
+
 docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@echo "Restarting booking_app container..."
 	@docker-compose stop app

@@ -180,3 +180,31 @@ func (r *postgresOutboxRepository) Create(ctx context.Context, event *domain.Out
 	query := "INSERT INTO events_outbox (event_type, payload, status) VALUES ($1, $2, $3) RETURNING id"
 	return r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&event.ID)
 }
+
+func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
+	query := `SELECT id, event_type, payload, status FROM events_outbox
+	          WHERE processed_at IS NULL
+	          ORDER BY id ASC
+	          LIMIT $1`
+	rows, err := r.getExecutor(ctx).QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []*domain.OutboxEvent
+	for rows.Next() {
+		e := &domain.OutboxEvent{}
+		if err := rows.Scan(&e.ID, &e.EventType, &e.Payload, &e.Status); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+func (r *postgresOutboxRepository) MarkProcessed(ctx context.Context, id int) error {
+	query := "UPDATE events_outbox SET processed_at = NOW() WHERE id = $1"
+	_, err := r.getExecutor(ctx).ExecContext(ctx, query, id)
+	return err
+}

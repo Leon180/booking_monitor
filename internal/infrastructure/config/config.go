@@ -12,6 +12,7 @@ type Config struct {
 	Server   ServerConfig   `yaml:"server"`
 	Redis    RedisConfig    `yaml:"redis"`
 	Postgres PostgresConfig `yaml:"postgres"`
+	Kafka    KafkaConfig    `yaml:"kafka"`
 }
 
 type AppConfig struct {
@@ -42,6 +43,15 @@ type PostgresConfig struct {
 	MaxOpenConns int           `yaml:"max_open_conns" env:"DB_MAX_OPEN_CONNS" env-default:"50"`
 	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"5"`
 	MaxIdleTime  time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME" env-default:"5m"`
+}
+
+type KafkaConfig struct {
+	// Brokers is a comma-separated list of Kafka broker addresses.
+	Brokers string `yaml:"brokers" env:"KAFKA_BROKERS" env-default:"localhost:9092"`
+	// WriteTimeout is the max time to wait for a Kafka write to complete.
+	WriteTimeout time.Duration `yaml:"write_timeout" env:"KAFKA_WRITE_TIMEOUT" env-default:"5s"`
+	// OutboxBatchSize controls how many outbox events are processed per relay tick.
+	OutboxBatchSize int `yaml:"outbox_batch_size" env:"KAFKA_OUTBOX_BATCH_SIZE" env-default:"100"`
 }
 
 func LoadConfig(path string) (*Config, error) {
