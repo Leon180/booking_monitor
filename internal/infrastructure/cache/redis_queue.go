@@ -2,6 +2,7 @@ package cache
 
 import (
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 	"context"
 	"fmt"
 	"time"
@@ -20,13 +21,15 @@ type redisOrderQueue struct {
 	client        *redis.Client
 	inventoryRepo domain.InventoryRepository
 	logger        *zap.SugaredLogger
+	consumerName  string
 }
 
-func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *zap.SugaredLogger) domain.OrderQueue {
+func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *zap.SugaredLogger, cfg *config.Config) domain.OrderQueue {
 	return &redisOrderQueue{
 		client:        client,
 		inventoryRepo: inventoryRepo,
 		logger:        logger,
+		consumerName:  cfg.App.WorkerID,
 	}
 }
 
@@ -44,7 +47,14 @@ func (q *redisOrderQueue) EnsureGroup(ctx context.Context) error {
 
 func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx context.Context, msg *domain.OrderMessage) error) error {
 	// Consumer Name (unique per pod, using hostname or uuid would be better, but for single node "App" is fine)
-	consumerName := "booking-worker-1"
+	consumerName := q.consumerName
+
+	// 1. Recover Pending Messages (PEL)
+	// These are messages this consumer claimed but crashed before ACKing.
+	if err := q.processPending(ctx, consumerName, handler); err != nil {
+		q.logger.Errorw("Failed to process pending messages during startup", "error", err)
+		// We log but continue, ensuring we at least process new messages.
+	}
 
 	for {
 		// Check for context cancellation
@@ -186,4 +196,51 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 		EventID:  eventID,
 		Quantity: qty,
 	}, nil
+}
+
+// processPending fetches and processes messages from the Pending Entries List (PEL).
+func (q *redisOrderQueue) processPending(ctx context.Context, consumerName string, handler func(ctx context.Context, msg *domain.OrderMessage) error) error {
+	q.logger.Info("Checking for pending messages (PEL)...")
+
+	for {
+		// XREADGROUP with ID "0" fetches pending messages for check consumer.
+		streams, err := q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    groupName,
+			Consumer: consumerName,
+			Streams:  []string{streamKey, "0"}, // "0" = Pending messages
+			Count:    10,
+			Block:    0,
+		}).Result()
+
+		if err != nil {
+			return err
+		}
+
+		if len(streams) == 0 || len(streams[0].Messages) == 0 {
+			q.logger.Info("No more pending messages to recover.")
+			return nil
+		}
+
+		stream := streams[0]
+		q.logger.Infow("Recovering pending messages", "count", len(stream.Messages))
+
+		for _, msg := range stream.Messages {
+			orderMsg, err := parseMessage(msg)
+			if err != nil {
+				q.logger.Errorw("Malformed pending message", "id", msg.ID, "error", err)
+				q.moveToDLQ(ctx, msg, err)
+				q.client.XAck(ctx, streamKey, groupName, msg.ID)
+				continue
+			}
+
+			// Process with Retry
+			if err := q.processWithRetry(ctx, handler, orderMsg); err != nil {
+				q.handleFailure(ctx, orderMsg, msg, err)
+			} else {
+				// Success
+				q.client.XAck(ctx, streamKey, groupName, msg.ID)
+				q.logger.Infow("Recovered and processed pending message", "msg_id", msg.ID)
+			}
+		}
+	}
 }

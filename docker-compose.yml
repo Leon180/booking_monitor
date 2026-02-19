@@ -11,6 +11,7 @@ services:
       - postgres
       - jaeger
       - kafka
+      - redis
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
       - OTEL_SERVICE_NAME=booking-service
@@ -27,6 +28,7 @@ services:
     depends_on:
       - postgres
       - kafka
+      - redis
     environment:
       - DATABASE_URL=postgres://user:password@postgres:5432/booking?sslmode=disable
       - REDIS_ADDR=booking_redis:6379

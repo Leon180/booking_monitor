@@ -19,6 +19,7 @@ type AppConfig struct {
 	Name     string `yaml:"name" env:"APP_NAME" env-default:"booking_monitor"`
 	Version  string `yaml:"version" env:"APP_VERSION" env-default:"1.0.0"`
 	LogLevel string `yaml:"log_level" env:"LOG_LEVEL" env-default:"info"`
+	WorkerID string `yaml:"worker_id" env:"WORKER_ID" env-default:"worker-1"`
 }
 
 type ServerConfig struct {
