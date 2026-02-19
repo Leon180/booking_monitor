@@ -63,7 +63,7 @@ func TestWorkerService_ProcessMessage(t *testing.T) {
 
 				// 4. Create Outbox Event
 				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(&domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e *domain.OutboxEvent) error {
-					assert.Equal(t, "order_created", e.EventType)
+					assert.Equal(t, "order.created", e.EventType)
 					assert.Equal(t, "PENDING", e.Status)
 					return nil
 				})
@@ -176,5 +176,30 @@ func TestWorkerService_ProcessMessage(t *testing.T) {
 				assert.Contains(t, spyMetrics.Outcomes, tt.expectedMetric, "Expected metric outcome not found")
 			}
 		})
+
 	}
+}
+
+func TestWorkerService_Start(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockQueue := mocks.NewMockOrderQueue(ctrl)
+	nopLogger := zap.NewNop().Sugar()
+
+	svc := NewWorkerService(mockQueue, nil, nil, nil, nil, nil, nopLogger)
+
+	ctx := context.Background()
+
+	// 1. EnsureGroup Success, Subscribe Success
+	mockQueue.EXPECT().EnsureGroup(ctx).Return(nil)
+	mockQueue.EXPECT().Subscribe(ctx, gomock.Any()).Return(nil)
+
+	svc.(*workerService).Start(ctx)
+
+	// 2. EnsureGroup Error
+	mockQueue.EXPECT().EnsureGroup(ctx).Return(errors.New("redis error"))
+	// Subscribe should NOT be called
+
+	svc.(*workerService).Start(ctx)
 }
