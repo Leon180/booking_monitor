@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
 	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/cache"
@@ -24,6 +25,9 @@ import (
 	"booking_monitor/internal/infrastructure/observability"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
 	"booking_monitor/pkg/logger"
+
+	paymentApp "booking_monitor/internal/application/payment"
+	paymentInfra "booking_monitor/internal/infrastructure/payment"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
@@ -61,12 +65,80 @@ func main() {
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
 	stressCmd.Flags().String("port", "8080", "Target server port")
 
-	rootCmd.AddCommand(serverCmd, stressCmd)
+	var paymentCmd = &cobra.Command{
+		Use:   "payment",
+		Short: "Run the Payment Service worker",
+		Run:   runPaymentWorker,
+	}
+
+	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func runPaymentWorker(cmd *cobra.Command, args []string) {
+	// 1. Load Config
+	cfg, err := config.LoadConfig("config/config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	app := fx.New(
+		// Provide Logger
+		logger.Module,
+
+		// Provide Config
+		fx.Provide(func() *config.Config {
+			return cfg
+		}),
+
+		// Provide DB connection using Shared Provider
+		fx.Provide(provideDB),
+
+		// Provide Modules
+		postgresRepo.Module,
+
+		// Payment Specific Providers
+		fx.Provide(
+			// Cast MockGateway to PaymentGateway interface
+			fx.Annotate(
+				paymentInfra.NewMockGateway,
+				fx.As(new(domain.PaymentGateway)),
+			),
+			paymentApp.NewService, // domain.PaymentService
+			// Kafka Consumer
+			func(cfg *config.Config) *messaging.KafkaConsumer {
+				return messaging.NewKafkaConsumer(&cfg.Kafka)
+			},
+		),
+
+		// Invoke Consumer Start
+		fx.Invoke(func(lc fx.Lifecycle, consumer *messaging.KafkaConsumer, service domain.PaymentService, log *zap.SugaredLogger) {
+			ctx, cancel := context.WithCancel(context.Background())
+
+			lc.Append(fx.Hook{
+				OnStart: func(context.Context) error {
+					log.Info("Starting Payment Service Worker...")
+					go func() {
+						if err := consumer.Start(ctx, service); err != nil {
+							log.Errorw("Consumer stopped with error", "error", err)
+						}
+					}()
+					return nil
+				},
+				OnStop: func(ctx context.Context) error {
+					log.Info("Stopping Payment Service Worker...")
+					cancel()
+					return consumer.Close()
+				},
+			})
+		}),
+	)
+
+	app.Run()
 }
 
 func initTracer() *trace.TracerProvider {
@@ -116,26 +188,8 @@ func runServer(cmd *cobra.Command, args []string) {
 			return cfg
 		}),
 
-		// Provide DB connection using Config
-		fx.Provide(func(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
-			db, err := sql.Open("postgres", cfg.Postgres.DSN)
-			if err != nil {
-				return nil, err
-			}
-
-			// Simple retry logic
-			for i := 0; i < 10; i++ {
-				if err = db.Ping(); err == nil {
-					break
-				}
-				time.Sleep(1 * time.Second)
-			}
-
-			db.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
-			db.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
-			db.SetConnMaxIdleTime(cfg.Postgres.MaxIdleTime)
-			return db, nil
-		}),
+		// Provide DB connection using Shared Provider
+		fx.Provide(provideDB),
 
 		// Provide Modules
 		postgresRepo.Module,
@@ -205,6 +259,27 @@ func runServer(cmd *cobra.Command, args []string) {
 	)
 
 	app.Run()
+}
+
+// provideDB creates a database connection with retry logic.
+func provideDB(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
+	db, err := sql.Open("postgres", cfg.Postgres.DSN)
+	if err != nil {
+		return nil, err
+	}
+
+	// Simple retry logic
+	for i := 0; i < 10; i++ {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	db.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
+	db.SetConnMaxIdleTime(cfg.Postgres.MaxIdleTime)
+	return db, nil
 }
 
 // Ported from stress_test/main.go

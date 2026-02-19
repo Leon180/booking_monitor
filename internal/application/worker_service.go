@@ -105,7 +105,7 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		// 3. Outbox Pattern
 		payload, _ := json.Marshal(order)
 		outboxEvent := &domain.OutboxEvent{
-			EventType: "order_created",
+			EventType: "order.created",
 			Payload:   payload,
 			Status:    "PENDING",
 		}

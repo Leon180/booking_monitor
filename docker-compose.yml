@@ -20,6 +20,19 @@ services:
       - GIN_MODE=release
       - APP_ENV=production
 
+  payment_worker:
+    build: .
+    container_name: booking_payment_worker
+    command: [ "/app/booking-cli", "payment" ]
+    depends_on:
+      - postgres
+      - kafka
+    environment:
+      - DATABASE_URL=postgres://user:password@postgres:5432/booking?sslmode=disable
+      - REDIS_ADDR=booking_redis:6379
+      - KAFKA_BROKERS=kafka:9092
+      - APP_NAME=booking_payment_worker
+
   postgres:
     image: postgres:15-alpine
     container_name: booking_db

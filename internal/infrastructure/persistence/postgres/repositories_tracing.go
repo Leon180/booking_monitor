@@ -126,3 +126,17 @@ func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit,
 	}
 	return orders, total, err
 }
+
+func (d *orderRepositoryTracingDecorator) UpdateStatus(ctx context.Context, id int, status domain.OrderStatus) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateOrderStatus", trace.WithAttributes(
+		attribute.Int("order_id", id),
+		attribute.String("status", string(status)),
+	))
+	defer span.End()
+
+	err := d.next.UpdateStatus(ctx, id, status)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}

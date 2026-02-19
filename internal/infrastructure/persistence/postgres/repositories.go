@@ -141,6 +141,12 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	return orders, total, nil
 }
 
+func (r *postgresOrderRepository) UpdateStatus(ctx context.Context, id int, status domain.OrderStatus) error {
+	query := "UPDATE orders SET status = $1 WHERE id = $2"
+	_, err := r.getExecutor(ctx).ExecContext(ctx, query, status, id)
+	return err
+}
+
 // DecrementTicket implements atomic inventory deduction using DB constraints
 func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, quantity int) error {
 	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
