@@ -81,8 +81,12 @@ This project follows **Domain-Driven Design (DDD)** and **Clean Architecture** p
 
 - **Unified Logger**: Uses `go.uber.org/zap` for structured JSON logging.
 - **Tracing**: Integrated with OpenTelemetry (OTEL). Spans are created for API -> Service -> Repository layers.
-- **Metrics**: Prometheus metrics exposed at `/metrics`.
-- **Dashboards**: Grafana pre-provisioned at `http://localhost:3000` (admin/admin).
+- **Metrics**: Prometheus metrics exposed at `/metrics`. 
+  - **Conversion Rate**: Tracks page views (`GET /api/v1/events/:id`) vs. successful bookings to measure funnel conversion.
+  - **System Fairness**: Monitors per-IP request rates to identify and isolate bot traffic.
+  - **Saturation**: Tracks active goroutines and memory allocation overhead.
+  - **p99 Latency**: Refined histogram tracking for accurate p99 request duration calculation.
+- **Dashboards**: Grafana pre-provisioned at `http://localhost:3000` (admin/admin). Contains a detailed 6-panel dashboard featuring RPS, Latency Quantiles, Conversion Rate, IP Fairness, and Saturation out of the box.
 
 ## Configuration
 

@@ -62,3 +62,19 @@ func (h *tracingBookingHandler) HandleCreateEvent(c *gin.Context) {
 		span.SetStatus(codes.Error, "Internal Server Error")
 	}
 }
+
+func (h *tracingBookingHandler) HandleViewEvent(c *gin.Context) {
+	ctx := c.Request.Context()
+	ctx, span := otel.Tracer("api").Start(ctx, "HandleViewEvent")
+	defer span.End()
+
+	c.Request = c.Request.WithContext(ctx)
+
+	h.handler.HandleViewEvent(c)
+
+	status := c.Writer.Status()
+	span.SetAttributes(attribute.Int("http.status_code", status))
+	if status >= 500 {
+		span.SetStatus(codes.Error, "Internal Server Error")
+	}
+}

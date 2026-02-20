@@ -21,11 +21,23 @@ var (
 
 	httpRequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "Duration of HTTP requests in seconds",
-			Buckets: prometheus.DefBuckets,
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests in seconds",
+			// Finer buckets for accurate p99 calculation (5ms to 2.5s)
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5},
 		},
 		[]string{"method", "path"},
+	)
+
+	// --- Advanced Metrics (Phase 7.7) ---
+
+	// PageViewsTotal tracks users entering the page for conversion rate calculation.
+	PageViewsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "page_views_total",
+			Help: "Total number of page views to measure funnel conversion",
+		},
+		[]string{"page"},
 	)
 
 	// --- Business Metrics ---
@@ -73,9 +85,9 @@ func MetricsMiddleware() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		duration := time.Since(start).Seconds()
-		status := c.Writer.Status()
+		status := strconv.Itoa(c.Writer.Status())
 
-		httpRequestsTotal.WithLabelValues(c.Request.Method, c.FullPath(), strconv.Itoa(status)).Inc()
+		httpRequestsTotal.WithLabelValues(c.Request.Method, c.FullPath(), status).Inc()
 		httpRequestDuration.WithLabelValues(c.Request.Method, c.FullPath()).Observe(duration)
 	}
 }

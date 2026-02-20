@@ -45,6 +45,12 @@ Client → Nginx (Rate Limit) → Ticket Service (Go)
              → Publish `order.paid` → Email / Analytics
 ```
 
+## Architecture Diagrams
+
+For a detailed visual understanding of the system, refer to:
+1. [Current Monolith Architecture](../../docs/architecture/current_monolith.md) - Shows the successful integration of Phase 1-7 (Redis, Kafka, Payment).
+2. [Future Robust Monolith](../../docs/architecture/future_robust_monolith.md) - Shows the target architecture after Phases 8-11 (Nginx, Sagas, Locks).
+
 ## Components
 
 | Component | Status | Reference |
@@ -53,22 +59,25 @@ Client → Nginx (Rate Limit) → Ticket Service (Go)
 | Go Worker (stream consumer) | ✅ Done | `internal/application/worker_service.go` |
 | Outbox table | ✅ Done | `deploy/postgres/migrations/000003_add_outbox.up.sql` |
 | Idempotency (API layer) | ✅ Done | `internal/infrastructure/cache/idempotency.go` |
-| Nginx / API Gateway | ❌ Pending | See [nginx.md](references/nginx.md) |
-| Kafka + Outbox Relay | ❌ Pending | See [kafka.md](references/kafka.md) |
-| Payment Service | ❌ Pending | See [payment.md](references/payment.md) |
+| Kafka + Outbox Relay | ✅ Done | `internal/application/outbox_relay.go` |
+| Payment Service | ✅ Done | `internal/application/payment/service.go` |
+| Nginx / API Gateway | ❌ Pending | Phase 8. See [nginx.md](references/nginx.md) |
+| Distributed Locks (Outbox Relay) | ❌ Pending | Phase 9. Prevent DB contention when scaling. |
+| Saga Pattern (Payment Rollback) | ❌ Pending | Phase 10. Compensating transactions via Kafka. |
+| Resilience (Redis MAXLEN & DLQ) | ❌ Pending | Phase 11. Protect Redis memory and handle toxic messages. |
 
-## Implementation Order
+## Implementation Road Map (Stabilizing the Monolith)
 
-When adding new components, follow this order (each depends on the previous):
+Instead of immediately splitting into microservices, we will scale horizontally by stabilizing the Modular Monolith:
 
-1. **Kafka** — Add to `docker-compose.yml`, implement outbox relay worker
-2. **Payment Service** — New Go microservice consuming `order.created`
-3. **Nginx** — Add as reverse proxy with rate limiting in `docker-compose.yml`
-4. **Email/Notify** — Kafka consumer for `order.paid`
+1. **Phase 8: API Gateway (Nginx)** — Add Reverse Proxy to protect the naked Gin router with Connection Draining and Rate Limiting.
+2. **Phase 9: Distributed Locking** — Use Redis to implement a Mutex so multiple `OutboxRelay` instances don't bombard the DB in a Race Condition.
+3. **Phase 10: Saga Rollbacks** — If Payment fails, consume an `order.failed` Kafka event to `INCRBY` the inventory back into Redis so the ticket isn't lost permanently.
+4. **Phase 11: Resilience & DLQ** — Guarantee Redis Stream stability via `MAXLEN` and automate Dead Letter Queue routing for failed worker jobs.
 
 ## Key Design Decisions
 
 - **Redis is not the source of truth** — DB is. Redis only gates the hot path.
 - **Outbox pattern** — Guarantees at-least-once delivery to Kafka without distributed transactions.
 - **Worker idempotency** — DB `UNIQUE(user_id, event_id)` constraint prevents double orders even if the worker retries.
-- **Order status lifecycle**: `pending` → `paid` → (optionally) `cancelled`
+- **Monolith First** — The system is strictly decoupled internally via interfaces, allowing us to deploy as a monolith and avoid Kubernetes/Networking overhead, with the option to split later.

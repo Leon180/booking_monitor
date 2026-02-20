@@ -6,6 +6,7 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/observability"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -15,6 +16,7 @@ type BookingHandler interface {
 	HandleBook(c *gin.Context)
 	HandleListBookings(c *gin.Context)
 	HandleCreateEvent(c *gin.Context)
+	HandleViewEvent(c *gin.Context)
 }
 
 type bookingHandler struct {
@@ -162,8 +164,15 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 	c.JSON(http.StatusCreated, event)
 }
 
+func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
+	// 記錄進入頁面的人數 (Conversion: Page Views)
+	observability.PageViewsTotal.WithLabelValues("event_detail").Inc()
+	c.JSON(http.StatusOK, gin.H{"message": "View event", "event_id": c.Param("id")})
+}
+
 func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler) {
 	r.POST("/book", handler.HandleBook)
 	r.GET("/history", handler.HandleListBookings)
 	r.POST("/events", handler.HandleCreateEvent)
+	r.GET("/events/:id", handler.HandleViewEvent)
 }

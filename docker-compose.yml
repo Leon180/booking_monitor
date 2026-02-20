@@ -4,8 +4,6 @@ services:
   app:
     build: .
     container_name: booking_app
-    ports:
-      - "8080:8080"
     command: [ "/app/booking-cli", "server" ]
     depends_on:
       - postgres
@@ -20,6 +18,16 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - GIN_MODE=release
       - APP_ENV=production
+
+  nginx:
+    image: nginx:alpine
+    container_name: booking_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
 
   payment_worker:
     build: .

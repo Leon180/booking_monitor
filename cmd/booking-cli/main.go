@@ -224,6 +224,12 @@ func runServer(cmd *cobra.Command, args []string) {
 					r := gin.New()        // Use New() to control middleware
 					r.Use(gin.Recovery()) // Recovery from panics
 
+					// Secure ClientIP resolution behind Nginx Proxy (Docker default subnets)
+					err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"})
+					if err != nil {
+						log.Warnw("Failed to set trusted proxies", "error", err)
+					}
+
 					r.Use(api.LoggerMiddleware(log))            // 1. Inject Logger
 					r.Use(middleware.CorrelationIDMiddleware()) // 2. Inject Correlation ID (Enriches Logger)
 

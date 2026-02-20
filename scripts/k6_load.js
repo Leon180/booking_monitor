@@ -25,7 +25,8 @@ export const options = {
     },
 };
 
-const BASE_URL = 'http://app:8080/api/v1'; // Access app service internally in docker network
+// Access app service internally in docker network to bypass Nginx Rate Limiting during pure backend capacity benchmarks
+const BASE_URL = 'http://app:8080/api/v1';
 
 export function setup() {
     // Create a new event for this test run
