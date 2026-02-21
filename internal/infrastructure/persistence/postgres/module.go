@@ -12,6 +12,7 @@ var Module = fx.Module("postgres",
 		NewPostgresOrderRepository,
 		NewPostgresOutboxRepository,
 		NewPostgresUnitOfWork,
+		NewPostgresDistributedLock,
 	),
 	// Apply Decorators
 	fx.Decorate(

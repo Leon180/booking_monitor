@@ -16,9 +16,10 @@ type OutboxRelay struct {
 	outboxRepo domain.OutboxRepository
 	publisher  domain.EventPublisher
 	batchSize  int
+	mutex      domain.DistributedLock
 }
 
-func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPublisher, batchSize int) *OutboxRelay {
+func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPublisher, batchSize int, mutex domain.DistributedLock) *OutboxRelay {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
@@ -26,6 +27,7 @@ func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPu
 		outboxRepo: outboxRepo,
 		publisher:  publisher,
 		batchSize:  batchSize,
+		mutex:      mutex,
 	}
 }
 
@@ -47,8 +49,23 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 		select {
 		case <-ctx.Done():
 			log.Infow("outbox relay stopped")
+			// Ensure lock is released on graceful shutdown
+			_ = r.mutex.Unlock(context.Background(), 1001)
 			return
 		case <-ticker.C:
+			// 1. Leader Election: Try to acquire Postgres Advisory Lock (LockID: 1001)
+			acquired, err := r.mutex.TryLock(ctx, 1001)
+			if err != nil {
+				log.Errorw("outbox relay: failed to acquire lock", "error", err)
+				continue
+			}
+
+			if !acquired {
+				// We are in standby mode. Keep quiet or log at debug level.
+				continue
+			}
+
+			// 2. We are the Leader! Process the batch.
 			batchFn(ctx)
 		}
 	}

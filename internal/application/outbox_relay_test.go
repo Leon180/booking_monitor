@@ -93,13 +93,14 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 
 			mockRepo := mocks.NewMockOutboxRepository(ctrl)
 			mockPub := mocks.NewMockEventPublisher(ctrl)
+			mockLock := mocks.NewMockDistributedLock(ctrl)
 
 			if tt.setupMocks != nil {
 				tt.setupMocks(mockRepo, mockPub)
 			}
 
 			// We test the private method processBatch directly to avoid timing issues with Run()
-			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize)
+			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock)
 			relay.processBatch(ctx)
 		})
 	}
