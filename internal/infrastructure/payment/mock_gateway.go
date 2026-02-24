@@ -44,7 +44,7 @@ func (g *MockGateway) Charge(ctx context.Context, orderID int, amount float64) e
 		return ctx.Err()
 	}
 
-	// Simulate failure
+	// Simulate payment failures based on SuccessRate
 	if rand.Float64() > g.SuccessRate {
 		return errors.New("payment declined by mock gateway")
 	}

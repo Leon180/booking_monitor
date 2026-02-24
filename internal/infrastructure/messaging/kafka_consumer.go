@@ -19,16 +19,14 @@ type KafkaConsumer struct {
 }
 
 // NewKafkaConsumer creates a new Kafka consumer.
-func NewKafkaConsumer(cfg *config.KafkaConfig) *KafkaConsumer {
-	log := zap.S().With("component", "kafka_consumer")
+func NewKafkaConsumer(cfg *config.KafkaConfig, log *zap.SugaredLogger) *KafkaConsumer {
+	log = log.With("component", "kafka_consumer")
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
-		GroupID:     "payment-service-group",
+		GroupID:     "payment-service-group-test",
 		Topic:       "order.created",
 		StartOffset: kafka.FirstOffset,
-		MinBytes:    10e3, // 10KB
-		MaxBytes:    10e6, // 10MB
 	})
 
 	return &KafkaConsumer{
@@ -42,6 +40,7 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 	c.log.Info("Starting Kafka consumer for topic: order.created")
 
 	for {
+		c.log.Debug("Polling Kafka...")
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -58,18 +57,15 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			c.log.Errorw("Failed to unmarshal event", "error", err, "payload", string(msg.Value))
 			// Commit bad message to avoid loop
-			if err := c.reader.CommitMessages(ctx, msg); err != nil {
-				c.log.Errorw("Failed to commit offset for bad message", "error", err)
+			if commitErr := c.reader.CommitMessages(ctx, msg); commitErr != nil {
+				c.log.Errorw("Failed to commit offset for bad message", "error", commitErr)
 			}
 			continue
 		}
 
 		if err := handler.ProcessOrder(ctx, &event); err != nil {
 			c.log.Errorw("Failed to process order", "order_id", event.OrderID, "error", err)
-			// Simple retry policy: log and continue (at-least-once means we ideally retry until success or DLQ)
-			// For this implementation, we log error but DO NOT commit offset if it's a transient error?
-			// But if we don't commit, we block.
-			// Let's assume we commit for now to keep things moving in this demo.
+			continue // Do not commit, retry on restart or rely on uncommitted message behavior
 		}
 
 		if err := c.reader.CommitMessages(ctx, msg); err != nil {

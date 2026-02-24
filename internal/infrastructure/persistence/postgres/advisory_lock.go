@@ -38,7 +38,7 @@ func (l *pgAdvisoryLock) TryLock(ctx context.Context, lockID int64) (bool, error
 	l.conn = conn
 
 	var acquired bool
-	err := l.conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", lockID).Scan(&acquired)
+	err = l.conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", lockID).Scan(&acquired)
 	if err != nil || !acquired {
 		// If we failed to acquire or got an error, release the connection
 		// so we don't exhaust the connection pool while in Standby mode.

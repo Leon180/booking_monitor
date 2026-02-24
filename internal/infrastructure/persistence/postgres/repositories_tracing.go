@@ -75,6 +75,20 @@ func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, e
 	return err
 }
 
+func (d *eventRepositoryTracingDecorator) IncrementTicket(ctx context.Context, eventID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "IncrementTicket", trace.WithAttributes(
+		attribute.Int("event_id", eventID),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.IncrementTicket(ctx, eventID, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
 func (d *eventRepositoryTracingDecorator) Update(ctx context.Context, event *domain.Event) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateEvent", trace.WithAttributes(
 		attribute.Int("event_id", event.ID),
@@ -110,6 +124,19 @@ func (d *orderRepositoryTracingDecorator) Create(ctx context.Context, order *dom
 		span.RecordError(err)
 	}
 	return err
+}
+
+func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (*domain.Order, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetOrderByID", trace.WithAttributes(
+		attribute.Int("order_id", id),
+	))
+	defer span.End()
+
+	order, err := d.next.GetByID(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return order, err
 }
 
 func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {

@@ -35,8 +35,6 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -110,8 +108,8 @@ func runPaymentWorker(cmd *cobra.Command, args []string) {
 			),
 			paymentApp.NewService, // domain.PaymentService
 			// Kafka Consumer
-			func(cfg *config.Config) *messaging.KafkaConsumer {
-				return messaging.NewKafkaConsumer(&cfg.Kafka)
+			func(cfg *config.Config, logger *zap.SugaredLogger) *messaging.KafkaConsumer {
+				return messaging.NewKafkaConsumer(&cfg.Kafka, logger)
 			},
 		),
 
@@ -144,23 +142,25 @@ func runPaymentWorker(cmd *cobra.Command, args []string) {
 func initTracer() *trace.TracerProvider {
 	ctx := context.Background()
 
+	svcName := os.Getenv("OTEL_SERVICE_NAME")
+	if svcName == "" {
+		svcName = "booking-service"
+	}
+
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName("booking-service"),
+			semconv.ServiceName(svcName),
 		),
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("failed to create resource: %v", err)
 	}
 
-	conn, err := grpc.NewClient("localhost:4317", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Will automatically use OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
+	// If not set, defaults to localhost:4317. It handles http/https prefixes correctly.
+	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("failed to create gRPC connection to collector: %v", err)
-	}
-
-	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
-	if err != nil {
-		log.Fatalf("failed to create trace exporter: %v", err)
+		log.Printf("failed to create trace exporter: %v", err)
 	}
 
 	tp := trace.NewTracerProvider(
@@ -210,9 +210,12 @@ func runServer(cmd *cobra.Command, args []string) {
 
 		// Provide concrete implementations of application interfaces
 		fx.Provide(observability.NewWorkerMetrics),
+		fx.Provide(func(cfg *config.Config) *messaging.SagaConsumer {
+			return messaging.NewSagaConsumer(&cfg.Kafka)
+		}),
 
 		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService) {
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) {
 			tp := initTracer()
 
 			// Context for worker shutdown
@@ -248,14 +251,22 @@ func runServer(cmd *cobra.Command, args []string) {
 						}
 					}()
 
-					// Start Background Worker
+					// Start Background Worker (Redis -> DB Outbox)
 					go worker.Start(workerCtx)
+
+					// Start Saga Consumer (Kafka order.failed -> Restore DB/Redis)
+					go func() {
+						if err := sagaConsumer.Start(workerCtx, compensator); err != nil {
+							log.Errorw("Saga consumer stopped with error", "error", err)
+						}
+					}()
 
 					return nil
 				},
 				OnStop: func(ctx context.Context) error {
-					log.Info("Stopping worker service...")
+					log.Info("Stopping worker services...")
 					workerCancel()
+					_ = sagaConsumer.Close()
 
 					log.Info("Shutting down tracer provider")
 					return tp.Shutdown(ctx)

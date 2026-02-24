@@ -98,6 +98,20 @@ func (mr *MockEventRepositoryMockRecorder) GetByID(ctx, id any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByID", reflect.TypeOf((*MockEventRepository)(nil).GetByID), ctx, id)
 }
 
+// IncrementTicket mocks base method.
+func (m *MockEventRepository) IncrementTicket(ctx context.Context, eventID, quantity int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IncrementTicket", ctx, eventID, quantity)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// IncrementTicket indicates an expected call of IncrementTicket.
+func (mr *MockEventRepositoryMockRecorder) IncrementTicket(ctx, eventID, quantity any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IncrementTicket", reflect.TypeOf((*MockEventRepository)(nil).IncrementTicket), ctx, eventID, quantity)
+}
+
 // Update mocks base method.
 func (m *MockEventRepository) Update(ctx context.Context, event *domain.Event) error {
 	m.ctrl.T.Helper()

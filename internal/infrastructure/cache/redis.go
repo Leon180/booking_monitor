@@ -105,8 +105,8 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	}
 }
 
-func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, count int) error {
-	keys := []string{inventoryKey(eventID)}
+func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, count int, compensationID string) error {
+	keys := []string{inventoryKey(eventID), "saga:reverted:" + compensationID}
 	args := []interface{}{count}
 
 	script, ok := r.scripts["revert"]

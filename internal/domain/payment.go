@@ -18,10 +18,22 @@ type PaymentService interface {
 // OrderCreatedEvent represents the structure of the event consumed from Kafka.
 // It mirrors the event published by the ticket service.
 type OrderCreatedEvent struct {
-	EventID   string    `json:"event_id"`
-	OrderID   int       `json:"order_id"`
+	OrderID   int       `json:"id"`
+	Status    string    `json:"status"`
 	UserID    int       `json:"user_id"`
-	TicketID  int       `json:"ticket_id"`
-	Amount    float64   `json:"amount"`
+	EventID   int       `json:"event_id"`
+	Quantity  int       `json:"quantity"`
+	Amount    float64   `json:"amount"` // Deserialize amount for gateway charge
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// OrderFailedEvent represents the structure of the event published when a payment fails.
+// It is consumed by the booking domain to trigger a compensating transaction (Saga).
+type OrderFailedEvent struct {
+	EventID  int       `json:"event_id"`
+	OrderID  int       `json:"order_id"`
+	UserID   int       `json:"user_id"`
+	Quantity int       `json:"quantity"`
+	FailedAt time.Time `json:"failed_at"`
+	Reason   string    `json:"reason"`
 }

@@ -13,6 +13,11 @@ var (
 	ErrUserAlreadyBought = errors.New("user already bought ticket")
 )
 
+const (
+	EventTypeOrderFailed = "order.failed"
+	OutboxStatusPending  = "PENDING"
+)
+
 type Event struct {
 	ID               int    `json:"id"`
 	Name             string `json:"name"`
@@ -39,7 +44,8 @@ type EventRepository interface {
 	DeductInventory(ctx context.Context, eventID, quantity int) error // Deprecated in favor of Lifecycle, but kept for legacy
 	Update(ctx context.Context, event *Event) error
 	DecrementTicket(ctx context.Context, eventID, quantity int) error
-}
+	IncrementTicket(ctx context.Context, eventID, quantity int) error
+} // ...
 
 type OutboxEvent struct {
 	ID          int

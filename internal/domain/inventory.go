@@ -17,6 +17,6 @@ type InventoryRepository interface {
 	DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error)
 
 	// RevertInventory restores inventory count.
-	// Used for compensation in DLQ scenarios.
-	RevertInventory(ctx context.Context, eventID int, count int) error
+	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
+	RevertInventory(ctx context.Context, eventID int, count int, compensationID string) error
 }

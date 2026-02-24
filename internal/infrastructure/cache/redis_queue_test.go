@@ -68,7 +68,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	}).Result()
 
 	// Claim it (ReadGroup)
-	rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+	_, _ = rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    "orders:group",
 		Consumer: "worker-1",
 		Streams:  []string{"orders:stream", ">"},
@@ -127,7 +127,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 		return nil
 	}
 
-	queue.Subscribe(ctx, handler)
+	_ = queue.Subscribe(ctx, handler)
 
 	// Handler should NOT be called for malformed message
 	assert.False(t, handlerCalled)

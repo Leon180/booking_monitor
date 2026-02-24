@@ -12,6 +12,7 @@ var Module = fx.Module("application",
 		NewEventService,
 		NewWorkerService,
 		NewOutboxRelay,
+		NewSagaCompensator,
 	),
 	fx.Decorate(
 		// BookingService chain: base -> tracing -> metrics

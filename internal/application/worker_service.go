@@ -82,12 +82,11 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 			return err
 		}
 
-		// 2. Create Order
 		order := &domain.Order{
 			UserID:    msg.UserID,
 			EventID:   msg.EventID,
 			Quantity:  msg.Quantity,
-			Status:    "confirmed",
+			Status:    domain.OrderStatusPending,
 			CreatedAt: time.Now(),
 		}
 

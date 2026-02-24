@@ -115,13 +115,14 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	var statusCode int
 	var body string
 	if err != nil {
-		if err == domain.ErrSoldOut {
+		switch err {
+		case domain.ErrSoldOut:
 			statusCode = http.StatusConflict
 			body = `{"error":"sold out"}`
-		} else if err == domain.ErrUserAlreadyBought {
+		case domain.ErrUserAlreadyBought:
 			statusCode = http.StatusConflict
 			body = `{"error":"user already bought ticket"}`
-		} else {
+		default:
 			// Use json.Marshal to safely encode the error message (handles quotes, backslashes, etc.)
 			errJSON, _ := json.Marshal(gin.H{"error": err.Error()})
 			statusCode = http.StatusInternalServerError

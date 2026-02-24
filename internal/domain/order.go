@@ -2,15 +2,19 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+var ErrOrderNotFound = errors.New("order not found")
 
 type OrderStatus string
 
 const (
-	OrderStatusConfirmed OrderStatus = "confirmed"
-	OrderStatusPending   OrderStatus = "pending"
-	OrderStatusFailed    OrderStatus = "failed"
+	OrderStatusConfirmed   OrderStatus = "confirmed"
+	OrderStatusPending     OrderStatus = "pending"
+	OrderStatusFailed      OrderStatus = "failed"
+	OrderStatusCompensated OrderStatus = "compensated"
 )
 
 type Order struct {
@@ -26,5 +30,6 @@ type Order struct {
 type OrderRepository interface {
 	Create(ctx context.Context, order *Order) error
 	ListOrders(ctx context.Context, limit, offset int, status *OrderStatus) ([]*Order, int, error)
+	GetByID(ctx context.Context, id int) (*Order, error)
 	UpdateStatus(ctx context.Context, id int, status OrderStatus) error
 }

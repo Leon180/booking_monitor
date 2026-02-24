@@ -56,17 +56,17 @@ func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, eventID, use
 }
 
 // RevertInventory mocks base method.
-func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID, count int) error {
+func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID, count int, compensationID string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count)
+	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count, compensationID)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RevertInventory indicates an expected call of RevertInventory.
-func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, count any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, count, compensationID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, count)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, count, compensationID)
 }
 
 // SetInventory mocks base method.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/lib/pq"
 
@@ -97,6 +98,19 @@ func (r *postgresOrderRepository) Create(ctx context.Context, order *domain.Orde
 	return nil
 }
 
+func (r *postgresOrderRepository) GetByID(ctx context.Context, id int) (*domain.Order, error) {
+	query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders WHERE id = $1"
+	var o domain.Order
+	err := r.getExecutor(ctx).QueryRowContext(ctx, query, id).Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, domain.ErrOrderNotFound
+		}
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
 	var total int
 	var rows *sql.Rows
@@ -123,7 +137,7 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var orders []*domain.Order
 	for rows.Next() {
@@ -167,6 +181,25 @@ func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, 
 	return nil
 }
 
+// IncrementTicket restores atomic inventory. Used for Saga compensation.
+func (r *postgresEventRepository) IncrementTicket(ctx context.Context, eventID, quantity int) error {
+	// Guard against over-increment beyond total_tickets
+	query := "UPDATE events SET available_tickets = available_tickets + $2 WHERE id = $1 AND available_tickets + $2 <= total_tickets"
+	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("failed to increment ticket: event %d not found or exceeds total tickets", eventID)
+	}
+	return nil
+}
+
 type postgresOutboxRepository struct {
 	db *sql.DB
 }
@@ -196,7 +229,7 @@ func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []*domain.OutboxEvent
 	for rows.Next() {

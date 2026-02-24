@@ -137,9 +137,11 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 
 func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.OrderMessage, rawMsg redis.XMessage, err error) {
 	// 1. Compensate Inventory
-	// We use background context because we must ensure compensation happens even if request ctx is cancelled
-	bgCtx := context.Background()
-	_ = q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity)
+	// We use background context with timeout because we must ensure compensation happens even if request ctx is cancelled
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID)
 
 	// 2. Move to DLQ
 	q.moveToDLQ(bgCtx, rawMsg, err)
@@ -186,9 +188,9 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 	}
 
 	var userID, eventID, qty int
-	fmt.Sscanf(userIDStr, "%d", &userID)
-	fmt.Sscanf(eventIDStr, "%d", &eventID)
-	fmt.Sscanf(qtyStr, "%d", &qty)
+	_, _ = fmt.Sscanf(userIDStr, "%d", &userID)
+	_, _ = fmt.Sscanf(eventIDStr, "%d", &eventID)
+	_, _ = fmt.Sscanf(qtyStr, "%d", &qty)
 
 	return &domain.OrderMessage{
 		ID:       msg.ID,
