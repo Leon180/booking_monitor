@@ -45,6 +45,10 @@ type EventRepository interface {
 	Update(ctx context.Context, event *Event) error
 	DecrementTicket(ctx context.Context, eventID, quantity int) error
 	IncrementTicket(ctx context.Context, eventID, quantity int) error
+	// Delete removes an event. Used by EventService.CreateEvent as a
+	// compensating action when the dual-write to the Redis hot-path
+	// inventory fails after the DB row has been committed.
+	Delete(ctx context.Context, id int) error
 } // ...
 
 type OutboxEvent struct {

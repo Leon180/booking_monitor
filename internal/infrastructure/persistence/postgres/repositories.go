@@ -188,6 +188,17 @@ func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, 
 	return nil
 }
 
+// Delete removes an event. Used by EventService.CreateEvent as a
+// compensating action when the Redis hot-path SetInventory call fails
+// after the DB row has been committed.
+func (r *postgresEventRepository) Delete(ctx context.Context, id int) error {
+	query := "DELETE FROM events WHERE id = $1"
+	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, id); err != nil {
+		return fmt.Errorf("eventRepository.Delete id=%d: %w", id, err)
+	}
+	return nil
+}
+
 // IncrementTicket restores atomic inventory. Used for Saga compensation.
 func (r *postgresEventRepository) IncrementTicket(ctx context.Context, eventID, quantity int) error {
 	// Guard against over-increment beyond total_tickets

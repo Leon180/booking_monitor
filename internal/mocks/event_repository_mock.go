@@ -83,6 +83,20 @@ func (mr *MockEventRepositoryMockRecorder) DeductInventory(ctx, eventID, quantit
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockEventRepository)(nil).DeductInventory), ctx, eventID, quantity)
 }
 
+// Delete mocks base method.
+func (m *MockEventRepository) Delete(ctx context.Context, id int) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Delete", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Delete indicates an expected call of Delete.
+func (mr *MockEventRepositoryMockRecorder) Delete(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Delete", reflect.TypeOf((*MockEventRepository)(nil).Delete), ctx, id)
+}
+
 // GetByID mocks base method.
 func (m *MockEventRepository) GetByID(ctx context.Context, id int) (*domain.Event, error) {
 	m.ctrl.T.Helper()
