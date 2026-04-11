@@ -99,6 +99,26 @@ var (
 			Help: "Total number of saga events dead-lettered after max retries",
 		},
 	)
+
+	// KafkaConsumerRetryTotal counts Kafka messages that failed to
+	// process transiently and were left UNCOMMITTED for Kafka rebalance
+	// to re-deliver. This is the "silent retry" surface: if this
+	// counter's rate stays high, it means downstream infra (DB / Redis
+	// / payment gateway) is degraded and consumers are in a stuck-but-
+	// not-dead state. Labels:
+	//   topic  = original Kafka topic name
+	//   reason = "transient_processing_error" for now; future budget
+	//            implementation will add "retry_budget_exceeded" etc.
+	//
+	// Paired with the `KafkaConsumerStuck` Prometheus alert which
+	// fires when `rate(kafka_consumer_retry_total[5m]) > 1` for 2m.
+	KafkaConsumerRetryTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kafka_consumer_retry_total",
+			Help: "Total Kafka messages left uncommitted for rebalance-based retry due to transient errors",
+		},
+		[]string{"topic", "reason"},
+	)
 )
 
 func MetricsMiddleware() gin.HandlerFunc {
@@ -125,5 +145,8 @@ func init() {
 		for _, reason := range []string{"invalid_payload", "invalid_event", "max_retries"} {
 			DLQMessagesTotal.WithLabelValues(topic, reason)
 		}
+	}
+	for _, topic := range []string{"order.created", "order.failed"} {
+		KafkaConsumerRetryTotal.WithLabelValues(topic, "transient_processing_error")
 	}
 }
