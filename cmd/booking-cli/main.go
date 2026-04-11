@@ -328,20 +328,38 @@ func runServer(cmd *cobra.Command, args []string) {
 func provideDB(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
 	db, err := sql.Open("postgres", cfg.Postgres.DSN)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sql.Open: %w", err)
 	}
 
-	// Simple retry logic
-	for i := 0; i < 10; i++ {
-		if err = db.Ping(); err == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
+	// Apply pool configuration BEFORE the first ping so that the retry
+	// loop exercises conns with the configured limits. Previously the
+	// setters ran AFTER the ping loop, which meant the initial Ping ran
+	// against default pool settings and a transient error burned a
+	// connection slot without respecting MaxOpenConns / MaxIdleConns.
 	db.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
 	db.SetConnMaxIdleTime(cfg.Postgres.MaxIdleTime)
+	// MaxLifetime forces periodic recycling of busy conns to bound
+	// long-lived connection staleness (memory, prepared-statement
+	// caches, PgBouncer auth drift). Closes action-list item M5.
+	db.SetConnMaxLifetime(cfg.Postgres.MaxLifetime)
+
+	// Retry ping until Postgres is reachable or we exhaust the budget.
+	// A bounded retry loop is intentional here — we want the process
+	// to exit with a clear error if the DB never comes up, rather than
+	// block forever waiting on it.
+	var pingErr error
+	for i := 0; i < 10; i++ {
+		if pingErr = db.Ping(); pingErr == nil {
+			break
+		}
+		log.Warnw("waiting for Postgres", "attempt", i+1, "error", pingErr)
+		time.Sleep(1 * time.Second)
+	}
+	if pingErr != nil {
+		return nil, fmt.Errorf("provideDB: postgres unreachable after 10 attempts: %w", pingErr)
+	}
+
 	return db, nil
 }
 

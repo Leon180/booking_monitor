@@ -69,20 +69,6 @@ func (mr *MockEventRepositoryMockRecorder) DecrementTicket(ctx, eventID, quantit
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DecrementTicket", reflect.TypeOf((*MockEventRepository)(nil).DecrementTicket), ctx, eventID, quantity)
 }
 
-// DeductInventory mocks base method.
-func (m *MockEventRepository) DeductInventory(ctx context.Context, eventID, quantity int) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeductInventory", ctx, eventID, quantity)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// DeductInventory indicates an expected call of DeductInventory.
-func (mr *MockEventRepositoryMockRecorder) DeductInventory(ctx, eventID, quantity any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockEventRepository)(nil).DeductInventory), ctx, eventID, quantity)
-}
-
 // Delete mocks base method.
 func (m *MockEventRepository) Delete(ctx context.Context, id int) error {
 	m.ctrl.T.Helper()
@@ -110,6 +96,21 @@ func (m *MockEventRepository) GetByID(ctx context.Context, id int) (*domain.Even
 func (mr *MockEventRepositoryMockRecorder) GetByID(ctx, id any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByID", reflect.TypeOf((*MockEventRepository)(nil).GetByID), ctx, id)
+}
+
+// GetByIDForUpdate mocks base method.
+func (m *MockEventRepository) GetByIDForUpdate(ctx context.Context, id int) (*domain.Event, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetByIDForUpdate", ctx, id)
+	ret0, _ := ret[0].(*domain.Event)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetByIDForUpdate indicates an expected call of GetByIDForUpdate.
+func (mr *MockEventRepositoryMockRecorder) GetByIDForUpdate(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByIDForUpdate", reflect.TypeOf((*MockEventRepository)(nil).GetByIDForUpdate), ctx, id)
 }
 
 // IncrementTicket mocks base method.
