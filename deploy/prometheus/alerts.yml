@@ -2,16 +2,20 @@ groups:
   - name: booking_alerts
     rules:
       - alert: HighErrorRate
+        # Use a 5m rate window with a 2m `for` so the alert only fires
+        # when elevated errors persist. Previously both were 1m, which
+        # gave zero hysteresis and flapped on every brief spike.
+        # Closes action-list item N6.
         expr: |
-          sum(rate(http_requests_total{status=~"5.."}[1m])) 
-          / 
-          sum(rate(http_requests_total[1m])) > 0.05
-        for: 1m
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m])) > 0.05
+        for: 2m
         labels:
           severity: critical
         annotations:
           summary: "High Error Rate detected"
-          description: "Error rate is above 5% (current: {{ $value }})"
+          description: "Error rate above 5% over 5m (current: {{ $value }})"
 
       - alert: HighLatency
         expr: |
