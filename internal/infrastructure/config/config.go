@@ -61,6 +61,20 @@ type KafkaConfig struct {
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"KAFKA_WRITE_TIMEOUT" env-default:"5s"`
 	// OutboxBatchSize controls how many outbox events are processed per relay tick.
 	OutboxBatchSize int `yaml:"outbox_batch_size" env:"KAFKA_OUTBOX_BATCH_SIZE" env-default:"100"`
+	// PaymentGroupID is the Kafka consumer group id for the payment
+	// service. Previously hardcoded as "payment-service-group-test"
+	// (note the `-test` suffix — a latent prod/test bleed bug).
+	PaymentGroupID string `yaml:"payment_group_id" env:"KAFKA_PAYMENT_GROUP_ID" env-default:"payment-service-group"`
+	// OrderCreatedTopic is the topic the payment consumer subscribes to.
+	// Previously hardcoded.
+	OrderCreatedTopic string `yaml:"order_created_topic" env:"KAFKA_ORDER_CREATED_TOPIC" env-default:"order.created"`
+	// SagaGroupID is the Kafka consumer group id for the saga consumer.
+	// Distinct from PaymentGroupID so the two consumers don't steal
+	// messages from each other (they live on different topics anyway
+	// but keeping group ids disjoint is defensive).
+	SagaGroupID string `yaml:"saga_group_id" env:"KAFKA_SAGA_GROUP_ID" env-default:"booking-saga-group"`
+	// OrderFailedTopic is the topic the saga consumer subscribes to.
+	OrderFailedTopic string `yaml:"order_failed_topic" env:"KAFKA_ORDER_FAILED_TOPIC" env-default:"order.failed"`
 }
 
 func LoadConfig(path string) (*Config, error) {

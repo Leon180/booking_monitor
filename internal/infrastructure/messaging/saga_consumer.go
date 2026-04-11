@@ -52,8 +52,8 @@ func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client) *SagaConsumer {
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
-		GroupID:     "booking-saga-group", // Different group from payment!
-		Topic:       "order.failed",
+		GroupID:     cfg.SagaGroupID, // Different group from payment!
+		Topic:       cfg.OrderFailedTopic,
 		StartOffset: kafka.FirstOffset,
 		MinBytes:    10e3,
 		MaxBytes:    10e6,
