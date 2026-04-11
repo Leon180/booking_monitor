@@ -53,6 +53,12 @@ var Module = fx.Module("application",
 		},
 	),
 	// Start the outbox relay (with tracing) as a background goroutine managed by the Fx lifecycle.
+	//
+	// The run-context is derived from context.Background() rather than a
+	// caller-supplied ctx because the relay must survive any individual
+	// fx lifecycle hook timeout. OnStop invokes cancel() explicitly so
+	// the background is still bounded by the fx lifecycle — just
+	// decoupled from the OnStop ctx deadline.
 	fx.Invoke(func(lc fx.Lifecycle, relay *OutboxRelay) {
 		traced := NewOutboxRelayTracingDecorator(relay)
 		ctx, cancel := context.WithCancel(context.Background())
