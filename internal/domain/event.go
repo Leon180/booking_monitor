@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -26,15 +25,20 @@ type Event struct {
 	Version          int    `json:"version"` // Added Version
 }
 
-func (e *Event) Deduct(quantity int) error {
+// Deduct returns a new *Event with AvailableTickets decremented by
+// quantity, or an error. It is immutable: the receiver is NOT mutated.
+// This follows the project's global "create new objects, never mutate"
+// coding style rule and makes concurrent reads of an Event safe.
+func (e *Event) Deduct(quantity int) (*Event, error) {
 	if quantity < 0 {
-		return fmt.Errorf("invalid quantity")
+		return nil, errors.New("invalid quantity")
 	}
 	if e.AvailableTickets < quantity {
-		return ErrSoldOut
+		return nil, ErrSoldOut
 	}
-	e.AvailableTickets -= quantity
-	return nil
+	next := *e
+	next.AvailableTickets -= quantity
+	return &next, nil
 }
 
 //go:generate mockgen -source=event.go -destination=../mocks/event_repository_mock.go -package=mocks
