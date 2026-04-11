@@ -106,12 +106,20 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 }
 
 // deadLetter writes the original message (with metadata headers) to the
-// DLQ topic and increments the observability counter. Failures here are
-// logged but do not block the consumer loop — at that point the best we
-// can do is keep processing and page an operator via the metric gap.
+// DLQ topic and increments the observability counter ONLY on successful
+// write. Failures here are logged — at that point the best we can do
+// is keep processing the consumer loop and rely on Kafka's consumer-lag
+// metric + the dlq_messages_total gap to alert operators that messages
+// are being lost.
+//
+// Correctness note: the counter is incremented AFTER a successful
+// WriteMessages, not before. An earlier version bumped the counter
+// unconditionally at function entry, which meant that a transient
+// Kafka leader-election error (observed during cluster warm-up) would
+// leave the counter reporting "N messages dead-lettered" while those
+// N messages were actually dropped on the floor. Metric vs. reality
+// must match — otherwise alerts on dlq_messages_total become useless.
 func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reason string, cause error) {
-	observability.DLQMessagesTotal.WithLabelValues(paymentDLQTopic, reason).Inc()
-
 	dlqMsg := kafka.Message{
 		Key:   msg.Key,
 		Value: msg.Value,
@@ -124,8 +132,12 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 		},
 	}
 	if err := c.dlq.WriteMessages(ctx, dlqMsg); err != nil {
-		c.log.Errorw("Failed to write to DLQ topic", "error", err, "topic", paymentDLQTopic, "reason", reason)
+		c.log.Errorw("Failed to write to DLQ topic — message lost",
+			"error", err, "topic", paymentDLQTopic, "reason", reason,
+			"original_offset", msg.Offset)
+		return
 	}
+	observability.DLQMessagesTotal.WithLabelValues(paymentDLQTopic, reason).Inc()
 }
 
 // commitOrLog commits a message offset and logs (but does not return)

@@ -110,12 +110,22 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 				continue // retry later (no commit)
 			}
 
-			// Budget exhausted — dead-letter, metric, commit.
+			// Budget exhausted — dead-letter first, bump metric ONLY on
+			// successful write (see KafkaConsumer.deadLetter for the same
+			// invariant). If the DLQ write fails, we don't commit the
+			// offset either — Kafka rebalance will redeliver and we'll
+			// try again next time. This means poison messages may cause
+			// a short hot-loop under DLQ failure, but at least the
+			// metric never lies about what was actually dead-lettered.
 			c.log.Errorw("compensation max retries exceeded — dead-lettering",
 				"offset", msg.Offset, "partition", msg.Partition, "attempts", count)
+			if !c.writeDLQ(ctx, msg, handleErr) {
+				// DLQ write failed — do NOT commit, do NOT clear the
+				// retry counter. Next rebalance will retry.
+				continue
+			}
 			observability.SagaPoisonMessagesTotal.Inc()
 			observability.DLQMessagesTotal.WithLabelValues(sagaDLQTopic, "max_retries").Inc()
-			c.writeDLQ(ctx, msg, handleErr)
 			_ = c.clearRetry(ctx, msg.Partition, msg.Offset)
 			c.commitOrLog(ctx, msg)
 			continue
@@ -156,9 +166,10 @@ func (c *SagaConsumer) clearRetry(ctx context.Context, partition int, offset int
 
 // writeDLQ publishes the offending message to the saga DLQ topic with
 // provenance headers so an operator (or a future DLQ worker) can triage.
-// Failures here are logged but do not block the consumer loop — the
-// metric counter still fires so alerting remains accurate.
-func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause error) {
+// Returns true on successful publish, false on error. The caller uses
+// the return value to decide whether to commit the Kafka offset — if
+// the DLQ write failed, we must NOT commit, so rebalance will retry.
+func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause error) bool {
 	dlqMsg := kafka.Message{
 		Key:   msg.Key,
 		Value: msg.Value,
@@ -171,8 +182,11 @@ func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause er
 		},
 	}
 	if err := c.dlq.WriteMessages(ctx, dlqMsg); err != nil {
-		c.log.Errorw("failed to write saga DLQ", "error", err, "topic", sagaDLQTopic)
+		c.log.Errorw("failed to write saga DLQ — message retained for retry",
+			"error", err, "topic", sagaDLQTopic, "offset", msg.Offset)
+		return false
 	}
+	return true
 }
 
 func (c *SagaConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
