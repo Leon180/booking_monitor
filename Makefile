@@ -2,6 +2,11 @@ PROJECT_NAME := booking-cli
 BUILD_DIR := bin
 CMD_PATH := ./cmd/booking-cli
 
+# Load secrets / connection strings from .env if present (non-fatal if missing).
+# `export` makes every variable visible to child processes (docker exec, migrate, etc.).
+-include .env
+export
+
 .PHONY: all build clean test lint modernize run-server run-stress deps help
 
 all: build
@@ -103,11 +108,11 @@ mocks: tools ## Generate mocks using local wrapper
 
 reset-db: ## Reset database (clear orders, reset event inventory to 100)
 	@echo "Resetting database..."
-	@docker exec booking_db psql -U user -d booking -c "TRUNCATE orders;"
-	@docker exec booking_db psql -U user -d booking -c "DELETE FROM events WHERE id != 1;"
-	@docker exec booking_db psql -U user -d booking -c "UPDATE events SET total_tickets = 100, available_tickets = 100, name = 'Jay Chou Concert', version = 0 WHERE id = 1;"
-	@docker exec booking_db psql -U user -d booking -c "INSERT INTO events (id, name, total_tickets, available_tickets, version) VALUES (1, 'Jay Chou Concert', 100, 100, 0) ON CONFLICT (id) DO NOTHING;"
-	@docker exec booking_redis redis-cli FLUSHALL || true
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE orders;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events WHERE id != 1;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "UPDATE events SET total_tickets = 100, available_tickets = 100, name = 'Jay Chou Concert', version = 0 WHERE id = 1;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "INSERT INTO events (id, name, total_tickets, available_tickets, version) VALUES (1, 'Jay Chou Concert', 100, 100, 0) ON CONFLICT (id) DO NOTHING;"
+	@docker exec booking_redis redis-cli FLUSHALL
 	@docker exec booking_redis redis-cli SET event:1:qty 100
 	@echo "Database and Redis reset complete."
 
@@ -121,9 +126,12 @@ stop: ## Stop the API server
 restart: stop run-server ## Restart the API server
 
 # Database Migrations
-DB_URL=postgres://user:password@localhost:5433/booking?sslmode=disable
+# MIGRATE_DB_URL is loaded from .env (see .env.example). This is the host-side URL
+# (localhost:5433), NOT the in-compose DATABASE_URL which uses `postgres` hostname.
+DB_URL=$(MIGRATE_DB_URL)
 
 migrate-up: ## Run all new database migrations
+	@test -n "$(DB_URL)" || { echo "MIGRATE_DB_URL is not set. Copy .env.example to .env and fill it in."; exit 1; }
 	migrate -path deploy/postgres/migrations -database "$(DB_URL)" up
 
 migrate-down: ## Revert the last database migration
