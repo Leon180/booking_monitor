@@ -8,7 +8,7 @@ A high-concurrency ticket booking system designed to simulate "flash sale" scena
 
 **Goal**: Prevent overselling through a multi-layer strategy while maximizing throughput.
 
-**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases)
+**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases). A multi-agent review on Apr 11, 2026 surfaced 66 findings, which were remediated in PRs #8 (CRITICAL), #9 (HIGH), #10 (MEDIUM/LOW/NIT) — see Section 8.
 
 ---
 
@@ -16,7 +16,7 @@ A high-concurrency ticket booking system designed to simulate "flash sale" scena
 
 ```
 Client --> Nginx (rate limit: 100 req/s/IP, burst 200)
-  --> Gin API (idempotency check, correlation ID, metrics)
+  --> Gin API (idempotency check, correlation ID, metrics, mapError)
     --> BookingService
       --> Redis Lua Script (atomic DECRBY + XADD to stream)
         --> Redis Stream (orders:stream)
@@ -24,12 +24,15 @@ Client --> Nginx (rate limit: 100 req/s/IP, burst 200)
             --> PostgreSQL TX [Order + OutboxEvent]
               --> OutboxRelay (advisory lock leader election)
                 --> Kafka (order.created)
-                  --> PaymentWorker
+                  --> PaymentWorker (KafkaConsumer)
                     --> Success: UPDATE status='confirmed'
+                    --> Invalid input: DLQ (order.created.dlq)
                     --> Failure: Outbox -> Kafka (order.failed)
-                      --> SagaCompensator
+                      --> SagaCompensator (Redis-backed retry counter)
                         --> DB: IncrementTicket + status='compensated'
-                        --> Redis: SETNX + INCRBY (idempotent revert)
+                        --> Redis: INCRBY then SET NX EX (crash-safe revert)
+                        --> Budget exhausted: DLQ (order.failed.dlq)
+                                             + saga_poison_messages_total
 ```
 
 ### Data Flow Summary
@@ -52,7 +55,8 @@ Client --> Nginx (rate limit: 100 req/s/IP, burst 200)
 ```
 ID, Name, TotalTickets, AvailableTickets, Version
 Invariant: 0 <= AvailableTickets <= TotalTickets
-Method: Deduct(quantity) - validates capacity before decrement
+Method: Deduct(quantity) (*Event, error) — immutable, returns a new
+        *Event with decremented tickets; receiver is never mutated.
 ```
 
 **Order** (`internal/domain/order.go`)
@@ -73,16 +77,19 @@ Types: order.created, order.failed
 
 | Interface | Purpose | Implementation |
 |-----------|---------|----------------|
-| EventRepository | Event CRUD + DecrementTicket/IncrementTicket | PostgreSQL |
+| EventRepository | Event CRUD + GetByIDForUpdate + DecrementTicket / IncrementTicket + Delete (for CreateEvent compensation) | PostgreSQL |
 | OrderRepository | Order CRUD + status updates | PostgreSQL |
 | OutboxRepository | Outbox CRUD + ListPending/MarkProcessed | PostgreSQL |
 | InventoryRepository | Hot inventory deduction/reversion | Redis (Lua scripts) |
 | OrderQueue | Async order stream (Enqueue/Dequeue/Ack) | Redis Streams |
 | IdempotencyRepository | Request deduplication (24h TTL) | Redis |
 | EventPublisher | Publish domain events | Kafka |
+| PaymentService | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Domain-layer service |
 | PaymentGateway | Charge payments | Mock (configurable success rate) |
 | DistributedLock | Leader election | PostgreSQL advisory locks |
 | UnitOfWork | Transaction management | PostgreSQL |
+
+`EventRepository.GetByID` performs a plain read; the explicit `GetByIDForUpdate` variant takes a `FOR UPDATE` row lock and MUST be called inside a UoW-managed transaction. The previously-deprecated `DeductInventory` method on `EventRepository` was removed in the remediation pass (no production callers).
 
 ---
 
@@ -131,7 +138,7 @@ CREATE TABLE events_outbox (
 );
 ```
 
-### Migration History (6 files in `deploy/postgres/migrations/`)
+### Migration History (7 files in `deploy/postgres/migrations/`)
 
 | # | Purpose |
 |---|---------|
@@ -141,22 +148,29 @@ CREATE TABLE events_outbox (
 | 000004 | Add `check_available_tickets_non_negative` + `UNIQUE(user_id, event_id)` |
 | 000005 | Add `processed_at` column to `events_outbox` |
 | 000006 | Replace unique constraint with partial index `WHERE status != 'failed'` — allows users to retry purchase after payment failure |
+| 000007 | Add partial index `events_outbox_pending_idx ON events_outbox(id) WHERE processed_at IS NULL` — speeds up OutboxRelay.ListPending. Uses `CREATE INDEX CONCURRENTLY`; the file carries the `-- golang-migrate: no-transaction` pragma |
 
 ### Redis
 
 | Key Pattern | Type | Purpose |
 |-------------|------|---------|
-| `event:{id}:qty` | String (integer) | Hot inventory counter |
+| `event:{id}:qty` | String (integer) | Hot inventory counter (30d TTL so orphaned keys from deleted events eventually expire) |
 | `orders:stream` | Stream | Async order queue |
+| `orders:dlq` | Stream | Worker-side DLQ (messages that exhausted the 3-retry budget) |
 | `idempotency:{key}` | String | Request deduplication (24h TTL) |
 | `saga:reverted:{order_id}` | String | Compensation idempotency (7d TTL) |
+| `saga:retry:p{partition}:o{offset}` | String (integer) | Durable saga-consumer retry counter (24h TTL) — survives restarts so `maxRetries=3` is really enforced |
 
 ### Kafka Topics
 
 | Topic | Producer | Consumer Group | Consumer | Payload |
 |-------|----------|----------------|----------|---------|
-| `order.created` | OutboxRelay | `payment-service-group-test` | PaymentWorker | OrderCreatedEvent (id, user_id, event_id, quantity, amount) |
-| `order.failed` | PaymentWorker (via outbox) | `booking-saga-group` | SagaCompensator | OrderFailedEvent (order_id, event_id, user_id, quantity, reason) |
+| `order.created` | OutboxRelay | `payment-service-group` (configurable via `KAFKA_PAYMENT_GROUP_ID`) | PaymentWorker (KafkaConsumer) | OrderCreatedEvent (id, user_id, event_id, quantity, amount) |
+| `order.created.dlq` | KafkaConsumer on unparseable / `ErrInvalidPaymentEvent` | — | — (future DLQ worker) | Original payload + `x-original-{topic,partition,offset}` / `x-dlq-{reason,error}` headers |
+| `order.failed` | PaymentService (via outbox) | `booking-saga-group` (configurable via `KAFKA_SAGA_GROUP_ID`) | SagaCompensator (via SagaConsumer) | OrderFailedEvent (order_id, event_id, user_id, quantity, reason) |
+| `order.failed.dlq` | SagaConsumer after `sagaMaxRetries` | — | — (future DLQ worker) | Same provenance headers + reason=`max_retries` |
+
+Group IDs and topic names are all sourced from `KafkaConfig` (`KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`). The previous hardcoded `payment-service-group-test` literal was a latent prod/test bleed bug.
 
 ---
 
@@ -167,7 +181,7 @@ Book tickets for an event.
 ```json
 // Request
 { "user_id": 123, "event_id": 1, "quantity": 1 }
-// Headers: Idempotency-Key: <uuid> (optional)
+// Headers: Idempotency-Key: <uuid> (optional, <= 128 chars)
 
 // 200 OK
 { "message": "booking successful" }
@@ -175,7 +189,11 @@ Book tickets for an event.
 { "error": "sold out" }
 // 409 Conflict
 { "error": "user already bought ticket" }
+// 500 Internal Server Error (sanitized)
+{ "error": "internal server error" }
 ```
+
+Error responses go through `api/errors.go :: mapError`, which matches sentinel errors via `errors.Is` and returns a safe public message. Raw DB / driver errors are logged server-side with correlation IDs but **never** echoed to the client.
 
 ### GET /api/v1/history
 Paginated order history.
@@ -195,8 +213,7 @@ View event details. Increments `page_views_total` metric for conversion tracking
 ### GET /metrics
 Prometheus metrics endpoint.
 
-### POST /book (legacy)
-Direct booking endpoint (non-versioned, retained from Phase 0).
+> **Removed:** the legacy `POST /book` route (kept from Phase 0) was deleted in the remediation pass — it sat outside the `/api/v1` group and therefore bypassed the Nginx `location /api/` rate-limit zone. All callers must now use `/api/v1/book`.
 
 ---
 
@@ -212,12 +229,22 @@ Direct booking endpoint (non-versioned, retained from Phase 0).
 4. Return 1 (success)
 ```
 
-**revert.lua** - Idempotent compensation
+**revert.lua** - Idempotent compensation (INCRBY-before-SET reordering)
 ```
-1. SETNX saga:reverted:{order_id} (prevents double-revert)
-2. If set: EXPIRE 7d + INCRBY event:{id}:qty
-3. Return 1 (reverted) or 0 (already reverted)
+1. EXISTS saga:reverted:{order_id} → if set, return 0 (already reverted)
+2. INCRBY event:{id}:qty
+3. SET saga:reverted:{order_id} NX EX 604800 (7d)
+4. Return 1 (reverted)
 ```
+
+Rationale for ordering (remediation item H6): under `appendfsync=always`
++ a mid-script Redis crash, the previous SETNX-then-INCRBY order could
+persist the idempotency key WITHOUT the INCRBY, permanently skipping
+inventory revert on all retries (silent under-revert). The new order
+produces a loud over-revert instead (inventory > total, already
+alerted on), which is much easier to catch and fix. Normal Lua
+execution is atomic, so no concurrent callers can observe the
+intermediate state.
 
 ### 6.2 Transactional Outbox
 
@@ -231,10 +258,13 @@ Direct booking endpoint (non-versioned, retained from Phase 0).
 
 1. PaymentWorker consumes `order.created`, calls PaymentGateway.Charge()
 2. On failure: updates order status to `failed`, inserts `order.failed` outbox event
-3. SagaCompensator consumes `order.failed`:
-   - DB: IncrementTicket + update order status to `compensated` (same TX)
-   - Redis: SETNX-guarded INCRBY to restore hot inventory
-4. Max 3 retries, then skip (prevents partition blocking)
+3. SagaCompensator consumes `order.failed` (via `SagaConsumer`):
+   - DB: `IncrementTicket` + update order status to `compensated` (same TX, idempotent via the `OrderStatusCompensated` guard)
+   - Redis: `revert.lua` does an `INCRBY` then `SET NX EX 7d` — crash-safe ordering (see Section 6.1)
+4. **Retry counter is Redis-backed** (`saga:retry:p{partition}:o{offset}` TTL 24h), so a consumer restart cannot reset it
+5. After `sagaMaxRetries = 3` failures, the message is written to `order.failed.dlq` with provenance headers, the counter is cleared, the offset is committed, and both `saga_poison_messages_total` and `dlq_messages_total{topic="order.failed.dlq", reason="max_retries"}` counters are incremented — no more silent partition drops
+
+Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `ErrInvalidPaymentEvent` from `PaymentService.ProcessOrder` are dead-lettered instead of being silently committed (which the old `return nil` branches did).
 
 ### 6.4 Unit of Work
 
@@ -268,18 +298,25 @@ Direct booking endpoint (non-versioned, retained from Phase 0).
 ### Metrics (Prometheus)
 | Metric | Type | Description |
 |--------|------|-------------|
-| `http_requests_total` | Counter | All requests by method/path/status |
+| `http_requests_total` | Counter | All requests by method/path/status (path is the Gin route template, bounded cardinality) |
 | `http_request_duration_seconds` | Histogram | Request latency (p99-optimized buckets) |
-| `bookings_total` | Counter | Booking outcomes (success, sold_out, duplicate, error) |
-| `worker_orders_total` | Counter | Worker processing by outcome |
+| `bookings_total` | Counter | Booking outcomes (`success`, `sold_out`, `duplicate`, `error`) — pre-initialized at startup |
+| `worker_orders_total` | Counter | Worker processing by outcome (`success`, `sold_out`, `duplicate`, `db_error`) — pre-initialized |
 | `worker_processing_duration_seconds` | Histogram | Worker latency |
 | `inventory_conflicts_total` | Counter | Redis-approved-but-DB-rejected oversells |
 | `page_views_total` | Counter | Event page views (conversion funnel) |
+| `dlq_messages_total` | Counter (`topic`, `reason`) | Messages written to a dead-letter topic. Pre-initialized labels cover `order.created.dlq` and `order.failed.dlq` for reasons `invalid_payload`, `invalid_event`, `max_retries` |
+| `saga_poison_messages_total` | Counter | Saga events dead-lettered after exceeding `sagaMaxRetries` |
+
+The `InventorySoldOut` alert in `deploy/prometheus/alerts.yml` now uses `increase(bookings_total{status="sold_out"}[5m]) > 0` — the previous `booking_sold_out_total` expression referenced a metric that did not exist in the code, so the alert was permanently silent.
 
 ### Tracing (OpenTelemetry + Jaeger)
 - Decorator pattern: `BookingServiceTracingDecorator`, `WorkerServiceMetricsDecorator`, `OutboxRelayTracingDecorator`
+- `OutboxRelayTracingDecorator` now calls `span.RecordError` + `span.SetStatus(codes.Error)` on batch failures — the previous version always closed spans as OK
+- `api/handler_tracing.go` uses a shared `recordHTTPResult(span, status)` helper that sets `span.status = Error` for **all** status >= 400, not just 5xx, so 4xx client errors show up in Jaeger search
 - GRPC exporter to Jaeger (port 4317)
-- Always-sample policy
+- **Sampler is configurable** via `OTEL_TRACES_SAMPLER_RATIO`: empty/1 → AlwaysSample (default), 0 → NeverSample, 0 < r < 1 → TraceIDRatioBased(r). Unparseable values log a warning and fall back to AlwaysSample (we never silently disable tracing)
+- `initTracer` now **fails fast** (returns error to fx.Invoke) if either `resource.New` or `otlptracegrpc.New` fails, instead of letting a nil `traceExporter` crash the first span export
 
 ### Logging (Zap)
 - Structured JSON to stdout
@@ -293,8 +330,8 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 
 ## 8. Development Phases (Complete History)
 
-| Phase | Date | Commit | Description |
-|-------|------|--------|-------------|
+| Phase | Date | Commit / PR | Description |
+|-------|------|-------------|-------------|
 | 0 | Feb 14 | `65502bb` | Basic booking API + Postgres + Prometheus/Grafana/Jaeger + CLI |
 | 1 | Feb 15 | `67234b4`, `f9ff381` | K6 load testing + scaling roadmap + benchmark automation |
 | 2 | Feb 15 | `65058a9` | Redis hot inventory (Lua scripts, 4k->11k RPS) |
@@ -308,6 +345,17 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 | 10 | Feb 20 | `572d430` | Nginx API gateway + rate limiting + observability refinements |
 | 11 | Feb 21 | `f56ab82` | PostgreSQL advisory locks for OutboxRelay leader election |
 | 12 | Feb 24 | `4e89ff7` | Saga compensation + idempotent Redis rollback + partial unique index (allows retry after payment failure) |
+| 13 | Apr 11 | PRs #7–#10 | **Multi-agent review + remediation**: 66 findings across 6 review dimensions (domain/app, persistence, concurrency/cache, messaging/saga, api/payment, observability/deploy). All 6 CRITICAL and all 13 HIGH items fixed in [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) and [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9); 17 MEDIUM / 14 LOW / 6 NIT items fixed in [`fix/review-backlog` (#10)](https://github.com/Leon180/booking_monitor/pull/10). Consolidated backlog lives at [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md). See the **Remediation highlights** block below for the user-visible changes. |
+
+### Remediation highlights (Phase 13)
+
+- **Kafka DLQ end-to-end**: new topics `order.created.dlq` / `order.failed.dlq`, new metrics `dlq_messages_total` / `saga_poison_messages_total`, Redis-backed saga retry counter, `ErrInvalidPaymentEvent` sentinel. No more silent message drops.
+- **API safety**: `r.Run()` replaced with an explicit `http.Server{}` that honours `cfg.Server.ReadTimeout`/`WriteTimeout`; `api/errors.go :: mapError` sanitizes every error response so DB / driver errors never leak to clients; legacy `POST /book` route removed.
+- **Secrets moved to `.env`**: all plaintext passwords (`postgres`, `grafana`, `redis`) now come from `${VAR}` substitution via a gitignored `.env` file with a tracked `.env.example`; docker-compose fails fast if values are missing.
+- **`Config.Validate()`** rejects missing `DATABASE_URL` and (under `APP_ENV=production`) the localhost defaults on `REDIS_ADDR` / `KAFKA_BROKERS`.
+- **Deploy hardening**: all six unpinned images now pinned (`golang:1.24-alpine`, `alpine:3.20`, `nginx:1.27-alpine`, `prom/prometheus:v2.54.1`, `grafana/grafana:11.2.2`, `jaegertracing/all-in-one:1.60`); Dockerfile runner stage runs as non-root `uid:10001`; Redis now has `--requirepass`.
+- **Observability**: configurable OTel sampler via `OTEL_TRACES_SAMPLER_RATIO`, `recordHTTPResult` helper flags 4xx as span errors, `InventorySoldOut` alert now uses the real `bookings_total{status="sold_out"}` metric.
+- **Persistence**: new partial index `events_outbox_pending_idx` (migration 000007), pool setters moved before the ping + new `ConnMaxLifetime`, `GetByID` split into plain + `GetByIDForUpdate`, 19 repository sites now wrap errors with `%w`.
 
 ---
 
@@ -327,7 +375,7 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 ## 10. Remaining Roadmap
 
 ### High Priority
-- **DLQ Worker**: Implement dead letter retry policy with configurable backoff and max attempts. Currently messages that fail 3x in the worker are moved to `orders:dlq` but never reprocessed.
+- **DLQ Worker**: A follow-up consumer that drains the four dead-letter destinations on a slower cadence and applies a retry-with-backoff policy before giving up. The DLQ **producers** (Worker `orders:dlq`, KafkaConsumer `order.created.dlq`, SagaConsumer `order.failed.dlq`) all exist and carry provenance headers (topic / partition / offset / reason / error); what's missing is the reader side plus a manual-replay CLI.
 
 ### Medium Priority
 - **Event Sourcing**: Replace direct DB mutations with an append-only event store for full audit trail and replay capability.
@@ -377,6 +425,8 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | File | Purpose |
 |------|---------|
 | `internal/infrastructure/api/handler.go` | HTTP handlers + route registration |
+| `internal/infrastructure/api/errors.go` | `mapError(err) (status, publicMsg)` helper — sanitized public error responses |
+| `internal/infrastructure/api/handler_tracing.go` | Tracing decorator + `recordHTTPResult` span helper |
 | `internal/infrastructure/api/middleware/` | Idempotency, correlation ID, metrics, tracing |
 | `internal/infrastructure/cache/redis.go` | Redis inventory + idempotency repos |
 | `internal/infrastructure/cache/redis_queue.go` | Redis Streams consumer |
@@ -396,14 +446,15 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | File | Purpose |
 |------|---------|
 | `config/config.yml` | Application configuration |
-| `docker-compose.yml` | Full stack orchestration (10 services) |
-| `Dockerfile` | Multi-stage build (alpine, ~7MB) |
-| `deploy/postgres/migrations/` | 6 SQL migration files |
-| `deploy/redis/redis.conf` | Redis AOF persistence config |
-| `deploy/nginx/nginx.conf` | Rate limiting + reverse proxy |
-| `deploy/prometheus/prometheus.yml` | Scrape config (5s interval) |
-| `deploy/prometheus/alerts.yml` | Alert rules |
-| `deploy/grafana/provisioning/` | Pre-configured datasources + dashboards |
+| `.env.example` | Required-env template (Postgres / Redis / Kafka / Grafana / OTel). `.env` itself is gitignored |
+| `docker-compose.yml` | Full stack orchestration (10 services); all secrets come from `${VAR}` substitution, fails fast on missing values |
+| `Dockerfile` | Multi-stage build (`golang:1.24-alpine` → `alpine:3.20`), runner stage runs as non-root uid 10001 |
+| `deploy/postgres/migrations/` | 7 SQL migration files |
+| `deploy/redis/redis.conf` | Redis AOF persistence config (password is passed via `--requirepass ${REDIS_PASSWORD}` in docker-compose, not baked into the conf) |
+| `deploy/nginx/nginx.conf` | Rate limiting + reverse proxy; bounded proxy timeouts + upstream keepalive |
+| `deploy/prometheus/prometheus.yml` | Scrape config (15s interval) |
+| `deploy/prometheus/alerts.yml` | Alert rules (`HighErrorRate`, `HighLatency`, `InventorySoldOut`) |
+| `deploy/grafana/provisioning/` | Pre-configured datasources + dashboards (`timeseries` panels, `disableDeletion: true`) |
 
 ### Documentation
 | File | Purpose |
@@ -413,4 +464,5 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | `docs/architecture/future_robust_monolith.md` | Phases 8-11 target architecture |
 | `docs/adr/0001_async_queue_selection.md` | Redis Streams vs Kafka decision |
 | `docs/reviews/phase2_review.md` | Redis integration review |
+| `docs/reviews/ACTION_LIST.md` | Phase 13 consolidated remediation backlog (66 findings, severity-ranked, links back to review PRs) |
 | `docs/benchmarks/` | 15 timestamped performance reports |
