@@ -32,6 +32,7 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -210,8 +211,8 @@ func runServer(cmd *cobra.Command, args []string) {
 
 		// Provide concrete implementations of application interfaces
 		fx.Provide(observability.NewWorkerMetrics),
-		fx.Provide(func(cfg *config.Config) *messaging.SagaConsumer {
-			return messaging.NewSagaConsumer(&cfg.Kafka)
+		fx.Provide(func(cfg *config.Config, rdb *redis.Client) *messaging.SagaConsumer {
+			return messaging.NewSagaConsumer(&cfg.Kafka, rdb)
 		}),
 
 		// Run Server -> Invoke
