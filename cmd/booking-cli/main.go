@@ -140,7 +140,12 @@ func runPaymentWorker(cmd *cobra.Command, args []string) {
 	app.Run()
 }
 
-func initTracer() *trace.TracerProvider {
+// initTracer constructs the OTLP tracer provider. Errors are FATAL.
+// Previously both error paths only produced a `log.Printf` and fell
+// through, which left `traceExporter == nil` and crashed on the first
+// span export (trace.WithBatcher(nil) panics). Either we have real
+// tracing or the process refuses to start.
+func initTracer() (*trace.TracerProvider, error) {
 	ctx := context.Background()
 
 	svcName := os.Getenv("OTEL_SERVICE_NAME")
@@ -154,14 +159,17 @@ func initTracer() *trace.TracerProvider {
 		),
 	)
 	if err != nil {
-		log.Printf("failed to create resource: %v", err)
+		return nil, fmt.Errorf("initTracer: resource.New: %w", err)
 	}
 
 	// Will automatically use OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
 	// If not set, defaults to localhost:4317. It handles http/https prefixes correctly.
+	//
+	// WithInsecure() is OK for the in-cluster Jaeger collector; once we
+	// run against a remote collector, gate this on OTEL_EXPORTER_OTLP_INSECURE.
 	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
 	if err != nil {
-		log.Printf("failed to create trace exporter: %v", err)
+		return nil, fmt.Errorf("initTracer: otlptracegrpc.New: %w", err)
 	}
 
 	tp := trace.NewTracerProvider(
@@ -170,7 +178,7 @@ func initTracer() *trace.TracerProvider {
 		trace.WithBatcher(traceExporter),
 	)
 	otel.SetTracerProvider(tp)
-	return tp
+	return tp, nil
 }
 
 func runServer(cmd *cobra.Command, args []string) {
@@ -216,8 +224,13 @@ func runServer(cmd *cobra.Command, args []string) {
 		}),
 
 		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) {
-			tp := initTracer()
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) error {
+			// Fail fast if the tracer cannot be initialized: a nil
+			// traceExporter would crash the first span export.
+			tp, err := initTracer()
+			if err != nil {
+				return fmt.Errorf("runServer: %w", err)
+			}
 
 			// Context for worker shutdown
 			workerCtx, workerCancel := context.WithCancel(context.Background())
@@ -245,7 +258,12 @@ func runServer(cmd *cobra.Command, args []string) {
 
 					v1 := r.Group("/api/v1")
 					api.RegisterRoutes(v1, handler)
-					r.POST("/book", handler.HandleBook) // Legacy
+					// Legacy POST /book route removed: it was registered
+					// outside the /api/v1 group, which meant it bypassed
+					// the nginx `location /api/` rate-limit zone and also
+					// sat outside any future Go-layer rate-limit
+					// middleware. All callers should use /api/v1/book.
+					// Closes action-list item H9.
 
 					// Construct http.Server explicitly so configured ReadTimeout /
 					// WriteTimeout take effect. `r.Run()` wraps a default
@@ -299,6 +317,7 @@ func runServer(cmd *cobra.Command, args []string) {
 					return tp.Shutdown(ctx)
 				},
 			})
+			return nil
 		}),
 	)
 
