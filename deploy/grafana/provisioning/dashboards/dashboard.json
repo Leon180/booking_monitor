@@ -1,6 +1,6 @@
 {
   "title": "Booking Monitor Dashboard",
-  "schemaVersion": 27,
+  "schemaVersion": 39,
   "uid": "booking_dashboard",
   "time": {
     "from": "now-15m",
@@ -11,7 +11,7 @@
     {
       "id": 1,
       "title": "Request Rate (RPS)",
-      "type": "graph",
+      "type": "timeseries",
       "datasource": "Prometheus",
       "gridPos": {
         "h": 8,
@@ -30,7 +30,7 @@
     {
       "id": 2,
       "title": "Global Request Latency (p99/p95/p50)",
-      "type": "graph",
+      "type": "timeseries",
       "datasource": "Prometheus",
       "gridPos": {
         "h": 8,
@@ -55,16 +55,11 @@
           "refId": "C"
         }
       ],
-      "yaxes": [
-        {
-          "format": "s",
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
         }
-      ]
+      }
     },
     {
       "id": 3,
@@ -96,7 +91,7 @@
     {
       "id": 5,
       "title": "Saturation (Goroutines)",
-      "type": "graph",
+      "type": "timeseries",
       "datasource": "Prometheus",
       "gridPos": {
         "h": 8,
@@ -115,7 +110,7 @@
     {
       "id": 6,
       "title": "Saturation (Memory Alloc Bytes)",
-      "type": "graph",
+      "type": "timeseries",
       "datasource": "Prometheus",
       "gridPos": {
         "h": 8,
@@ -130,16 +125,11 @@
           "refId": "A"
         }
       ],
-      "yaxes": [
-        {
-          "format": "bytes",
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
         }
-      ]
+      }
     }
   ]
 }

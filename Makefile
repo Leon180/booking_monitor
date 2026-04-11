@@ -145,3 +145,7 @@ migrate-force: ## Force set migration version
 	@read -p "Enter version: " version; \
 	migrate -path deploy/postgres/migrations -database "$(DB_URL)" force $$version
 
+migrate-status: ## Show the current migration version (N5)
+	@test -n "$(DB_URL)" || { echo "MIGRATE_DB_URL is not set. Copy .env.example to .env and fill it in."; exit 1; }
+	migrate -path deploy/postgres/migrations -database "$(DB_URL)" version
+

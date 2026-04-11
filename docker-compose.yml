@@ -64,9 +64,17 @@ services:
     volumes:
       - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf
       - redis_data:/data
-    command: [ "redis-server", "/usr/local/etc/redis/redis.conf" ]
+    # requirepass is passed as a command-line arg so the secret stays
+    # in .env, never in the baked config file. The entrypoint still
+    # loads redis.conf for persistence / memory settings.
+    command:
+      - "redis-server"
+      - "/usr/local/etc/redis/redis.conf"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      # -a is used so the ping still works when requirepass is set.
+      test: [ "CMD", "redis-cli", "-a", "$${REDIS_PASSWORD}", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
