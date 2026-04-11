@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"booking_monitor/internal/domain"
@@ -59,7 +60,7 @@ func (s *workerService) Start(ctx context.Context) {
 		return s.processMessage(ctx, msg)
 	})
 
-	if err != nil && err != context.Canceled {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		s.logger.Errorw("Worker subscription failed", "error", err)
 	}
 }
@@ -101,8 +102,16 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 			return err
 		}
 
-		// 3. Outbox Pattern
-		payload, _ := json.Marshal(order)
+		// 3. Outbox Pattern. Marshal errors are theoretical for the
+		// current *domain.Order shape (ints, string, time.Time, enum)
+		// but we still surface them so a future field addition can't
+		// ship a silent nil-payload outbox row.
+		payload, err := json.Marshal(order)
+		if err != nil {
+			s.logger.Errorw("Failed to marshal order for outbox", "msg_id", msg.ID, "error", err)
+			s.metrics.RecordOrderOutcome("db_error")
+			return fmt.Errorf("marshal outbox payload: %w", err)
+		}
 		outboxEvent := &domain.OutboxEvent{
 			EventType: "order.created",
 			Payload:   payload,
