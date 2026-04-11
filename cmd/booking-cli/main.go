@@ -221,6 +221,10 @@ func runServer(cmd *cobra.Command, args []string) {
 			// Context for worker shutdown
 			workerCtx, workerCancel := context.WithCancel(context.Background())
 
+			// Shared between OnStart and OnStop so the HTTP server can be
+			// gracefully shut down. Constructed inside OnStart.
+			var httpServer *http.Server
+
 			// Hooks
 			lc.Append(fx.Hook{
 				OnStart: func(context.Context) error {
@@ -228,8 +232,7 @@ func runServer(cmd *cobra.Command, args []string) {
 					r.Use(gin.Recovery()) // Recovery from panics
 
 					// Secure ClientIP resolution behind Nginx Proxy (Docker default subnets)
-					err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"})
-					if err != nil {
+					if err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}); err != nil {
 						log.Warnw("Failed to set trusted proxies", "error", err)
 					}
 
@@ -243,10 +246,26 @@ func runServer(cmd *cobra.Command, args []string) {
 					api.RegisterRoutes(v1, handler)
 					r.POST("/book", handler.HandleBook) // Legacy
 
-					// Start HTTP Server
+					// Construct http.Server explicitly so configured ReadTimeout /
+					// WriteTimeout take effect. `r.Run()` wraps a default
+					// http.Server which ignores these, leaving the process open
+					// to slow-loris attacks.
+					httpServer = &http.Server{
+						Addr:              ":" + cfg.Server.Port,
+						Handler:           r,
+						ReadTimeout:       cfg.Server.ReadTimeout,
+						ReadHeaderTimeout: cfg.Server.ReadTimeout,
+						WriteTimeout:      cfg.Server.WriteTimeout,
+						IdleTimeout:       2 * cfg.Server.WriteTimeout,
+						MaxHeaderBytes:    1 << 20, // 1 MiB
+					}
+
 					go func() {
-						log.Infow("Starting server", "port", cfg.Server.Port)
-						if err := r.Run(":" + cfg.Server.Port); err != nil {
+						log.Infow("Starting server",
+							"port", cfg.Server.Port,
+							"read_timeout", cfg.Server.ReadTimeout,
+							"write_timeout", cfg.Server.WriteTimeout)
+						if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 							log.Errorw("Server failed", "error", err)
 						}
 					}()
@@ -267,6 +286,13 @@ func runServer(cmd *cobra.Command, args []string) {
 					log.Info("Stopping worker services...")
 					workerCancel()
 					_ = sagaConsumer.Close()
+
+					if httpServer != nil {
+						log.Info("Shutting down HTTP server")
+						if err := httpServer.Shutdown(ctx); err != nil {
+							log.Errorw("HTTP server shutdown error", "error", err)
+						}
+					}
 
 					log.Info("Shutting down tracer provider")
 					return tp.Shutdown(ctx)
