@@ -99,6 +99,11 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 				// Redis is down — we cannot safely retry (no durable
 				// counter) and we cannot safely drop (would be silent).
 				// Do NOT commit so Kafka re-delivers on next rebalance.
+				// Bump the retry counter so this "double-dependency
+				// outage" (Kafka up + Redis down) is observable via
+				// the KafkaConsumerStuck alert.
+				observability.KafkaConsumerRetryTotal.
+					WithLabelValues(msg.Topic, "transient_processing_error").Inc()
 				c.log.Errorw("failed to persist retry counter — will retry via rebalance",
 					"error", incrErr, "offset", msg.Offset)
 				continue

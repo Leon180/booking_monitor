@@ -324,8 +324,14 @@ Prometheus metrics 端點。
 | `page_views_total` | Counter | 活動頁面瀏覽量(轉換漏斗) |
 | `dlq_messages_total` | Counter(`topic`, `reason`) | 寫入 DLQ 的訊息數。預先初始化的 label 涵蓋 `order.created.dlq` 與 `order.failed.dlq`,reason 包含 `invalid_payload`、`invalid_event`、`max_retries` |
 | `saga_poison_messages_total` | Counter | Saga 事件在超過 `sagaMaxRetries` 後被 dead-letter 的次數 |
+| `kafka_consumer_retry_total` | Counter(`topic`, `reason`) | 因為下游短暫錯誤而故意**不 commit**、留給 Kafka rebalance 重送的訊息數。故意**不**進 DLQ(那會在 DB 小抖動時誤傷已經付款的訂單,造成超賣)。配套的 `KafkaConsumerStuck` 告警會監控這個指標 — 持續非零率就代表某個下游依賴正在降級 |
 
-`deploy/prometheus/alerts.yml` 裡的 `InventorySoldOut` 告警改成 `increase(bookings_total{status="sold_out"}[5m]) > 0` — 之前的 `booking_sold_out_total` 表達式指向一個程式碼裡不存在的指標,所以告警永遠不會觸發。
+**告警(`deploy/prometheus/alerts.yml`):**
+
+- `HighErrorRate` — HTTP 5xx 比例 5m 內超過 5%(加 2m `for` 防抖動)
+- `HighLatency` — p99 請求延遲 > 2s
+- `InventorySoldOut` — `increase(bookings_total{status="sold_out"}[5m]) > 0`。舊版的 `booking_sold_out_total` 表達式指向一個程式碼裡不存在的指標,所以告警原本永遠不會觸發,在 remediation 中修掉。
+- `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1`,持續 2m。與 `kafka_consumer_retry_total` 計數器配對使用的契約:當下游短暫錯誤造成持續 rebalance retry 時,這個告警會觸發,讓 oncall 去查**下游基礎設施**(DB / Redis / payment gateway),**不是** consumer 本身。Consumer 是按設計運作的;告警存在的目的是讓「卡住但沒死」這個狀態能被 operator 看到,而不需要靠 dead-letter 正在處理中的訂單來製造可見度。
 
 ### 分散式追蹤(OpenTelemetry + Jaeger)
 - Decorator 模式:`BookingServiceTracingDecorator`, `WorkerServiceMetricsDecorator`, `OutboxRelayTracingDecorator`

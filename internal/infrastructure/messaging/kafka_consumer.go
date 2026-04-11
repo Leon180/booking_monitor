@@ -96,6 +96,10 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 
 			// Any other error is treated as transient: do NOT commit so
 			// the message will be re-delivered by Kafka's group rebalance.
+			// Bump the retry counter so operators can see "stuck but not
+			// dead" consumers via Prometheus / the KafkaConsumerStuck alert.
+			observability.KafkaConsumerRetryTotal.
+				WithLabelValues(msg.Topic, "transient_processing_error").Inc()
 			c.log.Errorw("Failed to process order — will retry",
 				"order_id", event.OrderID, "error", err, "offset", msg.Offset)
 			continue

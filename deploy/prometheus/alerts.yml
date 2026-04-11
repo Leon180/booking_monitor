@@ -40,3 +40,25 @@ groups:
         annotations:
           summary: "Event Sold Out"
           description: "At least one booking attempt in the last 5 minutes returned sold_out ({{ $value }} attempts)."
+
+      - alert: KafkaConsumerStuck
+        # Fires when a Kafka consumer is persistently leaving messages
+        # uncommitted for rebalance retry — the "stuck but not dead"
+        # state that happens during extended Postgres/Redis/payment-
+        # gateway outages. This is the observability half of the
+        # order.created.dlq infinite-loop gap: we intentionally do NOT
+        # dead-letter on transient errors (that would cause overselling
+        # during DB hiccups), so the contract is "if this alert fires,
+        # humans investigate the downstream dependency, not the consumer".
+        #
+        # Threshold is 1 retry/sec sustained for 2 minutes. Normal
+        # operation should be 0 — any sustained non-zero value is a
+        # signal that downstream infra is degraded.
+        expr: |
+          sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer stuck on topic {{ $labels.topic }}"
+          description: "kafka_consumer_retry_total is averaging {{ $value }} retries/sec over 5m on topic {{ $labels.topic }}. Check downstream DB / Redis / payment gateway health."

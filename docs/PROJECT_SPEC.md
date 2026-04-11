@@ -336,8 +336,14 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 | `page_views_total` | Counter | Event page views (conversion funnel) |
 | `dlq_messages_total` | Counter (`topic`, `reason`) | Messages written to a dead-letter topic. Pre-initialized labels cover `order.created.dlq` and `order.failed.dlq` for reasons `invalid_payload`, `invalid_event`, `max_retries` |
 | `saga_poison_messages_total` | Counter | Saga events dead-lettered after exceeding `sagaMaxRetries` |
+| `kafka_consumer_retry_total` | Counter (`topic`, `reason`) | Messages left UNCOMMITTED for Kafka rebalance retry because of a transient downstream error. Intentionally NOT dead-lettered (would cause overselling during DB hiccups). The `KafkaConsumerStuck` alert watches this — a sustained non-zero rate means a downstream dependency is degraded |
 
-The `InventorySoldOut` alert in `deploy/prometheus/alerts.yml` now uses `increase(bookings_total{status="sold_out"}[5m]) > 0` — the previous `booking_sold_out_total` expression referenced a metric that did not exist in the code, so the alert was permanently silent.
+**Alerts (`deploy/prometheus/alerts.yml`):**
+
+- `HighErrorRate` — HTTP 5xx ratio > 5% over 5m (2m `for` for hysteresis)
+- `HighLatency` — p99 request duration > 2s
+- `InventorySoldOut` — `increase(bookings_total{status="sold_out"}[5m]) > 0`. The previous `booking_sold_out_total` expression referenced a metric that did not exist in the code, so the alert was permanently silent until the remediation fix.
+- `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1` for 2m. Paired contract with the `kafka_consumer_retry_total` counter: when transient errors cause sustained rebalance retries, this alert fires so oncall investigates **downstream infra** (DB / Redis / payment gateway), NOT the consumer. The consumer is working as designed; the alert exists so "stuck but not dead" is operator-visible without having to dead-letter in-flight orders.
 
 ### Tracing (OpenTelemetry + Jaeger)
 - Decorator pattern: `BookingServiceTracingDecorator`, `WorkerServiceMetricsDecorator`, `OutboxRelayTracingDecorator`
