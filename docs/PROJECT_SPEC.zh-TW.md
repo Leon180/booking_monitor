@@ -37,13 +37,38 @@ Client --> Nginx (限流: 100 req/s/IP, burst 200)
 
 ### 資料流摘要
 
-| 步驟 | 元件 | 儲存層 | 採用模式 |
-|------|------|--------|----------|
-| 1 | API 接收訂票請求 | Redis | Lua 原子扣減 |
-| 2 | Worker 處理訂單 | PostgreSQL | UoW(Order + Outbox 同一交易) |
-| 3 | OutboxRelay 發布事件 | Kafka | Transactional Outbox |
-| 4 | 付款處理 | PostgreSQL | 狀態更新 |
-| 5 | 失敗時補償 | PostgreSQL + Redis | Saga 模式 |
+Happy path 與 failure path 都從同一個 `POST /api/v1/book` 呼叫開始,在第 4 步之後分歧。每一個跨元件的邊界都採「at-least-once + idempotent consumer」契約;不會有任何一個同步 RPC 讓 API 回應被 Kafka 或 Postgres 的寫入阻擋住。
+
+#### Happy path
+
+| # | 元件 | 輸入 | 動到的儲存層 | 效果 | 失敗行為 |
+|---|------|------|-------------|------|---------|
+| 1 | Gin API handler(`/api/v1/book`) | 使用者請求 | Redis(idempotency key,24 小時 TTL) | 先查 `Idempotency-Key` header,命中就把之前快取的 2xx/4xx/5xx body 原封不動回傳,跳過後續步驟 | Body 缺漏/格式錯 → 400 `"invalid request body"`;`mapError` 會把任何下游錯誤 sanitize |
+| 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis 透過 `deduct.lua`(原子性) | `DECRBY event:{id}:qty`:`>= 0` 就順便 `XADD orders:stream` 並回 200;`< 0` 就 `INCRBY` 還原,回 409 `sold out` | API 在 Redis 一成功就 return — 訂單**還沒真正寫入 DB**,只是進了 queue |
+| 3 | `WorkerService.processMessage`(`orders:stream` 上的 consumer group) | Stream 訊息 | PostgreSQL(單一 UoW 交易) | `DecrementTicket`(DB 上的 row-level 二次驗證,抓 Redis/DB drift)→ `orderRepo.Create`(UNIQUE 部分索引擋重複購票)→ `outboxRepo.Create(event_type="order.created")` — **三步在同一個交易裡** | `DecrementTicket` 拒絕 → 還原 Redis + ACK(記錄 inventory conflict metric);`orderRepo.Create` 遇到 `ErrUserAlreadyBought` → 還原 Redis + ACK(記錄 duplicate);其他錯誤 → 不 ACK,`processWithRetry` 跑 3 次,之後進 DLQ(`orders:dlq`)並還原 Redis |
+| 4 | `OutboxRelay`(背景 goroutine,透過 Postgres advisory lock 1001 選出唯一 leader) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL(讀 + 更新)→ Kafka topic `order.created` | 每 500ms 輪詢一次(部分索引 `events_outbox_pending_idx` 涵蓋此 query),每個 tick 最多發 100 筆,發完再 `UPDATE processed_at = NOW()`。Publish 失敗 → 跳過 `MarkProcessed`,下一個 tick 重發。Publish 成功但 `MarkProcessed` 失敗 → 下一個 tick 會再發一次,consumer **必須**做到 idempotent | Leader crash → advisory lock 自動釋放(session-bound)→ 某個 standby 下一個 tick 接手 |
+| 5 | `KafkaConsumer` → `PaymentService.ProcessOrder` | `OrderCreatedEvent` | Redis(以 `orderRepo.GetByID` → 檢查狀態的方式做 idempotency)→ `PaymentGateway.Charge` → PostgreSQL(更新狀態) | 訂單狀態若已是 `confirmed`/`failed`/`compensated` → 直接跳過(idempotent)。否則呼叫 mock gateway 扣款,成功就 `UPDATE orders SET status='confirmed'`,並 commit Kafka offset | 無法解析 JSON / `ErrInvalidPaymentEvent` → 寫到 `order.created.dlq`(帶 provenance headers)並 commit offset。短暫 DB/Redis 錯誤 → 不 commit,讓 Kafka rebalance 重送 |
+
+到這一步,使用者的訂票已經徹底確認:Redis、DB 和付款狀態三者一致。
+
+#### Failure path(付款閘道拒絕扣款)
+
+| # | 元件 | 輸入 | 動到的儲存層 | 效果 |
+|---|------|------|-------------|------|
+| 5a | `PaymentService.ProcessOrder`(同上一步的呼叫) | `Charge` 回傳錯誤 | PostgreSQL(單一 UoW 交易) | `UPDATE orders SET status='failed'` + `outboxRepo.Create(event_type="order.failed")` — 同一筆交易,跟第 3 步的 outbox 有相同保證 |
+| 5b | `OutboxRelay` | `order.failed` 的 pending row | PostgreSQL → Kafka topic `order.failed` | 跟第 4 步是同一個輪詢迴圈,只是 topic 不同 |
+| 5c | `SagaConsumer` → `SagaCompensator.HandleOrderFailed` | `OrderFailedEvent` | PostgreSQL(UoW 交易:`IncrementTicket` + `status='compensated'`)→ Redis 透過 `revert.lua`(`INCRBY event:{id}:qty` → `SET saga:reverted:{order_id} NX EX 7d`) | DB 路徑以 `OrderStatusCompensated` 守門員做 idempotent;Redis 路徑以 `saga:reverted:*` key 做 idempotent |
+| 5d | 補償失敗時 | — | Redis(持久化的重試計數 `saga:retry:p{partition}:o{offset}`,TTL 24 小時) | 計數 +1,訊息**不 commit**,交給 Kafka 重送。計數會活過 consumer 重啟 |
+| 5e | 超過 `sagaMaxRetries = 3` 次後 | Poison 訊息 | Kafka topic `order.failed.dlq` + 指標 | 原始 payload + provenance headers 寫入 DLQ,`saga_poison_messages_total` 和 `dlq_messages_total{topic, reason="max_retries"}` 遞增,retry 計數清掉,Kafka offset commit。**不會有靜默 drop** |
+
+到這一步,Redis 和 DB 的庫存都回到訂票前的狀態;使用者在歷史紀錄會看到 `status='compensated'`。
+
+#### 跨元件的共通保證
+
+- **API 回應絕不會被 Kafka 或 Postgres 的寫入阻擋。** 只有 Redis 在同步路徑上。
+- **每一筆「必須伴隨事件」的 DB 寫入都走 outbox,在同一個交易內 commit。** 整個系統沒有任何一處是 `db.Commit(); publisher.Send()` 這種順序寫。
+- **每個 consumer 都是 idempotent** — 方法包含 DB 唯一約束、Redis `SET ... NX`、或檢查「狀態已進入終局」。這是 outbox 的 at-least-once 語義一定要搭配的另一半。
+- **沒有靜默的訊息 drop。** 任何無法處理的訊息都會落到一個 DLQ topic,並帶足夠的 provenance headers(原始 topic / partition / offset / reason / error)方便手動 replay。唯一的例外是 `PaymentService` 上的 transient 基礎設施錯誤 — 目前我們依賴 Kafka rebalance 重試,未來的 DLQ worker 會在那裡補上 retry budget。
 
 ---
 

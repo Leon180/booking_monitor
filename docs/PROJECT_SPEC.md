@@ -37,13 +37,42 @@ Client --> Nginx (rate limit: 100 req/s/IP, burst 200)
 
 ### Data Flow Summary
 
-| Step | Component | Storage | Pattern |
-|------|-----------|---------|---------|
-| 1 | API receives booking | Redis | Lua atomic deduction |
-| 2 | Worker processes order | PostgreSQL | UoW (Order + Outbox in same TX) |
-| 3 | OutboxRelay publishes | Kafka | Transactional outbox |
-| 4 | Payment processes | PostgreSQL | Status update |
-| 5 | On failure: compensate | PostgreSQL + Redis | Saga pattern |
+The happy path and the failure path both start from a single
+`POST /api/v1/book` call but diverge at step 4. Every boundary
+crossing uses an at-least-once + idempotent contract; there is
+never a synchronous RPC that blocks the API response on Kafka
+or Postgres writes.
+
+#### Happy path
+
+| # | Component | Input | Storage touched | Effect | Failure behaviour |
+|---|-----------|-------|-----------------|--------|-------------------|
+| 1 | Gin API handler (`/api/v1/book`) | User request | Redis (idempotency key, 24h TTL) | `Idempotency-Key` header, if present, is looked up first — a hit replays the cached 2xx/4xx/5xx body verbatim and skips the rest | Missing/duplicate body → 400 `"invalid request body"`; `mapError` sanitizes any downstream leak |
+| 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis via `deduct.lua` (atomic) | `DECRBY event:{id}:qty` → if `>= 0` also `XADD orders:stream` → return 200; if `< 0` `INCRBY` revert and return 409 `sold out` | API returns immediately after Redis — the order is **not yet persisted**, just queued |
+| 3 | `WorkerService.processMessage` (consumer group on `orders:stream`) | Stream message | PostgreSQL (single UoW transaction) | `DecrementTicket` (DB row-level double-check, guards against Redis/DB drift) → `orderRepo.Create` (UNIQUE partial index catches duplicate purchase) → `outboxRepo.Create(event_type="order.created")` — **all three in one tx** | `DecrementTicket` rejects → revert Redis + ACK (inventory conflict metric); `orderRepo.Create` hits `ErrUserAlreadyBought` → revert Redis + ACK (duplicate metric); other errors → no ACK, `processWithRetry` 3×, then DLQ (`orders:dlq`) + Redis revert |
+| 4 | `OutboxRelay` (background goroutine, single leader elected via Postgres advisory lock 1001) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL (read + update) → Kafka topic `order.created` | Polls every 500ms (partial index `events_outbox_pending_idx` covers this), publishes up to 100 events per tick, then `UPDATE processed_at = NOW()`. Publish failure → skip `MarkProcessed` so the next tick retries. MarkProcessed failure after a successful publish → event will be re-published on next tick, consumers MUST be idempotent | Leader crash → advisory lock auto-releases (session-bound) → a standby acquires it on its next tick |
+| 5 | `KafkaConsumer` → `PaymentService.ProcessOrder` | `OrderCreatedEvent` | Redis (idempotency via `orderRepo.GetByID` → status check) → `PaymentGateway.Charge` → PostgreSQL (status update) | If order is already `confirmed`/`failed`/`compensated` → skip (idempotent). Otherwise charge mock gateway. On success: `UPDATE orders SET status='confirmed'`. Commit Kafka offset | Malformed JSON / `ErrInvalidPaymentEvent` → dead-letter to `order.created.dlq` with provenance headers + commit offset. Transient DB/Redis errors → do NOT commit, Kafka rebalance re-delivers |
+
+At this point the user's booking is fully confirmed: Redis, DB, and payment status are consistent.
+
+#### Failure path (payment gateway rejects the charge)
+
+| # | Component | Input | Storage touched | Effect |
+|---|-----------|-------|-----------------|--------|
+| 5a | `PaymentService.ProcessOrder` (same call as step 5 above) | `Charge` returned error | PostgreSQL (single UoW tx) | `UPDATE orders SET status='failed'` + `outboxRepo.Create(event_type="order.failed")` — same tx, same guarantee as step 3's outbox |
+| 5b | `OutboxRelay` | `order.failed` pending row | PostgreSQL → Kafka topic `order.failed` | Same polling loop as step 4, different topic |
+| 5c | `SagaConsumer` → `SagaCompensator.HandleOrderFailed` | `OrderFailedEvent` | PostgreSQL (UoW tx: `IncrementTicket` + `status='compensated'`) → Redis via `revert.lua` (`INCRBY event:{id}:qty` → `SET saga:reverted:{order_id} NX EX 7d`) | DB path is idempotent via the `OrderStatusCompensated` guard; Redis path is idempotent via the `saga:reverted:*` key |
+| 5d | On compensator error | — | Redis (durable retry counter `saga:retry:p{partition}:o{offset}` TTL 24h) | Counter incremented, message **not committed** so Kafka re-delivers. Counter survives consumer restart |
+| 5e | After `sagaMaxRetries = 3` | Poison message | Kafka topic `order.failed.dlq` + metrics | Original payload + provenance headers written to DLQ, `saga_poison_messages_total` and `dlq_messages_total{topic, reason="max_retries"}` incremented, retry counter cleared, Kafka offset committed. **No silent drops** |
+
+At this point the Redis and DB inventory are back to the pre-booking state; the user sees `status='compensated'` in their history.
+
+#### Cross-cutting guarantees
+
+- **API response never blocks on Kafka or Postgres writes.** Only Redis is in the synchronous path.
+- **Every DB write that must cause an event goes through the outbox**, committed in the same transaction. There is no `db.Commit(); publisher.Send()` sequence anywhere.
+- **Every consumer is idempotent** — either via a DB unique constraint, a Redis `SET ... NX`, or an explicit status-is-terminal check. This is required by the outbox's at-least-once semantics.
+- **No silent message drops.** Every unhandleable message lands in a DLQ topic with enough provenance headers (original topic / partition / offset / reason / error) to manually replay. The only exception is transient infrastructure errors on `PaymentService`, where we rely on Kafka rebalance for retry — a future DLQ worker will add a retry budget there.
 
 ---
 
