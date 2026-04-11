@@ -76,8 +76,18 @@ func inventoryKey(eventID int) string {
 	return fmt.Sprintf("event:%d:qty", eventID)
 }
 
+// inventoryTTL is the maximum lifetime of a Redis inventory key. It is
+// intentionally long (30 days) so any active event's inventory is
+// re-upserted by operational flows (CreateEvent, saga revert, manual
+// reset) well before expiry — but orphaned keys from deleted events
+// eventually fall off Redis instead of accumulating forever.
+//
+// Previously the TTL was 0 (never expires), which caused unbounded key
+// growth. See action-list item L3.
+const inventoryTTL = 30 * 24 * time.Hour
+
 func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID int, count int) error {
-	return r.client.Set(ctx, inventoryKey(eventID), count, 0).Err()
+	return r.client.Set(ctx, inventoryKey(eventID), count, inventoryTTL).Err()
 }
 
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error) {
