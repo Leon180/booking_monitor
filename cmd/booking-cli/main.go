@@ -11,6 +11,8 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -173,12 +175,42 @@ func initTracer() (*trace.TracerProvider, error) {
 	}
 
 	tp := trace.NewTracerProvider(
-		trace.WithSampler(trace.AlwaysSample()),
+		trace.WithSampler(resolveSampler()),
 		trace.WithResource(res),
 		trace.WithBatcher(traceExporter),
 	)
 	otel.SetTracerProvider(tp)
 	return tp, nil
+}
+
+// resolveSampler picks the trace sampler based on OTEL_TRACES_SAMPLER_RATIO.
+// Accepted values:
+//   - unset or empty:        AlwaysSample (backwards compatible default)
+//   - "0":                   NeverSample
+//   - "1" / "1.0":           AlwaysSample
+//   - 0 < r < 1 (float):     TraceIDRatioBased(r)
+//   - anything else:         log a warning and fall back to AlwaysSample
+//
+// Closes action-list item M15 (configurable sampler ratio so
+// production can drop the AlwaysSample default).
+func resolveSampler() trace.Sampler {
+	raw := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_RATIO"))
+	if raw == "" {
+		return trace.AlwaysSample()
+	}
+	r, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		log.Printf("initTracer: invalid OTEL_TRACES_SAMPLER_RATIO=%q, falling back to AlwaysSample: %v", raw, err)
+		return trace.AlwaysSample()
+	}
+	switch {
+	case r <= 0:
+		return trace.NeverSample()
+	case r >= 1:
+		return trace.AlwaysSample()
+	default:
+		return trace.TraceIDRatioBased(r)
+	}
 }
 
 func runServer(cmd *cobra.Command, args []string) {
