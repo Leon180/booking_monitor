@@ -46,6 +46,12 @@ type PostgresConfig struct {
 	MaxOpenConns int           `yaml:"max_open_conns" env:"DB_MAX_OPEN_CONNS" env-default:"50"`
 	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"5"`
 	MaxIdleTime  time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME" env-default:"5m"`
+	// MaxLifetime bounds how long a single Postgres connection may live.
+	// Unlike MaxIdleTime (which evicts idle conns), MaxLifetime forces
+	// recycling of busy conns so long-lived ones don't accumulate
+	// staleness (memory, prepared statement caches, PgBouncer auth
+	// drift). 30m is a safe default for most deployments.
+	MaxLifetime time.Duration `yaml:"max_lifetime" env:"DB_MAX_LIFETIME" env-default:"30m"`
 }
 
 type KafkaConfig struct {
