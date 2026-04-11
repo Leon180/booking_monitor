@@ -2,13 +2,20 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/pkg/logger"
 )
 
-const outboxPollInterval = 500 * time.Millisecond
+const (
+	outboxPollInterval = 500 * time.Millisecond
+	// outboxLockID is the Postgres advisory lock key used for leader
+	// election across all OutboxRelay replicas. Defined once to avoid
+	// the historical magic-number-in-two-places bug (M4).
+	outboxLockID int64 = 1001
+)
 
 // OutboxRelay polls the outbox table and publishes pending events to the message bus.
 // It runs as a background goroutine managed by the Fx lifecycle.
@@ -38,25 +45,39 @@ func (r *OutboxRelay) Run(ctx context.Context) {
 
 // runWithBatchHook runs the ticker loop, calling batchFn on each tick.
 // This allows the tracing decorator to inject a traced version of processBatch.
-func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context.Context)) {
+//
+// The advisory lock is released via defer so ANY exit path — panic,
+// ctx.Done, or unexpected return — releases it. Previously the Unlock
+// only ran on the ctx.Done branch, which leaked the lock on panic or
+// on a bug that returned from the function without hitting ctx.Done.
+func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context.Context) error) {
 	log := logger.FromCtx(ctx)
 	log.Infow("outbox relay started", "batch_size", r.batchSize)
 
 	ticker := time.NewTicker(outboxPollInterval)
 	defer ticker.Stop()
 
+	// Always release the advisory lock on exit, regardless of how we got
+	// here. Use context.Background() because the parent ctx may already
+	// be cancelled when this defer fires during shutdown.
+	defer func() {
+		if err := r.mutex.Unlock(context.Background(), outboxLockID); err != nil {
+			log.Errorw("outbox relay: failed to release advisory lock",
+				"lock_id", outboxLockID, "error", err)
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Infow("outbox relay stopped")
-			// Ensure lock is released on graceful shutdown
-			_ = r.mutex.Unlock(context.Background(), 1001)
 			return
 		case <-ticker.C:
-			// 1. Leader Election: Try to acquire Postgres Advisory Lock (LockID: 1001)
-			acquired, err := r.mutex.TryLock(ctx, 1001)
+			// 1. Leader Election: Try to acquire Postgres Advisory Lock
+			acquired, err := r.mutex.TryLock(ctx, outboxLockID)
 			if err != nil {
-				log.Errorw("outbox relay: failed to acquire lock", "error", err)
+				log.Errorw("outbox relay: failed to acquire lock",
+					"lock_id", outboxLockID, "error", err)
 				continue
 			}
 
@@ -65,25 +86,34 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 				continue
 			}
 
-			// 2. We are the Leader! Process the batch.
-			batchFn(ctx)
+			// 2. We are the Leader! Process the batch. Errors are logged
+			// by the batchFn itself (or its tracing decorator, which also
+			// records them on the span); the ticker continues either way.
+			if err := batchFn(ctx); err != nil {
+				log.Errorw("outbox relay: batch error", "error", err)
+			}
 		}
 	}
 }
 
-func (r *OutboxRelay) processBatch(ctx context.Context) {
+// processBatch now returns an error so the tracing decorator can call
+// span.RecordError / span.SetStatus with precise information. It returns
+// the FIRST fatal-to-batch error (list failure); per-event publish or
+// mark-processed errors are logged inline and do not abort the batch
+// because the next tick will retry.
+func (r *OutboxRelay) processBatch(ctx context.Context) error {
 	log := logger.FromCtx(ctx)
 
 	events, err := r.outboxRepo.ListPending(ctx, r.batchSize)
 	if err != nil {
 		log.Errorw("outbox relay: failed to list pending events", "error", err)
-		return
+		return fmt.Errorf("outbox relay list pending: %w", err)
 	}
 
 	for _, e := range events {
 		// Respect context cancellation mid-batch for responsive shutdown.
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
 
 		if err := r.publisher.Publish(ctx, e.EventType, e.Payload); err != nil {
@@ -107,4 +137,6 @@ func (r *OutboxRelay) processBatch(ctx context.Context) {
 			// be idempotent (at-least-once delivery guarantee).
 		}
 	}
+
+	return nil
 }
