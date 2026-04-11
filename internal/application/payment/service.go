@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -36,14 +37,18 @@ func NewService(
 func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEvent) error {
 	s.log.Infow("Processing payment for order", "order_id", event.OrderID, "amount", event.Amount)
 
-	// 1. Input Validation
+	// 1. Input Validation — return ErrInvalidPaymentEvent (NOT nil) so the
+	// Kafka consumer can route the message to DLQ, emit a metric, and
+	// commit the offset. Previously this function returned nil, which the
+	// consumer interpreted as "success, commit offset" — permanently
+	// losing the event without any operator-visible signal.
 	if event.OrderID <= 0 {
 		s.log.Errorw("Invalid OrderID", "order_id", event.OrderID)
-		return nil // Drop unprocessable message
+		return fmt.Errorf("order_id=%d: %w", event.OrderID, domain.ErrInvalidPaymentEvent)
 	}
 	if event.Amount < 0 {
-		s.log.Errorw("Invalid Amount", "amount", event.Amount)
-		return nil // Drop unprocessable message
+		s.log.Errorw("Invalid Amount", "order_id", event.OrderID, "amount", event.Amount)
+		return fmt.Errorf("amount=%v: %w", event.Amount, domain.ErrInvalidPaymentEvent)
 	}
 
 	// 2. Idempotency Check
