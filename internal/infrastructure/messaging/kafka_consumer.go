@@ -158,4 +158,3 @@ func (c *KafkaConsumer) Close() error {
 	}
 	return dErr
 }
-

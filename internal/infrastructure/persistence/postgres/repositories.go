@@ -36,25 +36,30 @@ func (r *postgresEventRepository) GetByID(ctx context.Context, id int) (*domain.
 	var event domain.Event
 	err := row.Scan(&event.ID, &event.Name, &event.TotalTickets, &event.AvailableTickets)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.ErrEventNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("eventRepository.GetByID id=%d: %w", id, err)
 	}
 	return &event, nil
 }
 
 func (r *postgresEventRepository) Create(ctx context.Context, event *domain.Event) error {
 	query := "INSERT INTO events (name, total_tickets, available_tickets, version) VALUES ($1, $2, $3, $4) RETURNING id"
-	return r.getExecutor(ctx).QueryRowContext(ctx, query, event.Name, event.TotalTickets, event.AvailableTickets, event.Version).Scan(&event.ID)
+	if err := r.getExecutor(ctx).QueryRowContext(ctx, query, event.Name, event.TotalTickets, event.AvailableTickets, event.Version).Scan(&event.ID); err != nil {
+		return fmt.Errorf("eventRepository.Create: %w", err)
+	}
+	return nil
 }
 
 // Update persists the event state.
 // We use simple update here, relying on FOR UPDATE in GetByID for concurrency control in UoW.
 func (r *postgresEventRepository) Update(ctx context.Context, event *domain.Event) error {
 	query := "UPDATE events SET available_tickets = $1 WHERE id = $2"
-	_, err := r.getExecutor(ctx).ExecContext(ctx, query, event.AvailableTickets, event.ID)
-	return err
+	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, event.AvailableTickets, event.ID); err != nil {
+		return fmt.Errorf("eventRepository.Update id=%d: %w", event.ID, err)
+	}
+	return nil
 }
 
 // DeductInventory - Keeping for backward compatibility or direct atomic usage if not using UoW/Entity pattern strictly
@@ -62,12 +67,12 @@ func (r *postgresEventRepository) DeductInventory(ctx context.Context, eventID, 
 	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
 	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.DeductInventory exec: %w", err)
 	}
 
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.DeductInventory rows: %w", err)
 	}
 
 	if rowsAffected == 0 {
@@ -93,7 +98,7 @@ func (r *postgresOrderRepository) Create(ctx context.Context, order *domain.Orde
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			return domain.ErrUserAlreadyBought
 		}
-		return err
+		return fmt.Errorf("orderRepository.Create: %w", err)
 	}
 	return nil
 }
@@ -103,10 +108,10 @@ func (r *postgresOrderRepository) GetByID(ctx context.Context, id int) (*domain.
 	var o domain.Order
 	err := r.getExecutor(ctx).QueryRowContext(ctx, query, id).Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.ErrOrderNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("orderRepository.GetByID id=%d: %w", id, err)
 	}
 	return &o, nil
 }
@@ -119,7 +124,7 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	if status != nil {
 		// Filter by status
 		if err := r.getExecutor(ctx).QueryRowContext(ctx, "SELECT count(*) FROM orders WHERE status = $1", status).Scan(&total); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("orderRepository.ListOrders count (status=%v): %w", *status, err)
 		}
 
 		query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders WHERE status = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
@@ -127,7 +132,7 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	} else {
 		// No filter
 		if err := r.getExecutor(ctx).QueryRowContext(ctx, "SELECT count(*) FROM orders").Scan(&total); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("orderRepository.ListOrders count: %w", err)
 		}
 
 		query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders ORDER BY created_at DESC LIMIT $1 OFFSET $2"
@@ -135,7 +140,7 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	}
 
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("orderRepository.ListOrders query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -143,13 +148,13 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	for rows.Next() {
 		var o domain.Order
 		if err := rows.Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt); err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("orderRepository.ListOrders scan: %w", err)
 		}
 		orders = append(orders, &o)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("orderRepository.ListOrders rows: %w", err)
 	}
 
 	return orders, total, nil
@@ -157,8 +162,10 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 
 func (r *postgresOrderRepository) UpdateStatus(ctx context.Context, id int, status domain.OrderStatus) error {
 	query := "UPDATE orders SET status = $1 WHERE id = $2"
-	_, err := r.getExecutor(ctx).ExecContext(ctx, query, status, id)
-	return err
+	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, status, id); err != nil {
+		return fmt.Errorf("orderRepository.UpdateStatus id=%d status=%v: %w", id, status, err)
+	}
+	return nil
 }
 
 // DecrementTicket implements atomic inventory deduction using DB constraints
@@ -166,12 +173,12 @@ func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, 
 	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
 	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.DecrementTicket exec (event=%d, qty=%d): %w", eventID, quantity, err)
 	}
 
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.DecrementTicket rows: %w", err)
 	}
 
 	if rowsAffected == 0 {
@@ -181,21 +188,32 @@ func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID, 
 	return nil
 }
 
+// Delete removes an event. Used by EventService.CreateEvent as a
+// compensating action when the Redis hot-path SetInventory call fails
+// after the DB row has been committed.
+func (r *postgresEventRepository) Delete(ctx context.Context, id int) error {
+	query := "DELETE FROM events WHERE id = $1"
+	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, id); err != nil {
+		return fmt.Errorf("eventRepository.Delete id=%d: %w", id, err)
+	}
+	return nil
+}
+
 // IncrementTicket restores atomic inventory. Used for Saga compensation.
 func (r *postgresEventRepository) IncrementTicket(ctx context.Context, eventID, quantity int) error {
 	// Guard against over-increment beyond total_tickets
 	query := "UPDATE events SET available_tickets = available_tickets + $2 WHERE id = $1 AND available_tickets + $2 <= total_tickets"
 	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.IncrementTicket exec (event=%d, qty=%d): %w", eventID, quantity, err)
 	}
 
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("eventRepository.IncrementTicket rows: %w", err)
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("failed to increment ticket: event %d not found or exceeds total tickets", eventID)
+		return fmt.Errorf("eventRepository.IncrementTicket: event %d not found or exceeds total tickets", eventID)
 	}
 	return nil
 }
@@ -217,7 +235,10 @@ func (r *postgresOutboxRepository) getExecutor(ctx context.Context) DBExecutor {
 
 func (r *postgresOutboxRepository) Create(ctx context.Context, event *domain.OutboxEvent) error {
 	query := "INSERT INTO events_outbox (event_type, payload, status) VALUES ($1, $2, $3) RETURNING id"
-	return r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&event.ID)
+	if err := r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&event.ID); err != nil {
+		return fmt.Errorf("outboxRepository.Create type=%s: %w", event.EventType, err)
+	}
+	return nil
 }
 
 func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
@@ -227,7 +248,7 @@ func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) (
 	          LIMIT $1`
 	rows, err := r.getExecutor(ctx).QueryContext(ctx, query, limit)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("outboxRepository.ListPending query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -235,15 +256,20 @@ func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) (
 	for rows.Next() {
 		e := &domain.OutboxEvent{}
 		if err := rows.Scan(&e.ID, &e.EventType, &e.Payload, &e.Status); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("outboxRepository.ListPending scan: %w", err)
 		}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("outboxRepository.ListPending rows: %w", err)
+	}
+	return events, nil
 }
 
 func (r *postgresOutboxRepository) MarkProcessed(ctx context.Context, id int) error {
 	query := "UPDATE events_outbox SET processed_at = NOW() WHERE id = $1"
-	_, err := r.getExecutor(ctx).ExecContext(ctx, query, id)
-	return err
+	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, id); err != nil {
+		return fmt.Errorf("outboxRepository.MarkProcessed id=%d: %w", id, err)
+	}
+	return nil
 }

@@ -102,6 +102,19 @@ func (d *eventRepositoryTracingDecorator) Update(ctx context.Context, event *dom
 	return err
 }
 
+func (d *eventRepositoryTracingDecorator) Delete(ctx context.Context, id int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DeleteEvent", trace.WithAttributes(
+		attribute.Int("event_id", id),
+	))
+	defer span.End()
+
+	err := d.next.Delete(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
 // --- OrderRepositoryDecorator ---
 
 type orderRepositoryTracingDecorator struct {

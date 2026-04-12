@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
@@ -62,5 +64,55 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config validation: %w", err)
+	}
+
 	return cfg, nil
+}
+
+// Validate checks that required-at-startup fields are present. It
+// returns the aggregated list of missing fields as one error. Callers
+// (cmd/booking-cli) should treat this as fatal and exit before any fx
+// wiring runs, so operators get a precise error instead of a cryptic
+// connection failure several seconds later.
+func (c *Config) Validate() error {
+	var missing []string
+
+	// DSN has no env-default: it MUST be set via DATABASE_URL or yaml.
+	if strings.TrimSpace(c.Postgres.DSN) == "" {
+		missing = append(missing, "postgres.dsn / DATABASE_URL")
+	}
+
+	// Server port is defaulted via env-default but a zero-length explicit
+	// value would still be invalid.
+	if strings.TrimSpace(c.Server.Port) == "" {
+		missing = append(missing, "server.port / PORT")
+	}
+
+	// Redis / Kafka defaults are fine for local dev, but in production
+	// (APP_ENV=production) we reject the localhost defaults so ops can't
+	// ship on a silent localhost connection.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+		if isLocalhostAddr(c.Redis.Addr) {
+			missing = append(missing, "redis.addr / REDIS_ADDR (localhost default not permitted in production)")
+		}
+		if isLocalhostAddr(c.Kafka.Brokers) {
+			missing = append(missing, "kafka.brokers / KAFKA_BROKERS (localhost default not permitted in production)")
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required config fields: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
+
+// isLocalhostAddr returns true if the address string is one of the
+// unconfigured localhost defaults cleanenv hands back when nothing
+// overrides REDIS_ADDR / KAFKA_BROKERS.
+func isLocalhostAddr(addr string) bool {
+	a := strings.TrimSpace(addr)
+	return a == "localhost:6379" || a == "localhost:9092"
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // OutboxRelayTracingDecorator wraps OutboxRelay.processBatch with an OTEL span.
@@ -22,11 +23,18 @@ func (d *OutboxRelayTracingDecorator) Run(ctx context.Context) {
 	d.next.runWithBatchHook(ctx, d.processBatchTraced)
 }
 
-// processBatchTraced wraps a single processBatch call with an OTEL span.
-func (d *OutboxRelayTracingDecorator) processBatchTraced(ctx context.Context) {
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "OutboxRelay.processBatch") // No attributes here — batch size is logged, not traced, to avoid high-cardinality spans.
-
+// processBatchTraced wraps a single processBatch call with an OTEL span
+// and records batch errors via span.RecordError + span.SetStatus so
+// Jaeger reflects failures instead of always showing OK.
+func (d *OutboxRelayTracingDecorator) processBatchTraced(ctx context.Context) error {
+	// No attributes: batch size is logged, not traced, to avoid high-cardinality spans.
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "OutboxRelay.processBatch")
 	defer span.End()
 
-	d.next.processBatch(ctx)
+	err := d.next.processBatch(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }

@@ -21,7 +21,7 @@ services:
       - APP_ENV=${APP_ENV:-production}
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     container_name: booking_nginx
     ports:
       - "80:80"
@@ -72,7 +72,7 @@ services:
       retries: 5
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     container_name: booking_prometheus
     # Mount the whole deploy/prometheus/ directory (not just prometheus.yml)
     # so `rule_files: - "alerts.yml"` in prometheus.yml resolves. Previously
@@ -87,7 +87,7 @@ services:
       - "host.docker.internal:host-gateway"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.2
     container_name: booking_grafana
     ports:
       - "3000:3000"
@@ -100,7 +100,7 @@ services:
       - prometheus
 
   jaeger:
-    image: jaegertracing/all-in-one:latest
+    image: jaegertracing/all-in-one:1.60
     container_name: booking_jaeger
     ports:
       - "16686:16686" # Web UI
