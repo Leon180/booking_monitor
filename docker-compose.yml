@@ -74,8 +74,13 @@ services:
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: booking_prometheus
+    # Mount the whole deploy/prometheus/ directory (not just prometheus.yml)
+    # so `rule_files: - "alerts.yml"` in prometheus.yml resolves. Previously
+    # only prometheus.yml was mounted, which silently disabled every alert
+    # rule (including the InventorySoldOut fix from C6). Caught during the
+    # PR #8 smoke test.
     volumes:
-      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deploy/prometheus:/etc/prometheus:ro
     ports:
       - "9090:9090"
     extra_hosts:
