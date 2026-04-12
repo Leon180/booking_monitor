@@ -18,8 +18,11 @@
 --    under the same crash (key set, inventory never restored, no
 --    operator signal). Loud over-revert beats silent under-revert.
 --
--- The SET uses the atomic `NX EX` form (Redis ≥ 2.6.12) to replace the
+-- The SET uses `EX` for atomic key+TTL (Redis ≥ 2.6.12) to replace the
 -- previous `SETNX` + `EXPIRE` pair, which also fixes action-list L1.
+-- NX is intentionally omitted: the EXISTS guard at the top of the script
+-- already handles idempotency, and within an atomic Lua execution NX
+-- would be redundant.
 
 if redis.call("EXISTS", KEYS[2]) == 1 then
     return 0  -- Already reverted, nothing to do.

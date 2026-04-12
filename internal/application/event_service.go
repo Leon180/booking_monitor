@@ -21,11 +21,15 @@ type eventService struct {
 	log           *zap.SugaredLogger
 }
 
-func NewEventService(repo domain.EventRepository, inventoryRepo domain.InventoryRepository) EventService {
+// NewEventService takes the logger as an explicit dependency rather than
+// reaching for the global zap.S(). This matches WorkerService /
+// SagaCompensator and ensures the logger is initialized by the time fx
+// calls this constructor (zap.ReplaceGlobals may not have fired yet).
+func NewEventService(repo domain.EventRepository, inventoryRepo domain.InventoryRepository, log *zap.SugaredLogger) EventService {
 	return &eventService{
 		repo:          repo,
 		inventoryRepo: inventoryRepo,
-		log:           zap.S().With("component", "event_service"),
+		log:           log.With("component", "event_service"),
 	}
 }
 

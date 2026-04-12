@@ -57,10 +57,18 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 	ticker := time.NewTicker(outboxPollInterval)
 	defer ticker.Stop()
 
-	// Always release the advisory lock on exit, regardless of how we got
-	// here. Use context.Background() because the parent ctx may already
-	// be cancelled when this defer fires during shutdown.
+	// Track whether we ever acquired the lock so the defer doesn't
+	// issue a spurious Unlock on a DistributedLock implementation that
+	// lacks a nil-guard (pgAdvisoryLock is safe, but the interface
+	// contract doesn't guarantee it).
+	wasLeader := false
+
+	// Release the advisory lock on exit. Use context.Background()
+	// because the parent ctx may already be cancelled during shutdown.
 	defer func() {
+		if !wasLeader {
+			return
+		}
 		if err := r.mutex.Unlock(context.Background(), outboxLockID); err != nil {
 			log.Errorw("outbox relay: failed to release advisory lock",
 				"lock_id", outboxLockID, "error", err)
@@ -85,6 +93,7 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 				// We are in standby mode. Keep quiet or log at debug level.
 				continue
 			}
+			wasLeader = true
 
 			// 2. We are the Leader! Process the batch. Errors are logged
 			// by the batchFn itself (or its tracing decorator, which also
