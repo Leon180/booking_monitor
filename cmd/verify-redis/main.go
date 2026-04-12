@@ -12,9 +12,17 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// 1. Connect to Redis
+	// 1. Connect to Redis. Address and password read from the same
+	// env vars the main app uses, so this tool works against any
+	// environment (local, compose, remote) without recompile.
+	// Closes action-list item L13.
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
 	r := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr:     addr,
+		Password: os.Getenv("REDIS_PASSWORD"),
 	})
 	if err := r.Ping(ctx).Err(); err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)

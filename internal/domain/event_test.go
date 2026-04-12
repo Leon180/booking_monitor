@@ -53,7 +53,7 @@ func TestEvent_Deduct(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			event := &domain.Event{AvailableTickets: tt.initialTickets}
-			err := event.Deduct(tt.deductAmount)
+			next, err := event.Deduct(tt.deductAmount)
 
 			if tt.expectedError != nil {
 				if tt.expectedError == assert.AnError {
@@ -61,10 +61,18 @@ func TestEvent_Deduct(t *testing.T) {
 				} else {
 					assert.Equal(t, tt.expectedError, err)
 				}
-			} else {
-				assert.NoError(t, err)
+				// Original event must be untouched on failure.
+				assert.Equal(t, tt.initialTickets, event.AvailableTickets)
+				assert.Nil(t, next)
+				return
 			}
-			assert.Equal(t, tt.expectedRemain, event.AvailableTickets)
+
+			assert.NoError(t, err)
+			// Original receiver is never mutated (immutable pattern).
+			assert.Equal(t, tt.initialTickets, event.AvailableTickets)
+			// Returned *Event reflects the deducted state.
+			assert.NotNil(t, next)
+			assert.Equal(t, tt.expectedRemain, next.AvailableTickets)
 		})
 	}
 }

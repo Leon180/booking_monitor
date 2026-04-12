@@ -19,27 +19,40 @@ func NewPostgresEventRepository(db *sql.DB) domain.EventRepository {
 	return &postgresEventRepository{db: db}
 }
 
+// GetByID performs a plain read with no locking. It is safe to call
+// outside a transaction (no FOR UPDATE). Callers that need to read + mutate
+// atomically must use the UoW-aware GetByIDForUpdate variant below.
 func (r *postgresEventRepository) GetByID(ctx context.Context, id int) (*domain.Event, error) {
-	// Use FOR UPDATE in transaction? Here we just read.
-	// Actually, for booking we need transactional context.
-	// For simplicity in this stage, we assume the Service manages the Transaction if needed,
-	// but standard sql.DB doesn't propagate Tx without context key or passing Tx explicitly.
-	// To stick to clean arch, we often pass Tx via context or have a UnitOfWork.
-	// Given the "Direct DB Transaction" requirement of Stage 1, we need to support it.
-
-	// However, the `GetByID` is usually just for display.
-	// `DeductInventory` is the one that needs transaction or atomic update.
-
-	query := "SELECT id, name, total_tickets, available_tickets FROM events WHERE id = $1 FOR UPDATE"
+	query := "SELECT id, name, total_tickets, available_tickets FROM events WHERE id = $1"
 	row := r.getExecutor(ctx).QueryRowContext(ctx, query, id)
 
 	var event domain.Event
-	err := row.Scan(&event.ID, &event.Name, &event.TotalTickets, &event.AvailableTickets)
-	if err != nil {
+	if err := row.Scan(&event.ID, &event.Name, &event.TotalTickets, &event.AvailableTickets); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.ErrEventNotFound
 		}
 		return nil, fmt.Errorf("eventRepository.GetByID id=%d: %w", id, err)
+	}
+	return &event, nil
+}
+
+// GetByIDForUpdate performs a row-locked read via `SELECT ... FOR UPDATE`.
+// It MUST be called inside a transaction scope managed by the UnitOfWork;
+// outside a transaction, Postgres takes the row lock on an auto-commit
+// single-row statement and releases it immediately, producing the same
+// result as GetByID plus pointless lock overhead. The method is kept on
+// the interface so future bugfixes (e.g. the saga compensator taking a
+// row lock before IncrementTicket) have a clear, discoverable API.
+func (r *postgresEventRepository) GetByIDForUpdate(ctx context.Context, id int) (*domain.Event, error) {
+	query := "SELECT id, name, total_tickets, available_tickets FROM events WHERE id = $1 FOR UPDATE"
+	row := r.getExecutor(ctx).QueryRowContext(ctx, query, id)
+
+	var event domain.Event
+	if err := row.Scan(&event.ID, &event.Name, &event.TotalTickets, &event.AvailableTickets); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.ErrEventNotFound
+		}
+		return nil, fmt.Errorf("eventRepository.GetByIDForUpdate id=%d: %w", id, err)
 	}
 	return &event, nil
 }
@@ -59,26 +72,6 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *domain.Even
 	if _, err := r.getExecutor(ctx).ExecContext(ctx, query, event.AvailableTickets, event.ID); err != nil {
 		return fmt.Errorf("eventRepository.Update id=%d: %w", event.ID, err)
 	}
-	return nil
-}
-
-// DeductInventory - Keeping for backward compatibility or direct atomic usage if not using UoW/Entity pattern strictly
-func (r *postgresEventRepository) DeductInventory(ctx context.Context, eventID, quantity int) error {
-	query := "UPDATE events SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2"
-	res, err := r.getExecutor(ctx).ExecContext(ctx, query, eventID, quantity)
-	if err != nil {
-		return fmt.Errorf("eventRepository.DeductInventory exec: %w", err)
-	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("eventRepository.DeductInventory rows: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return domain.ErrSoldOut
-	}
-
 	return nil
 }
 

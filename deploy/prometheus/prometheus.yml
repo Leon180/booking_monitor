@@ -1,5 +1,9 @@
 global:
-  scrape_interval: 5s
+  # 15s is a reasonable production default. Local dev / load tests
+  # can override by mounting a different prometheus.yml. Previously
+  # this was 5s, which 3× the scrape traffic for no operator benefit.
+  # Closes action-list item M17.
+  scrape_interval: 15s
 
 rule_files:
   - "alerts.yml"
@@ -9,10 +13,15 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
+  # booking-service runs inside this compose network as `app:8080`.
+  # The previous config also listed `host.docker.internal:8080` which
+  # is only reachable from Docker Desktop on macOS/Windows and causes
+  # "context deadline exceeded" scrape failures on Linux hosts.
+  # Closes action-list item M12.
   - job_name: 'booking-service'
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['host.docker.internal:8080', 'app:8080']
+      - targets: ['app:8080']
 
   - job_name: 'jaeger'
     static_configs:

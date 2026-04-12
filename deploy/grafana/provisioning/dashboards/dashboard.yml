@@ -5,7 +5,16 @@ providers:
     orgId: 1
     folder: ''
     type: file
-    disableDeletion: false
-    updateIntervalSeconds: 10
+    # disableDeletion protects provisioned dashboards from being
+    # accidentally deleted via the Grafana UI. In production we want
+    # provisioned dashboards to be immutable from the UI — edits go
+    # through git, not the UI. Closes action-list item L12.
+    disableDeletion: true
+    # Provisioned dashboards should also not be editable in the UI
+    # (changes would be wiped on the next updateIntervalSeconds scan).
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
     options:
       path: /etc/grafana/provisioning/dashboards
+      # foldersFromFilesStructure off: keep them in the root folder.
+      foldersFromFilesStructure: false

@@ -46,6 +46,12 @@ type PostgresConfig struct {
 	MaxOpenConns int           `yaml:"max_open_conns" env:"DB_MAX_OPEN_CONNS" env-default:"50"`
 	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"5"`
 	MaxIdleTime  time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME" env-default:"5m"`
+	// MaxLifetime bounds how long a single Postgres connection may live.
+	// Unlike MaxIdleTime (which evicts idle conns), MaxLifetime forces
+	// recycling of busy conns so long-lived ones don't accumulate
+	// staleness (memory, prepared statement caches, PgBouncer auth
+	// drift). 30m is a safe default for most deployments.
+	MaxLifetime time.Duration `yaml:"max_lifetime" env:"DB_MAX_LIFETIME" env-default:"30m"`
 }
 
 type KafkaConfig struct {
@@ -55,6 +61,20 @@ type KafkaConfig struct {
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"KAFKA_WRITE_TIMEOUT" env-default:"5s"`
 	// OutboxBatchSize controls how many outbox events are processed per relay tick.
 	OutboxBatchSize int `yaml:"outbox_batch_size" env:"KAFKA_OUTBOX_BATCH_SIZE" env-default:"100"`
+	// PaymentGroupID is the Kafka consumer group id for the payment
+	// service. Previously hardcoded as "payment-service-group-test"
+	// (note the `-test` suffix — a latent prod/test bleed bug).
+	PaymentGroupID string `yaml:"payment_group_id" env:"KAFKA_PAYMENT_GROUP_ID" env-default:"payment-service-group"`
+	// OrderCreatedTopic is the topic the payment consumer subscribes to.
+	// Previously hardcoded.
+	OrderCreatedTopic string `yaml:"order_created_topic" env:"KAFKA_ORDER_CREATED_TOPIC" env-default:"order.created"`
+	// SagaGroupID is the Kafka consumer group id for the saga consumer.
+	// Distinct from PaymentGroupID so the two consumers don't steal
+	// messages from each other (they live on different topics anyway
+	// but keeping group ids disjoint is defensive).
+	SagaGroupID string `yaml:"saga_group_id" env:"KAFKA_SAGA_GROUP_ID" env-default:"booking-saga-group"`
+	// OrderFailedTopic is the topic the saga consumer subscribes to.
+	OrderFailedTopic string `yaml:"order_failed_topic" env:"KAFKA_ORDER_FAILED_TOPIC" env-default:"order.failed"`
 }
 
 func LoadConfig(path string) (*Config, error) {

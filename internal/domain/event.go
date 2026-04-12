@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -26,22 +25,31 @@ type Event struct {
 	Version          int    `json:"version"` // Added Version
 }
 
-func (e *Event) Deduct(quantity int) error {
+// Deduct returns a new *Event with AvailableTickets decremented by
+// quantity, or an error. It is immutable: the receiver is NOT mutated.
+// This follows the project's global "create new objects, never mutate"
+// coding style rule and makes concurrent reads of an Event safe.
+func (e *Event) Deduct(quantity int) (*Event, error) {
 	if quantity < 0 {
-		return fmt.Errorf("invalid quantity")
+		return nil, errors.New("invalid quantity")
 	}
 	if e.AvailableTickets < quantity {
-		return ErrSoldOut
+		return nil, ErrSoldOut
 	}
-	e.AvailableTickets -= quantity
-	return nil
+	next := *e
+	next.AvailableTickets -= quantity
+	return &next, nil
 }
 
 //go:generate mockgen -source=event.go -destination=../mocks/event_repository_mock.go -package=mocks
 type EventRepository interface {
 	Create(ctx context.Context, event *Event) error
+	// GetByID is a plain read with no row lock. Safe outside a transaction.
 	GetByID(ctx context.Context, id int) (*Event, error)
-	DeductInventory(ctx context.Context, eventID, quantity int) error // Deprecated in favor of Lifecycle, but kept for legacy
+	// GetByIDForUpdate takes a FOR UPDATE row lock and MUST be called
+	// inside a UoW-managed transaction. See persistence/postgres for the
+	// rationale.
+	GetByIDForUpdate(ctx context.Context, id int) (*Event, error)
 	Update(ctx context.Context, event *Event) error
 	DecrementTicket(ctx context.Context, eventID, quantity int) error
 	IncrementTicket(ctx context.Context, eventID, quantity int) error
@@ -49,7 +57,7 @@ type EventRepository interface {
 	// compensating action when the dual-write to the Redis hot-path
 	// inventory fails after the DB row has been committed.
 	Delete(ctx context.Context, id int) error
-} // ...
+}
 
 type OutboxEvent struct {
 	ID          int

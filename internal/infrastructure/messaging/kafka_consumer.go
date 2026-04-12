@@ -34,8 +34,8 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, log *zap.SugaredLogger) *KafkaCon
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
-		GroupID:     "payment-service-group",
-		Topic:       "order.created",
+		GroupID:     cfg.PaymentGroupID,
+		Topic:       cfg.OrderCreatedTopic,
 		StartOffset: kafka.FirstOffset,
 	})
 
