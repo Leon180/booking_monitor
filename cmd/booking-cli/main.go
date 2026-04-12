@@ -20,7 +20,6 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
-	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
@@ -290,8 +289,10 @@ func runServer(cmd *cobra.Command, args []string) {
 						log.Warnw("Failed to set trusted proxies", "error", err)
 					}
 
-					r.Use(api.LoggerMiddleware(log))            // 1. Inject Logger
-					r.Use(middleware.CorrelationIDMiddleware()) // 2. Inject Correlation ID (Enriches Logger)
+					// Single combined middleware: logger + correlation ID in ONE
+					// context.WithValue + ONE c.Request.WithContext. The old
+					// two-middleware chain did 2+2 of these (~464 bytes/req).
+					r.Use(api.CombinedMiddleware(log))
 
 					r.Use(observability.MetricsMiddleware())
 					r.GET("/metrics", gin.WrapH(promhttp.Handler()))
