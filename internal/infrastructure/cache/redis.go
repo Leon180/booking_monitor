@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -143,7 +144,7 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	case -1:
 		return false, nil // Sold Out
 	default:
-		return false, errUnexpectedLuaResult
+		return false, fmt.Errorf("redis: unexpected lua result %d: %w", res, errUnexpectedLuaResult)
 	}
 }
 
