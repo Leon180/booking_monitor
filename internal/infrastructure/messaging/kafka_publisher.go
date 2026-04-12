@@ -46,6 +46,13 @@ func (p *kafkaPublisher) Publish(ctx context.Context, topic string, payload []by
 
 // Close flushes the writer but gives up after kafkaCloseTimeout so the
 // shutdown path can never block forever on a slow broker.
+//
+// Note: if the timeout fires, the background goroutine calling
+// p.writer.Close() is leaked — kafka-go's Writer.Close() has no
+// cancellation hook. This is a single-goroutine, shutdown-only leak
+// that cannot be fixed without upstream support (or switching to a
+// writer that accepts context on Close). Acceptable trade-off: the
+// process is terminating anyway.
 func (p *kafkaPublisher) Close() error {
 	done := make(chan error, 1)
 	go func() { done <- p.writer.Close() }()
