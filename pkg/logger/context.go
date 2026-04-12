@@ -6,43 +6,47 @@ import (
 	"go.uber.org/zap"
 )
 
-type ctxKey struct{}
+// RequestContext holds all per-request metadata in a single struct so we
+// need only ONE context.WithValue call instead of N separate calls.
+// This is critical for GC: each context.WithValue allocates a 32-byte
+// valueCtx struct, and each c.Request.WithContext clones the entire
+// *http.Request (~200 bytes). Consolidating N values into 1 struct
+// cuts both the WithValue and WithContext cost to 1/N.
+type RequestContext struct {
+	Logger        *zap.SugaredLogger
+	CorrelationID string
+}
+
+type reqCtxKey struct{}
+
+// WithRequestContext stores all per-request metadata in a single
+// context.WithValue call.
+func WithRequestContext(ctx context.Context, rctx *RequestContext) context.Context {
+	return context.WithValue(ctx, reqCtxKey{}, rctx)
+}
+
+// RequestContextFromCtx retrieves the consolidated request context.
+func RequestContextFromCtx(ctx context.Context) *RequestContext {
+	if rctx, ok := ctx.Value(reqCtxKey{}).(*RequestContext); ok {
+		return rctx
+	}
+	return nil
+}
 
 // FromCtx returns the SugaredLogger associated with the context.
 // If no logger is associated, it returns the global SugaredLogger.
 func FromCtx(ctx context.Context) *zap.SugaredLogger {
-	if l, ok := ctx.Value(ctxKey{}).(*zap.SugaredLogger); ok {
-		return l
+	if rctx := RequestContextFromCtx(ctx); rctx != nil && rctx.Logger != nil {
+		return rctx.Logger
 	}
 	return zap.S()
-}
-
-// WithCtx returns a copy of parent context in which the valid SugaredLogger is associated.
-func WithCtx(ctx context.Context, l *zap.SugaredLogger) context.Context {
-	return context.WithValue(ctx, ctxKey{}, l)
-}
-
-// --- Correlation ID (lightweight, no logger clone) ---
-//
-// CorrelationIDMiddleware used to call l.With("correlation_id", id)
-// on every request, which cloned the entire zap core (~1.2 KB/req).
-// At 8k RPS that was 4.1 GB/min of heap allocations and 25% of total
-// GC pressure. Now we store correlation_id as a plain context string
-// and only attach it to log calls that actually fire.
-
-type correlationKey struct{}
-
-// WithCorrelationID stores the correlation ID in the context without
-// cloning the logger. Zero allocation beyond the context.WithValue.
-func WithCorrelationID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, correlationKey{}, id)
 }
 
 // CorrelationIDFromCtx retrieves the correlation ID from the context.
 // Returns "" if not set.
 func CorrelationIDFromCtx(ctx context.Context) string {
-	if id, ok := ctx.Value(correlationKey{}).(string); ok {
-		return id
+	if rctx := RequestContextFromCtx(ctx); rctx != nil {
+		return rctx.CorrelationID
 	}
 	return ""
 }
@@ -61,4 +65,36 @@ func WithCorrelation(ctx context.Context) *zap.SugaredLogger {
 		return l.With("correlation_id", id)
 	}
 	return l
+}
+
+// --- Legacy compatibility ---
+// These are kept so existing code that calls WithCtx / WithCorrelationID
+// continues to compile. They delegate to the consolidated RequestContext.
+
+// WithCtx returns a copy of parent context with the logger set.
+// Prefer WithRequestContext for new code (consolidates all per-request
+// metadata into a single WithValue call).
+func WithCtx(ctx context.Context, l *zap.SugaredLogger) context.Context {
+	rctx := RequestContextFromCtx(ctx)
+	if rctx == nil {
+		rctx = &RequestContext{}
+	}
+	newRctx := &RequestContext{
+		Logger:        l,
+		CorrelationID: rctx.CorrelationID,
+	}
+	return WithRequestContext(ctx, newRctx)
+}
+
+// WithCorrelationID stores the correlation ID in the context.
+func WithCorrelationID(ctx context.Context, id string) context.Context {
+	rctx := RequestContextFromCtx(ctx)
+	if rctx == nil {
+		rctx = &RequestContext{}
+	}
+	newRctx := &RequestContext{
+		Logger:        rctx.Logger,
+		CorrelationID: id,
+	}
+	return WithRequestContext(ctx, newRctx)
 }

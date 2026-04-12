@@ -2,7 +2,10 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -13,6 +16,24 @@ import (
 	"booking_monitor/internal/infrastructure/config"
 	_ "embed"
 )
+
+// Pre-allocated sentinel errors for hot-path — avoids fmt.Errorf
+// interface boxing on every call.
+var (
+	errDeductScriptNotFound = errors.New("redis: script 'deduct' not found")
+	errRevertScriptNotFound = errors.New("redis: script 'revert' not found")
+	errUnexpectedLuaResult  = errors.New("redis: unexpected lua result")
+)
+
+// argsPool reuses []interface{} slices for Redis Lua script calls.
+// Each DeductInventory call needs 3 args; RevertInventory needs 1.
+// We pool a 3-element slice (the common case) and sub-slice for smaller calls.
+var argsPool = sync.Pool{
+	New: func() interface{} {
+		s := make([]interface{}, 3)
+		return &s
+	},
+}
 
 // Module provides the Redis client and InventoryRepository.
 var Module = fx.Options(
@@ -71,9 +92,13 @@ func NewRedisInventoryRepository(client *redis.Client) domain.InventoryRepositor
 	}
 }
 
-// key helper: event:{id}:qty
+// inventoryKeyPrefix + strconv avoids fmt.Sprintf interface boxing
+// on every call (~1 alloc saved per request vs fmt.Sprintf).
+const inventoryKeyPrefix = "event:"
+const inventoryKeySuffix = ":qty"
+
 func inventoryKey(eventID int) string {
-	return fmt.Sprintf("event:%d:qty", eventID)
+	return inventoryKeyPrefix + strconv.Itoa(eventID) + inventoryKeySuffix
 }
 
 // inventoryTTL is the maximum lifetime of a Redis inventory key. It is
@@ -91,13 +116,21 @@ func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID int
 }
 
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error) {
-	keys := []string{inventoryKey(eventID)}
-	// ARGV[1]=count, ARGV[2]=event_id, ARGV[3]=user_id (for stream message)
-	args := []interface{}{count, eventID, userID}
+	key := inventoryKey(eventID)
+	keys := []string{key}
+
+	// Reuse args slice from pool to avoid per-call allocation.
+	// The int→interface{} boxing still escapes, but the slice header doesn't.
+	argsPtr := argsPool.Get().(*[]interface{})
+	args := *argsPtr
+	args[0] = count
+	args[1] = eventID
+	args[2] = userID
+	defer argsPool.Put(argsPtr)
 
 	script, ok := r.scripts["deduct"]
 	if !ok {
-		return false, fmt.Errorf("script 'deduct' not found")
+		return false, errDeductScriptNotFound
 	}
 
 	res, err := script.Run(ctx, r.client, keys, args...).Int()
@@ -111,17 +144,22 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	case -1:
 		return false, nil // Sold Out
 	default:
-		return false, fmt.Errorf("unexpected lua result: %d", res)
+		return false, fmt.Errorf("redis: unexpected lua result %d: %w", res, errUnexpectedLuaResult)
 	}
 }
 
 func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, count int, compensationID string) error {
 	keys := []string{inventoryKey(eventID), "saga:reverted:" + compensationID}
-	args := []interface{}{count}
+
+	// Reuse pooled args slice (sub-slice to 1 element for revert).
+	argsPtr := argsPool.Get().(*[]interface{})
+	args := (*argsPtr)[:1]
+	args[0] = count
+	defer argsPool.Put(argsPtr)
 
 	script, ok := r.scripts["revert"]
 	if !ok {
-		return fmt.Errorf("script 'revert' not found")
+		return errRevertScriptNotFound
 	}
 
 	return script.Run(ctx, r.client, keys, args...).Err()
