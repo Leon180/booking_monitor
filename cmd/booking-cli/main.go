@@ -39,6 +39,13 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
+	// pprof: registers /debug/pprof/* handlers on http.DefaultServeMux.
+	// A separate listener on :6060 serves these (see runServer OnStart).
+	// This is gated behind the ENABLE_PPROF env var — set to "true" to
+	// start the profiling server. Never expose in production without
+	// network-level access control.
+	_ "net/http/pprof"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -320,6 +327,18 @@ func runServer(cmd *cobra.Command, args []string) {
 							log.Errorw("Server failed", "error", err)
 						}
 					}()
+
+					// pprof server on :6060 (opt-in via ENABLE_PPROF=true).
+					// Uses http.DefaultServeMux which already has /debug/pprof/*
+					// registered via the blank import above.
+					if strings.EqualFold(os.Getenv("ENABLE_PPROF"), "true") {
+						go func() {
+							log.Infow("pprof server started", "addr", ":6060")
+							if err := http.ListenAndServe(":6060", nil); err != nil {
+								log.Errorw("pprof server failed", "error", err)
+							}
+						}()
+					}
 
 					// Start Background Worker (Redis -> DB Outbox)
 					go worker.Start(workerCtx)
