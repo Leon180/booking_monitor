@@ -5,6 +5,8 @@ services:
     build: .
     container_name: booking_app
     command: [ "/app/booking-cli", "server" ]
+    ports:
+      - "6060:6060"   # pprof (only active when ENABLE_PPROF=true)
     depends_on:
       - postgres
       - jaeger
@@ -19,6 +21,9 @@ services:
       - KAFKA_BROKERS=${KAFKA_BROKERS:?KAFKA_BROKERS is required}
       - GIN_MODE=${GIN_MODE:-release}
       - APP_ENV=${APP_ENV:-production}
+      - GOGC=${GOGC:-100}
+      - OTEL_TRACES_SAMPLER_RATIO=${OTEL_TRACES_SAMPLER_RATIO:-1}
+      - ENABLE_PPROF=${ENABLE_PPROF:-false}
 
   nginx:
     image: nginx:1.27-alpine
