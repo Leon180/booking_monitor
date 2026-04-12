@@ -252,12 +252,12 @@ docker exec booking_app sh -c '
 
 ```bash
 docker exec booking_app wget -qO- http://localhost:8080/metrics 2>/dev/null \
-  | grep -E "^(dlq_messages_total|saga_poison_messages_total)"
-# Expected: 6 dlq_messages_total lines + 1 saga_poison_messages_total line, all value 0
+  | grep -E "^(dlq_messages_total|saga_poison_messages_total|kafka_consumer_retry_total)"
+# Expected: 6 dlq_messages_total + 1 saga_poison_messages_total + 2 kafka_consumer_retry_total = 9 lines, all value 0
 # The labels should be pre-initialized for all known {topic, reason} combos
 ```
 
-**Pass criteria:** 7 counter lines present at value 0.
+**Pass criteria:** 9 counter lines present at value 0 (6 dlq + 1 saga_poison + 2 kafka_consumer_retry).
 
 ---
 
