@@ -274,9 +274,10 @@ func runServer(cmd *cobra.Command, args []string) {
 			// Context for worker shutdown
 			workerCtx, workerCancel := context.WithCancel(context.Background())
 
-			// Shared between OnStart and OnStop so the HTTP server can be
+			// Shared between OnStart and OnStop so servers can be
 			// gracefully shut down. Constructed inside OnStart.
 			var httpServer *http.Server
+			var pprofServer *http.Server
 
 			// Hooks
 			lc.Append(fx.Hook{
@@ -330,11 +331,13 @@ func runServer(cmd *cobra.Command, args []string) {
 
 					// pprof server on :6060 (opt-in via ENABLE_PPROF=true).
 					// Uses http.DefaultServeMux which already has /debug/pprof/*
-					// registered via the blank import above.
+					// registered via the blank import above. Wrapped in an
+					// http.Server so OnStop can shut it down cleanly.
 					if strings.EqualFold(os.Getenv("ENABLE_PPROF"), "true") {
+						pprofServer = &http.Server{Addr: ":6060", Handler: nil}
 						go func() {
 							log.Infow("pprof server started", "addr", ":6060")
-							if err := http.ListenAndServe(":6060", nil); err != nil {
+							if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 								log.Errorw("pprof server failed", "error", err)
 							}
 						}()
@@ -356,6 +359,13 @@ func runServer(cmd *cobra.Command, args []string) {
 					log.Info("Stopping worker services...")
 					workerCancel()
 					_ = sagaConsumer.Close()
+
+					if pprofServer != nil {
+						log.Info("Shutting down pprof server")
+						if err := pprofServer.Shutdown(ctx); err != nil {
+							log.Errorw("pprof server shutdown error", "error", err)
+						}
+					}
 
 					if httpServer != nil {
 						log.Info("Shutting down HTTP server")

@@ -46,3 +46,19 @@ func CorrelationIDFromCtx(ctx context.Context) string {
 	}
 	return ""
 }
+
+// WithCorrelation returns the context logger enriched with the
+// correlation_id field (if present). Use this on ERROR PATHS ONLY —
+// calling it on every request would re-introduce the zap core clone
+// that we removed from CorrelationIDMiddleware for GC reasons.
+//
+// Usage (in handler error paths):
+//
+//	logger.WithCorrelation(ctx).Errorw("something failed", "error", err)
+func WithCorrelation(ctx context.Context) *zap.SugaredLogger {
+	l := FromCtx(ctx)
+	if id := CorrelationIDFromCtx(ctx); id != "" {
+		return l.With("correlation_id", id)
+	}
+	return l
+}

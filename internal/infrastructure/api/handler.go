@@ -49,7 +49,6 @@ type meta struct {
 
 func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 	ctx := c.Request.Context()
-	log := logger.FromCtx(ctx)
 
 	var req struct {
 		Page   int     `form:"page"`
@@ -57,7 +56,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 		Status *string `form:"status"`
 	}
 	if err := c.ShouldBindQuery(&req); err != nil {
-		log.Warnw("invalid history query params", "error", err)
+		logger.WithCorrelation(ctx).Warnw("invalid history query params", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters"})
 		return
 	}
@@ -76,7 +75,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 
 	orders, total, err := h.service.GetBookingHistory(ctx, req.Page, req.Size, orserStatus)
 	if err != nil {
-		log.Errorw("GetBookingHistory failed", "error", err)
+		logger.WithCorrelation(ctx).Errorw("GetBookingHistory failed", "error", err)
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})
 		return
@@ -94,11 +93,10 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 
 func (h *bookingHandler) HandleBook(c *gin.Context) {
 	ctx := c.Request.Context()
-	log := logger.FromCtx(ctx)
 
 	var req bookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Warnw("invalid book request body", "error", err)
+		logger.WithCorrelation(ctx).Warnw("invalid book request body", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -124,7 +122,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	if err != nil {
 		// Log the raw error with full context server-side, then translate to
 		// a sanitized public message via mapError so we never leak DB errors.
-		log.Errorw("BookTicket failed",
+		logger.WithCorrelation(ctx).Errorw("BookTicket failed",
 			"error", err,
 			"user_id", req.UserID,
 			"event_id", req.EventID,
@@ -157,18 +155,17 @@ type createEventRequest struct {
 
 func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 	ctx := c.Request.Context()
-	log := logger.FromCtx(ctx)
 
 	var req createEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Warnw("invalid create event request", "error", err)
+		logger.WithCorrelation(ctx).Warnw("invalid create event request", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
 	event, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets)
 	if err != nil {
-		log.Errorw("CreateEvent failed", "error", err, "name", req.Name, "total_tickets", req.TotalTickets)
+		logger.WithCorrelation(ctx).Errorw("CreateEvent failed", "error", err, "name", req.Name, "total_tickets", req.TotalTickets)
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})
 		return

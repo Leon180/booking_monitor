@@ -26,7 +26,7 @@ else
 fi
 
 # CSV header
-echo "timestamp,gc_pause_max_ns,gc_pause_p75_ns,heap_inuse_bytes,heap_alloc_bytes,goroutines,mallocs_total,frees_total,gc_cycles_total" > "$OUTPUT"
+echo "timestamp,gc_pause_max_sec,gc_pause_p75_sec,heap_inuse_bytes,heap_alloc_bytes,goroutines,mallocs_total,frees_total,gc_cycles_total" > "$OUTPUT"
 
 echo "[gc_metrics] Collecting every ${INTERVAL}s → $OUTPUT (Ctrl-C to stop)"
 
