@@ -78,6 +78,27 @@ var (
 			Help: "Total number of inventory conflicts (Redis approved, DB rejected)",
 		},
 	)
+
+	// DLQMessagesTotal counts messages routed to a dead-letter queue by
+	// topic and reason. Labels:
+	//   topic  = "order.created.dlq" | "order.failed.dlq"
+	//   reason = "invalid_payload" | "invalid_event" | "max_retries"
+	DLQMessagesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dlq_messages_total",
+			Help: "Total number of messages written to a dead-letter queue",
+		},
+		[]string{"topic", "reason"},
+	)
+
+	// SagaPoisonMessagesTotal counts saga events that exceeded the
+	// compensator retry budget and were dead-lettered.
+	SagaPoisonMessagesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "saga_poison_messages_total",
+			Help: "Total number of saga events dead-lettered after max retries",
+		},
+	)
 )
 
 func MetricsMiddleware() gin.HandlerFunc {
@@ -99,5 +120,10 @@ func init() {
 	}
 	for _, status := range []string{"success", "sold_out", "duplicate", "db_error"} {
 		WorkerOrdersTotal.WithLabelValues(status)
+	}
+	for _, topic := range []string{"order.created.dlq", "order.failed.dlq"} {
+		for _, reason := range []string{"invalid_payload", "invalid_event", "max_retries"} {
+			DLQMessagesTotal.WithLabelValues(topic, reason)
+		}
 	}
 }

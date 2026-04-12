@@ -24,9 +24,15 @@ groups:
           description: "p99 Latency is above 2s (current: {{ $value }}s)"
 
       - alert: InventorySoldOut
-        expr: booking_sold_out_total > 0
+        # Uses `bookings_total{status="sold_out"}`, the real metric
+        # registered in internal/infrastructure/observability/metrics.go.
+        # The previous expression referenced `booking_sold_out_total`, a
+        # metric that does not exist in the codebase, so the alert could
+        # never fire.
+        expr: increase(bookings_total{status="sold_out"}[5m]) > 0
+        for: 0m
         labels:
           severity: info
         annotations:
           summary: "Event Sold Out"
-          description: "An event has been sold out."
+          description: "At least one booking attempt in the last 5 minutes returned sold_out ({{ $value }} attempts)."

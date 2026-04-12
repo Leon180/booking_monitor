@@ -4,26 +4,52 @@ import (
 	"context"
 
 	"go.uber.org/fx"
+	"go.uber.org/zap"
+
+	"booking_monitor/internal/domain"
 )
 
 var Module = fx.Module("application",
+	// BookingService is provided as a fully-decorated chain:
+	//   base -> tracing -> metrics
+	// We use fx.Provide with an inline constructor rather than
+	// fx.Provide(NewBookingService) + fx.Decorate, because fx.Decorate
+	// is module-scoped from fx v1.17+ — it only applies to consumers
+	// inside the same fx.Module. Our api.Module consumes BookingService
+	// from outside, so it would receive the base (undecorated)
+	// instance and skip every metric / trace. Inlining the wrap at
+	// the provide site sidesteps the scoping issue entirely.
 	fx.Provide(
-		NewBookingService,
+		func(
+			eventRepo domain.EventRepository,
+			orderRepo domain.OrderRepository,
+			inventoryRepo domain.InventoryRepository,
+			uow domain.UnitOfWork,
+		) BookingService {
+			base := NewBookingService(eventRepo, orderRepo, inventoryRepo, uow)
+			return NewBookingServiceMetricsDecorator(
+				NewBookingServiceTracingDecorator(base),
+			)
+		},
 		NewEventService,
-		NewWorkerService,
 		NewOutboxRelay,
 		NewSagaCompensator,
 	),
-	fx.Decorate(
-		// BookingService chain: base -> tracing -> metrics
-		func(svc BookingService) BookingService {
-			return NewBookingServiceMetricsDecorator(
-				NewBookingServiceTracingDecorator(svc),
-			)
-		},
-		// WorkerService chain: base -> metrics
-		func(svc WorkerService) WorkerService {
-			return NewWorkerServiceMetricsDecorator(svc)
+	// WorkerService is provided similarly — wrap with metrics at the
+	// provide site so any future external consumer gets the decorated
+	// instance.
+	fx.Provide(
+		func(
+			queue domain.OrderQueue,
+			orderRepo domain.OrderRepository,
+			eventRepo domain.EventRepository,
+			outboxRepo domain.OutboxRepository,
+			uow domain.UnitOfWork,
+			metrics domain.WorkerMetrics,
+			logger *zap.SugaredLogger,
+		) WorkerService {
+			base := NewWorkerService(queue, orderRepo, eventRepo, outboxRepo, uow, metrics, logger)
+			return NewWorkerServiceMetricsDecorator(base)
 		},
 	),
 	// Start the outbox relay (with tracing) as a background goroutine managed by the Fx lifecycle.

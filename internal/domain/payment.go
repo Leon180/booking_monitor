@@ -2,8 +2,16 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrInvalidPaymentEvent is returned by PaymentService.ProcessOrder when the
+// OrderCreatedEvent payload fails input validation (zero/negative OrderID,
+// negative Amount, etc.). Consumers MUST treat this as a dead-letter
+// condition: log, publish to DLQ if configured, commit the offset, and move
+// on. It is NEVER a retryable error.
+var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 
 // PaymentGateway defines the interface for external payment processing.
 type PaymentGateway interface {
