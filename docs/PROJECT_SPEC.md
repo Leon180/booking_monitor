@@ -8,7 +8,7 @@ A high-concurrency ticket booking system designed to simulate "flash sale" scena
 
 **Goal**: Prevent overselling through a multi-layer strategy while maximizing throughput.
 
-**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases). A multi-agent review on Apr 11, 2026 surfaced 66 findings, which were remediated in PRs #8 (CRITICAL), #9 (HIGH), #10 (MEDIUM/LOW/NIT) — see Section 8.
+**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases). A multi-agent review on Apr 11, 2026 surfaced 66 findings, remediated across PRs #8 (CRITICAL) / #9 (HIGH) / #12 (MEDIUM/LOW/NIT) / #13 (observability + smoke test plan). GC optimization followed on Apr 12–13 via PRs #14 (baseline harness + quick wins, +157% RPS) and #15 (deep fixes: sync.Pool, escape analysis, GOMEMLIMIT, combined middleware). See Section 8.
 
 ---
 
@@ -361,6 +361,22 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 ### Dashboards (Grafana)
 Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP Fairness, Saturation
 
+### Profiling (pprof)
+- `net/http/pprof` exposes `/debug/pprof/*` on a **separate** listener `:6060` — NOT on the main Gin router and NOT routed through nginx
+- Controlled by `ENABLE_PPROF` env var (`true` to enable, defaults to `false`). Port 6060 is published in `docker-compose.yml` only for local use
+- Wrapped in an `http.Server` with an fx `OnStop` hook (clean shutdown, no goroutine leak)
+- Capture scripts: `scripts/pprof_capture.sh` grabs heap + allocs (30s sample) + goroutine profiles mid-test; `scripts/benchmark_gc.sh` orchestrates the whole run
+- Use `go tool pprof -alloc_space -top pprof/heap.pb.gz` to see cumulative allocation hotspots
+
+### Runtime tuning env vars
+
+| Variable | Default (.env) | Fallback (compose) | Purpose |
+|----------|----------------|--------------------|---------|
+| `GOGC` | `400` | `100` | GC trigger ratio. Higher = GC less often, higher peak heap |
+| `GOMEMLIMIT` | `256MiB` | (unset) | Soft memory limit. Pairs with GOGC so GC is aggressive only near the cap |
+| `OTEL_TRACES_SAMPLER_RATIO` | `0.01` | `1` | Fraction of requests sampled. `0` disables, `1` always samples |
+| `ENABLE_PPROF` | `true` | `false` | Whether to start the pprof listener on `:6060` |
+
 ---
 
 ## 8. Development Phases (Complete History)
@@ -380,7 +396,8 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 | 10 | Feb 20 | `572d430` | Nginx API gateway + rate limiting + observability refinements |
 | 11 | Feb 21 | `f56ab82` | PostgreSQL advisory locks for OutboxRelay leader election |
 | 12 | Feb 24 | `4e89ff7` | Saga compensation + idempotent Redis rollback + partial unique index (allows retry after payment failure) |
-| 13 | Apr 11 | PRs #7–#10 | **Multi-agent review + remediation**: 66 findings across 6 review dimensions (domain/app, persistence, concurrency/cache, messaging/saga, api/payment, observability/deploy). All 6 CRITICAL and all 13 HIGH items fixed in [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) and [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9); 17 MEDIUM / 14 LOW / 6 NIT items fixed in [`fix/review-backlog` (#10)](https://github.com/Leon180/booking_monitor/pull/10). Consolidated backlog lives at [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md). See the **Remediation highlights** block below for the user-visible changes. |
+| 13 | Apr 11 | PRs #7 / #8 / #9 / #12 / #13 | **Multi-agent review + remediation**: 66 findings across 6 review dimensions (domain/app, persistence, concurrency/cache, messaging/saga, api/payment, observability/deploy). All 6 CRITICAL and all 13 HIGH items fixed in [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) and [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9); 17 MEDIUM / 14 LOW / 6 NIT items fixed in [`fix/review-backlog` (#12)](https://github.com/Leon180/booking_monitor/pull/12); docs + `kafka_consumer_retry_total` metric + `KafkaConsumerStuck` alert + [`docs/reviews/SMOKE_TEST_PLAN.md`](reviews/SMOKE_TEST_PLAN.md) in [`fix/review-docs` (#13)](https://github.com/Leon180/booking_monitor/pull/13). Consolidated backlog lives at [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md). See the **Remediation highlights** block below for the user-visible changes. |
+| 14 | Apr 12–13 | PRs #14 / #15 | **GC optimization**: baseline benchmark revealed a 70% RPS regression caused by fx.Decorate fix re-enabling tracing/metrics decorators + `AlwaysSample()` + per-request zap core clone. Fixed in two PRs. [`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) added the benchmark harness (pprof endpoint on `:6060`, `scripts/benchmark_gc.sh`, `scripts/gc_metrics.sh`, `scripts/pprof_capture.sh`) and three quick wins (`OTEL_TRACES_SAMPLER_RATIO=0.01`, `GOGC=400`, CorrelationIDMiddleware no longer clones the zap core) — RPS 7,984 → 20,552 (+157%). [`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) followed with deep fixes: `sync.Pool` for Redis Lua script args, `strconv.Itoa` key concat (replaces `fmt.Sprintf` boxing), `GOMEMLIMIT=256MiB`, and a consolidated `CombinedMiddleware` that does exactly one `context.WithValue` + one `c.Request.WithContext` per request — mallocs/60s: 258M → 110M (−57%), GC cycles/60s: 202 → 86 (−57%). See the **Phase 14 highlights** block below. |
 
 ### Remediation highlights (Phase 13)
 
@@ -392,18 +409,28 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 - **Observability**: configurable OTel sampler via `OTEL_TRACES_SAMPLER_RATIO`, `recordHTTPResult` helper flags 4xx as span errors, `InventorySoldOut` alert now uses the real `bookings_total{status="sold_out"}` metric.
 - **Persistence**: new partial index `events_outbox_pending_idx` (migration 000007), pool setters moved before the ping + new `ConnMaxLifetime`, `GetByID` split into plain + `GetByIDForUpdate`, 19 repository sites now wrap errors with `%w`.
 
+### Phase 14 highlights (GC optimization)
+
+- **Benchmark harness**: `net/http/pprof` on a separate `:6060` listener (gated by `ENABLE_PPROF=true`), `scripts/benchmark_gc.sh` / `scripts/gc_metrics.sh` / `scripts/pprof_capture.sh` orchestrate k6 + Go runtime metrics + heap/allocs profiles into a single report under `docs/benchmarks/`. The listener uses its own `http.Server` with an fx `OnStop` shutdown hook — no goroutine leak.
+- **Sampler tuning**: `OTEL_TRACES_SAMPLER_RATIO` defaults to `0.01` (1%). Unsampled requests get a no-op span (zero allocation) instead of a full export through the batch span processor.
+- **Runtime tuning**: `GOGC=400` + `GOMEMLIMIT=256MiB` — GC stays lazy during normal traffic but becomes aggressive as heap approaches the soft limit, preventing unbounded growth during spikes.
+- **Hot-path allocation cuts**: `CombinedMiddleware` does exactly one `context.WithValue` + one `c.Request.WithContext` per request by consolidating logger + correlation ID into a single `RequestContext` struct (`pkg/logger/context.go`); Redis Lua script args reuse a `sync.Pool`-backed `[]interface{}`; inventory keys use `strconv.Itoa` concat instead of `fmt.Sprintf` to avoid interface boxing; sentinel errors (`errDeductScriptNotFound`, `errRevertScriptNotFound`, `errUnexpectedLuaResult`) replace per-call `fmt.Errorf`.
+- **Result**: clean-run RPS 7,984 → 20,552 (+157%); allocations/60s 258M → 110M (−57%); GC cycles/60s 202 → 86 (−57%); GC pause max 79ms → 41ms (−48%); heap peak bounded by `GOMEMLIMIT` at ≤256MB.
+
 ---
 
 ## 9. Performance Benchmarks
 
-| Configuration | RPS | P99 Latency | Bottleneck |
-|---------------|-----|-------------|------------|
-| Stage 1: Postgres only | ~4,000 | ~500ms | DB CPU (212%) |
-| Stage 2: Redis hot inventory | ~11,000 | ~50ms | Memory/Network |
-| Stage 2 + Kafka outbox | ~9,000 | ~100ms | Kafka throughput |
-| Full system (with saga) | ~8,500 | ~120ms | Saga overhead |
+| Configuration | RPS | P99 / P95 Latency | Notes |
+|---------------|-----|-------------------|-------|
+| Stage 1: Postgres only | ~4,000 | ~500ms (P99) | DB CPU bound (212%) |
+| Stage 2: Redis hot inventory | ~11,000 | ~50ms (P99) | Memory / Network bound |
+| Stage 2 + Kafka outbox | ~9,000 | ~100ms (P99) | Kafka throughput bound |
+| Full system (pre-Phase 13) | ~26,879 | ~33ms (P95) | Feb 2026 baseline — tracing decorator silently disabled due to fx bug |
+| Post-remediation, pre-GC | ~7,984 | ~98ms (P95) | Phase 13 fx fix re-enabled decorators + AlwaysSample → 70% regression |
+| **Post-Phase 14 GC wins** | **~20,552** | **~45ms (P95)** | PR #14 quick wins (sampler 0.01 + GOGC=400 + no-clone middleware) |
 
-Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
+Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs and the `*_gc_*` runs with pprof + GC metrics.
 
 ---
 
@@ -462,7 +489,7 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | `internal/infrastructure/api/handler.go` | HTTP handlers + route registration |
 | `internal/infrastructure/api/errors.go` | `mapError(err) (status, publicMsg)` helper — sanitized public error responses |
 | `internal/infrastructure/api/handler_tracing.go` | Tracing decorator + `recordHTTPResult` span helper |
-| `internal/infrastructure/api/middleware/` | Idempotency, correlation ID, metrics, tracing |
+| `internal/infrastructure/api/middleware.go` | `CombinedMiddleware` (Phase 14): single-pass logger + correlation ID injection (1 `context.WithValue` + 1 `c.Request.WithContext` per request) |
 | `internal/infrastructure/cache/redis.go` | Redis inventory + idempotency repos |
 | `internal/infrastructure/cache/redis_queue.go` | Redis Streams consumer |
 | `internal/infrastructure/cache/lua/deduct.lua` | Atomic inventory deduction script |
@@ -477,6 +504,12 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | `internal/infrastructure/config/config.go` | YAML config + env overrides |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock payment gateway |
 
+### Shared Packages (`pkg/`)
+| File | Purpose |
+|------|---------|
+| `pkg/logger/context.go` | `RequestContext` struct + `WithRequestContext` / `FromCtx` / `CorrelationIDFromCtx` / `WithCorrelation` helpers. One context key, one allocation per request |
+| `pkg/logger/logger.go` | Zap logger bootstrap (JSON encoder, stdout) |
+
 ### Configuration & Deployment
 | File | Purpose |
 |------|---------|
@@ -488,8 +521,17 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | `deploy/redis/redis.conf` | Redis AOF persistence config (password is passed via `--requirepass ${REDIS_PASSWORD}` in docker-compose, not baked into the conf) |
 | `deploy/nginx/nginx.conf` | Rate limiting + reverse proxy; bounded proxy timeouts + upstream keepalive |
 | `deploy/prometheus/prometheus.yml` | Scrape config (15s interval) |
-| `deploy/prometheus/alerts.yml` | Alert rules (`HighErrorRate`, `HighLatency`, `InventorySoldOut`) |
+| `deploy/prometheus/alerts.yml` | Alert rules (`HighErrorRate`, `HighLatency`, `InventorySoldOut`, `KafkaConsumerStuck`) |
 | `deploy/grafana/provisioning/` | Pre-configured datasources + dashboards (`timeseries` panels, `disableDeletion: true`) |
+
+### Benchmark & Profiling Scripts
+| File | Purpose |
+|------|---------|
+| `scripts/k6_comparison.js` | k6 load scenario (500k-ticket pool, 500 VUs, 60s constant-vus) used by both benchmark harnesses |
+| `scripts/benchmark_compare.sh` | Two-run A/B benchmark producing historical-format comparison reports |
+| `scripts/benchmark_gc.sh` | Phase 14: k6 + gc_metrics + pprof captured together; produces GC Runtime Metrics table |
+| `scripts/gc_metrics.sh` | Polls `/metrics` every 5s for `go_gc_duration_seconds`, `go_memstats_*`, `go_goroutines` into CSV |
+| `scripts/pprof_capture.sh` | Grabs heap + allocs (30s sample) + goroutine profiles from `:6060` mid-test |
 
 ### Documentation
 | File | Purpose |
@@ -500,4 +542,5 @@ Benchmark reports in `docs/benchmarks/` (15 timestamped directories).
 | `docs/adr/0001_async_queue_selection.md` | Redis Streams vs Kafka decision |
 | `docs/reviews/phase2_review.md` | Redis integration review |
 | `docs/reviews/ACTION_LIST.md` | Phase 13 consolidated remediation backlog (66 findings, severity-ranked, links back to review PRs) |
-| `docs/benchmarks/` | 15 timestamped performance reports |
+| `docs/reviews/SMOKE_TEST_PLAN.md` | 12-section repeatable runbook covering CRITICAL / HIGH remediation (pre-init metrics, legacy route removal, config validation, DLQ paths, etc.) |
+| `docs/benchmarks/` | Timestamped performance reports; Phase 14 baseline + GC runs stored under `*_gc_*` and `*_compare_c500` prefixes |

@@ -68,19 +68,22 @@ GET  /api/v1/history       # 分頁查詢訂單 (?page=&size=&status=)
 POST /api/v1/events        # 建立活動 (name, total_tickets)
 GET  /api/v1/events/:id    # 查看活動
 GET  /metrics              # Prometheus 指標
-POST /book                 # 舊版 route(Phase 0 保留)
 ```
+
+舊版 `POST /book` 已於 Phase 13 remediation(PR #9 H9)移除 — 它會繞過 nginx 的限流 zone。所有呼叫端必須改用 `/api/v1/book`。
 
 ## 資料庫
 - PostgreSQL 對外 port 5433(user/password/booking)
 - 3 張資料表:`events`, `orders`, `events_outbox`
-- 6 個 migration 檔位於 `deploy/postgres/migrations/`
+- 7 個 migration 檔位於 `deploy/postgres/migrations/`(PR #12 新增 000007:`events_outbox(id) WHERE processed_at IS NULL` 的部分索引)
 
 ## Kafka Topics
-| Topic | Producer | Consumer Group | Consumer |
-|-------|----------|----------------|----------|
-| `order.created` | OutboxRelay | `payment-service-group-test` | PaymentWorker |
-| `order.failed` | PaymentWorker (透過 outbox) | `booking-saga-group` | SagaCompensator |
+- `order.created` — 由 payment service 消費(group `payment-service-group`)
+- `order.created.dlq` — 無法解析 / invalid payment event 的 dead letter
+- `order.failed` — 由 saga compensator 消費(group `booking-saga-group`)
+- `order.failed.dlq` — saga 事件超過 `sagaMaxRetries=3` 後的 dead letter
+
+Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CREATED_TOPIC`、`KAFKA_SAGA_GROUP_ID`、`KAFKA_ORDER_FAILED_TOPIC` 設定。
 
 ## 開發規範
 - **Immutable 資料模式**:建立新物件,不要 mutate
@@ -90,8 +93,8 @@ POST /book                 # 舊版 route(Phase 0 保留)
 - 不得硬編密碼/金鑰,一律用環境變數
 - 測試使用 testify/assert + go.uber.org/mock
 
-## 目前狀態(截至 2026-02-24)
-已完成 12 個階段。核心系統完整運作:雙層庫存、非同步處理、Outbox、付款流程、Saga 補償。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
+## 目前狀態(截至 2026-04-21)
+已完成 14 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
 
 ## 待辦路線圖
 - **DLQ Worker**(優先):dead letter 的重試政策(目前訊息進了 `orders:dlq` 就沒有重跑機制)
@@ -100,20 +103,26 @@ POST /book                 # 舊版 route(Phase 0 保留)
 - **真實支付閘道**:目前只有 mock
 - **管理後台**:目前沒有管理 UI
 
+## 關鍵環境變數(GC / Tracing / Profiling)
+- `GOGC`(`.env` 預設 `400`,docker-compose fallback `100`)— 數值越高 GC 觸發越少
+- `GOMEMLIMIT=256MiB` — 軟記憶體上限;搭配 GOGC 使用,只有在接近上限時才變積極
+- `OTEL_TRACES_SAMPLER_RATIO`(預設 `0.01`)— 採樣 1%;`1` = 永遠採樣,`0` = 全不採樣
+- `ENABLE_PPROF`(預設 `false`)— 設為 `true` 時 pprof 會開在 `:6060`
+
 ## `.claude/` 下的可用工具
 
 Claude Code 會自動探索 `.claude/agents/` 與 `.claude/skills/` 下的資產。以下工具採自 [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code)(MIT),完整來源清單見 [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md)。
 
 ### Subagents(`.claude/agents/`)
-- **go-reviewer** — 修改任何 Go 程式碼時使用。檢查安全性(SQL/command injection、race condition、`InsecureSkipVerify`)、錯誤處理(wrapping、`errors.Is/As`)、併發(goroutine leak、channel deadlock)以及程式碼品質。
-- **go-build-resolver** — `go build` 或 `go test` 失敗時使用。診斷 import cycle、版本不一致、模組錯誤。
-- **silent-failure-hunter** — review 錯誤處理路徑時使用,尤其是 Kafka consumers([internal/infrastructure/messaging/](../internal/infrastructure/messaging/))、outbox relay([internal/application/outbox_relay.go](../internal/application/outbox_relay.go))、saga compensator、worker service。專門獵捕被吞掉的 error、空的 catch 區塊、錯誤的 fallback。
+- **go-reviewer** — TRIGGER:PR 內有任何 `*.go` 檔異動。檢查安全性(SQL/command injection、race condition、`InsecureSkipVerify`)、錯誤處理(wrapping、`errors.Is/As`)、併發(goroutine leak、channel deadlock)以及程式碼品質。
+- **go-build-resolver** — TRIGGER:`go build` 或 `go test` 失敗。診斷 import cycle、版本不一致、模組錯誤。
+- **silent-failure-hunter** — TRIGGER:review 錯誤處理路徑,尤其是 Kafka consumers([internal/infrastructure/messaging/](../internal/infrastructure/messaging/))、outbox relay([internal/application/outbox_relay.go](../internal/application/outbox_relay.go))、saga compensator、worker service。專門獵捕被吞掉的 error、空的 catch 區塊、錯誤的 fallback。
 
 ### Skills(`.claude/skills/`)
-- **golang-patterns** — Go 慣用寫法:小型介面、錯誤 wrapping、context 傳遞。
-- **golang-testing** — Table-driven tests、`testify` / `go.uber.org/mock`、race detection、覆蓋率。
-- **postgres-patterns** — PG 專屬:交易、advisory lock、索引、連線池。
-- **tdd-workflow** — Red-green-refactor 循環,把全域 coding style 裡面的 TDD 規範落實成可執行步驟。
+- **golang-patterns** — TRIGGER:撰寫新的 Go 程式碼。Go 慣用寫法:小型介面、錯誤 wrapping、context 傳遞。
+- **golang-testing** — TRIGGER:補測試。Table-driven tests、`testify` / `go.uber.org/mock`、race detection、覆蓋率。
+- **postgres-patterns** — TRIGGER:動到 `internal/infrastructure/persistence/postgres/` 或 migration。交易、advisory lock、索引、連線池。
+- **tdd-workflow** — TRIGGER:開始新的 feature / bugfix。Red-green-refactor 循環,把全域 coding style 裡面的 TDD 規範落實成可執行步驟。
 
 ### Rules(`.claude/rules/golang/`)
 在使用者的全域 `~/.claude/rules/common/` 之上,加入 Go 專用的標準: `coding-style.md`, `hooks.md`, `patterns.md`, `security.md`, `testing.md`。

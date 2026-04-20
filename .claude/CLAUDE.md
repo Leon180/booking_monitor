@@ -68,17 +68,22 @@ GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
 POST /api/v1/events        # Create event (name, total_tickets)
 GET  /api/v1/events/:id    # View event details
 GET  /metrics              # Prometheus metrics
-POST /book                 # Legacy route (Phase 0 retained)
 ```
+
+Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypassed nginx rate-limit zones. All callers must use `/api/v1/book`.
 
 ## Database
 - PostgreSQL on port 5433 (user/password/booking)
 - 3 tables: `events`, `orders`, `events_outbox`
-- 6 migrations in `deploy/postgres/migrations/`
+- 7 migrations in `deploy/postgres/migrations/` (000007 added in PR #12: partial index on `events_outbox(id) WHERE processed_at IS NULL`)
 
 ## Kafka Topics
-- `order.created` - consumed by payment service
-- `order.failed` - consumed by saga compensator
+- `order.created` — consumed by payment service (group `payment-service-group`)
+- `order.created.dlq` — dead letter for unparseable / invalid payment events
+- `order.failed` — consumed by saga compensator (group `booking-saga-group`)
+- `order.failed.dlq` — dead letter for saga events that exceed `sagaMaxRetries=3`
+
+Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`.
 
 ## Development Conventions
 - Immutable data patterns - create new objects, never mutate
@@ -88,8 +93,8 @@ POST /book                 # Legacy route (Phase 0 retained)
 - No hardcoded secrets - use env vars
 - Tests use testify/assert + go.uber.org/mock
 
-## Current State (as of 2026-02-24)
-12 phases completed. Core system fully functional with dual-tier inventory, async processing, outbox, payment flow, and saga compensation. See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
+## Current State (as of 2026-04-21)
+14 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
 
 ## Remaining Roadmap
 - DLQ Worker (dead letter retry policy)
@@ -97,20 +102,26 @@ POST /book                 # Legacy route (Phase 0 retained)
 - Horizontal scaling tests
 - Real payment gateway integration
 
+## Key Env Vars (GC / Tracing / Profiling)
+- `GOGC` (default `400` in `.env`, `100` fallback in docker-compose) — higher = less frequent GC
+- `GOMEMLIMIT=256MiB` — soft memory limit; pairs with GOGC so GC gets aggressive only near the cap
+- `OTEL_TRACES_SAMPLER_RATIO` (default `0.01`) — 1% sampling; `1` = always, `0` = never
+- `ENABLE_PPROF` (default `false`) — when `true`, pprof endpoints served on `:6060`
+
 ## Available Tooling under `.claude/`
 
 Claude Code auto-discovers assets placed under `.claude/agents/` and `.claude/skills/`. These are adopted from [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) (MIT) — see [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 ### Subagents (`.claude/agents/`)
-- **go-reviewer** — Use on any Go code change. Checks security (SQL/command injection, race conditions, `InsecureSkipVerify`), error handling (wrapping, `errors.Is/As`), concurrency (goroutine leaks, channel deadlocks), and code quality.
-- **go-build-resolver** — Use when `go build` or `go test` fails. Diagnoses import cycles, version mismatches, module errors.
-- **silent-failure-hunter** — Use when reviewing error-handling paths, especially in Kafka consumers ([internal/infrastructure/messaging/](../internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox_relay.go](../internal/application/outbox_relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
+- **go-reviewer** — TRIGGER: any `*.go` file modified in a PR. Checks security (SQL/command injection, race conditions, `InsecureSkipVerify`), error handling (wrapping, `errors.Is/As`), concurrency (goroutine leaks, channel deadlocks), and code quality.
+- **go-build-resolver** — TRIGGER: `go build` or `go test` fails. Diagnoses import cycles, version mismatches, module errors.
+- **silent-failure-hunter** — TRIGGER: reviewing code that returns or swallows errors, especially Kafka consumers ([internal/infrastructure/messaging/](../internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox_relay.go](../internal/application/outbox_relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
 
 ### Skills (`.claude/skills/`)
-- **golang-patterns** — Go idioms: small interfaces, error wrapping, context propagation.
-- **golang-testing** — Table-driven tests, `testify` / `go.uber.org/mock`, race detection, coverage.
-- **postgres-patterns** — PG-specific: transactions, advisory locks, indexes, connection pooling.
-- **tdd-workflow** — Red-green-refactor loop, operationalizing the TDD mandate in the global coding style.
+- **golang-patterns** — TRIGGER: writing new Go code. Go idioms: small interfaces, error wrapping, context propagation.
+- **golang-testing** — TRIGGER: adding tests. Table-driven tests, `testify` / `go.uber.org/mock`, race detection, coverage.
+- **postgres-patterns** — TRIGGER: touching `internal/infrastructure/persistence/postgres/` or migrations. Transactions, advisory locks, indexes, connection pooling.
+- **tdd-workflow** — TRIGGER: starting a new feature/bugfix. Red-green-refactor loop, operationalizing the TDD mandate in the global coding style.
 
 ### Rules (`.claude/rules/golang/`)
 Extends the user's global `~/.claude/rules/common/` with Go-specific standards: `coding-style.md`, `hooks.md`, `patterns.md`, `security.md`, `testing.md`.
