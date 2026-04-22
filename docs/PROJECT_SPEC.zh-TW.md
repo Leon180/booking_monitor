@@ -8,7 +8,7 @@
 
 **核心目標**:以多層防線防止超賣,同時將吞吐量最大化。
 
-**開發時程**:2026-02-14 至 2026-02-24(10 天,15 個 commits,12 個 phases)。2026-04-11 進行多 agent 程式碼審查,總共整理出 66 項 findings,並透過 PR #8(CRITICAL)、#9(HIGH)、#10(MEDIUM/LOW/NIT)完成修復 — 詳見第 8 節。
+**開發時程**:2026-02-14 至 2026-02-24(10 天,15 個 commits,12 個 phases)。2026-04-11 進行多 agent 程式碼審查,共整理出 66 項 findings,於 PR #8(CRITICAL)/ #9(HIGH)/ #12(MEDIUM/LOW/NIT)/ #13(可觀測性 + smoke test plan)完成修復。GC 優化接著在 4/12–13 透過 PR #14(baseline harness + quick wins,+157% RPS)與 #15(deep fixes:sync.Pool、escape analysis、GOMEMLIMIT、合併 middleware)完成 — 詳見第 8 節。
 
 ---
 
@@ -349,6 +349,22 @@ Prometheus metrics 端點。
 ### 儀表板(Grafana)
 預先配置的 6 格儀表板: RPS、Latency Quantiles、Conversion Rate、IP Fairness、Saturation
 
+### Profiling(pprof)
+- `net/http/pprof` 把 `/debug/pprof/*` 開在**獨立的** `:6060` listener — 不走主要 Gin router,也不經過 nginx
+- 由 `ENABLE_PPROF` 環境變數控制(設 `true` 開啟,預設 `false`)。`docker-compose.yml` 僅為本機使用 publish 6060
+- 以 `http.Server` 包起,並配 fx `OnStop` hook(clean shutdown,無 goroutine leak)
+- 擷取腳本:`scripts/pprof_capture.sh` 在壓測中抓 heap + allocs(30 秒取樣)+ goroutine profile;`scripts/benchmark_gc.sh` 負責整個 run 的編排
+- 分析熱點分配用 `go tool pprof -alloc_space -top pprof/heap.pb.gz`
+
+### Runtime 調優環境變數
+
+| 變數 | 預設(.env) | Fallback(compose) | 用途 |
+|------|--------------|---------------------|------|
+| `GOGC` | `400` | `100` | GC 觸發比例,越大 GC 越少、peak heap 越高 |
+| `GOMEMLIMIT` | `256MiB` | (未設) | 軟記憶體上限,搭配 GOGC 讓 GC 只在接近上限時變積極 |
+| `OTEL_TRACES_SAMPLER_RATIO` | `0.01` | `1` | 採樣比例。`0` 全關,`1` 全開 |
+| `ENABLE_PPROF` | `true` | `false` | 是否啟動 `:6060` 的 pprof listener |
+
 ---
 
 ## 8. 開發階段(完整歷史)
@@ -368,7 +384,8 @@ Prometheus metrics 端點。
 | 10 | 2/20 | `572d430` | Nginx API gateway + 限流 + 可觀測性調整 |
 | 11 | 2/21 | `f56ab82` | PostgreSQL advisory lock(OutboxRelay 領導者選舉) |
 | 12 | 2/24 | `4e89ff7` | Saga 補償 + 冪等 Redis 回滾 + 部分唯一索引(允許付款失敗後重試) |
-| 13 | 4/11 | PRs #7–#10 | **多 agent review 與 remediation**:在 6 個 review 面向(domain/app、persistence、concurrency/cache、messaging/saga、api/payment、observability/deploy)共彙整出 66 項 findings。所有 6 個 CRITICAL 與 13 個 HIGH 在 [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) 與 [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9) 修復;17 MEDIUM / 14 LOW / 6 NIT 在 [`fix/review-backlog` (#10)](https://github.com/Leon180/booking_monitor/pull/10) 修復。彙整後的 backlog 存放在 [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md)。使用者面向的改動請看下方的 **Remediation 重點** 區塊。 |
+| 13 | 4/11 | PRs #7 / #8 / #9 / #12 / #13 | **多 agent review 與 remediation**:在 6 個 review 面向(domain/app、persistence、concurrency/cache、messaging/saga、api/payment、observability/deploy)共彙整出 66 項 findings。所有 6 個 CRITICAL 與 13 個 HIGH 在 [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) 與 [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9) 修復;17 MEDIUM / 14 LOW / 6 NIT 在 [`fix/review-backlog` (#12)](https://github.com/Leon180/booking_monitor/pull/12) 修復;docs + `kafka_consumer_retry_total` 指標 + `KafkaConsumerStuck` 告警 + [`docs/reviews/SMOKE_TEST_PLAN.md`](reviews/SMOKE_TEST_PLAN.md) 於 [`fix/review-docs` (#13)](https://github.com/Leon180/booking_monitor/pull/13) 完成。彙整後的 backlog 存放在 [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md)。使用者面向的改動請看下方的 **Remediation 重點** 區塊。 |
+| 14 | 4/12–13 | PRs #14 / #15 | **GC 優化**:baseline benchmark 發現 RPS 比歷史掉 70%,根因是 fx.Decorate 修好後 tracing/metrics decorator 真的被套用,加上 `AlwaysSample()` 與每個 request 都 clone 一次 zap core。分兩個 PR 修復。[`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) 先建 benchmark harness(pprof endpoint 開在 `:6060`、`scripts/benchmark_gc.sh`、`scripts/gc_metrics.sh`、`scripts/pprof_capture.sh`)並導入三個 quick win(`OTEL_TRACES_SAMPLER_RATIO=0.01`、`GOGC=400`、CorrelationIDMiddleware 不再 clone zap core)— RPS 7,984 → 20,552(+157%)。[`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) 緊接做 deep fix:Redis Lua script args 改用 `sync.Pool`、key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf` boxing)、`GOMEMLIMIT=256MiB`、以及合併後的 `CombinedMiddleware`,每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext` — 每 60 秒分配物件數 258M → 110M(−57%),GC 週期 202 → 86(−57%)。詳細請看下方的 **Phase 14 重點** 區塊。 |
 
 ### Remediation 重點(Phase 13)
 
@@ -380,18 +397,28 @@ Prometheus metrics 端點。
 - **可觀測性**:OTel 採樣器可透過 `OTEL_TRACES_SAMPLER_RATIO` 設定;`recordHTTPResult` helper 會把 4xx 也標成 span error;`InventorySoldOut` 告警改用真實存在的 `bookings_total{status="sold_out"}` 指標。
 - **Persistence**:新增部分索引 `events_outbox_pending_idx`(migration 000007);pool 設定移到 ping 迴圈之前並加上 `ConnMaxLifetime`;`GetByID` 拆成一般版 + `GetByIDForUpdate`;19 處 repository 的錯誤都改用 `%w` wrap。
 
+### Phase 14 重點(GC 優化)
+
+- **Benchmark harness**:`net/http/pprof` 獨立跑在 `:6060` listener(透過 `ENABLE_PPROF=true` 控制);`scripts/benchmark_gc.sh` / `scripts/gc_metrics.sh` / `scripts/pprof_capture.sh` 把 k6、Go runtime 指標、heap/allocs profile 整合成單一報告,產出在 `docs/benchmarks/`。該 listener 有自己的 `http.Server` 與 fx `OnStop` shutdown hook — 無 goroutine leak。
+- **Sampler 調優**:`OTEL_TRACES_SAMPLER_RATIO` 預設 `0.01`(1%)。未被採樣的 request 只拿到一個 no-op span(零分配),不會走完整的 batch span processor export。
+- **Runtime 調優**:`GOGC=400` + `GOMEMLIMIT=256MiB` — 正常流量下 GC 很鬆,heap 接近 soft limit 時才變積極,避免流量 spike 時 heap 無限成長。
+- **Hot-path 分配削減**:`CombinedMiddleware` 把 logger + correlation ID 合併成一個 `RequestContext` struct(`pkg/logger/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
+- **結果**:clean run RPS 7,984 → 20,552(+157%);每 60 秒分配物件數 258M → 110M(−57%);GC 週期 202 → 86(−57%);GC pause 最大值 79ms → 41ms(−48%);heap peak 被 `GOMEMLIMIT` 控制在 ≤256MB。
+
 ---
 
 ## 9. 效能基準
 
-| 設定 | RPS | P99 延遲 | 瓶頸 |
-|------|-----|----------|------|
-| Stage 1:純 Postgres | ~4,000 | ~500ms | DB CPU(212%) |
-| Stage 2:Redis 熱庫存 | ~11,000 | ~50ms | 記憶體/網路 |
-| Stage 2 + Kafka outbox | ~9,000 | ~100ms | Kafka 吞吐量 |
-| 完整系統(含 saga) | ~8,500 | ~120ms | Saga overhead |
+| 設定 | RPS | P99 / P95 延遲 | 備註 |
+|------|-----|----------------|------|
+| Stage 1:純 Postgres | ~4,000 | ~500ms(P99)| DB CPU 瓶頸(212%) |
+| Stage 2:Redis 熱庫存 | ~11,000 | ~50ms(P99)| 記憶體/網路瓶頸 |
+| Stage 2 + Kafka outbox | ~9,000 | ~100ms(P99)| Kafka 吞吐量瓶頸 |
+| 完整系統(Phase 13 前) | ~26,879 | ~33ms(P95)| 2026-02 baseline — tracing decorator 因 fx bug 靜默被關掉 |
+| Remediation 後、GC 優化前 | ~7,984 | ~98ms(P95)| Phase 13 修好 fx 後 decorator 真的啟用 + AlwaysSample → 掉 70% |
+| **Phase 14 GC 優化後** | **~20,552** | **~45ms(P95)**| PR #14 quick wins(sampler 0.01 + GOGC=400 + 不 clone 的 middleware) |
 
-基準測試報告在 `docs/benchmarks/`(共 15 個時間戳目錄)。
+基準測試報告在 `docs/benchmarks/` — 分成 `*_compare_c500` 的 clean run 與帶 pprof + GC metrics 的 `*_gc_*` 目錄。
 
 ---
 
@@ -450,7 +477,7 @@ Prometheus metrics 端點。
 | `internal/infrastructure/api/handler.go` | HTTP handlers + 路由註冊 |
 | `internal/infrastructure/api/errors.go` | `mapError(err) (status, publicMsg)` helper — 負責把錯誤 sanitize 成公開訊息 |
 | `internal/infrastructure/api/handler_tracing.go` | Tracing decorator + `recordHTTPResult` span helper |
-| `internal/infrastructure/api/middleware/` | 冪等性、correlation ID、metrics、tracing |
+| `internal/infrastructure/api/middleware.go` | `CombinedMiddleware`(Phase 14):一次性注入 logger + correlation ID(每個 request 只 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`) |
 | `internal/infrastructure/cache/redis.go` | Redis inventory + idempotency repos |
 | `internal/infrastructure/cache/redis_queue.go` | Redis Streams consumer |
 | `internal/infrastructure/cache/lua/deduct.lua` | 原子扣減 Lua script |
@@ -465,6 +492,12 @@ Prometheus metrics 端點。
 | `internal/infrastructure/config/config.go` | YAML config + 環境變數 override |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock 付款閘道 |
 
+### 共用套件(`pkg/`)
+| 檔案 | 用途 |
+|------|------|
+| `pkg/logger/context.go` | `RequestContext` struct + `WithRequestContext` / `FromCtx` / `CorrelationIDFromCtx` / `WithCorrelation` 等 helper。單一 context key,每個 request 只會配置一次 |
+| `pkg/logger/logger.go` | Zap logger 啟動設定(JSON encoder、stdout) |
+
 ### 設定與部署
 | 檔案 | 用途 |
 |------|------|
@@ -476,8 +509,17 @@ Prometheus metrics 端點。
 | `deploy/redis/redis.conf` | Redis AOF 持久化設定(密碼透過 docker-compose 的 `--requirepass ${REDIS_PASSWORD}` 帶入,不寫死在 conf 裡) |
 | `deploy/nginx/nginx.conf` | 限流 + reverse proxy;帶有界 proxy timeouts 與 upstream keepalive |
 | `deploy/prometheus/prometheus.yml` | 抓取設定(15 秒間隔) |
-| `deploy/prometheus/alerts.yml` | 告警規則(`HighErrorRate`、`HighLatency`、`InventorySoldOut`) |
+| `deploy/prometheus/alerts.yml` | 告警規則(`HighErrorRate`、`HighLatency`、`InventorySoldOut`、`KafkaConsumerStuck`) |
 | `deploy/grafana/provisioning/` | 預設資料來源 + 儀表板(使用 `timeseries` 面板,`disableDeletion: true`) |
+
+### Benchmark 與 Profiling 腳本
+| 檔案 | 用途 |
+|------|------|
+| `scripts/k6_comparison.js` | k6 壓測情境(50 萬票池、500 VUs、60 秒 constant-vus),兩套 benchmark harness 都用它 |
+| `scripts/benchmark_compare.sh` | 連跑兩輪的 A/B benchmark,產出符合歷史格式的比較報告 |
+| `scripts/benchmark_gc.sh` | Phase 14:同時跑 k6 + gc_metrics + pprof,產出帶 GC Runtime Metrics 表格的報告 |
+| `scripts/gc_metrics.sh` | 每 5 秒 poll `/metrics`,把 `go_gc_duration_seconds`、`go_memstats_*`、`go_goroutines` 寫成 CSV |
+| `scripts/pprof_capture.sh` | 壓測途中從 `:6060` 抓 heap + allocs(30 秒取樣)+ goroutine profile |
 
 ### 文件
 | 檔案 | 用途 |
@@ -488,4 +530,5 @@ Prometheus metrics 端點。
 | `docs/adr/0001_async_queue_selection.md` | Redis Streams vs Kafka 決策紀錄 |
 | `docs/reviews/phase2_review.md` | Redis 整合 code review |
 | `docs/reviews/ACTION_LIST.md` | Phase 13 的彙整 remediation 清單(66 項 findings,依嚴重度排序,連結回原始 review PR) |
-| `docs/benchmarks/` | 15 份帶時間戳的效能報告 |
+| `docs/reviews/SMOKE_TEST_PLAN.md` | 12 個可重複執行的 smoke test 章節,涵蓋 CRITICAL / HIGH 修復(metric 預初始化、舊 route 移除、config validation、DLQ 路徑等) |
+| `docs/benchmarks/` | 帶時間戳的效能報告;Phase 14 的 baseline 與 GC 測試存放於 `*_gc_*` 與 `*_compare_c500` 前綴 |
