@@ -1,3 +1,54 @@
+# Grafana dashboard provider.
+#
+# This file is NOT a dashboard itself — it tells Grafana where to find
+# dashboards on disk and how strictly to enforce them. Dashboards live
+# in ./dashboard.json; Grafana rescans the path every
+# `updateIntervalSeconds` seconds and reloads any changed JSON.
+#
+# Rationale for each field:
+#   providers[].name: 'Default'
+#     Internal provider id. No user-visible impact.
+#
+#   orgId: 1
+#     Grafana supports multi-tenancy via "orgs". 1 is the default
+#     org that single-team deployments always use.
+#
+#   folder: ''
+#     Empty → dashboards go into the root (General) folder. Set this
+#     if you want them grouped ("Backend", "Infra", etc.).
+#
+#   type: file
+#     Source is the local filesystem. Other providers support remote
+#     sources (http, github, gitlab, s3) but `file` + compose mount
+#     is the simplest and fits our provisioning-as-code model.
+#
+#   disableDeletion: true  [action-list L12]
+#     Blocks "Delete Dashboard" from the UI. Provisioned dashboards
+#     must only be edited via git — never ad-hoc in prod. Without
+#     this, an operator click can remove a dashboard that will then
+#     be silently restored on next reload → confusing change loop.
+#
+#   allowUiUpdates: false  [action-list L12]
+#     UI "Save" does nothing. If set to true, users save changes
+#     that get overwritten 30s later when the JSON on disk wins.
+#     Keeping it false makes the source of truth unambiguous:
+#     "edit the JSON or you're wasting your time".
+#
+#   updateIntervalSeconds: 30
+#     How often Grafana re-scans the `path` for JSON changes. 30s
+#     is a good trade-off between "editing a panel feels fast" and
+#     "cheap rescans". Bump to 300 in CI-deployed envs to cut load.
+#
+#   options.path: /etc/grafana/provisioning/dashboards
+#     Path inside the Grafana container. docker-compose.yml mounts
+#     ./deploy/grafana/provisioning → /etc/grafana/provisioning so
+#     our repo's dashboard.json appears here.
+#
+#   foldersFromFilesStructure: false
+#     false → all JSONs go into `folder` above.
+#     true  → disk subdir structure becomes the UI folder tree.
+#     We have one dashboard so the flat model is simpler.
+
 apiVersion: 1
 
 providers:
@@ -5,16 +56,9 @@ providers:
     orgId: 1
     folder: ''
     type: file
-    # disableDeletion protects provisioned dashboards from being
-    # accidentally deleted via the Grafana UI. In production we want
-    # provisioned dashboards to be immutable from the UI — edits go
-    # through git, not the UI. Closes action-list item L12.
     disableDeletion: true
-    # Provisioned dashboards should also not be editable in the UI
-    # (changes would be wiped on the next updateIntervalSeconds scan).
     allowUiUpdates: false
     updateIntervalSeconds: 30
     options:
       path: /etc/grafana/provisioning/dashboards
-      # foldersFromFilesStructure off: keep them in the root folder.
       foldersFromFilesStructure: false
