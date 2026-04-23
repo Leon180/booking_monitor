@@ -9,6 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 type EventService interface {
@@ -18,18 +20,18 @@ type EventService interface {
 type eventService struct {
 	repo          domain.EventRepository
 	inventoryRepo domain.InventoryRepository
-	log           *zap.SugaredLogger
+	log           *mlog.Logger
 }
 
 // NewEventService takes the logger as an explicit dependency rather than
-// reaching for the global zap.S(). This matches WorkerService /
-// SagaCompensator and ensures the logger is initialized by the time fx
-// calls this constructor (zap.ReplaceGlobals may not have fired yet).
-func NewEventService(repo domain.EventRepository, inventoryRepo domain.InventoryRepository, log *zap.SugaredLogger) EventService {
+// reaching for zap's globals. This matches WorkerService /
+// SagaCompensator and guarantees the logger is initialized by the time
+// fx calls this constructor.
+func NewEventService(repo domain.EventRepository, inventoryRepo domain.InventoryRepository, logger *mlog.Logger) EventService {
 	return &eventService{
 		repo:          repo,
 		inventoryRepo: inventoryRepo,
-		log:           log.With("component", "event_service"),
+		log:           logger.With(zap.String("component", "event_service")),
 	}
 }
 
@@ -62,14 +64,15 @@ func (s *eventService) CreateEvent(ctx context.Context, name string, totalTicket
 			// Compensation failed — we now have a dangling event row
 			// in the DB with no Redis inventory. Surface BOTH errors
 			// so the operator can reconcile manually.
-			s.log.Errorw("COMPENSATION FAILED — dangling event row",
-				"event_id", event.ID,
-				"redis_error", err,
-				"delete_error", delErr)
+			s.log.Error(ctx, "COMPENSATION FAILED — dangling event row",
+				tag.EventID(event.ID),
+				zap.NamedError("redis_error", err),
+				zap.NamedError("delete_error", delErr),
+			)
 			return nil, fmt.Errorf("eventService.CreateEvent: redis SetInventory failed (%v) AND compensating DB delete failed: %w", err, delErr)
 		}
-		s.log.Warnw("compensated dangling event after Redis failure",
-			"event_id", event.ID, "error", err)
+		s.log.Warn(ctx, "compensated dangling event after Redis failure",
+			tag.EventID(event.ID), tag.Error(err))
 		return nil, fmt.Errorf("eventService.CreateEvent redis SetInventory: %w", err)
 	}
 

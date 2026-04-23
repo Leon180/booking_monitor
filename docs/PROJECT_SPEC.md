@@ -414,7 +414,7 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 - **Benchmark harness**: `net/http/pprof` on a separate `:6060` listener (gated by `ENABLE_PPROF=true`), `scripts/benchmark_gc.sh` / `scripts/gc_metrics.sh` / `scripts/pprof_capture.sh` orchestrate k6 + Go runtime metrics + heap/allocs profiles into a single report under `docs/benchmarks/`. The listener uses its own `http.Server` with an fx `OnStop` shutdown hook — no goroutine leak.
 - **Sampler tuning**: `OTEL_TRACES_SAMPLER_RATIO` defaults to `0.01` (1%). Unsampled requests get a no-op span (zero allocation) instead of a full export through the batch span processor.
 - **Runtime tuning**: `GOGC=400` + `GOMEMLIMIT=256MiB` — GC stays lazy during normal traffic but becomes aggressive as heap approaches the soft limit, preventing unbounded growth during spikes.
-- **Hot-path allocation cuts**: `CombinedMiddleware` does exactly one `context.WithValue` + one `c.Request.WithContext` per request by consolidating logger + correlation ID into a single `RequestContext` struct (`pkg/logger/context.go`); Redis Lua script args reuse a `sync.Pool`-backed `[]interface{}`; inventory keys use `strconv.Itoa` concat instead of `fmt.Sprintf` to avoid interface boxing; sentinel errors (`errDeductScriptNotFound`, `errRevertScriptNotFound`, `errUnexpectedLuaResult`) replace per-call `fmt.Errorf`.
+- **Hot-path allocation cuts**: `CombinedMiddleware` does exactly one `context.WithValue` + one `c.Request.WithContext` per request by injecting a scoped logger into the context (`internal/log/context.go`); Redis Lua script args reuse a `sync.Pool`-backed `[]interface{}`; inventory keys use `strconv.Itoa` concat instead of `fmt.Sprintf` to avoid interface boxing; sentinel errors (`errDeductScriptNotFound`, `errRevertScriptNotFound`, `errUnexpectedLuaResult`) replace per-call `fmt.Errorf`.
 - **Result**: clean-run RPS 7,984 → 20,552 (+157%); allocations/60s 258M → 110M (−57%); GC cycles/60s 202 → 86 (−57%); GC pause max 79ms → 41ms (−48%); heap peak bounded by `GOMEMLIMIT` at ≤256MB.
 
 ---
@@ -504,11 +504,17 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/infrastructure/config/config.go` | YAML config + env overrides |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock payment gateway |
 
-### Shared Packages (`pkg/`)
+### Internal logging (`internal/log/`)
 | File | Purpose |
 |------|---------|
-| `pkg/logger/context.go` | `RequestContext` struct + `WithRequestContext` / `FromCtx` / `CorrelationIDFromCtx` / `WithCorrelation` helpers. One context key, one allocation per request |
-| `pkg/logger/logger.go` | Zap logger bootstrap (JSON encoder, stdout) |
+| `internal/log/log.go` | `Logger` type wrapping `*zap.Logger` + `AtomicLevel`; exposes `L()` (fast path), `S()` (sugar), `With()`, `Level()`, `Sync()` |
+| `internal/log/options.go` | `Options` struct + `fillDefaults` (encoder, output, sampling). Decouples the package from `internal/config` |
+| `internal/log/level.go` | `Level` type alias + `ParseLevel(string) (Level, error)` — typos fail startup, never silent fallback |
+| `internal/log/context.go` | `NewContext` / `FromContext` — canonical ctx carry (klog/slog convention). `FromContext` returns `Nop` if unset, not a hidden global |
+| `internal/log/nop.go` | `NewNop()` silent logger for tests and unwired paths |
+| `internal/log/handler.go` | `LevelHandler()` — GET/POST `/admin/loglevel` for runtime level changes; mounted on the pprof listener |
+| `internal/log/tag/tag.go` | Typed `zap.Field` constructors (`tag.OrderID`, `tag.Error`, etc.) — compile-time typo protection on the hot path |
+| `internal/bootstrap/logmodule.go` | fx wiring: reads `cfg.App.LogLevel` → `log.ParseLevel` → `log.New`. Lives here (not in `internal/log/`) so the log package stays config-free |
 
 ### Configuration & Deployment
 | File | Purpose |

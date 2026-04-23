@@ -29,7 +29,8 @@ internal/
     observability/        # Prometheus metrics, OTEL tracing
     payment/              # Mock payment gateway
     config/               # YAML config + env overrides
-pkg/logger/               # Structured logging (Zap)
+  log/                    # Structured logging (Zap) — context propagation, typed tags, runtime level
+  bootstrap/              # fx wiring for logger and other infra primitives
 deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafana configs
 ```
 

@@ -7,10 +7,12 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/observability"
-	"booking_monitor/pkg/logger"
+	"booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
+	"go.uber.org/zap"
 )
 
 type BookingHandler interface {
@@ -56,7 +58,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 		Status *string `form:"status"`
 	}
 	if err := c.ShouldBindQuery(&req); err != nil {
-		logger.WithCorrelation(ctx).Warnw("invalid history query params", "error", err)
+		log.Warn(ctx, "invalid history query params", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters"})
 		return
 	}
@@ -75,7 +77,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 
 	orders, total, err := h.service.GetBookingHistory(ctx, req.Page, req.Size, orserStatus)
 	if err != nil {
-		logger.WithCorrelation(ctx).Errorw("GetBookingHistory failed", "error", err)
+		log.Error(ctx, "GetBookingHistory failed", tag.Error(err))
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})
 		return
@@ -96,7 +98,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 
 	var req bookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.WithCorrelation(ctx).Warnw("invalid book request body", "error", err)
+		log.Warn(ctx, "invalid book request body", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -122,11 +124,12 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	if err != nil {
 		// Log the raw error with full context server-side, then translate to
 		// a sanitized public message via mapError so we never leak DB errors.
-		logger.WithCorrelation(ctx).Errorw("BookTicket failed",
-			"error", err,
-			"user_id", req.UserID,
-			"event_id", req.EventID,
-			"quantity", req.Quantity)
+		log.Error(ctx, "BookTicket failed",
+			tag.Error(err),
+			tag.UserID(req.UserID),
+			tag.EventID(req.EventID),
+			tag.Quantity(req.Quantity),
+		)
 
 		status, publicMsg := mapError(err)
 		errJSON, _ := json.Marshal(gin.H{"error": publicMsg})
@@ -158,14 +161,18 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 
 	var req createEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.WithCorrelation(ctx).Warnw("invalid create event request", "error", err)
+		log.Warn(ctx, "invalid create event request", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
 	event, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets)
 	if err != nil {
-		logger.WithCorrelation(ctx).Errorw("CreateEvent failed", "error", err, "name", req.Name, "total_tickets", req.TotalTickets)
+		log.Error(ctx, "CreateEvent failed",
+			tag.Error(err),
+			zap.String("name", req.Name),
+			zap.Int("total_tickets", req.TotalTickets),
+		)
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})
 		return

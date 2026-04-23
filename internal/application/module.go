@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"go.uber.org/fx"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
 )
 
 var Module = fx.Module("application",
@@ -46,7 +46,7 @@ var Module = fx.Module("application",
 			outboxRepo domain.OutboxRepository,
 			uow domain.UnitOfWork,
 			metrics domain.WorkerMetrics,
-			logger *zap.SugaredLogger,
+			logger *mlog.Logger,
 		) WorkerService {
 			base := NewWorkerService(queue, orderRepo, eventRepo, outboxRepo, uow, metrics, logger)
 			return NewWorkerServiceMetricsDecorator(base)

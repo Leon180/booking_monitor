@@ -6,17 +6,14 @@ import (
 	"testing"
 
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
-	"booking_monitor/pkg/logger"
 
 	"go.uber.org/mock/gomock"
-	"go.uber.org/zap"
 )
 
 func TestOutboxRelay_ProcessBatch(t *testing.T) {
-	// Setup logger
-	nopLogger := zap.NewNop().Sugar()
-	ctx := logger.WithCtx(context.Background(), nopLogger)
+	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	tests := []struct {
 		name       string
@@ -100,7 +97,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			}
 
 			// We test the private method processBatch directly to avoid timing issues with Run()
-			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock)
+			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
 			relay.processBatch(ctx)
 		})
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
 	"booking_monitor/internal/infrastructure/cache"
@@ -25,7 +26,8 @@ import (
 	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
-	"booking_monitor/pkg/logger"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 
 	paymentApp "booking_monitor/internal/application/payment"
 	paymentInfra "booking_monitor/internal/infrastructure/payment"
@@ -95,7 +97,7 @@ func runPaymentWorker(cmd *cobra.Command, args []string) {
 
 	app := fx.New(
 		// Provide Logger
-		logger.Module,
+		bootstrap.LogModule,
 
 		// Provide Config
 		fx.Provide(func() *config.Config {
@@ -117,28 +119,29 @@ func runPaymentWorker(cmd *cobra.Command, args []string) {
 			),
 			paymentApp.NewService, // domain.PaymentService
 			// Kafka Consumer
-			func(cfg *config.Config, logger *zap.SugaredLogger) *messaging.KafkaConsumer {
+			func(cfg *config.Config, logger *mlog.Logger) *messaging.KafkaConsumer {
 				return messaging.NewKafkaConsumer(&cfg.Kafka, logger)
 			},
 		),
 
 		// Invoke Consumer Start
-		fx.Invoke(func(lc fx.Lifecycle, consumer *messaging.KafkaConsumer, service domain.PaymentService, log *zap.SugaredLogger) {
+		fx.Invoke(func(lc fx.Lifecycle, consumer *messaging.KafkaConsumer, service domain.PaymentService, logger *mlog.Logger) {
 			ctx, cancel := context.WithCancel(context.Background())
 
 			lc.Append(fx.Hook{
 				OnStart: func(context.Context) error {
-					log.Info("Starting Payment Service Worker...")
+					logger.L().Info("Starting Payment Service Worker...")
 					go func() {
 						if err := consumer.Start(ctx, service); err != nil {
-							log.Errorw("Consumer stopped with error", "error", err)
+							logger.L().Error("Consumer stopped with error", tag.Error(err))
 						}
 					}()
 					return nil
 				},
 				OnStop: func(ctx context.Context) error {
-					log.Info("Stopping Payment Service Worker...")
+					logger.L().Info("Stopping Payment Service Worker...")
 					cancel()
+					_ = logger.Sync()
 					return consumer.Close()
 				},
 			})
@@ -228,7 +231,7 @@ func runServer(cmd *cobra.Command, args []string) {
 
 	app := fx.New(
 		// Provide Logger
-		logger.Module,
+		bootstrap.LogModule,
 
 		// Provide Config
 		fx.Provide(func() *config.Config {
@@ -257,12 +260,12 @@ func runServer(cmd *cobra.Command, args []string) {
 
 		// Provide concrete implementations of application interfaces
 		fx.Provide(observability.NewWorkerMetrics),
-		fx.Provide(func(cfg *config.Config, rdb *redis.Client) *messaging.SagaConsumer {
-			return messaging.NewSagaConsumer(&cfg.Kafka, rdb)
+		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
+			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
 
 		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, log *zap.SugaredLogger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) error {
+		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, logger *mlog.Logger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) error {
 			// Fail fast if the tracer cannot be initialized: a nil
 			// traceExporter would crash the first span export.
 			tp, err := initTracer()
@@ -286,13 +289,13 @@ func runServer(cmd *cobra.Command, args []string) {
 
 					// Secure ClientIP resolution behind Nginx Proxy (Docker default subnets)
 					if err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}); err != nil {
-						log.Warnw("Failed to set trusted proxies", "error", err)
+						logger.L().Warn("Failed to set trusted proxies", tag.Error(err))
 					}
 
 					// Single combined middleware: logger + correlation ID in ONE
 					// context.WithValue + ONE c.Request.WithContext. The old
 					// two-middleware chain did 2+2 of these (~464 bytes/req).
-					r.Use(api.CombinedMiddleware(log))
+					r.Use(api.CombinedMiddleware(logger))
 
 					r.Use(observability.MetricsMiddleware())
 					r.GET("/metrics", gin.WrapH(promhttp.Handler()))
@@ -321,12 +324,13 @@ func runServer(cmd *cobra.Command, args []string) {
 					}
 
 					go func() {
-						log.Infow("Starting server",
-							"port", cfg.Server.Port,
-							"read_timeout", cfg.Server.ReadTimeout,
-							"write_timeout", cfg.Server.WriteTimeout)
+						logger.L().Info("Starting server",
+							zap.String("port", cfg.Server.Port),
+							zap.Duration("read_timeout", cfg.Server.ReadTimeout),
+							zap.Duration("write_timeout", cfg.Server.WriteTimeout),
+						)
 						if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-							log.Errorw("Server failed", "error", err)
+							logger.L().Error("Server failed", tag.Error(err))
 						}
 					}()
 
@@ -334,12 +338,16 @@ func runServer(cmd *cobra.Command, args []string) {
 					// Uses http.DefaultServeMux which already has /debug/pprof/*
 					// registered via the blank import above. Wrapped in an
 					// http.Server so OnStop can shut it down cleanly.
+					//
+					// The dynamic log-level handler mounts here too — same
+					// operator-only listener, same ENABLE_PPROF gate.
 					if strings.EqualFold(os.Getenv("ENABLE_PPROF"), "true") {
+						http.Handle("/admin/loglevel", logger.LevelHandler())
 						pprofServer = &http.Server{Addr: ":6060", Handler: nil}
 						go func() {
-							log.Infow("pprof server started", "addr", ":6060")
+							logger.L().Info("pprof server started", zap.String("addr", ":6060"))
 							if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-								log.Errorw("pprof server failed", "error", err)
+								logger.L().Error("pprof server failed", tag.Error(err))
 							}
 						}()
 					}
@@ -350,33 +358,47 @@ func runServer(cmd *cobra.Command, args []string) {
 					// Start Saga Consumer (Kafka order.failed -> Restore DB/Redis)
 					go func() {
 						if err := sagaConsumer.Start(workerCtx, compensator); err != nil {
-							log.Errorw("Saga consumer stopped with error", "error", err)
+							logger.L().Error("Saga consumer stopped with error", tag.Error(err))
 						}
 					}()
 
 					return nil
 				},
 				OnStop: func(ctx context.Context) error {
-					log.Info("Stopping worker services...")
+					logger.L().Info("Stopping worker services...")
 					workerCancel()
 					_ = sagaConsumer.Close()
 
 					if pprofServer != nil {
-						log.Info("Shutting down pprof server")
+						logger.L().Info("Shutting down pprof server")
 						if err := pprofServer.Shutdown(ctx); err != nil {
-							log.Errorw("pprof server shutdown error", "error", err)
+							logger.L().Error("pprof server shutdown error", tag.Error(err))
 						}
 					}
 
 					if httpServer != nil {
-						log.Info("Shutting down HTTP server")
+						logger.L().Info("Shutting down HTTP server")
 						if err := httpServer.Shutdown(ctx); err != nil {
-							log.Errorw("HTTP server shutdown error", "error", err)
+							logger.L().Error("HTTP server shutdown error", tag.Error(err))
 						}
 					}
 
-					log.Info("Shutting down tracer provider")
-					return tp.Shutdown(ctx)
+					logger.L().Info("Shutting down tracer provider")
+					shutdownErr := tp.Shutdown(ctx)
+					if shutdownErr != nil {
+						logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
+					}
+
+					// Flush any buffered log entries before the process exits.
+					_ = logger.Sync()
+
+					// Return the tracer error so fx reports a non-zero exit
+					// code on graceful-shutdown failure. Other shutdown errors
+					// (HTTP, pprof) are logged but not returned because they
+					// are expected during fast shutdowns (e.g. SIGINT mid-
+					// request). A tracer flush failure is different — it
+					// means span data is actually lost.
+					return shutdownErr
 				},
 			})
 			return nil
@@ -387,7 +409,7 @@ func runServer(cmd *cobra.Command, args []string) {
 }
 
 // provideDB creates a database connection with retry logic.
-func provideDB(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
+func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 	db, err := sql.Open("postgres", cfg.Postgres.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
@@ -415,7 +437,7 @@ func provideDB(cfg *config.Config, log *zap.SugaredLogger) (*sql.DB, error) {
 		if pingErr = db.Ping(); pingErr == nil {
 			break
 		}
-		log.Warnw("waiting for Postgres", "attempt", i+1, "error", pingErr)
+		logger.L().Warn("waiting for Postgres", zap.Int("attempt", i+1), tag.Error(pingErr))
 		time.Sleep(1 * time.Second)
 	}
 	if pingErr != nil {

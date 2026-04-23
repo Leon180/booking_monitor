@@ -7,12 +7,11 @@ import (
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
-	"booking_monitor/pkg/logger"
+	mlog "booking_monitor/internal/log"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
 )
 
 func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
@@ -21,7 +20,7 @@ func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	defer s.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	nopLogger := zap.NewNop().Sugar()
+	nopLogger := mlog.NewNop()
 
 	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
 
@@ -47,13 +46,13 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	defer s.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	nopLogger := zap.NewNop().Sugar()
+	nopLogger := mlog.NewNop()
 
 	// No mock needed for happy path
 	// Setup Config
 	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
 	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg)
-	ctx := logger.WithCtx(context.Background(), nopLogger)
+	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
@@ -107,7 +106,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	defer s.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	nopLogger := zap.NewNop().Sugar()
+	nopLogger := mlog.NewNop()
 
 	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)

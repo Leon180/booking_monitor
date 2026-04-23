@@ -7,18 +7,17 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks" // Generated Mocks
-	"booking_monitor/pkg/logger"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
-	"go.uber.org/zap"
 )
 
 func TestBookingService_BookTicket(t *testing.T) {
-	// Initialize a no-op logger for testing
-	nopLogger := zap.NewNop().Sugar()
-	ctx := logger.WithCtx(context.Background(), nopLogger)
+	// Silent logger via the package's own Nop helper — avoids pulling
+	// in zap internals in tests.
+	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	tests := []struct {
 		name          string

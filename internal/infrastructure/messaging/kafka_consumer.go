@@ -13,6 +13,8 @@ import (
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 // paymentDLQTopic is where payment events that cannot be processed end up.
@@ -25,12 +27,12 @@ const paymentDLQTopic = "order.created.dlq"
 type KafkaConsumer struct {
 	reader *kafka.Reader
 	dlq    *kafka.Writer
-	log    *zap.SugaredLogger
+	log    *mlog.Logger
 }
 
 // NewKafkaConsumer creates a new Kafka consumer with an attached DLQ writer.
-func NewKafkaConsumer(cfg *config.KafkaConfig, log *zap.SugaredLogger) *KafkaConsumer {
-	log = log.With("component", "kafka_consumer")
+func NewKafkaConsumer(cfg *config.KafkaConfig, logger *mlog.Logger) *KafkaConsumer {
+	scoped := logger.With(zap.String("component", "kafka_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
@@ -50,7 +52,7 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, log *zap.SugaredLogger) *KafkaCon
 	return &KafkaConsumer{
 		reader: r,
 		dlq:    dlq,
-		log:    log,
+		log:    scoped,
 	}
 }
 
@@ -58,26 +60,30 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, log *zap.SugaredLogger) *KafkaCon
 // are written to the DLQ topic and their offsets committed so they do not
 // block the partition.
 func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService) error {
-	c.log.Info("Starting Kafka consumer for topic: order.created")
+	c.log.Info(ctx, "Starting Kafka consumer for topic: order.created")
 
 	for {
-		c.log.Debug("Polling Kafka...")
+		c.log.Debug(ctx, "Polling Kafka...")
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // Graceful shutdown
 			}
-			c.log.Errorw("Failed to fetch message", "error", err)
+			c.log.Error(ctx, "Failed to fetch message", tag.Error(err))
 			time.Sleep(time.Second) // Backoff
 			continue
 		}
 
-		c.log.Infow("Received message", "key", string(msg.Key), "offset", msg.Offset)
+		c.log.Info(ctx, "Received message",
+			zap.ByteString("key", msg.Key), tag.Offset(msg.Offset))
 
 		var event domain.OrderCreatedEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
-			c.log.Errorw("Failed to unmarshal event — dead-lettering",
-				"error", err, "payload", string(msg.Value), "offset", msg.Offset)
+			c.log.Error(ctx, "Failed to unmarshal event — dead-lettering",
+				tag.Error(err),
+				zap.ByteString("payload", msg.Value),
+				tag.Offset(msg.Offset),
+			)
 			c.deadLetter(ctx, msg, "invalid_payload", err)
 			c.commitOrLog(ctx, msg)
 			continue
@@ -87,8 +93,11 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 			// Business-invalid input (e.g. OrderID<=0, Amount<0) is
 			// permanently unprocessable. Dead-letter and commit.
 			if errors.Is(err, domain.ErrInvalidPaymentEvent) {
-				c.log.Warnw("Invalid payment event — dead-lettering",
-					"error", err, "order_id", event.OrderID, "offset", msg.Offset)
+				c.log.Warn(ctx, "Invalid payment event — dead-lettering",
+					tag.Error(err),
+					tag.OrderID(event.OrderID),
+					tag.Offset(msg.Offset),
+				)
 				c.deadLetter(ctx, msg, "invalid_event", err)
 				c.commitOrLog(ctx, msg)
 				continue
@@ -100,8 +109,11 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 			// dead" consumers via Prometheus / the KafkaConsumerStuck alert.
 			observability.KafkaConsumerRetryTotal.
 				WithLabelValues(msg.Topic, "transient_processing_error").Inc()
-			c.log.Errorw("Failed to process order — will retry",
-				"order_id", event.OrderID, "error", err, "offset", msg.Offset)
+			c.log.Error(ctx, "Failed to process order — will retry",
+				tag.OrderID(event.OrderID),
+				tag.Error(err),
+				tag.Offset(msg.Offset),
+			)
 			continue
 		}
 
@@ -136,9 +148,12 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 		},
 	}
 	if err := c.dlq.WriteMessages(ctx, dlqMsg); err != nil {
-		c.log.Errorw("Failed to write to DLQ topic — message lost",
-			"error", err, "topic", paymentDLQTopic, "reason", reason,
-			"original_offset", msg.Offset)
+		c.log.Error(ctx, "Failed to write to DLQ topic — message lost",
+			tag.Error(err),
+			tag.Topic(paymentDLQTopic),
+			zap.String("reason", reason),
+			zap.Int64("original_offset", msg.Offset),
+		)
 		return
 	}
 	observability.DLQMessagesTotal.WithLabelValues(paymentDLQTopic, reason).Inc()
@@ -149,7 +164,7 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 // failures because Kafka will re-deliver on next rebalance.
 func (c *KafkaConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
 	if err := c.reader.CommitMessages(ctx, msg); err != nil {
-		c.log.Errorw("Failed to commit offset", "error", err, "offset", msg.Offset)
+		c.log.Error(ctx, "Failed to commit offset", tag.Error(err), tag.Offset(msg.Offset))
 	}
 }
 

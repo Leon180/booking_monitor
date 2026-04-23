@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
-	"go.uber.org/zap"
 )
 
 // SpyingWorkerMetrics for verifying metric recording
@@ -35,7 +35,7 @@ func (s *SpyingWorkerMetrics) RecordInventoryConflict() {
 
 func TestWorkerService_ProcessMessage(t *testing.T) {
 	// Initialize logger
-	nopLogger := zap.NewNop().Sugar()
+	nopLogger := mlog.NewNop()
 
 	tests := []struct {
 		name           string
@@ -185,7 +185,7 @@ func TestWorkerService_Start(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockQueue := mocks.NewMockOrderQueue(ctrl)
-	nopLogger := zap.NewNop().Sugar()
+	nopLogger := mlog.NewNop()
 
 	svc := NewWorkerService(mockQueue, nil, nil, nil, nil, nil, nopLogger)
 

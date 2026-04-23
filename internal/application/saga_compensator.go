@@ -8,6 +8,8 @@ import (
 	"go.uber.org/zap"
 
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 type SagaCompensator interface {
@@ -19,39 +21,42 @@ type sagaCompensator struct {
 	inventoryRepo domain.InventoryRepository
 	orderRepo     domain.OrderRepository
 	uow           domain.UnitOfWork
-	log           *zap.SugaredLogger
+	log           *mlog.Logger
 }
 
 // NewSagaCompensator takes the logger as an explicit dependency rather
-// than reaching for the global zap.S(), matching the pattern used by
+// than reaching for zap's globals, matching the pattern used by
 // WorkerService and keeping tests deterministic (L7).
 func NewSagaCompensator(
 	eventRepo domain.EventRepository,
 	inventoryRepo domain.InventoryRepository,
 	orderRepo domain.OrderRepository,
 	uow domain.UnitOfWork,
-	log *zap.SugaredLogger,
+	logger *mlog.Logger,
 ) SagaCompensator {
 	return &sagaCompensator{
 		eventRepo:     eventRepo,
 		inventoryRepo: inventoryRepo,
 		orderRepo:     orderRepo,
 		uow:           uow,
-		log:           log.With("component", "saga_compensator"),
+		log:           logger.With(zap.String("component", "saga_compensator")),
 	}
 }
 
 func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte) error {
 	var event domain.OrderFailedEvent
 	if err := json.Unmarshal(payload, &event); err != nil {
-		s.log.Errorw("failed to unmarshal event", "error", err, "payload", string(payload))
+		s.log.Error(ctx, "failed to unmarshal event",
+			tag.Error(err),
+			zap.ByteString("payload", payload),
+		)
 		return fmt.Errorf("sagaCompensator.HandleOrderFailed unmarshal: %w", err)
 	}
 
-	s.log.Infow("rolling back inventory for failed order",
-		"order_id", event.OrderID,
-		"event_id", event.EventID,
-		"quantity", event.Quantity,
+	s.log.Info(ctx, "rolling back inventory for failed order",
+		tag.OrderID(event.OrderID),
+		tag.EventID(event.EventID),
+		tag.Quantity(event.Quantity),
 	)
 
 	// 1. Rollback PostgreSQL Inventory & Ensure Idempotency via UoW
@@ -76,7 +81,7 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	})
 
 	if errUow != nil {
-		s.log.Errorw("failed to rollback DB inventory", "order_id", event.OrderID, "error", errUow)
+		s.log.Error(ctx, "failed to rollback DB inventory", tag.OrderID(event.OrderID), tag.Error(errUow))
 		return errUow // Retry — already wrapped inside the closure
 	}
 
@@ -85,13 +90,13 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	// key (see revert.lua for the crash-safety trade-off).
 	compensationID := fmt.Sprintf("order:%d", event.OrderID)
 	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, event.Quantity, compensationID); err != nil {
-		s.log.Errorw("failed to rollback Redis inventory",
-			"order_id", event.OrderID,
-			"error", err,
+		s.log.Error(ctx, "failed to rollback Redis inventory",
+			tag.OrderID(event.OrderID),
+			tag.Error(err),
 		)
 		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%d: %w", event.OrderID, err)
 	}
 
-	s.log.Infow("rollback successful", "order_id", event.OrderID)
+	s.log.Info(ctx, "rollback successful", tag.OrderID(event.OrderID))
 	return nil
 }

@@ -3,6 +3,8 @@ package cache
 import (
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 	"context"
 	"errors"
 	"fmt"
@@ -23,16 +25,19 @@ const (
 type redisOrderQueue struct {
 	client        *redis.Client
 	inventoryRepo domain.InventoryRepository
-	logger        *zap.SugaredLogger
+	logger        *mlog.Logger
 	consumerName  string
 }
 
-func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *zap.SugaredLogger, cfg *config.Config) domain.OrderQueue {
+func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *mlog.Logger, cfg *config.Config) domain.OrderQueue {
 	return &redisOrderQueue{
 		client:        client,
 		inventoryRepo: inventoryRepo,
-		logger:        logger,
-		consumerName:  cfg.App.WorkerID,
+		logger: logger.With(
+			zap.String("component", "redis_order_queue"),
+			zap.String("worker_id", cfg.App.WorkerID),
+		),
+		consumerName: cfg.App.WorkerID,
 	}
 }
 
@@ -57,7 +62,7 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 	// 1. Recover Pending Messages (PEL)
 	// These are messages this consumer claimed but crashed before ACKing.
 	if err := q.processPending(ctx, consumerName, handler); err != nil {
-		q.logger.Errorw("Failed to process pending messages during startup", "error", err)
+		q.logger.Error(ctx, "Failed to process pending messages during startup", tag.Error(err))
 		// We log but continue, ensuring we at least process new messages.
 	}
 
@@ -85,16 +90,16 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 
 			// Self-healing: If group is missing (e.g. after FLUSHALL), recreate it.
 			if strings.Contains(err.Error(), "NOGROUP") {
-				q.logger.Warn("XReadGroup Error: NOGROUP. Attempting to recreate group...")
+				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group...")
 				if ensureErr := q.EnsureGroup(ctx); ensureErr != nil {
-					q.logger.Errorw("Failed to recreate group", "error", ensureErr)
+					q.logger.Error(ctx, "Failed to recreate group", tag.Error(ensureErr))
 				}
 				time.Sleep(1 * time.Second)
 				continue
 			}
 
 			// Log error and sleep briefly
-			q.logger.Errorw("XReadGroup Error", "error", err)
+			q.logger.Error(ctx, "XReadGroup Error", tag.Error(err))
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -103,8 +108,8 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 			for _, msg := range stream.Messages {
 				orderMsg, err := parseMessage(msg)
 				if err != nil {
-					q.logger.Errorw("Malformed message — routing to DLQ",
-						"error", err, "msg_id", msg.ID)
+					q.logger.Error(ctx, "Malformed message — routing to DLQ",
+						tag.Error(err), tag.MsgID(msg.ID))
 					q.moveToDLQ(ctx, msg, err)
 					q.ackOrLog(ctx, msg.ID)
 					continue
@@ -129,8 +134,8 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 // is operator-visible.
 func (q *redisOrderQueue) ackOrLog(ctx context.Context, msgID string) {
 	if err := q.client.XAck(ctx, streamKey, groupName, msgID).Err(); err != nil {
-		q.logger.Errorw("XAck failed — message will be re-delivered via PEL",
-			"error", err, "msg_id", msgID)
+		q.logger.Error(ctx, "XAck failed — message will be re-delivered via PEL",
+			tag.Error(err), tag.MsgID(msgID))
 	}
 }
 
@@ -162,8 +167,8 @@ func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.Or
 	defer cancel()
 
 	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
-		q.logger.Errorw("RevertInventory failed during handleFailure",
-			"error", revertErr, "event_id", orderMsg.EventID, "quantity", orderMsg.Quantity)
+		q.logger.Error(ctx, "RevertInventory failed during handleFailure",
+			tag.Error(revertErr), tag.EventID(orderMsg.EventID), tag.Quantity(orderMsg.Quantity))
 	}
 
 	// 2. Move to DLQ
@@ -188,8 +193,11 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 		Stream: dlqKey,
 		Values: values,
 	}).Err(); addErr != nil {
-		q.logger.Errorw("XAdd to DLQ failed — failure trace lost",
-			"error", addErr, "original_id", msg.ID, "dlq", dlqKey)
+		q.logger.Error(ctx, "XAdd to DLQ failed — failure trace lost",
+			tag.Error(addErr),
+			zap.String("original_id", msg.ID),
+			zap.String("dlq", dlqKey),
+		)
 	}
 }
 
@@ -236,7 +244,7 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 
 // processPending fetches and processes messages from the Pending Entries List (PEL).
 func (q *redisOrderQueue) processPending(ctx context.Context, consumerName string, handler func(ctx context.Context, msg *domain.OrderMessage) error) error {
-	q.logger.Info("Checking for pending messages (PEL)...")
+	q.logger.Info(ctx, "Checking for pending messages (PEL)...")
 
 	for {
 		// XREADGROUP with ID "0" fetches pending messages for check consumer.
@@ -258,17 +266,17 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 		}
 
 		if len(streams) == 0 || len(streams[0].Messages) == 0 {
-			q.logger.Info("No more pending messages to recover.")
+			q.logger.Info(ctx, "No more pending messages to recover.")
 			return nil
 		}
 
 		stream := streams[0]
-		q.logger.Infow("Recovering pending messages", "count", len(stream.Messages))
+		q.logger.Info(ctx, "Recovering pending messages", zap.Int("count", len(stream.Messages)))
 
 		for _, msg := range stream.Messages {
 			orderMsg, err := parseMessage(msg)
 			if err != nil {
-				q.logger.Errorw("Malformed pending message", "id", msg.ID, "error", err)
+				q.logger.Error(ctx, "Malformed pending message", tag.MsgID(msg.ID), tag.Error(err))
 				q.moveToDLQ(ctx, msg, err)
 				q.ackOrLog(ctx, msg.ID)
 				continue
@@ -280,7 +288,7 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 			} else {
 				// Success
 				q.ackOrLog(ctx, msg.ID)
-				q.logger.Infow("Recovered and processed pending message", "msg_id", msg.ID)
+				q.logger.Info(ctx, "Recovered and processed pending message", tag.MsgID(msg.ID))
 			}
 		}
 	}

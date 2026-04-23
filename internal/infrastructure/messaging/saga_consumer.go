@@ -13,6 +13,8 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 const (
@@ -42,13 +44,14 @@ type SagaConsumer struct {
 	reader *kafka.Reader
 	dlq    *kafka.Writer
 	redis  *redis.Client
-	log    *zap.SugaredLogger
+	log    *mlog.Logger
 }
 
 // NewSagaConsumer constructs the consumer with a DLQ writer and a Redis
-// client for durable retry counting. All three collaborators are required.
-func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client) *SagaConsumer {
-	log := zap.S().With("component", "saga_consumer")
+// client for durable retry counting. The logger is an explicit dependency
+// so tests don't have to reach through zap's global logger.
+func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client, logger *mlog.Logger) *SagaConsumer {
+	scoped := logger.With(zap.String("component", "saga_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
@@ -71,12 +74,12 @@ func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client) *SagaConsumer {
 		reader: r,
 		dlq:    dlq,
 		redis:  rdb,
-		log:    log,
+		log:    scoped,
 	}
 }
 
 func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCompensator) error {
-	c.log.Info("Starting Saga Consumer for topic: order.failed")
+	c.log.Info(ctx, "Starting Saga Consumer for topic: order.failed")
 
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
@@ -84,15 +87,15 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 			if ctx.Err() != nil {
 				return nil // Graceful shutdown
 			}
-			c.log.Errorw("failed to fetch message", "error", err)
+			c.log.Error(ctx, "failed to fetch message", tag.Error(err))
 			time.Sleep(time.Second) // Backoff
 			continue
 		}
 
-		c.log.Infow("received failed order event", "offset", msg.Offset)
+		c.log.Info(ctx, "received failed order event", tag.Offset(msg.Offset))
 
 		if handleErr := compensator.HandleOrderFailed(ctx, msg.Value); handleErr != nil {
-			c.log.Errorw("failed to handle event", "error", handleErr, "offset", msg.Offset)
+			c.log.Error(ctx, "failed to handle event", tag.Error(handleErr), tag.Offset(msg.Offset))
 
 			count, incrErr := c.incrRetry(ctx, msg.Partition, msg.Offset)
 			if incrErr != nil {
@@ -104,14 +107,14 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 				// the KafkaConsumerStuck alert.
 				observability.KafkaConsumerRetryTotal.
 					WithLabelValues(msg.Topic, "transient_processing_error").Inc()
-				c.log.Errorw("failed to persist retry counter — will retry via rebalance",
-					"error", incrErr, "offset", msg.Offset)
+				c.log.Error(ctx, "failed to persist retry counter — will retry via rebalance",
+					tag.Error(incrErr), tag.Offset(msg.Offset))
 				continue
 			}
 
 			if count <= sagaMaxRetries {
-				c.log.Warnw("compensation failed — retrying",
-					"attempt", count, "offset", msg.Offset)
+				c.log.Warn(ctx, "compensation failed — retrying",
+					zap.Int64("attempt", count), tag.Offset(msg.Offset))
 				continue // retry later (no commit)
 			}
 
@@ -122,8 +125,11 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 			// try again next time. This means poison messages may cause
 			// a short hot-loop under DLQ failure, but at least the
 			// metric never lies about what was actually dead-lettered.
-			c.log.Errorw("compensation max retries exceeded — dead-lettering",
-				"offset", msg.Offset, "partition", msg.Partition, "attempts", count)
+			c.log.Error(ctx, "compensation max retries exceeded — dead-lettering",
+				tag.Offset(msg.Offset),
+				tag.Partition(msg.Partition),
+				zap.Int64("attempts", count),
+			)
 			if !c.writeDLQ(ctx, msg, handleErr) {
 				// DLQ write failed — do NOT commit, do NOT clear the
 				// retry counter. Next rebalance will retry.
@@ -187,8 +193,8 @@ func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause er
 		},
 	}
 	if err := c.dlq.WriteMessages(ctx, dlqMsg); err != nil {
-		c.log.Errorw("failed to write saga DLQ — message retained for retry",
-			"error", err, "topic", sagaDLQTopic, "offset", msg.Offset)
+		c.log.Error(ctx, "failed to write saga DLQ — message retained for retry",
+			tag.Error(err), tag.Topic(sagaDLQTopic), tag.Offset(msg.Offset))
 		return false
 	}
 	return true
@@ -196,7 +202,7 @@ func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause er
 
 func (c *SagaConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
 	if err := c.reader.CommitMessages(ctx, msg); err != nil {
-		c.log.Errorw("failed to commit offset", "error", err, "offset", msg.Offset)
+		c.log.Error(ctx, "failed to commit offset", tag.Error(err), tag.Offset(msg.Offset))
 	}
 }
 
