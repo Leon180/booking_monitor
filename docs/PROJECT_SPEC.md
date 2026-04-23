@@ -8,7 +8,7 @@ A high-concurrency ticket booking system designed to simulate "flash sale" scena
 
 **Goal**: Prevent overselling through a multi-layer strategy while maximizing throughput.
 
-**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases). A multi-agent review on Apr 11, 2026 surfaced 66 findings, remediated across PRs #8 (CRITICAL) / #9 (HIGH) / #12 (MEDIUM/LOW/NIT) / #13 (observability + smoke test plan). GC optimization followed on Apr 12–13 via PRs #14 (baseline harness + quick wins, +157% RPS) and #15 (deep fixes: sync.Pool, escape analysis, GOMEMLIMIT, combined middleware). See Section 8.
+**Development Timeline**: Feb 14 - Feb 24, 2026 (10 days, 15 commits, 12 phases). A multi-agent review on Apr 11, 2026 surfaced 66 findings, remediated across PRs #8 (CRITICAL) / #9 (HIGH) / #12 (MEDIUM/LOW/NIT) / #13 (observability + smoke test plan). GC optimization followed on Apr 12–13 via PRs #14 (baseline harness + quick wins, +157% RPS) and #15 (deep fixes: sync.Pool, escape analysis, GOMEMLIMIT, combined middleware). Logger architecture then moved to `internal/log` in PR #18 (Apr 23–24) with ctx-aware emit methods, OTEL trace_id/span_id auto-enrichment, and a runtime `/admin/loglevel` endpoint. See Section 8.
 
 ---
 
@@ -353,10 +353,17 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 - **Sampler is configurable** via `OTEL_TRACES_SAMPLER_RATIO`: empty/1 → AlwaysSample (default), 0 → NeverSample, 0 < r < 1 → TraceIDRatioBased(r). Unparseable values log a warning and fall back to AlwaysSample (we never silently disable tracing)
 - `initTracer` now **fails fast** (returns error to fx.Invoke) if either `resource.New` or `otlptracegrpc.New` fails, instead of letting a nil `traceExporter` crash the first span export
 
-### Logging (Zap)
-- Structured JSON to stdout
-- Correlation ID injection via middleware
-- Component-scoped loggers
+### Logging (internal/log + zap)
+- Structured JSON to stdout (ISO8601 time, `level`/`time`/`msg`/`caller` keys)
+- **Two usage styles**, both documented in `internal/log/doc.go`:
+  - **Pattern A** — struct-owned DI logger (`s.log *mlog.Logger`) used by long-lived components (sagaCompensator, workerService, paymentService, event_service, redisOrderQueue, KafkaConsumer, SagaConsumer, OutboxRelay). Each bakes a `component=<subsystem>` field at construction via `With()` so every log line is filterable by subsystem.
+  - **Pattern B** — package-level ctx-aware calls (`log.Error(ctx, ...)`) used by HTTP handlers, middleware, and init code where no stable component identity exists.
+- **Auto-enriched per-call fields** (prepended by `enrichFields`):
+  - `correlation_id` from context (set by `CombinedMiddleware`)
+  - `trace_id` / `span_id` from `trace.SpanContextFromContext(ctx)` when an OTEL span is in ctx — zero extra code at call site
+- **No per-request zap core clone** — middleware stores `{logger, correlationID}` as a value struct via one `context.WithValue`. Happy-path requests never allocate for logger state.
+- **Runtime level knob**: `GET`/`POST` `/admin/loglevel` on the pprof listener flips the `AtomicLevel` without restart (same `ENABLE_PPROF=true` gate)
+- **Typed field constructors** in `internal/log/tag/` (`tag.OrderID(id)`, `tag.Error(err)`, etc.) — compile-time typo protection on the hot path
 
 ### Dashboards (Grafana)
 Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP Fairness, Saturation
@@ -398,6 +405,7 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 | 12 | Feb 24 | `4e89ff7` | Saga compensation + idempotent Redis rollback + partial unique index (allows retry after payment failure) |
 | 13 | Apr 11 | PRs #7 / #8 / #9 / #12 / #13 | **Multi-agent review + remediation**: 66 findings across 6 review dimensions (domain/app, persistence, concurrency/cache, messaging/saga, api/payment, observability/deploy). All 6 CRITICAL and all 13 HIGH items fixed in [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) and [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9); 17 MEDIUM / 14 LOW / 6 NIT items fixed in [`fix/review-backlog` (#12)](https://github.com/Leon180/booking_monitor/pull/12); docs + `kafka_consumer_retry_total` metric + `KafkaConsumerStuck` alert + [`docs/reviews/SMOKE_TEST_PLAN.md`](reviews/SMOKE_TEST_PLAN.md) in [`fix/review-docs` (#13)](https://github.com/Leon180/booking_monitor/pull/13). Consolidated backlog lives at [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md). See the **Remediation highlights** block below for the user-visible changes. |
 | 14 | Apr 12–13 | PRs #14 / #15 | **GC optimization**: baseline benchmark revealed a 70% RPS regression caused by fx.Decorate fix re-enabling tracing/metrics decorators + `AlwaysSample()` + per-request zap core clone. Fixed in two PRs. [`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) added the benchmark harness (pprof endpoint on `:6060`, `scripts/benchmark_gc.sh`, `scripts/gc_metrics.sh`, `scripts/pprof_capture.sh`) and three quick wins (`OTEL_TRACES_SAMPLER_RATIO=0.01`, `GOGC=400`, CorrelationIDMiddleware no longer clones the zap core) — RPS 7,984 → 20,552 (+157%). [`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) followed with deep fixes: `sync.Pool` for Redis Lua script args, `strconv.Itoa` key concat (replaces `fmt.Sprintf` boxing), `GOMEMLIMIT=256MiB`, and a consolidated `CombinedMiddleware` that does exactly one `context.WithValue` + one `c.Request.WithContext` per request — mallocs/60s: 258M → 110M (−57%), GC cycles/60s: 202 → 86 (−57%). See the **Phase 14 highlights** block below. |
+| 15 | Apr 23–24 | PR #18 | **Logger architecture refactor**: `pkg/logger/` → `internal/log/` with a ctx-aware emit API. Middleware no longer calls `baseLogger.With(tag.CorrelationID(id))` per request (which deep-cloned zap's internal core ~1.2 KB/req). Instead `CombinedMiddleware` stores a `ctxValue{logger, correlationID string}` via one `context.WithValue`; `Logger.Error(ctx, msg, fields...)` and the package-level `log.Error(ctx, ...)` read `correlation_id` and OTEL `trace_id`/`span_id` from ctx at emit time via `enrichFields`. Adds `LevelHandler()` exposing `GET`/`POST` `/admin/loglevel` on the pprof listener for runtime level changes, `ParseLevel` that rejects typos (vs silent info fallback), and the `internal/log/tag/` package of typed `zap.Field` constructors. Every long-lived component (sagaCompensator, workerService, paymentService, event_service, redisOrderQueue, KafkaConsumer, SagaConsumer, OutboxRelay) now decorates its injected logger with `component=<subsystem>` for uniform Loki/Grafana label matching. See the **Phase 15 highlights** block below. |
 
 ### Remediation highlights (Phase 13)
 
@@ -416,6 +424,16 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 - **Runtime tuning**: `GOGC=400` + `GOMEMLIMIT=256MiB` — GC stays lazy during normal traffic but becomes aggressive as heap approaches the soft limit, preventing unbounded growth during spikes.
 - **Hot-path allocation cuts**: `CombinedMiddleware` does exactly one `context.WithValue` + one `c.Request.WithContext` per request by injecting a scoped logger into the context (`internal/log/context.go`); Redis Lua script args reuse a `sync.Pool`-backed `[]interface{}`; inventory keys use `strconv.Itoa` concat instead of `fmt.Sprintf` to avoid interface boxing; sentinel errors (`errDeductScriptNotFound`, `errRevertScriptNotFound`, `errUnexpectedLuaResult`) replace per-call `fmt.Errorf`.
 - **Result**: clean-run RPS 7,984 → 20,552 (+157%); allocations/60s 258M → 110M (−57%); GC cycles/60s 202 → 86 (−57%); GC pause max 79ms → 41ms (−48%); heap peak bounded by `GOMEMLIMIT` at ≤256MB.
+
+### Phase 15 highlights (logger refactor)
+
+- **Package move**: `pkg/logger/` → `internal/log/`. Service-scoped logger package shouldn't live in `pkg/` (Go layout convention: `pkg/` = reusable across modules, `internal/` = service-private).
+- **Ctx-aware emit API**: `Logger.Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)` plus package-level `log.Error(ctx, ...)` / etc. `Check()` is called first, so a disabled level costs ZERO allocation; when enabled, `enrichFields(ctx, user)` prepends `correlation_id` (from ctx) plus OTEL `trace_id` / `span_id` (from `trace.SpanContextFromContext`). No per-request `baseLogger.With(...)` clone.
+- **Hybrid usage convention** (documented in `internal/log/doc.go`): Pattern A — long-lived components with stable identity inject the logger and decorate it with `component=<subsystem>` via `With()` ONCE at construction. Pattern B — call-site-local code (handlers, middleware, init) uses package-level `log.Error(ctx, ...)`. Both co-exist; not an inconsistency.
+- **Runtime level knob**: `LevelHandler()` serves `GET`/`POST` `/admin/loglevel` on the pprof listener. Flips the atomic level without restart. Same `ENABLE_PPROF=true` gate.
+- **Typed tags**: `internal/log/tag/` supplies `tag.OrderID`, `tag.EventID`, `tag.Error`, etc. — 11 canonical keys as `zap.Field` constructors. Compile-time typo protection on the hot path.
+- **Caller correctness**: both emit paths report the user's file:line, not `internal/log/log.go`. Covered by `TestCallerFrame_Method` + `TestCallerFrame_PackageLevel` regression tests.
+- **Trade-off**: back-to-back benchmark (same Docker env) showed ~9% RPS drop vs PR #15 main — wrapper dispatch + `AddCallerSkip` walk + `enrichFields` check. Accepted in exchange for zero per-request clone, auto trace enrichment, and the owned `Logger` type (future slog migration replaces the body of `log.go` only, not 60+ call sites).
 
 ---
 
@@ -507,7 +525,7 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 ### Internal logging (`internal/log/`)
 | File | Purpose |
 |------|---------|
-| `internal/log/log.go` | `Logger` type wrapping `*zap.Logger` + `AtomicLevel`; exposes `L()` (fast path), `S()` (sugar), `With()`, `Level()`, `Sync()` |
+| `internal/log/log.go` | `Logger` type wrapping `*zap.Logger` + `AtomicLevel`. Ctx-aware emit methods `Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)` auto-enrich with `correlation_id` + OTEL `trace_id`/`span_id` via `enrichFields`. Also exposes `L()` (raw zap for hot loops), `S()` (sugar), `With()`, `Level()`, `Sync()`. Uses a separate `zCtxSkip` core with `AddCallerSkip(2)` so caller frames point at user code, not the wrapper |
 | `internal/log/options.go` | `Options` struct + `fillDefaults` (encoder, output, sampling). Decouples the package from `internal/config` |
 | `internal/log/level.go` | `Level` type alias + `ParseLevel(string) (Level, error)` — typos fail startup, never silent fallback |
 | `internal/log/context.go` | `NewContext` / `FromContext` — canonical ctx carry (klog/slog convention). `FromContext` returns `Nop` if unset, not a hidden global |

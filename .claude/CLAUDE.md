@@ -93,8 +93,14 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 - No hardcoded secrets - use env vars
 - Tests use testify/assert + go.uber.org/mock
 
-## Current State (as of 2026-04-21)
-14 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
+## Current State (as of 2026-04-24)
+15 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). Phase 15 (Apr 23–24) landed the logger architecture refactor in PR #18 — `pkg/logger/` → `internal/log/` with ctx-aware emit methods (`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`) that auto-inject `correlation_id` + OTEL `trace_id`/`span_id`, `/admin/loglevel` runtime level endpoint on the pprof listener, and the typed `internal/log/tag/` field constructors. See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
+
+## Logging Conventions (post-PR #18)
+- **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
+- **Pattern B — call-site-local code**: handlers, middleware, init paths use package-level `log.Error(ctx, "msg", tag.UserID(uid))`. Reads the logger from ctx via `FromContext`, falls back to Nop when unset.
+- **Typed fields**: prefer `tag.OrderID`/`tag.Error`/`tag.UserID` etc. from `internal/log/tag/` over raw `zap.Int("order_id", ...)` — compile-time typo protection.
+- **Never call `zap.S()` or `zap.L()` globals** — they're not wired in this codebase; the logger is DI'd everywhere.
 
 ## Remaining Roadmap
 - DLQ Worker (dead letter retry policy)

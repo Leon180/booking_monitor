@@ -8,7 +8,7 @@
 
 **核心目標**:以多層防線防止超賣,同時將吞吐量最大化。
 
-**開發時程**:2026-02-14 至 2026-02-24(10 天,15 個 commits,12 個 phases)。2026-04-11 進行多 agent 程式碼審查,共整理出 66 項 findings,於 PR #8(CRITICAL)/ #9(HIGH)/ #12(MEDIUM/LOW/NIT)/ #13(可觀測性 + smoke test plan)完成修復。GC 優化接著在 4/12–13 透過 PR #14(baseline harness + quick wins,+157% RPS)與 #15(deep fixes:sync.Pool、escape analysis、GOMEMLIMIT、合併 middleware)完成 — 詳見第 8 節。
+**開發時程**:2026-02-14 至 2026-02-24(10 天,15 個 commits,12 個 phases)。2026-04-11 進行多 agent 程式碼審查,共整理出 66 項 findings,於 PR #8(CRITICAL)/ #9(HIGH)/ #12(MEDIUM/LOW/NIT)/ #13(可觀測性 + smoke test plan)完成修復。GC 優化接著在 4/12–13 透過 PR #14(baseline harness + quick wins,+157% RPS)與 #15(deep fixes:sync.Pool、escape analysis、GOMEMLIMIT、合併 middleware)完成。Logger 架構在 PR #18(4/23–24)搬到 `internal/log`,加入 ctx-aware emit 方法、OTEL trace_id/span_id 自動注入、以及執行期 `/admin/loglevel` 端點 — 詳見第 8 節。
 
 ---
 
@@ -341,10 +341,17 @@ Prometheus metrics 端點。
 - **採樣器可設定**:透過 `OTEL_TRACES_SAMPLER_RATIO`:空/1 → AlwaysSample(預設)、0 → NeverSample、0 < r < 1 → TraceIDRatioBased(r)。若值無法解析,會 log warning 並 fallback 到 AlwaysSample(絕不靜默關閉 tracing)
 - `initTracer` 現在會**fail fast**(回傳錯誤給 fx.Invoke),不再讓 `resource.New` 或 `otlptracegrpc.New` 的錯誤落到下一步,導致 nil `traceExporter` 在送第一個 span 時 crash
 
-### 日誌(Zap)
-- Structured JSON 輸出至 stdout
-- Middleware 注入 Correlation ID
-- 依元件劃分的 logger
+### 日誌(internal/log + zap)
+- Structured JSON 輸出至 stdout(ISO8601 時間、`level`/`time`/`msg`/`caller` 欄位)
+- **兩種使用風格**,皆記錄在 `internal/log/doc.go`:
+  - **Pattern A** — 長生命週期元件(sagaCompensator、workerService、paymentService、event_service、redisOrderQueue、KafkaConsumer、SagaConsumer、OutboxRelay)使用結構體 DI logger(`s.log *mlog.Logger`),在建構時透過 `With()` 烘入 `component=<subsystem>`,讓每條 log 都能依子系統篩選。
+  - **Pattern B** — HTTP handlers、middleware、init 程式碼沒有穩定的 component 身份,使用套件層級的 ctx-aware 呼叫(`log.Error(ctx, ...)`)。
+- **每次呼叫自動補上的欄位**(由 `enrichFields` 前置):
+  - `correlation_id` 取自 context(由 `CombinedMiddleware` 注入)
+  - `trace_id` / `span_id` 取自 `trace.SpanContextFromContext(ctx)` — ctx 內有 OTEL span 時自動出現,呼叫端完全不需改動
+- **每個 request 不再 clone zap core** — middleware 以一次 `context.WithValue` 存 `{logger, correlationID}` 值結構。happy path 不為 logger 狀態分配任何記憶體。
+- **執行期 level 切換**:`GET`/`POST` `/admin/loglevel` 掛在 pprof listener 上,直接切換 `AtomicLevel`,不用重啟(同樣受 `ENABLE_PPROF=true` 控制)
+- **型別化欄位建構子** 放在 `internal/log/tag/`(`tag.OrderID(id)`、`tag.Error(err)` 等)— 熱路徑上享有編譯期打錯防護
 
 ### 儀表板(Grafana)
 預先配置的 6 格儀表板: RPS、Latency Quantiles、Conversion Rate、IP Fairness、Saturation
@@ -386,6 +393,7 @@ Prometheus metrics 端點。
 | 12 | 2/24 | `4e89ff7` | Saga 補償 + 冪等 Redis 回滾 + 部分唯一索引(允許付款失敗後重試) |
 | 13 | 4/11 | PRs #7 / #8 / #9 / #12 / #13 | **多 agent review 與 remediation**:在 6 個 review 面向(domain/app、persistence、concurrency/cache、messaging/saga、api/payment、observability/deploy)共彙整出 66 項 findings。所有 6 個 CRITICAL 與 13 個 HIGH 在 [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) 與 [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9) 修復;17 MEDIUM / 14 LOW / 6 NIT 在 [`fix/review-backlog` (#12)](https://github.com/Leon180/booking_monitor/pull/12) 修復;docs + `kafka_consumer_retry_total` 指標 + `KafkaConsumerStuck` 告警 + [`docs/reviews/SMOKE_TEST_PLAN.md`](reviews/SMOKE_TEST_PLAN.md) 於 [`fix/review-docs` (#13)](https://github.com/Leon180/booking_monitor/pull/13) 完成。彙整後的 backlog 存放在 [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md)。使用者面向的改動請看下方的 **Remediation 重點** 區塊。 |
 | 14 | 4/12–13 | PRs #14 / #15 | **GC 優化**:baseline benchmark 發現 RPS 比歷史掉 70%,根因是 fx.Decorate 修好後 tracing/metrics decorator 真的被套用,加上 `AlwaysSample()` 與每個 request 都 clone 一次 zap core。分兩個 PR 修復。[`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) 先建 benchmark harness(pprof endpoint 開在 `:6060`、`scripts/benchmark_gc.sh`、`scripts/gc_metrics.sh`、`scripts/pprof_capture.sh`)並導入三個 quick win(`OTEL_TRACES_SAMPLER_RATIO=0.01`、`GOGC=400`、CorrelationIDMiddleware 不再 clone zap core)— RPS 7,984 → 20,552(+157%)。[`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) 緊接做 deep fix:Redis Lua script args 改用 `sync.Pool`、key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf` boxing)、`GOMEMLIMIT=256MiB`、以及合併後的 `CombinedMiddleware`,每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext` — 每 60 秒分配物件數 258M → 110M(−57%),GC 週期 202 → 86(−57%)。詳細請看下方的 **Phase 14 重點** 區塊。 |
+| 15 | 4/23–24 | PR #18 | **Logger 架構重構**:`pkg/logger/` → `internal/log/`,改採 ctx-aware emit API。Middleware 不再在每個 request 呼叫 `baseLogger.With(tag.CorrelationID(id))`(該呼叫會深度 clone zap 內部 core,約 1.2 KB/req)。改成 `CombinedMiddleware` 以一次 `context.WithValue` 存 `ctxValue{logger, correlationID string}`;`Logger.Error(ctx, msg, fields...)` 與套件層級的 `log.Error(ctx, ...)` 由 `enrichFields` 在實際 emit 時從 ctx 讀出 `correlation_id` 與 OTEL `trace_id`/`span_id`。新增 `LevelHandler()`,把 `GET`/`POST` `/admin/loglevel` 掛在 pprof listener 上做執行期 level 切換;`ParseLevel` 對打錯的 level 直接回報錯誤(不再靜默 fallback 成 info);另新增 `internal/log/tag/` 套件提供型別化的 `zap.Field` 建構子。每個長生命週期元件(sagaCompensator、workerService、paymentService、event_service、redisOrderQueue、KafkaConsumer、SagaConsumer、OutboxRelay)現在都在注入的 logger 上烘入 `component=<subsystem>`,讓 Loki/Grafana 的標籤篩選在所有子系統上一致。詳細請看下方的 **Phase 15 重點** 區塊。 |
 
 ### Remediation 重點(Phase 13)
 
@@ -404,6 +412,16 @@ Prometheus metrics 端點。
 - **Runtime 調優**:`GOGC=400` + `GOMEMLIMIT=256MiB` — 正常流量下 GC 很鬆,heap 接近 soft limit 時才變積極,避免流量 spike 時 heap 無限成長。
 - **Hot-path 分配削減**:`CombinedMiddleware` 把已綁定 correlation id 的 request 級 logger 一次塞進 context(`internal/log/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
 - **結果**:clean run RPS 7,984 → 20,552(+157%);每 60 秒分配物件數 258M → 110M(−57%);GC 週期 202 → 86(−57%);GC pause 最大值 79ms → 41ms(−48%);heap peak 被 `GOMEMLIMIT` 控制在 ≤256MB。
+
+### Phase 15 重點(Logger 重構)
+
+- **套件搬家**:`pkg/logger/` → `internal/log/`。服務專屬的 logger 不應放在 `pkg/`(Go layout 慣例:`pkg/` = 跨 module 可重用,`internal/` = service-private)。
+- **Ctx-aware emit API**:`Logger.Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)` 以及套件層級的 `log.Error(ctx, ...)` 等。先呼叫 `Check()`,level 被關掉時花費**零 allocation**;啟用時 `enrichFields(ctx, user)` 會前置 `correlation_id`(從 ctx 取)加上 OTEL `trace_id` / `span_id`(從 `trace.SpanContextFromContext` 取)。每個 request 不再 clone `baseLogger.With(...)`。
+- **混合使用慣例**(記錄於 `internal/log/doc.go`):Pattern A — 有穩定身份的長生命週期元件在建構時一次以 `With()` 烘入 `component=<subsystem>` 標籤,並由 fx 注入;Pattern B — 呼叫點專用的程式(handlers、middleware、init)使用套件層級 `log.Error(ctx, ...)`。兩者並存,不是不一致。
+- **執行期 level 切換**:`LevelHandler()` 在 pprof listener 上提供 `GET`/`POST` `/admin/loglevel`,不需要重啟就能切換原子 level。同樣受 `ENABLE_PPROF=true` 控制。
+- **型別化 tag**:`internal/log/tag/` 提供 `tag.OrderID`、`tag.EventID`、`tag.Error` 等 11 個標準 key 的 `zap.Field` 建構子 — 熱路徑上有編譯期打錯防護。
+- **Caller 正確性**:兩條 emit 路徑都會回報使用者的 file:line,不會指向 `internal/log/log.go`。由 `TestCallerFrame_Method` + `TestCallerFrame_PackageLevel` 兩個 regression test 守護。
+- **取捨**:同一 Docker 環境背靠背 benchmark 相比 PR #15 main 掉約 9% RPS — wrapper 派送 + `AddCallerSkip` 的 frame 巡查 + `enrichFields` 的 fast-path check。交換到的是「每 request 零 clone」、「trace 自動 enrich」與擁有自有 `Logger` 型別(未來遷移到 slog 時只需改 `log.go`,不會波及 60+ 個呼叫點)。
 
 ---
 
@@ -495,7 +513,7 @@ Prometheus metrics 端點。
 ### 內部 logging(`internal/log/`)
 | 檔案 | 用途 |
 |------|------|
-| `internal/log/log.go` | `Logger` 型別,包住 `*zap.Logger` 與 `AtomicLevel`;提供 `L()`(fast path)、`S()`(sugar)、`With()`、`Level()`、`Sync()` |
+| `internal/log/log.go` | `Logger` 型別,包住 `*zap.Logger` 與 `AtomicLevel`。Ctx-aware emit 方法 `Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)` 會透過 `enrichFields` 自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`。同時保留 `L()`(熱迴圈使用的原始 zap)、`S()`(sugar)、`With()`、`Level()`、`Sync()`。內部使用獨立的 `zCtxSkip` core 加上 `AddCallerSkip(2)`,確保 caller 指向使用者程式碼而非 wrapper |
 | `internal/log/options.go` | `Options` 結構 + `fillDefaults`(encoder、output、sampling)。避免 log 套件反過來相依 `internal/config` |
 | `internal/log/level.go` | `Level` 型別別名 + `ParseLevel(string) (Level, error)` — 打錯直接讓 app 啟動失敗,不靜默 fallback |
 | `internal/log/context.go` | `NewContext` / `FromContext` — 慣例的 context 夾帶 logger 入口(照 klog/slog 命名)。`FromContext` 未設時回傳 `Nop`,不接全域 |
