@@ -402,7 +402,7 @@ Prometheus metrics 端點。
 - **Benchmark harness**:`net/http/pprof` 獨立跑在 `:6060` listener(透過 `ENABLE_PPROF=true` 控制);`scripts/benchmark_gc.sh` / `scripts/gc_metrics.sh` / `scripts/pprof_capture.sh` 把 k6、Go runtime 指標、heap/allocs profile 整合成單一報告,產出在 `docs/benchmarks/`。該 listener 有自己的 `http.Server` 與 fx `OnStop` shutdown hook — 無 goroutine leak。
 - **Sampler 調優**:`OTEL_TRACES_SAMPLER_RATIO` 預設 `0.01`(1%)。未被採樣的 request 只拿到一個 no-op span(零分配),不會走完整的 batch span processor export。
 - **Runtime 調優**:`GOGC=400` + `GOMEMLIMIT=256MiB` — 正常流量下 GC 很鬆,heap 接近 soft limit 時才變積極,避免流量 spike 時 heap 無限成長。
-- **Hot-path 分配削減**:`CombinedMiddleware` 把 logger + correlation ID 合併成一個 `RequestContext` struct(`pkg/logger/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
+- **Hot-path 分配削減**:`CombinedMiddleware` 把已綁定 correlation id 的 request 級 logger 一次塞進 context(`internal/log/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
 - **結果**:clean run RPS 7,984 → 20,552(+157%);每 60 秒分配物件數 258M → 110M(−57%);GC 週期 202 → 86(−57%);GC pause 最大值 79ms → 41ms(−48%);heap peak 被 `GOMEMLIMIT` 控制在 ≤256MB。
 
 ---
@@ -492,11 +492,17 @@ Prometheus metrics 端點。
 | `internal/infrastructure/config/config.go` | YAML config + 環境變數 override |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock 付款閘道 |
 
-### 共用套件(`pkg/`)
+### 內部 logging(`internal/log/`)
 | 檔案 | 用途 |
 |------|------|
-| `pkg/logger/context.go` | `RequestContext` struct + `WithRequestContext` / `FromCtx` / `CorrelationIDFromCtx` / `WithCorrelation` 等 helper。單一 context key,每個 request 只會配置一次 |
-| `pkg/logger/logger.go` | Zap logger 啟動設定(JSON encoder、stdout) |
+| `internal/log/log.go` | `Logger` 型別,包住 `*zap.Logger` 與 `AtomicLevel`;提供 `L()`(fast path)、`S()`(sugar)、`With()`、`Level()`、`Sync()` |
+| `internal/log/options.go` | `Options` 結構 + `fillDefaults`(encoder、output、sampling)。避免 log 套件反過來相依 `internal/config` |
+| `internal/log/level.go` | `Level` 型別別名 + `ParseLevel(string) (Level, error)` — 打錯直接讓 app 啟動失敗,不靜默 fallback |
+| `internal/log/context.go` | `NewContext` / `FromContext` — 慣例的 context 夾帶 logger 入口(照 klog/slog 命名)。`FromContext` 未設時回傳 `Nop`,不接全域 |
+| `internal/log/nop.go` | `NewNop()` 靜默 logger,供測試與尚未接好的背景路徑使用 |
+| `internal/log/handler.go` | `LevelHandler()` — GET/POST `/admin/loglevel` 動態調 level;掛在 pprof listener 上 |
+| `internal/log/tag/tag.go` | 強型別 `zap.Field` 建構子(`tag.OrderID`、`tag.Error` 等)— hot path 的 key 不怕打錯 |
+| `internal/bootstrap/logmodule.go` | fx 綁定:讀 `cfg.App.LogLevel` → `log.ParseLevel` → `log.New`。放這裡(而非 `internal/log/` 內)讓 log 套件與 config 解耦 |
 
 ### 設定與部署
 | 檔案 | 用途 |

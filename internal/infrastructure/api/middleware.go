@@ -1,33 +1,27 @@
 package api
 
 import (
-	"booking_monitor/pkg/logger"
+	"booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 )
 
-// LoggerMiddleware injects the base logger into the context.
-// DEPRECATED: prefer CombinedMiddleware which consolidates logger +
-// correlation ID into a single context.WithValue call.
-func LoggerMiddleware(l *zap.SugaredLogger) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx := logger.WithCtx(c.Request.Context(), l)
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
-	}
-}
-
-// CombinedMiddleware merges LoggerMiddleware + CorrelationIDMiddleware
-// into a single middleware that does exactly ONE context.WithValue and
-// ONE c.Request.WithContext per request.
+// CombinedMiddleware injects the request-scoped logger into the
+// context in a single pass — one correlation id generated, one zap
+// With to bake the id into a child logger, one context.WithValue,
+// one c.Request.WithContext. Error-path log calls that retrieve the
+// logger via log.FromContext(ctx) automatically emit the correlation
+// field without any per-call With() clone.
 //
-// Why: each context.WithValue allocates a 32-byte valueCtx struct, and
-// each WithContext clones the entire *http.Request (~200 bytes). The
-// old two-middleware chain did 2+2 of these; this does 1+1, saving
-// ~232 bytes/request × 17k RPS = ~3.9 MB/s of heap allocation.
-func CombinedMiddleware(baseLogger *zap.SugaredLogger) gin.HandlerFunc {
+// The correlation id is also echoed in the X-Correlation-ID response
+// header and stored in gin.Context keys for middleware-level access.
+//
+// This replaces the previous LoggerMiddleware + CorrelationIDMiddleware
+// pair, which did 2×WithValue + 2×WithContext (~464 bytes/req) on the
+// hot path.
+func CombinedMiddleware(baseLogger *log.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		corID := c.GetHeader("X-Correlation-ID")
 		if corID == "" {
@@ -35,11 +29,8 @@ func CombinedMiddleware(baseLogger *zap.SugaredLogger) gin.HandlerFunc {
 		}
 		c.Header("X-Correlation-ID", corID)
 
-		rctx := &logger.RequestContext{
-			Logger:        baseLogger,
-			CorrelationID: corID,
-		}
-		ctx := logger.WithRequestContext(c.Request.Context(), rctx)
+		reqLogger := baseLogger.With(tag.CorrelationID(corID))
+		ctx := log.NewContext(c.Request.Context(), reqLogger)
 		c.Request = c.Request.WithContext(ctx)
 		c.Set("correlation_id", corID)
 

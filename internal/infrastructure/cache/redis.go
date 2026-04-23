@@ -14,6 +14,8 @@ import (
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 	_ "embed"
 )
 
@@ -48,7 +50,7 @@ type redisInventoryRepository struct {
 	scripts map[string]*redis.Script
 }
 
-func NewRedisClient(cfg *config.Config, log *zap.SugaredLogger) *redis.Client {
+func NewRedisClient(cfg *config.Config, logger *mlog.Logger) *redis.Client {
 	redisCfg := cfg.Redis
 	opts := &redis.Options{
 		Addr:         redisCfg.Addr,
@@ -68,11 +70,14 @@ func NewRedisClient(cfg *config.Config, log *zap.SugaredLogger) *redis.Client {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
-		log.Fatalw("Failed to connect to Redis", "error", err)
+		logger.L().Fatal("Failed to connect to Redis", tag.Error(err))
 	}
 
 	// Scripts are loaded lazily by redis.Script
-	log.Infow("Connected to Redis successfully", "addr", redisCfg.Addr, "pool_size", redisCfg.PoolSize)
+	logger.L().Info("Connected to Redis successfully",
+		zap.String("addr", redisCfg.Addr),
+		zap.Int("pool_size", redisCfg.PoolSize),
+	)
 	return client
 }
 

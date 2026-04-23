@@ -29,7 +29,8 @@ internal/
     observability/        # Prometheus metrics、OTEL tracing
     payment/              # Mock 付款閘道
     config/               # YAML config + 環境變數 override
-pkg/logger/               # 結構化日誌(Zap)
+  log/                    # 結構化日誌(Zap)— context 傳遞、typed tag、執行期 level
+  bootstrap/              # logger 與其他基礎設施的 fx 綁定
 deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、Grafana 設定
 ```
 

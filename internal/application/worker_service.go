@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"booking_monitor/internal/domain"
-
-	"go.uber.org/zap"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 type WorkerService interface {
@@ -23,7 +23,7 @@ type workerService struct {
 	outboxRepo domain.OutboxRepository
 	uow        domain.UnitOfWork
 	metrics    domain.WorkerMetrics
-	logger     *zap.SugaredLogger
+	logger     *mlog.Logger
 }
 
 func NewWorkerService(
@@ -33,7 +33,7 @@ func NewWorkerService(
 	outboxRepo domain.OutboxRepository,
 	uow domain.UnitOfWork,
 	metrics domain.WorkerMetrics,
-	logger *zap.SugaredLogger,
+	logger *mlog.Logger,
 ) WorkerService {
 	return &workerService{
 		queue:      queue,
@@ -47,11 +47,11 @@ func NewWorkerService(
 }
 
 func (s *workerService) Start(ctx context.Context) {
-	s.logger.Info("Starting worker service...")
+	s.logger.L().Info("Starting worker service...")
 
 	// ensure group
 	if err := s.queue.EnsureGroup(ctx); err != nil {
-		s.logger.Errorw("Failed to ensure consumer group", "error", err)
+		s.logger.L().Error("Failed to ensure consumer group", tag.Error(err))
 		return
 	}
 
@@ -61,7 +61,7 @@ func (s *workerService) Start(ctx context.Context) {
 	})
 
 	if err != nil && !errors.Is(err, context.Canceled) {
-		s.logger.Errorw("Worker subscription failed", "error", err)
+		s.logger.L().Error("Worker subscription failed", tag.Error(err))
 	}
 }
 
@@ -73,12 +73,13 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		// 1. Double Check Inventory (Source of Truth)
 		if err := s.eventRepo.DecrementTicket(txCtx, msg.EventID, msg.Quantity); err != nil {
 			if errors.Is(err, domain.ErrSoldOut) {
-				s.logger.Warnw("Inventory conflict: Redis approved but DB sold out", "msg_id", msg.ID, "event_id", msg.EventID)
+				s.logger.L().Warn("Inventory conflict: Redis approved but DB sold out",
+					tag.MsgID(msg.ID), tag.EventID(msg.EventID))
 				s.metrics.RecordInventoryConflict()
 				s.metrics.RecordOrderOutcome("sold_out")
 				return err
 			}
-			s.logger.Errorw("Failed to decrement ticket in DB", "msg_id", msg.ID, "error", err)
+			s.logger.L().Error("Failed to decrement ticket in DB", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
@@ -93,11 +94,12 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 
 		if err := s.orderRepo.Create(txCtx, order); err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
-				s.logger.Warnw("Duplicate purchase blocked by DB constraint", "msg_id", msg.ID, "user_id", msg.UserID, "event_id", msg.EventID)
+				s.logger.L().Warn("Duplicate purchase blocked by DB constraint",
+					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
 				s.metrics.RecordOrderOutcome("duplicate")
 				return err
 			}
-			s.logger.Errorw("Failed to create order", "msg_id", msg.ID, "error", err)
+			s.logger.L().Error("Failed to create order", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
@@ -108,7 +110,7 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		// ship a silent nil-payload outbox row.
 		payload, err := json.Marshal(order)
 		if err != nil {
-			s.logger.Errorw("Failed to marshal order for outbox", "msg_id", msg.ID, "error", err)
+			s.logger.L().Error("Failed to marshal order for outbox", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
@@ -119,12 +121,13 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		}
 
 		if err := s.outboxRepo.Create(txCtx, outboxEvent); err != nil {
-			s.logger.Errorw("Failed to create outbox event", "msg_id", msg.ID, "error", err)
+			s.logger.L().Error("Failed to create outbox event", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
 
-		s.logger.Infow("Order processed successfully with Outbox", "msg_id", msg.ID, "order_id", order.ID)
+		s.logger.L().Info("Order processed successfully with Outbox",
+			tag.MsgID(msg.ID), tag.OrderID(order.ID))
 		s.metrics.RecordOrderOutcome("success")
 		return nil
 	})
