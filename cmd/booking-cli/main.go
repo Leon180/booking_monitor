@@ -48,33 +48,26 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
-// Runtime-stable constants. Anything a deployer might need to tune belongs
-// in config.Config — these are values that stay the same across envs or
-// already have a dedicated env-var override.
+// Code-level constants. Deployer-tunable values live in config.Config
+// (see cfg.Server / cfg.Postgres); the constants below are either program
+// contracts (API version), config bootstrap (can't live in config by
+// definition), OTel-convention fallbacks, or CLI-tool flag defaults.
 const (
 	// apiV1Prefix is the single source of truth for the versioned API
 	// router group. runServer registers it; stress + integration tools
 	// import it to avoid drift.
 	apiV1Prefix = "/api/v1"
 
+	// Config bootstrap — can't be in config by definition.
 	envConfigPath     = "CONFIG_PATH"
 	defaultConfigPath = "config/config.yml"
 
-	envEnablePprof    = "ENABLE_PPROF"
-	envPprofAddr      = "PPROF_ADDR"
-	defaultPprofAddr  = "127.0.0.1:6060" // loopback by default; heap dumps + /admin/loglevel live here.
-	pprofReadTimeout  = 5 * time.Second
-	pprofWriteTimeout = 30 * time.Second // heap dumps can take a while.
-
-	// DB ping retry bounds. Intentionally conservative so pod startup
-	// fails fast with a clear error if Postgres is genuinely unreachable.
-	dbPingAttempts   = 10
-	dbPingInterval   = time.Second
-	dbPingPerAttempt = 3 * time.Second
-
+	// OTel convention: OTEL_SERVICE_NAME is the standard env var; the
+	// const is just a fallback when it's unset.
 	otelServiceNameDefault = "booking-service"
 
-	// Stress-test defaults.
+	// Stress-test CLI flag defaults. Not in config because the stress
+	// binary is a one-off tool, not a server process reading config.
 	stressDefaultBaseURL      = "http://localhost:8080"
 	stressDefaultEventID      = 1
 	stressDefaultUserRangeMax = 10000
@@ -205,7 +198,7 @@ func runServer(_ *cobra.Command, _ []string) {
 
 		fx.Provide(func(cfg *config.Config) messaging.MessagingConfig {
 			return messaging.MessagingConfig{
-				Brokers:      messaging.ParseBrokers(cfg.Kafka.Brokers),
+				Brokers:      cfg.Kafka.Brokers,
 				WriteTimeout: cfg.Kafka.WriteTimeout,
 			}
 		}),
@@ -239,15 +232,15 @@ func installServer(
 		return fmt.Errorf("installServer: %w", err)
 	}
 
-	engine, err := buildGinEngine(logger, handler)
+	engine, err := buildGinEngine(cfg, logger, handler)
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
 
 	httpServer := buildHTTPServer(cfg, engine)
 	var pprofServer *http.Server
-	if strings.EqualFold(os.Getenv(envEnablePprof), "true") {
-		pprofServer = buildPprofServer(logger)
+	if cfg.Server.EnablePprof {
+		pprofServer = buildPprofServer(cfg, logger)
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -272,14 +265,11 @@ func installServer(
 // config failure used to degrade silently to a Warn — that left ClientIP()
 // returning the nginx pod IP, defeating rate-limits and audit logs. Now
 // fatal at construction time.
-//
-// TODO(config): move the RFC1918 CIDRs into cfg.Server so non-RFC1918
-// proxy meshes (GKE, some AWS VPCs) work without a code change.
-func buildGinEngine(logger *mlog.Logger, handler api.BookingHandler) (*gin.Engine, error) {
+func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.BookingHandler) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	if err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}); err != nil {
+	if err := r.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("buildGinEngine: SetTrustedProxies: %w", err)
 	}
 
@@ -314,11 +304,12 @@ func buildHTTPServer(cfg *config.Config, h http.Handler) *http.Server {
 // buildPprofServer returns the operator-only listener that carries pprof
 // endpoints + /admin/loglevel. Binds to 127.0.0.1 by default: heap dumps
 // + goroutine traces + log-level control must not be reachable on the
-// public interface without explicit opt-in (PPROF_ADDR override).
+// public interface without explicit opt-in (cfg.Server.PprofAddr /
+// PPROF_ADDR override).
 //
 // Uses a private ServeMux so we don't inherit whatever http.DefaultServeMux
 // accumulates elsewhere in the binary (tests, third-party libs, etc.).
-func buildPprofServer(logger *mlog.Logger) *http.Server {
+func buildPprofServer(cfg *config.Config, logger *mlog.Logger) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -327,17 +318,12 @@ func buildPprofServer(logger *mlog.Logger) *http.Server {
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	mux.Handle("/admin/loglevel", logger.LevelHandler())
 
-	addr := strings.TrimSpace(os.Getenv(envPprofAddr))
-	if addr == "" {
-		addr = defaultPprofAddr
-	}
-
 	return &http.Server{
-		Addr:              addr,
+		Addr:              cfg.Server.PprofAddr,
 		Handler:           mux,
-		ReadTimeout:       pprofReadTimeout,
-		ReadHeaderTimeout: pprofReadTimeout,
-		WriteTimeout:      pprofWriteTimeout,
+		ReadTimeout:       cfg.Server.PprofReadTimeout,
+		ReadHeaderTimeout: cfg.Server.PprofReadTimeout,
+		WriteTimeout:      cfg.Server.PprofWriteTimeout,
 	}
 }
 
@@ -504,29 +490,33 @@ func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 	// connection staleness (prepared-stmt caches, PgBouncer auth drift).
 	db.SetConnMaxLifetime(cfg.Postgres.MaxLifetime)
 
-	totalBudget := time.Duration(dbPingAttempts) * (dbPingInterval + dbPingPerAttempt)
+	attempts := cfg.Postgres.PingAttempts
+	interval := cfg.Postgres.PingInterval
+	perAttempt := cfg.Postgres.PingPerAttempt
+
+	totalBudget := time.Duration(attempts) * (interval + perAttempt)
 	ctx, cancel := context.WithTimeout(context.Background(), totalBudget)
 	defer cancel()
 
 	var pingErr error
-	for attempt := 1; attempt <= dbPingAttempts; attempt++ {
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, dbPingPerAttempt)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, perAttempt)
 		pingErr = db.PingContext(attemptCtx)
 		attemptCancel()
 		if pingErr == nil {
 			return db, nil
 		}
 		logger.L().Warn("waiting for Postgres", zap.Int("attempt", attempt), tag.Error(pingErr))
-		if attempt == dbPingAttempts {
+		if attempt == attempts {
 			break
 		}
 		select {
-		case <-time.After(dbPingInterval):
+		case <-time.After(interval):
 		case <-ctx.Done():
 			return nil, fmt.Errorf("provideDB: context cancelled: %w", ctx.Err())
 		}
 	}
-	return nil, fmt.Errorf("provideDB: postgres unreachable after %d attempts: %w", dbPingAttempts, pingErr)
+	return nil, fmt.Errorf("provideDB: postgres unreachable after %d attempts: %w", attempts, pingErr)
 }
 
 func runStress(cmd *cobra.Command, _ []string) {
