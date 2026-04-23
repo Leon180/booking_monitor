@@ -33,8 +33,11 @@ func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepo
 	return &redisOrderQueue{
 		client:        client,
 		inventoryRepo: inventoryRepo,
-		logger:        logger,
-		consumerName:  cfg.App.WorkerID,
+		logger: logger.With(
+			zap.String("component", "redis_order_queue"),
+			zap.String("worker_id", cfg.App.WorkerID),
+		),
+		consumerName: cfg.App.WorkerID,
 	}
 }
 

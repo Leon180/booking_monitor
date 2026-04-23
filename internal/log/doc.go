@@ -21,12 +21,66 @@
 // Call sites build structured fields with internal/log/tag (e.g.
 // tag.OrderID, tag.Error), not raw "key", value pairs. This catches
 // typos at compile time and keeps the key vocabulary consistent across
-// the codebase.
+// the codebase. correlation_id and OTEL trace_id / span_id do NOT
+// need a tag — they are injected automatically by enrichFields when
+// the ctx-aware methods fire.
 //
-//	log.FromContext(ctx).L().Error("BookTicket failed",
+//	log.Error(ctx, "BookTicket failed",
 //	    tag.Error(err),
 //	    tag.UserID(req.UserID),
 //	)
+//
+// # Usage principles (DI vs context-only)
+//
+// There are two supported patterns. The split is intentional — not an
+// inconsistency. Each pattern puts a different class of field in the
+// right place.
+//
+// Pattern A — DI logger held as a struct field, used by application
+// services and long-lived components (*sagaCompensator, *workerService,
+// *paymentService, *KafkaConsumer, *SagaConsumer, *redisOrderQueue):
+//
+//	type sagaCompensator struct { log *mlog.Logger }
+//
+//	func NewSagaCompensator(..., logger *mlog.Logger) SagaCompensator {
+//	    return &sagaCompensator{
+//	        log: logger.With(zap.String("component", "saga_compensator")),
+//	    }
+//	}
+//
+//	func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, ...) {
+//	    s.log.Error(ctx, "failed", tag.OrderID(id))
+//	}
+//
+// Pattern B — package-level ctx-aware calls, used by HTTP handlers,
+// the outbox relay, middleware, and init code:
+//
+//	func (h *bookingHandler) HandleBook(c *gin.Context) {
+//	    ctx := c.Request.Context()
+//	    log.Error(ctx, "BookTicket failed", tag.Error(err))
+//	}
+//
+// Two classes of field exist, and each pattern handles the right one:
+//
+//   - Component / subsystem fields (component="saga_compensator",
+//     worker_id="w-1") — known at construction, never change →
+//     baked into the struct logger via With() ONCE (Pattern A).
+//   - Request / call fields (correlation_id, trace_id, span_id,
+//     user_id, order_id) — per-request → carried on ctx and auto-
+//     injected by enrichFields, or passed as tag.* at the call site.
+//
+// Choose Pattern A when the caller has a stable component identity
+// that belongs on every log line it emits. Choose Pattern B when it
+// does not (handlers, middleware, init, background relays that are
+// single-instance). This is the convention in Temporal, Cockroach,
+// Kubernetes, Grafana, and modern slog codebases — NOT an arbitrary
+// mix.
+//
+// What is NOT a convention here: pure DI (no ctx) loses correlation_id /
+// trace_id auto-enrichment. Pure ctx (no struct logger) forces every
+// log call to repeat the component name (DRY violation) or adds
+// context.WithValue(ctx, "component", ...) boilerplate at every
+// method entry.
 //
 // # Dynamic level
 //
