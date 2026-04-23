@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"go.uber.org/zap"
-
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -31,7 +29,7 @@ func NewEventService(repo domain.EventRepository, inventoryRepo domain.Inventory
 	return &eventService{
 		repo:          repo,
 		inventoryRepo: inventoryRepo,
-		log:           logger.With(zap.String("component", "event_service")),
+		log:           logger.With(mlog.String("component", "event_service")),
 	}
 }
 
@@ -66,8 +64,8 @@ func (s *eventService) CreateEvent(ctx context.Context, name string, totalTicket
 			// so the operator can reconcile manually.
 			s.log.Error(ctx, "COMPENSATION FAILED — dangling event row",
 				tag.EventID(event.ID),
-				zap.NamedError("redis_error", err),
-				zap.NamedError("delete_error", delErr),
+				mlog.NamedError("redis_error", err),
+				mlog.NamedError("delete_error", delErr),
 			)
 			return nil, fmt.Errorf("eventService.CreateEvent: redis SetInventory failed (%v) AND compensating DB delete failed: %w", err, delErr)
 		}

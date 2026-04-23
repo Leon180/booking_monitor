@@ -99,7 +99,8 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 ## Logging 使用慣例(PR #18 之後)
 - **Pattern A — 長生命週期元件**:透過 constructor 注入 `*log.Logger`,在建構時一次性用 `With()` 加上 `component=<subsystem>` 標籤(例:`worker_service`、`outbox_relay`、`saga_compensator`)。呼叫 `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware 方法會自動注入 correlation/trace ids。
 - **Pattern B — 呼叫點本地程式碼**:handlers、middleware、init 路徑用 package-level `log.Error(ctx, "msg", tag.UserID(uid))`。會透過 `FromContext` 從 ctx 讀取 logger,未設定時 fallback 到 Nop。
-- **型別化欄位**:優先使用 `internal/log/tag/` 的 `tag.OrderID`/`tag.Error`/`tag.UserID` 等,不要寫原始 `zap.Int("order_id", ...)` — 編譯期檢查拼字錯誤。
+- **型別化欄位**:優先使用 `internal/log/tag/` 的 `tag.OrderID`/`tag.Error`/`tag.UserID` 等,不要寫原始 `log.Int("order_id", ...)` — 編譯期檢查拼字錯誤。
+- **One-off inline 欄位**:不值得建 typed tag 的 key(`component`、`batch_size`、`payload` 等)使用 `internal/log/` 的 `log.String`/`log.Int`/`log.Int64`/`log.ByteString`/`log.Err`/`log.NamedError`。應用程式碼**不要**直接 import `go.uber.org/zap` — zap 封裝在 `internal/log/` 內部。
 - **永遠不要呼叫 `zap.S()` 或 `zap.L()` 全域** — 這個專案沒有 wire 全域 logger,所有地方都用 DI 注入。
 
 ## 待辦路線圖

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"go.uber.org/zap"
-
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -36,7 +34,7 @@ func NewService(
 		orderRepo:  orderRepo,
 		outboxRepo: outboxRepo,
 		uow:        uow,
-		log:        logger.With(zap.String("component", "payment_service")),
+		log:        logger.With(mlog.String("component", "payment_service")),
 	}
 }
 

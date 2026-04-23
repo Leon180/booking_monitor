@@ -99,7 +99,8 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 ## Logging Conventions (post-PR #18)
 - **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
 - **Pattern B — call-site-local code**: handlers, middleware, init paths use package-level `log.Error(ctx, "msg", tag.UserID(uid))`. Reads the logger from ctx via `FromContext`, falls back to Nop when unset.
-- **Typed fields**: prefer `tag.OrderID`/`tag.Error`/`tag.UserID` etc. from `internal/log/tag/` over raw `zap.Int("order_id", ...)` — compile-time typo protection.
+- **Typed fields**: prefer `tag.OrderID`/`tag.Error`/`tag.UserID` etc. from `internal/log/tag/` over raw `log.Int("order_id", ...)` — compile-time typo protection.
+- **Inline one-off fields**: use `log.String`/`log.Int`/`log.Int64`/`log.ByteString`/`log.Err`/`log.NamedError` from `internal/log/` for keys that don't warrant a typed tag (`component`, `batch_size`, `payload`, etc.). Do NOT import `go.uber.org/zap` from application code — zap is encapsulated inside `internal/log/`.
 - **Never call `zap.S()` or `zap.L()` globals** — they're not wired in this codebase; the logger is DI'd everywhere.
 
 ## Remaining Roadmap

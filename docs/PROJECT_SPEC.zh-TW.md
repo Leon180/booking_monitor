@@ -519,6 +519,7 @@ Prometheus metrics 端點。
 | `internal/log/nop.go` | `NewNop()` 靜默 logger,供測試與尚未接好的背景路徑使用 |
 | `internal/log/handler.go` | `LevelHandler()` — GET/POST `/admin/loglevel` 動態調 level;掛在 pprof listener 上 |
 | `internal/log/tag/tag.go` | 強型別 `zap.Field` 建構子(`tag.OrderID`、`tag.Error` 等)— hot path 的 key 不怕打錯 |
+| `internal/log/field.go` | `Field` 型別別名 + 重新匯出的 zap 建構子(`log.String`、`log.Int`、`log.Int64`、`log.ByteString`、`log.Err`、`log.NamedError`),供 one-off inline key 使用,應用程式碼不需要再直接 import `go.uber.org/zap`。zap 完全封裝在 `internal/log/` 套件內部 |
 | `internal/bootstrap/logmodule.go` | fx 綁定:讀 `cfg.App.LogLevel` → `log.ParseLevel` → `log.New`。放這裡(而非 `internal/log/` 內)讓 log 套件與 config 解耦 |
 
 ### 設定與部署

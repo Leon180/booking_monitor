@@ -30,6 +30,22 @@
 //	    tag.UserID(req.UserID),
 //	)
 //
+// # Inline fields (non-canonical keys)
+//
+// For one-off keys that do not warrant a tag helper (component names,
+// worker ids, diagnostic payloads, reasons), use the re-exported
+// constructors in this package — log.String, log.Int, log.Int64,
+// log.ByteString, log.NamedError, log.Err. They are thin wrappers over
+// go.uber.org/zap so application code can import just
+// booking_monitor/internal/log and its tag subpackage, not zap itself.
+//
+//	log.Info(ctx, "outbox relay started",
+//	    log.Int("batch_size", r.batchSize),
+//	)
+//
+// If a key appears in two or more unrelated packages, promote it to a
+// typed tag in internal/log/tag instead.
+//
 // # Usage principles (DI vs context-only)
 //
 // There are two supported patterns. The split is intentional — not an

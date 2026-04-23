@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
@@ -32,7 +31,7 @@ type KafkaConsumer struct {
 
 // NewKafkaConsumer creates a new Kafka consumer with an attached DLQ writer.
 func NewKafkaConsumer(cfg *config.KafkaConfig, logger *mlog.Logger) *KafkaConsumer {
-	scoped := logger.With(zap.String("component", "kafka_consumer"))
+	scoped := logger.With(mlog.String("component", "kafka_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
@@ -75,13 +74,13 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 		}
 
 		c.log.Info(ctx, "Received message",
-			zap.ByteString("key", msg.Key), tag.Offset(msg.Offset))
+			mlog.ByteString("key", msg.Key), tag.Offset(msg.Offset))
 
 		var event domain.OrderCreatedEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			c.log.Error(ctx, "Failed to unmarshal event — dead-lettering",
 				tag.Error(err),
-				zap.ByteString("payload", msg.Value),
+				mlog.ByteString("payload", msg.Value),
 				tag.Offset(msg.Offset),
 			)
 			c.deadLetter(ctx, msg, "invalid_payload", err)
@@ -151,8 +150,8 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 		c.log.Error(ctx, "Failed to write to DLQ topic — message lost",
 			tag.Error(err),
 			tag.Topic(paymentDLQTopic),
-			zap.String("reason", reason),
-			zap.Int64("original_offset", msg.Offset),
+			mlog.String("reason", reason),
+			mlog.Int64("original_offset", msg.Offset),
 		)
 		return
 	}
