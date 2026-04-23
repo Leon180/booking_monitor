@@ -463,7 +463,6 @@ Prometheus metrics 端點。
 | 檔案 | 用途 |
 |------|------|
 | `cmd/booking-cli/main.go` | CLI 進入點:`server`, `stress`, `payment` 指令 |
-| `cmd/verify-redis/main.go` | Redis 驗證工具 |
 
 ### Domain
 | 檔案 | 用途 |

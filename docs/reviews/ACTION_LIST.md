@@ -76,7 +76,7 @@ found the original severity inflated.
 | L10 | [internal/infrastructure/messaging/kafka_publisher.go:L38-L40](../../internal/infrastructure/messaging/kafka_publisher.go#L38), [internal/infrastructure/messaging/module.go:L25-L27](../../internal/infrastructure/messaging/module.go#L25) | `Close()` blocks on flush with no timeout wrapper. | #4 |
 | L11 | [deploy/grafana/provisioning/dashboards/dashboard.json:L14,L33](../../deploy/grafana/provisioning/dashboards/dashboard.json) | Uses deprecated `graph` panel (removed in Grafana 10+). Migrate to `timeseries`; bump `schemaVersion` to 36+. | #6 |
 | L12 | [deploy/grafana/provisioning/dashboards/dashboard.yml:L8](../../deploy/grafana/provisioning/dashboards/dashboard.yml#L8) | `disableDeletion: false`. Should be `true` in prod. | #6 |
-| L13 | [cmd/verify-redis/main.go:L17](../../cmd/verify-redis/main.go#L17) | Hardcodes `Addr: "localhost:6379"`; no env var. | #6 |
+| L13 | ~~`cmd/verify-redis/main.go`~~ (file removed) | ~~Hardcodes `Addr: "localhost:6379"`; no env var.~~ Resolved by deleting the unused smoke utility — coverage now provided by `internal/infrastructure/cache/*_test.go` + `docs/reviews/SMOKE_TEST_PLAN.md` §5. | #6 |
 | L14 | [Makefile:L110](../../Makefile#L110) | `reset-db` uses `FLUSHALL \|\| true` — silently swallows failure. | #6 |
 
 ### NIT

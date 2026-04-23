@@ -475,7 +475,6 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | File | Purpose |
 |------|---------|
 | `cmd/booking-cli/main.go` | CLI entry: `server`, `stress`, `payment` commands |
-| `cmd/verify-redis/main.go` | Redis verification utility |
 
 ### Domain
 | File | Purpose |

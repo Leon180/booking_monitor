@@ -1,3 +1,39 @@
+# Grafana data source provisioning.
+#
+# This file is read by Grafana on startup (mounted at
+# /etc/grafana/provisioning/datasources/ via docker-compose.yml).
+# It tells Grafana where to fetch metrics from — dashboards then
+# reference this data source by `name`.
+#
+# Rationale for each field:
+#   apiVersion: 1
+#     Provisioning schema version. Only value accepted today.
+#
+#   name: Prometheus
+#     Dashboard JSON refers to this data source by name.
+#     Changing it means updating every dashboard → avoid renaming.
+#
+#   type: prometheus
+#     Tells Grafana which plugin parses responses. 30+ types exist
+#     (loki, jaeger, mysql, postgres, elasticsearch, cloudwatch, ...).
+#
+#   access: proxy
+#     proxy: browser → Grafana → Prometheus (safer; Prometheus need
+#       not be exposed publicly; Grafana can hold Prometheus auth).
+#     direct: browser → Prometheus directly (requires Prometheus to
+#       be reachable from user browsers; CORS issues; no shared auth).
+#     We always want proxy in production.
+#
+#   url: http://prometheus:9090
+#     `prometheus` is the docker-compose service name; internal DNS
+#     resolves it to the Prometheus container. 9090 is the Prometheus
+#     HTTP API convention. Never use `localhost:9090` here — each
+#     container has its own localhost (not the host's).
+#
+#   isDefault: true
+#     New dashboards pick this data source by default. Only one
+#     data source can be the default per Grafana organisation.
+
 apiVersion: 1
 
 datasources:

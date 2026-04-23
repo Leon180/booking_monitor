@@ -1,28 +1,66 @@
+# Prometheus main config.
+#
+# Prometheus uses a PULL model: it reaches out to each target every
+# `scrape_interval` and fetches the current metric values from the
+# target's /metrics endpoint. This differs from push-model systems
+# (StatsD, Datadog) and gives us:
+#   • the target's liveness is automatically observable (up metric)
+#   • no shared credentials in app code (the scraper controls auth)
+#   • service discovery plugs in at the scraper, not every app
+#   • targets can't DOS the scraper with runaway event rates
+# The trade-off: short-lived jobs need a separate pushgateway.
+# Our long-running server fits the pull model perfectly.
+
 global:
-  # 15s is a reasonable production default. Local dev / load tests
-  # can override by mounting a different prometheus.yml. Previously
-  # this was 5s, which 3× the scrape traffic for no operator benefit.
+  # scrape_interval — how often Prometheus pulls /metrics from each
+  # target. 15s is the cloud-native industry default. Shorter (e.g.
+  # 5s) triples scrape traffic without making dashboards noticeably
+  # more responsive and harms Prometheus CPU/storage at scale.
   # Closes action-list item M17.
   scrape_interval: 15s
 
+# rule_files — load recording and alerting rules from separate files.
+# Keeping rules out of this file avoids a 500-line monolith and lets
+# different teams own their alerts without git conflicts. Paths are
+# relative to this file's location. The docker-compose volume mount
+# (`./deploy/prometheus:/etc/prometheus`) makes alerts.yml resolve.
 rule_files:
   - "alerts.yml"
 
+# Every scrape_configs entry is a `job`. For each job, Prometheus
+# automatically adds two labels to every metric it scrapes:
+#   job      = the job_name below
+#   instance = "host:port" of the specific target
+# So `rate(http_requests_total{job="booking-service"}[1m])` selects
+# only metrics from that job, and aggregating `by (instance)` gives
+# per-replica views when the job has multiple targets.
 scrape_configs:
   - job_name: 'prometheus'
+    # Prometheus scrapes its own metrics (scrape latency, rule
+    # evaluation time, query volume, WAL size). `localhost:9090`
+    # means "this Prometheus process" (inside its container).
     static_configs:
       - targets: ['localhost:9090']
 
-  # booking-service runs inside this compose network as `app:8080`.
-  # The previous config also listed `host.docker.internal:8080` which
-  # is only reachable from Docker Desktop on macOS/Windows and causes
-  # "context deadline exceeded" scrape failures on Linux hosts.
-  # Closes action-list item M12.
   - job_name: 'booking-service'
+    # Our Go app. `app` resolves via docker-compose DNS to the
+    # booking-cli container; 8080 is what the Go server binds to.
+    # `metrics_path` defaults to /metrics — spelling it out keeps
+    # the intent obvious for future readers.
+    #
+    # The previous config also listed `host.docker.internal:8080`
+    # as a second target, which is only reachable from Docker
+    # Desktop on macOS/Windows and caused "context deadline
+    # exceeded" scrape failures on Linux hosts. Closes action-list
+    # item M12.
     metrics_path: '/metrics'
     static_configs:
       - targets: ['app:8080']
 
   - job_name: 'jaeger'
+    # Jaeger exposes its OWN operational metrics on 14269 (not trace
+    # data — trace data flows directly from the app via OTLP on
+    # 4317). We scrape these so we can alert on Jaeger backlog,
+    # dropped spans, etc. in the same Prometheus/Grafana stack.
     static_configs:
       - targets: ['jaeger:14269']
