@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"go.uber.org/zap"
-
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -39,7 +37,7 @@ func NewSagaCompensator(
 		inventoryRepo: inventoryRepo,
 		orderRepo:     orderRepo,
 		uow:           uow,
-		log:           logger.With(zap.String("component", "saga_compensator")),
+		log:           logger.With(mlog.String("component", "saga_compensator")),
 	}
 }
 
@@ -48,7 +46,7 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	if err := json.Unmarshal(payload, &event); err != nil {
 		s.log.Error(ctx, "failed to unmarshal event",
 			tag.Error(err),
-			zap.ByteString("payload", payload),
+			mlog.ByteString("payload", payload),
 		)
 		return fmt.Errorf("sagaCompensator.HandleOrderFailed unmarshal: %w", err)
 	}

@@ -531,6 +531,7 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/log/nop.go` | `NewNop()` silent logger for tests and unwired paths |
 | `internal/log/handler.go` | `LevelHandler()` — GET/POST `/admin/loglevel` for runtime level changes; mounted on the pprof listener |
 | `internal/log/tag/tag.go` | Typed `zap.Field` constructors (`tag.OrderID`, `tag.Error`, etc.) — compile-time typo protection on the hot path |
+| `internal/log/field.go` | `Field` alias + re-exported zap constructors (`log.String`, `log.Int`, `log.Int64`, `log.ByteString`, `log.Err`, `log.NamedError`) for inline one-off keys so application code doesn't need to import `go.uber.org/zap` directly. zap stays encapsulated inside `internal/log/` |
 | `internal/bootstrap/logmodule.go` | fx wiring: reads `cfg.App.LogLevel` → `log.ParseLevel` → `log.New`. Lives here (not in `internal/log/`) so the log package stays config-free |
 
 ### Configuration & Deployment

@@ -8,8 +8,6 @@ import (
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
-
-	"go.uber.org/zap"
 )
 
 const (
@@ -39,7 +37,7 @@ func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPu
 		publisher:  publisher,
 		batchSize:  batchSize,
 		mutex:      mutex,
-		log:        logger.With(zap.String("component", "outbox_relay")),
+		log:        logger.With(mlog.String("component", "outbox_relay")),
 	}
 }
 
@@ -56,7 +54,7 @@ func (r *OutboxRelay) Run(ctx context.Context) {
 // only ran on the ctx.Done branch, which leaked the lock on panic or
 // on a bug that returned from the function without hitting ctx.Done.
 func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context.Context) error) {
-	r.log.Info(ctx, "outbox relay started", zap.Int("batch_size", r.batchSize))
+	r.log.Info(ctx, "outbox relay started", mlog.Int("batch_size", r.batchSize))
 
 	ticker := time.NewTicker(outboxPollInterval)
 	defer ticker.Stop()
@@ -130,7 +128,7 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 
 		if err := r.publisher.Publish(ctx, e.EventType, e.Payload); err != nil {
 			r.log.Error(ctx, "outbox relay: failed to publish event",
-				zap.Int("event_id", e.ID),
+				mlog.Int("event_id", e.ID),
 				tag.Topic(e.EventType),
 				tag.Error(err),
 			)
@@ -141,7 +139,7 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 
 		if err := r.outboxRepo.MarkProcessed(ctx, e.ID); err != nil {
 			r.log.Error(ctx, "outbox relay: failed to mark event as processed",
-				zap.Int("event_id", e.ID),
+				mlog.Int("event_id", e.ID),
 				tag.Error(err),
 			)
 			// Intentional: the event was already published. If MarkProcessed

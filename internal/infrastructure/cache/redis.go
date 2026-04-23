@@ -10,7 +10,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
@@ -75,8 +74,8 @@ func NewRedisClient(cfg *config.Config, logger *mlog.Logger) *redis.Client {
 
 	// Scripts are loaded lazily by redis.Script
 	logger.Info(ctx, "Connected to Redis successfully",
-		zap.String("addr", redisCfg.Addr),
-		zap.Int("pool_size", redisCfg.PoolSize),
+		mlog.String("addr", redisCfg.Addr),
+		mlog.Int("pool_size", redisCfg.PoolSize),
 	)
 	return client
 }

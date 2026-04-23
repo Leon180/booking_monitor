@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"go.uber.org/zap"
-
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -44,7 +42,7 @@ func NewWorkerService(
 		outboxRepo: outboxRepo,
 		uow:        uow,
 		metrics:    metrics,
-		logger:     logger.With(zap.String("component", "worker_service")),
+		logger:     logger.With(mlog.String("component", "worker_service")),
 	}
 }
 

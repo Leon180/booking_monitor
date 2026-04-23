@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
-	"go.uber.org/zap"
 )
 
 type BookingHandler interface {
@@ -170,8 +169,8 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 	if err != nil {
 		log.Error(ctx, "CreateEvent failed",
 			tag.Error(err),
-			zap.String("name", req.Name),
-			zap.Int("total_tickets", req.TotalTickets),
+			log.String("name", req.Name),
+			log.Int("total_tickets", req.TotalTickets),
 		)
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})

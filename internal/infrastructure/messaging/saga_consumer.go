@@ -8,7 +8,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/config"
@@ -51,7 +50,7 @@ type SagaConsumer struct {
 // client for durable retry counting. The logger is an explicit dependency
 // so tests don't have to reach through zap's global logger.
 func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client, logger *mlog.Logger) *SagaConsumer {
-	scoped := logger.With(zap.String("component", "saga_consumer"))
+	scoped := logger.With(mlog.String("component", "saga_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{cfg.Brokers},
@@ -114,7 +113,7 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 
 			if count <= sagaMaxRetries {
 				c.log.Warn(ctx, "compensation failed — retrying",
-					zap.Int64("attempt", count), tag.Offset(msg.Offset))
+					mlog.Int64("attempt", count), tag.Offset(msg.Offset))
 				continue // retry later (no commit)
 			}
 
@@ -128,7 +127,7 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCo
 			c.log.Error(ctx, "compensation max retries exceeded — dead-lettering",
 				tag.Offset(msg.Offset),
 				tag.Partition(msg.Partition),
-				zap.Int64("attempts", count),
+				mlog.Int64("attempts", count),
 			)
 			if !c.writeDLQ(ctx, msg, handleErr) {
 				// DLQ write failed — do NOT commit, do NOT clear the

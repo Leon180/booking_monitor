@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"go.uber.org/zap"
 )
 
 const (
@@ -34,8 +33,8 @@ func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepo
 		client:        client,
 		inventoryRepo: inventoryRepo,
 		logger: logger.With(
-			zap.String("component", "redis_order_queue"),
-			zap.String("worker_id", cfg.App.WorkerID),
+			mlog.String("component", "redis_order_queue"),
+			mlog.String("worker_id", cfg.App.WorkerID),
 		),
 		consumerName: cfg.App.WorkerID,
 	}
@@ -195,8 +194,8 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 	}).Err(); addErr != nil {
 		q.logger.Error(ctx, "XAdd to DLQ failed — failure trace lost",
 			tag.Error(addErr),
-			zap.String("original_id", msg.ID),
-			zap.String("dlq", dlqKey),
+			mlog.String("original_id", msg.ID),
+			mlog.String("dlq", dlqKey),
 		)
 	}
 }
@@ -271,7 +270,7 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 		}
 
 		stream := streams[0]
-		q.logger.Info(ctx, "Recovering pending messages", zap.Int("count", len(stream.Messages)))
+		q.logger.Info(ctx, "Recovering pending messages", mlog.Int("count", len(stream.Messages)))
 
 		for _, msg := range stream.Messages {
 			orderMsg, err := parseMessage(msg)
