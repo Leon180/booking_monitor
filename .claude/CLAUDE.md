@@ -87,7 +87,7 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 
 ## Development Conventions
 - Immutable data patterns - create new objects, never mutate
-- Files under 800 lines, functions under 50 lines
+- Files under 800 lines; functions under 50 lines by default. Bootstrap / DI wiring / linear-construction code (e.g. `cmd/booking-cli/main.go` fx.Invoke bodies) may go up to ~80 lines when splitting would only add indirection without clarifying intent. Do not extract helpers purely to meet the line count.
 - Handle errors explicitly at every level
 - Validate at system boundaries
 - No hardcoded secrets - use env vars

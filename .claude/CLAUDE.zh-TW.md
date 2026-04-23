@@ -87,7 +87,7 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 
 ## 開發規範
 - **Immutable 資料模式**:建立新物件,不要 mutate
-- 檔案 < 800 行,function < 50 行
+- 檔案 < 800 行;function 預設 < 50 行。Bootstrap / DI 組裝 / 線性構造類程式碼(例如 `cmd/booking-cli/main.go` 的 fx.Invoke 主體)在拆分只會增加 indirection、卻不會讓意圖更清楚時,可放寬到 ~80 行。不要純粹為了湊行數而抽 helper。
 - 每一層都要明確處理 error
 - 所有邊界都要驗證輸入
 - 不得硬編密碼/金鑰,一律用環境變數

@@ -91,9 +91,8 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | 查看活動 |
 | GET | `/metrics` | Prometheus 指標 |
-| POST | `/book` | 舊版 route(Phase 0 保留) |
 
-**冪等性**:POST /book 可帶 `Idempotency-Key: <uuid>` header,以達到 at-most-once 語意。
+**冪等性**:`POST /api/v1/book` 可帶 `Idempotency-Key: <uuid>` header,以達到 at-most-once 語意。
 
 ## 開發指令
 
