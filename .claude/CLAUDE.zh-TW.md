@@ -93,8 +93,14 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 - 不得硬編密碼/金鑰,一律用環境變數
 - 測試使用 testify/assert + go.uber.org/mock
 
-## 目前狀態(截至 2026-04-21)
-已完成 14 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
+## 目前狀態(截至 2026-04-24)
+已完成 15 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。Phase 15(4/23–24)在 PR #18 完成 logger 架構重構 — `pkg/logger/` → `internal/log/`,新增 ctx-aware emit 方法(`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`)會自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`,在 pprof listener 上掛載 `/admin/loglevel` runtime level 端點,並提供 `internal/log/tag/` 型別化欄位建構子。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
+
+## Logging 使用慣例(PR #18 之後)
+- **Pattern A — 長生命週期元件**:透過 constructor 注入 `*log.Logger`,在建構時一次性用 `With()` 加上 `component=<subsystem>` 標籤(例:`worker_service`、`outbox_relay`、`saga_compensator`)。呼叫 `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware 方法會自動注入 correlation/trace ids。
+- **Pattern B — 呼叫點本地程式碼**:handlers、middleware、init 路徑用 package-level `log.Error(ctx, "msg", tag.UserID(uid))`。會透過 `FromContext` 從 ctx 讀取 logger,未設定時 fallback 到 Nop。
+- **型別化欄位**:優先使用 `internal/log/tag/` 的 `tag.OrderID`/`tag.Error`/`tag.UserID` 等,不要寫原始 `zap.Int("order_id", ...)` — 編譯期檢查拼字錯誤。
+- **永遠不要呼叫 `zap.S()` 或 `zap.L()` 全域** — 這個專案沒有 wire 全域 logger,所有地方都用 DI 注入。
 
 ## 待辦路線圖
 - **DLQ Worker**(優先):dead letter 的重試政策(目前訊息進了 `orders:dlq` 就沒有重跑機制)
