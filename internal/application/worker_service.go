@@ -47,11 +47,11 @@ func NewWorkerService(
 }
 
 func (s *workerService) Start(ctx context.Context) {
-	s.logger.L().Info("Starting worker service...")
+	s.logger.Info(ctx, "Starting worker service...")
 
 	// ensure group
 	if err := s.queue.EnsureGroup(ctx); err != nil {
-		s.logger.L().Error("Failed to ensure consumer group", tag.Error(err))
+		s.logger.Error(ctx, "Failed to ensure consumer group", tag.Error(err))
 		return
 	}
 
@@ -61,7 +61,7 @@ func (s *workerService) Start(ctx context.Context) {
 	})
 
 	if err != nil && !errors.Is(err, context.Canceled) {
-		s.logger.L().Error("Worker subscription failed", tag.Error(err))
+		s.logger.Error(ctx, "Worker subscription failed", tag.Error(err))
 	}
 }
 
@@ -73,13 +73,13 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		// 1. Double Check Inventory (Source of Truth)
 		if err := s.eventRepo.DecrementTicket(txCtx, msg.EventID, msg.Quantity); err != nil {
 			if errors.Is(err, domain.ErrSoldOut) {
-				s.logger.L().Warn("Inventory conflict: Redis approved but DB sold out",
+				s.logger.Warn(txCtx, "Inventory conflict: Redis approved but DB sold out",
 					tag.MsgID(msg.ID), tag.EventID(msg.EventID))
 				s.metrics.RecordInventoryConflict()
 				s.metrics.RecordOrderOutcome("sold_out")
 				return err
 			}
-			s.logger.L().Error("Failed to decrement ticket in DB", tag.MsgID(msg.ID), tag.Error(err))
+			s.logger.Error(txCtx, "Failed to decrement ticket in DB", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
@@ -94,12 +94,12 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 
 		if err := s.orderRepo.Create(txCtx, order); err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
-				s.logger.L().Warn("Duplicate purchase blocked by DB constraint",
+				s.logger.Warn(txCtx, "Duplicate purchase blocked by DB constraint",
 					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
 				s.metrics.RecordOrderOutcome("duplicate")
 				return err
 			}
-			s.logger.L().Error("Failed to create order", tag.MsgID(msg.ID), tag.Error(err))
+			s.logger.Error(txCtx, "Failed to create order", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
@@ -110,7 +110,7 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		// ship a silent nil-payload outbox row.
 		payload, err := json.Marshal(order)
 		if err != nil {
-			s.logger.L().Error("Failed to marshal order for outbox", tag.MsgID(msg.ID), tag.Error(err))
+			s.logger.Error(txCtx, "Failed to marshal order for outbox", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
@@ -121,12 +121,12 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		}
 
 		if err := s.outboxRepo.Create(txCtx, outboxEvent); err != nil {
-			s.logger.L().Error("Failed to create outbox event", tag.MsgID(msg.ID), tag.Error(err))
+			s.logger.Error(txCtx, "Failed to create outbox event", tag.MsgID(msg.ID), tag.Error(err))
 			s.metrics.RecordOrderOutcome("db_error")
 			return err
 		}
 
-		s.logger.L().Info("Order processed successfully with Outbox",
+		s.logger.Info(txCtx, "Order processed successfully with Outbox",
 			tag.MsgID(msg.ID), tag.OrderID(order.ID))
 		s.metrics.RecordOrderOutcome("success")
 		return nil

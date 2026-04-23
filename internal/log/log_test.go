@@ -121,7 +121,7 @@ func TestContext_RoundTrip(t *testing.T) {
 	l, err := log.New(log.Options{Level: log.InfoLevel, Output: &buf})
 	require.NoError(t, err)
 
-	ctx := log.NewContext(context.Background(), l)
+	ctx := log.NewContext(context.Background(), l, "")
 	got := log.FromContext(ctx)
 	assert.Same(t, l, got)
 }

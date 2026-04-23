@@ -41,7 +41,7 @@ func NewService(
 }
 
 func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEvent) error {
-	s.log.L().Info("Processing payment for order",
+	s.log.Info(ctx, "Processing payment for order",
 		tag.OrderID(event.OrderID), tag.Amount(event.Amount))
 
 	// 1. Input Validation — return ErrInvalidPaymentEvent (NOT nil) so the
@@ -50,11 +50,11 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 	// consumer interpreted as "success, commit offset" — permanently
 	// losing the event without any operator-visible signal.
 	if event.OrderID <= 0 {
-		s.log.L().Error("Invalid OrderID", tag.OrderID(event.OrderID))
+		s.log.Error(ctx, "Invalid OrderID", tag.OrderID(event.OrderID))
 		return fmt.Errorf("order_id=%d: %w", event.OrderID, domain.ErrInvalidPaymentEvent)
 	}
 	if event.Amount < 0 {
-		s.log.L().Error("Invalid Amount",
+		s.log.Error(ctx, "Invalid Amount",
 			tag.OrderID(event.OrderID), tag.Amount(event.Amount))
 		return fmt.Errorf("amount=%v: %w", event.Amount, domain.ErrInvalidPaymentEvent)
 	}
@@ -62,18 +62,18 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 	// 2. Idempotency Check
 	order, err := s.orderRepo.GetByID(ctx, event.OrderID)
 	if err != nil {
-		s.log.L().Error("Failed to get order for idempotency check", tag.Error(err))
+		s.log.Error(ctx, "Failed to get order for idempotency check", tag.Error(err))
 		return err
 	}
 	if order.Status != domain.OrderStatusPending {
-		s.log.L().Info("Order already processed, skipping payment",
+		s.log.Info(ctx, "Order already processed, skipping payment",
 			tag.OrderID(event.OrderID), tag.Status(string(order.Status)))
 		return nil
 	}
 
 	// 3. Call Payment Gateway
 	if err := s.gateway.Charge(ctx, event.OrderID, event.Amount); err != nil {
-		s.log.L().Error("Payment failed, initiating Saga Rollback",
+		s.log.Error(ctx, "Payment failed, initiating Saga Rollback",
 			tag.OrderID(event.OrderID), tag.Error(err))
 
 		// Create Saga compensating event (order.failed) atomically with status update
@@ -103,7 +103,7 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 			return s.outboxRepo.Create(txCtx, outboxEvent)
 		})
 		if errUow != nil {
-			s.log.L().Error("Failed to save saga compensating event",
+			s.log.Error(ctx, "Failed to save saga compensating event",
 				tag.OrderID(event.OrderID), tag.Error(errUow))
 			return errUow // Return error to trigger Kafka retry
 		}
@@ -113,10 +113,10 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 
 	// 3. Update Order Status
 	if err := s.orderRepo.UpdateStatus(ctx, event.OrderID, domain.OrderStatusConfirmed); err != nil {
-		s.log.L().Error("Failed to update order status to confirmed", tag.Error(err))
+		s.log.Error(ctx, "Failed to update order status to confirmed", tag.Error(err))
 		return err // Retry update
 	}
 
-	s.log.L().Info("Payment successful", tag.OrderID(event.OrderID))
+	s.log.Info(ctx, "Payment successful", tag.OrderID(event.OrderID))
 	return nil
 }

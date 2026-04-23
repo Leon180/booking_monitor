@@ -12,8 +12,10 @@ import "go.uber.org/zap"
 // caller who does SetLevel(Debug) on it cannot accidentally turn the
 // Nop into something that emits.
 func NewNop() *Logger {
+	z := zap.NewNop()
 	return &Logger{
-		z:     zap.NewNop(),
-		level: zap.NewAtomicLevelAt(ErrorLevel),
+		z:        z,
+		zCtxSkip: z, // Nop ignores everything; skip adjustment is irrelevant.
+		level:    zap.NewAtomicLevelAt(ErrorLevel),
 	}
 }

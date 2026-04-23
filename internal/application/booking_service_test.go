@@ -17,7 +17,7 @@ import (
 func TestBookingService_BookTicket(t *testing.T) {
 	// Silent logger via the package's own Nop helper — avoids pulling
 	// in zap internals in tests.
-	ctx := mlog.NewContext(context.Background(), mlog.NewNop())
+	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	tests := []struct {
 		name          string

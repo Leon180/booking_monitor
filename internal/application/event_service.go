@@ -64,14 +64,14 @@ func (s *eventService) CreateEvent(ctx context.Context, name string, totalTicket
 			// Compensation failed — we now have a dangling event row
 			// in the DB with no Redis inventory. Surface BOTH errors
 			// so the operator can reconcile manually.
-			s.log.L().Error("COMPENSATION FAILED — dangling event row",
+			s.log.Error(ctx, "COMPENSATION FAILED — dangling event row",
 				tag.EventID(event.ID),
 				zap.NamedError("redis_error", err),
 				zap.NamedError("delete_error", delErr),
 			)
 			return nil, fmt.Errorf("eventService.CreateEvent: redis SetInventory failed (%v) AND compensating DB delete failed: %w", err, delErr)
 		}
-		s.log.L().Warn("compensated dangling event after Redis failure",
+		s.log.Warn(ctx, "compensated dangling event after Redis failure",
 			tag.EventID(event.ID), tag.Error(err))
 		return nil, fmt.Errorf("eventService.CreateEvent redis SetInventory: %w", err)
 	}

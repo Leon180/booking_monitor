@@ -29,9 +29,8 @@ func EventID(id int) zap.Field { return zap.Int("event_id", id) }
 // UserID labels the log entry with the authenticated user id.
 func UserID(id int) zap.Field { return zap.Int("user_id", id) }
 
-// CorrelationID labels the log entry with the per-request correlation id
-// (the value also sent back to clients via the X-Correlation-ID header).
-func CorrelationID(id string) zap.Field { return zap.String("correlation_id", id) }
+// (correlation_id is auto-injected by the ctx-aware log methods —
+// no tag helper needed. See internal/log/log.go enrichFields.)
 
 // MsgID labels the log entry with a Redis Streams or Kafka message id.
 func MsgID(id string) zap.Field { return zap.String("msg_id", id) }

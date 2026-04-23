@@ -70,11 +70,11 @@ func NewRedisClient(cfg *config.Config, logger *mlog.Logger) *redis.Client {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
-		logger.L().Fatal("Failed to connect to Redis", tag.Error(err))
+		logger.Fatal(ctx, "Failed to connect to Redis", tag.Error(err))
 	}
 
 	// Scripts are loaded lazily by redis.Script
-	logger.L().Info("Connected to Redis successfully",
+	logger.Info(ctx, "Connected to Redis successfully",
 		zap.String("addr", redisCfg.Addr),
 		zap.Int("pool_size", redisCfg.PoolSize),
 	)

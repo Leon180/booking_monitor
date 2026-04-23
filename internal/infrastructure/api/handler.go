@@ -58,7 +58,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 		Status *string `form:"status"`
 	}
 	if err := c.ShouldBindQuery(&req); err != nil {
-		log.FromContext(ctx).L().Warn("invalid history query params", tag.Error(err))
+		log.Warn(ctx, "invalid history query params", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters"})
 		return
 	}
@@ -77,7 +77,7 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 
 	orders, total, err := h.service.GetBookingHistory(ctx, req.Page, req.Size, orserStatus)
 	if err != nil {
-		log.FromContext(ctx).L().Error("GetBookingHistory failed", tag.Error(err))
+		log.Error(ctx, "GetBookingHistory failed", tag.Error(err))
 		status, public := mapError(err)
 		c.JSON(status, gin.H{"error": public})
 		return
@@ -98,7 +98,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 
 	var req bookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.FromContext(ctx).L().Warn("invalid book request body", tag.Error(err))
+		log.Warn(ctx, "invalid book request body", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -124,7 +124,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	if err != nil {
 		// Log the raw error with full context server-side, then translate to
 		// a sanitized public message via mapError so we never leak DB errors.
-		log.FromContext(ctx).L().Error("BookTicket failed",
+		log.Error(ctx, "BookTicket failed",
 			tag.Error(err),
 			tag.UserID(req.UserID),
 			tag.EventID(req.EventID),
@@ -161,14 +161,14 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 
 	var req createEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.FromContext(ctx).L().Warn("invalid create event request", tag.Error(err))
+		log.Warn(ctx, "invalid create event request", tag.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
 	event, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets)
 	if err != nil {
-		log.FromContext(ctx).L().Error("CreateEvent failed",
+		log.Error(ctx, "CreateEvent failed",
 			tag.Error(err),
 			zap.String("name", req.Name),
 			zap.Int("total_tickets", req.TotalTickets),

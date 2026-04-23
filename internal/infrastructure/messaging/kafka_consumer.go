@@ -60,26 +60,26 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, logger *mlog.Logger) *KafkaConsum
 // are written to the DLQ topic and their offsets committed so they do not
 // block the partition.
 func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService) error {
-	c.log.L().Info("Starting Kafka consumer for topic: order.created")
+	c.log.Info(ctx, "Starting Kafka consumer for topic: order.created")
 
 	for {
-		c.log.L().Debug("Polling Kafka...")
+		c.log.Debug(ctx, "Polling Kafka...")
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // Graceful shutdown
 			}
-			c.log.L().Error("Failed to fetch message", tag.Error(err))
+			c.log.Error(ctx, "Failed to fetch message", tag.Error(err))
 			time.Sleep(time.Second) // Backoff
 			continue
 		}
 
-		c.log.L().Info("Received message",
+		c.log.Info(ctx, "Received message",
 			zap.ByteString("key", msg.Key), tag.Offset(msg.Offset))
 
 		var event domain.OrderCreatedEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
-			c.log.L().Error("Failed to unmarshal event — dead-lettering",
+			c.log.Error(ctx, "Failed to unmarshal event — dead-lettering",
 				tag.Error(err),
 				zap.ByteString("payload", msg.Value),
 				tag.Offset(msg.Offset),
@@ -93,7 +93,7 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 			// Business-invalid input (e.g. OrderID<=0, Amount<0) is
 			// permanently unprocessable. Dead-letter and commit.
 			if errors.Is(err, domain.ErrInvalidPaymentEvent) {
-				c.log.L().Warn("Invalid payment event — dead-lettering",
+				c.log.Warn(ctx, "Invalid payment event — dead-lettering",
 					tag.Error(err),
 					tag.OrderID(event.OrderID),
 					tag.Offset(msg.Offset),
@@ -109,7 +109,7 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 			// dead" consumers via Prometheus / the KafkaConsumerStuck alert.
 			observability.KafkaConsumerRetryTotal.
 				WithLabelValues(msg.Topic, "transient_processing_error").Inc()
-			c.log.L().Error("Failed to process order — will retry",
+			c.log.Error(ctx, "Failed to process order — will retry",
 				tag.OrderID(event.OrderID),
 				tag.Error(err),
 				tag.Offset(msg.Offset),
@@ -148,7 +148,7 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 		},
 	}
 	if err := c.dlq.WriteMessages(ctx, dlqMsg); err != nil {
-		c.log.L().Error("Failed to write to DLQ topic — message lost",
+		c.log.Error(ctx, "Failed to write to DLQ topic — message lost",
 			tag.Error(err),
 			tag.Topic(paymentDLQTopic),
 			zap.String("reason", reason),
@@ -164,7 +164,7 @@ func (c *KafkaConsumer) deadLetter(ctx context.Context, msg kafka.Message, reaso
 // failures because Kafka will re-deliver on next rebalance.
 func (c *KafkaConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
 	if err := c.reader.CommitMessages(ctx, msg); err != nil {
-		c.log.L().Error("Failed to commit offset", tag.Error(err), tag.Offset(msg.Offset))
+		c.log.Error(ctx, "Failed to commit offset", tag.Error(err), tag.Offset(msg.Offset))
 	}
 }
 

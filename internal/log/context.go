@@ -2,38 +2,61 @@ package log
 
 import "context"
 
-// ctxKey is the unexported type used as the context.Value key. Using a
-// zero-sized struct as the key avoids collisions with any string-based
-// key from another package.
+// ctxValue is the single payload we store in context.Value. A value
+// type (not pointer) with only 24 bytes keeps the per-request cost to
+// exactly one context.WithValue allocation — no cloned zap core.
+//
+// The correlationID is stored as a plain string, NOT baked into the
+// logger via zap's With(). That's the hot-path win: happy-path
+// requests cost ~40 bytes (valueCtx + this struct), not ~1.2 KB
+// (valueCtx + zap core clone).
+type ctxValue struct {
+	logger        *Logger
+	correlationID string
+}
+
 type ctxKey struct{}
 
-// NewContext returns a derived context that carries l. Callers typically
-// invoke this in request-scoped middleware, e.g.
+// NewContext stores the request-scoped logger and correlation id in
+// ctx. Both are read at log-write time by the Logger.Error / Info /
+// etc. methods — and by enrichFields which adds `correlation_id` plus
+// OTEL `trace_id` / `span_id` automatically to every log call.
 //
-//	logger := baseLogger.With(tag.CorrelationID(corID))
-//	ctx := log.NewContext(c.Request.Context(), logger)
-//	c.Request = c.Request.WithContext(ctx)
-func NewContext(ctx context.Context, l *Logger) context.Context {
-	return context.WithValue(ctx, ctxKey{}, l)
+// Callers pass correlationID="" for non-request contexts (tests,
+// background goroutines). The enrichment just skips the field.
+func NewContext(ctx context.Context, l *Logger, correlationID string) context.Context {
+	return context.WithValue(ctx, ctxKey{}, ctxValue{logger: l, correlationID: correlationID})
 }
 
 // FromContext returns the Logger associated with ctx, or a Nop logger
-// if none is present. Returning Nop (not a global) means an uninjected
-// caller logs nothing instead of silently writing to a hidden global —
-// which makes missing plumbing loud during tests and quiet in prod.
+// if none is present. Nop keeps missing injection silent; callers who
+// forget to wire a logger see "nothing happens" rather than writing to
+// a global.
 func FromContext(ctx context.Context) *Logger {
 	if ctx == nil {
 		return NewNop()
 	}
-	if l, ok := ctx.Value(ctxKey{}).(*Logger); ok && l != nil {
-		return l
+	if v, ok := ctx.Value(ctxKey{}).(ctxValue); ok && v.logger != nil {
+		return v.logger
 	}
 	return NewNop()
 }
 
-// CorrelationIDKey is the canonical zap field key used by middleware
-// that baked the correlation id into the context-carried logger via
-// With(tag.CorrelationID(id)). Exposed as a constant so call sites
-// that want to extract it for non-log purposes (response headers,
-// metrics) don't hardcode the string.
+// CorrelationIDFromCtx returns the request-scoped correlation id set
+// by the HTTP middleware, or "" if none is present. Log callers do
+// NOT need to invoke this — the Logger's ctx-aware methods pick it up
+// automatically via enrichFields.
+func CorrelationIDFromCtx(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(ctxKey{}).(ctxValue); ok {
+		return v.correlationID
+	}
+	return ""
+}
+
+// CorrelationIDKey is the canonical zap field key emitted by
+// enrichFields. Exposed so external code (metrics, response headers)
+// can reuse the same string constant.
 const CorrelationIDKey = "correlation_id"

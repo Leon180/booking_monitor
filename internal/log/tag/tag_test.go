@@ -22,7 +22,6 @@ func TestTagKeys(t *testing.T) {
 		{"OrderID", "order_id", tag.OrderID(1).Key},
 		{"EventID", "event_id", tag.EventID(1).Key},
 		{"UserID", "user_id", tag.UserID(1).Key},
-		{"CorrelationID", "correlation_id", tag.CorrelationID("abc").Key},
 		{"MsgID", "msg_id", tag.MsgID("x").Key},
 		{"LockID", "lock_id", tag.LockID(1).Key},
 		{"Topic", "topic", tag.Topic("t").Key},
@@ -44,7 +43,7 @@ func TestTag_Types(t *testing.T) {
 	// Spot-check the zapcore.FieldType for a few constructors to make
 	// sure ints / strings / errors are encoded as the right field type.
 	assert.Equal(t, zapcore.Int64Type, tag.OrderID(42).Type)
-	assert.Equal(t, zapcore.StringType, tag.CorrelationID("id").Type)
+	assert.Equal(t, zapcore.StringType, tag.Status("paid").Type)
 	assert.Equal(t, zapcore.Int64Type, tag.Offset(100).Type)
 	assert.Equal(t, zapcore.Float64Type, tag.Amount(3.14).Type)
 	assert.Equal(t, zapcore.ErrorType, tag.Error(errors.New("x")).Type)

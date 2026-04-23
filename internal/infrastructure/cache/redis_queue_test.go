@@ -52,7 +52,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// Setup Config
 	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
 	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg)
-	ctx := mlog.NewContext(context.Background(), nopLogger)
+	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")

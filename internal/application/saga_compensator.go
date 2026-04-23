@@ -46,14 +46,14 @@ func NewSagaCompensator(
 func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte) error {
 	var event domain.OrderFailedEvent
 	if err := json.Unmarshal(payload, &event); err != nil {
-		s.log.L().Error("failed to unmarshal event",
+		s.log.Error(ctx, "failed to unmarshal event",
 			tag.Error(err),
 			zap.ByteString("payload", payload),
 		)
 		return fmt.Errorf("sagaCompensator.HandleOrderFailed unmarshal: %w", err)
 	}
 
-	s.log.L().Info("rolling back inventory for failed order",
+	s.log.Info(ctx, "rolling back inventory for failed order",
 		tag.OrderID(event.OrderID),
 		tag.EventID(event.EventID),
 		tag.Quantity(event.Quantity),
@@ -81,7 +81,7 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	})
 
 	if errUow != nil {
-		s.log.L().Error("failed to rollback DB inventory", tag.OrderID(event.OrderID), tag.Error(errUow))
+		s.log.Error(ctx, "failed to rollback DB inventory", tag.OrderID(event.OrderID), tag.Error(errUow))
 		return errUow // Retry — already wrapped inside the closure
 	}
 
@@ -90,13 +90,13 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	// key (see revert.lua for the crash-safety trade-off).
 	compensationID := fmt.Sprintf("order:%d", event.OrderID)
 	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, event.Quantity, compensationID); err != nil {
-		s.log.L().Error("failed to rollback Redis inventory",
+		s.log.Error(ctx, "failed to rollback Redis inventory",
 			tag.OrderID(event.OrderID),
 			tag.Error(err),
 		)
 		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%d: %w", event.OrderID, err)
 	}
 
-	s.log.L().Info("rollback successful", tag.OrderID(event.OrderID))
+	s.log.Info(ctx, "rollback successful", tag.OrderID(event.OrderID))
 	return nil
 }

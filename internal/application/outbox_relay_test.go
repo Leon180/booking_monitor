@@ -13,7 +13,7 @@ import (
 )
 
 func TestOutboxRelay_ProcessBatch(t *testing.T) {
-	ctx := mlog.NewContext(context.Background(), mlog.NewNop())
+	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	tests := []struct {
 		name       string
