@@ -32,8 +32,14 @@ import (
 // (~1.2 KB). For per-request tags, pass them via the fields slice to
 // the ctx-aware method above.
 type Logger struct {
-	z        *zap.Logger // skip=0, used by L()/S()/With()
-	zCtxSkip *zap.Logger // skip=2, used by emit() so caller = user code
+	z *zap.Logger // skip=0, used by L()/S()/With() escape hatches
+	// zCtxSkip adds 2 frames so zap's caller resolver lands on user
+	// code regardless of whether the user entered via the Logger.Error
+	// method path (user → Logger.Error → emit → Check) or the
+	// package-level log.Error path (user → log.Error → pkgEmit →
+	// Check). Both paths have exactly two wrapper frames between the
+	// user's call site and zap's Check.
+	zCtxSkip *zap.Logger
 	level    zap.AtomicLevel
 }
 
@@ -72,10 +78,7 @@ func New(opts Options) (*Logger, error) {
 	zlog := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
 
 	return &Logger{
-		z: zlog,
-		// zCtxSkip adds 2 frames to skip (Logger.Error → emit). This
-		// makes zap.AddCaller report the USER's file:line when logs are
-		// emitted through the ctx-aware methods.
+		z:        zlog,
 		zCtxSkip: zlog.WithOptions(zap.AddCallerSkip(2)),
 		level:    atomic,
 	}, nil
@@ -214,31 +217,50 @@ func enrichFields(ctx context.Context, user []zap.Field) []zap.Field {
 // ─── Package-level helpers ──────────────────────────────────────────
 //
 // These pull the Logger out of ctx via FromContext. Use them where
-// you don't already hold a *Logger (e.g. request handlers). If you
-// already hold a struct-owned logger, prefer the method form so the
-// construction-time fields (component=..., etc.) still apply.
+// you don't already hold a *Logger (e.g. request handlers, the outbox
+// relay). If you already hold a struct-owned logger, prefer the
+// method form so the construction-time fields (component=..., etc.)
+// still apply.
+//
+// They inline the emit logic here (rather than delegating to
+// Logger.emit) so the caller-skip count matches the user's actual
+// stack depth (user -> log.Error -> FromContext().Check). Going
+// through Logger.emit would add one more frame and report this file
+// as the caller in log output.
 
 // Debug is the package-level ctx-aware shorthand.
 func Debug(ctx context.Context, msg string, fields ...zap.Field) {
-	FromContext(ctx).emit(ctx, zapcore.DebugLevel, msg, fields)
+	pkgEmit(ctx, zapcore.DebugLevel, msg, fields)
 }
 
 // Info is the package-level ctx-aware shorthand.
 func Info(ctx context.Context, msg string, fields ...zap.Field) {
-	FromContext(ctx).emit(ctx, zapcore.InfoLevel, msg, fields)
+	pkgEmit(ctx, zapcore.InfoLevel, msg, fields)
 }
 
 // Warn is the package-level ctx-aware shorthand.
 func Warn(ctx context.Context, msg string, fields ...zap.Field) {
-	FromContext(ctx).emit(ctx, zapcore.WarnLevel, msg, fields)
+	pkgEmit(ctx, zapcore.WarnLevel, msg, fields)
 }
 
 // Error is the package-level ctx-aware shorthand.
 func Error(ctx context.Context, msg string, fields ...zap.Field) {
-	FromContext(ctx).emit(ctx, zapcore.ErrorLevel, msg, fields)
+	pkgEmit(ctx, zapcore.ErrorLevel, msg, fields)
 }
 
 // Fatal is the package-level ctx-aware shorthand.
 func Fatal(ctx context.Context, msg string, fields ...zap.Field) {
-	FromContext(ctx).emit(ctx, zapcore.FatalLevel, msg, fields)
+	pkgEmit(ctx, zapcore.FatalLevel, msg, fields)
+}
+
+// pkgEmit is the package-level emit path. It uses zCtxSkip because
+// the stack depth from user code to zap.Check is the same whether
+// entry was via the method (user → Logger.Error → emit → Check) or
+// the package-level shim (user → log.Error → pkgEmit → Check).
+func pkgEmit(ctx context.Context, lvl zapcore.Level, msg string, fields []zap.Field) {
+	ce := FromContext(ctx).zCtxSkip.Check(lvl, msg)
+	if ce == nil {
+		return
+	}
+	ce.Write(enrichFields(ctx, fields)...)
 }

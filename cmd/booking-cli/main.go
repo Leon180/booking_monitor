@@ -384,13 +384,21 @@ func runServer(cmd *cobra.Command, args []string) {
 					}
 
 					logger.L().Info("Shutting down tracer provider")
-					if shutdownErr := tp.Shutdown(ctx); shutdownErr != nil {
+					shutdownErr := tp.Shutdown(ctx)
+					if shutdownErr != nil {
 						logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
 					}
 
 					// Flush any buffered log entries before the process exits.
 					_ = logger.Sync()
-					return nil
+
+					// Return the tracer error so fx reports a non-zero exit
+					// code on graceful-shutdown failure. Other shutdown errors
+					// (HTTP, pprof) are logged but not returned because they
+					// are expected during fast shutdowns (e.g. SIGINT mid-
+					// request). A tracer flush failure is different — it
+					// means span data is actually lost.
+					return shutdownErr
 				},
 			})
 			return nil

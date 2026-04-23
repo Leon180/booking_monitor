@@ -27,9 +27,10 @@ type OutboxRelay struct {
 	publisher  domain.EventPublisher
 	batchSize  int
 	mutex      domain.DistributedLock
+	log        *mlog.Logger
 }
 
-func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPublisher, batchSize int, mutex domain.DistributedLock) *OutboxRelay {
+func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPublisher, batchSize int, mutex domain.DistributedLock, logger *mlog.Logger) *OutboxRelay {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
@@ -38,6 +39,7 @@ func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPu
 		publisher:  publisher,
 		batchSize:  batchSize,
 		mutex:      mutex,
+		log:        logger.With(zap.String("component", "outbox_relay")),
 	}
 }
 
@@ -54,7 +56,7 @@ func (r *OutboxRelay) Run(ctx context.Context) {
 // only ran on the ctx.Done branch, which leaked the lock on panic or
 // on a bug that returned from the function without hitting ctx.Done.
 func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context.Context) error) {
-	mlog.Info(ctx, "outbox relay started", zap.Int("batch_size", r.batchSize))
+	r.log.Info(ctx, "outbox relay started", zap.Int("batch_size", r.batchSize))
 
 	ticker := time.NewTicker(outboxPollInterval)
 	defer ticker.Stop()
@@ -73,7 +75,7 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 		}
 		unlockCtx := context.Background()
 		if err := r.mutex.Unlock(unlockCtx, outboxLockID); err != nil {
-			mlog.Error(ctx, "outbox relay: failed to release advisory lock",
+			r.log.Error(ctx, "outbox relay: failed to release advisory lock",
 				tag.LockID(outboxLockID), tag.Error(err))
 		}
 	}()
@@ -81,13 +83,13 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 	for {
 		select {
 		case <-ctx.Done():
-			mlog.Info(ctx, "outbox relay stopped")
+			r.log.Info(ctx, "outbox relay stopped")
 			return
 		case <-ticker.C:
 			// 1. Leader Election: Try to acquire Postgres Advisory Lock
 			acquired, err := r.mutex.TryLock(ctx, outboxLockID)
 			if err != nil {
-				mlog.Error(ctx, "outbox relay: failed to acquire lock",
+				r.log.Error(ctx, "outbox relay: failed to acquire lock",
 					tag.LockID(outboxLockID), tag.Error(err))
 				continue
 			}
@@ -102,7 +104,7 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 			// by the batchFn itself (or its tracing decorator, which also
 			// records them on the span); the ticker continues either way.
 			if err := batchFn(ctx); err != nil {
-				mlog.Error(ctx, "outbox relay: batch error", tag.Error(err))
+				r.log.Error(ctx, "outbox relay: batch error", tag.Error(err))
 			}
 		}
 	}
@@ -116,7 +118,7 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 func (r *OutboxRelay) processBatch(ctx context.Context) error {
 	events, err := r.outboxRepo.ListPending(ctx, r.batchSize)
 	if err != nil {
-		mlog.Error(ctx, "outbox relay: failed to list pending events", tag.Error(err))
+		r.log.Error(ctx, "outbox relay: failed to list pending events", tag.Error(err))
 		return fmt.Errorf("outbox relay list pending: %w", err)
 	}
 
@@ -127,7 +129,7 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 		}
 
 		if err := r.publisher.Publish(ctx, e.EventType, e.Payload); err != nil {
-			mlog.Error(ctx, "outbox relay: failed to publish event",
+			r.log.Error(ctx, "outbox relay: failed to publish event",
 				zap.Int("event_id", e.ID),
 				tag.Topic(e.EventType),
 				tag.Error(err),
@@ -138,7 +140,7 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 		}
 
 		if err := r.outboxRepo.MarkProcessed(ctx, e.ID); err != nil {
-			mlog.Error(ctx, "outbox relay: failed to mark event as processed",
+			r.log.Error(ctx, "outbox relay: failed to mark event as processed",
 				zap.Int("event_id", e.ID),
 				tag.Error(err),
 			)

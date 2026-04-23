@@ -7,8 +7,10 @@
 //     if the underlying field name ever changes; "order_id", 123 will.
 //  2. Consistent key vocabulary — every call site writes `order_id`,
 //     not a mix of `order_id` / `orderID` / `orderId`.
-//  3. Zero-alloc — each helper returns a zap.Field directly, suitable
-//     for the fast path via log.Logger.L().Error(msg, tag.OrderID(id)).
+//  3. Zero-alloc — each helper returns a zap.Field directly, so the
+//     hot path is the ctx-aware methods that skip allocation when
+//     the level is disabled via zap.Logger.Check():
+//     l.Error(ctx, msg, tag.OrderID(id), tag.Error(err)).
 //
 // If a new key is used in two or more unrelated packages, add a
 // constructor here. One-off keys can stay inline with zap.String / zap.Int.

@@ -219,6 +219,60 @@ func TestLevelHandler_MissingLevel(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+func TestCallerFrame_Method(t *testing.T) {
+	// The ctx-aware method call site must be what `caller` reports,
+	// not internal log.go frames. AddCallerSkip(2) on zCtxSkip makes
+	// this work: user -> Logger.Error -> emit -> Check -> skip 2 frames.
+	var buf bytes.Buffer
+	l, err := log.New(log.Options{Level: log.InfoLevel, Output: &buf})
+	require.NoError(t, err)
+
+	l.Error(context.Background(), "methodCall") // this line's file:line is what we want
+	require.NoError(t, l.Sync())
+
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &entry))
+	caller, _ := entry["caller"].(string)
+	assert.Contains(t, caller, "log_test.go", "caller should point to THIS test file, not internal log.go")
+	assert.NotContains(t, caller, "internal/log/log.go", "caller must not leak the wrapper frames")
+}
+
+func TestCallerFrame_PackageLevel(t *testing.T) {
+	// Package-level shims (log.Error(ctx, ...)) add ONE more frame
+	// vs methods, so zPkgSkip uses AddCallerSkip(3). Without that the
+	// caller would resolve to log.go itself, not the user site — a
+	// silent observability regression.
+	var buf bytes.Buffer
+	l, err := log.New(log.Options{Level: log.InfoLevel, Output: &buf})
+	require.NoError(t, err)
+
+	ctx := log.NewContext(context.Background(), l, "")
+	log.Error(ctx, "pkgCall") // this line's file:line is what we want
+	require.NoError(t, l.Sync())
+
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &entry))
+	caller, _ := entry["caller"].(string)
+	assert.Contains(t, caller, "log_test.go", "package-level caller should point to THIS test file")
+	assert.NotContains(t, caller, "internal/log/log.go", "package-level caller must not leak the wrapper frames")
+}
+
+func TestEnrichFields_CorrelationIDInjected(t *testing.T) {
+	// End-to-end wiring check: NewContext stores a correlation id,
+	// enrichFields reads it back, and it lands in the log line.
+	var buf bytes.Buffer
+	l, err := log.New(log.Options{Level: log.InfoLevel, Output: &buf})
+	require.NoError(t, err)
+
+	ctx := log.NewContext(context.Background(), l, "abc-123")
+	log.Info(ctx, "hello")
+	require.NoError(t, l.Sync())
+
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &entry))
+	assert.Equal(t, "abc-123", entry[log.CorrelationIDKey])
+}
+
 func TestLevelHandler_MethodNotAllowed(t *testing.T) {
 	l, err := log.New(log.Options{Level: log.InfoLevel, Output: new(bytes.Buffer)})
 	require.NoError(t, err)

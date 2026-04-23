@@ -97,7 +97,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			}
 
 			// We test the private method processBatch directly to avoid timing issues with Run()
-			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock)
+			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
 			relay.processBatch(ctx)
 		})
 	}
