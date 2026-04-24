@@ -24,6 +24,6 @@ func NewWorkerServiceMetricsDecorator(next WorkerService) WorkerService {
 	return &workerServiceMetricsDecorator{next: next}
 }
 
-func (d *workerServiceMetricsDecorator) Start(ctx context.Context) {
-	d.next.Start(ctx)
+func (d *workerServiceMetricsDecorator) Start(ctx context.Context) error {
+	return d.next.Start(ctx)
 }

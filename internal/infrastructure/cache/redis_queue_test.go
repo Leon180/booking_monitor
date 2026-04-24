@@ -135,3 +135,42 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	len, _ := rdb.XLen(context.Background(), "orders:dlq").Result()
 	assert.Equal(t, int64(1), len)
 }
+
+// TestRedisOrderQueue_Subscribe_PersistentErrorBailout verifies that
+// Subscribe exits with an error (not loops forever) when the underlying
+// Redis is durably unreachable. Previously the loop logged + slept + retried
+// indefinitely, leaving the process "alive" to k8s while no messages could
+// be consumed. The fix: bounded consecutiveErrors counter → error return.
+func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
+	s := miniredis.RunT(t)
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Create the stream/group, then close Redis so XReadGroup fails on
+	// every iteration. The loop should exit with a wrapped error after
+	// maxConsecutiveReadErrors attempts instead of spinning forever.
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+	s.Close()
+
+	handlerCalled := false
+	handler := func(ctx context.Context, msg *domain.OrderMessage) error {
+		handlerCalled = true
+		return nil
+	}
+
+	err := queue.Subscribe(ctx, handler)
+
+	assert.Error(t, err, "Subscribe must return error after persistent Redis failure")
+	assert.Contains(t, err.Error(), "XReadGroup")
+	assert.Contains(t, err.Error(), "consecutive errors")
+	assert.False(t, handlerCalled, "Handler must not fire while Redis is down")
+	// ctx had 2 minutes; the bailout should have occurred well before then.
+	// If this assert fails, the loop bailed on ctx.Err() not consecutiveErrors.
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+}

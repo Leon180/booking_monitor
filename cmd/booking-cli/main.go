@@ -165,6 +165,12 @@ func installPaymentWorker(
 			go func() {
 				if err := consumer.Start(runCtx, service); err != nil && !errors.Is(err, context.Canceled) {
 					logger.L().Error("Payment consumer stopped with error", tag.Error(err))
+					// Shutdowner.Shutdown() returns an error only in lifecycle
+					// races (called before Done or after Stop) — both are
+					// non-actionable: the fatal cause was just logged, and
+					// normal fx lifecycle will take over regardless. This
+					// pattern repeats at every goroutine-level fatal
+					// escalation in this file; the `_` discard is deliberate.
 					_ = shutdowner.Shutdown(fx.ExitCode(1))
 				}
 			}()
@@ -379,7 +385,12 @@ func startBackgroundRunners(
 	logger *mlog.Logger,
 	shutdowner fx.Shutdowner,
 ) {
-	go worker.Start(ctx)
+	go func() {
+		if err := worker.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.L().Error("Worker stopped with error", tag.Error(err))
+			_ = shutdowner.Shutdown(fx.ExitCode(1))
+		}
+	}()
 
 	go func() {
 		if err := sagaConsumer.Start(ctx, compensator); err != nil && !errors.Is(err, context.Canceled) {
