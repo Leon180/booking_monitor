@@ -191,15 +191,35 @@ func TestWorkerService_Start(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. EnsureGroup Success, Subscribe Success
+	// 1. Clean shutdown path: EnsureGroup OK + Subscribe returns nil.
+	//    Start must return nil so main.go doesn't trigger fx.Shutdowner.
 	mockQueue.EXPECT().EnsureGroup(ctx).Return(nil)
 	mockQueue.EXPECT().Subscribe(ctx, gomock.Any()).Return(nil)
+	assert.NoError(t, svc.(*workerService).Start(ctx))
 
-	svc.(*workerService).Start(ctx)
+	// 2. Graceful shutdown: Subscribe returns context.Canceled.
+	//    This is the "ctx was cancelled" path — NOT a real failure.
+	//    Start must filter it to nil so callers don't escalate a
+	//    healthy SIGINT into an error-exit.
+	mockQueue.EXPECT().EnsureGroup(ctx).Return(nil)
+	mockQueue.EXPECT().Subscribe(ctx, gomock.Any()).Return(context.Canceled)
+	assert.NoError(t, svc.(*workerService).Start(ctx))
 
-	// 2. EnsureGroup Error
-	mockQueue.EXPECT().EnsureGroup(ctx).Return(errors.New("redis error"))
-	// Subscribe should NOT be called
+	// 3. Real subscribe failure: Start must surface the error wrapped so
+	//    main.go can call fx.Shutdowner and k8s restarts the pod.
+	subErr := errors.New("redis connection lost")
+	mockQueue.EXPECT().EnsureGroup(ctx).Return(nil)
+	mockQueue.EXPECT().Subscribe(ctx, gomock.Any()).Return(subErr)
+	err := svc.(*workerService).Start(ctx)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, subErr)
 
-	svc.(*workerService).Start(ctx)
+	// 4. EnsureGroup failure: must short-circuit (no Subscribe call)
+	//    and surface the error. Previously returned silently.
+	ensureErr := errors.New("redis auth failed")
+	mockQueue.EXPECT().EnsureGroup(ctx).Return(ensureErr)
+	// Subscribe MUST NOT be called — gomock will fail the test if it is.
+	err = svc.(*workerService).Start(ctx)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ensureErr)
 }

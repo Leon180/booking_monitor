@@ -13,7 +13,13 @@ import (
 )
 
 type WorkerService interface {
-	Start(ctx context.Context)
+	// Start runs the consumer loop until ctx is cancelled. Returns nil
+	// on clean shutdown (ctx.Canceled), or a wrapped error when the
+	// underlying queue cannot be set up or subscription fails. Callers
+	// are expected to escalate a non-nil return to fx.Shutdowner so k8s
+	// restarts the pod instead of silently serving bookings against a
+	// dead consumer.
+	Start(ctx context.Context) error
 }
 
 type workerService struct {
@@ -46,23 +52,28 @@ func NewWorkerService(
 	}
 }
 
-func (s *workerService) Start(ctx context.Context) {
+func (s *workerService) Start(ctx context.Context) error {
 	s.logger.Info(ctx, "Starting worker service...")
 
-	// ensure group
+	// ensure group. A startup-time failure here means the stream /
+	// consumer group can't be created — no point continuing; bubble
+	// up so the process exits and k8s restarts us.
 	if err := s.queue.EnsureGroup(ctx); err != nil {
-		s.logger.Error(ctx, "Failed to ensure consumer group", tag.Error(err))
-		return
+		return fmt.Errorf("worker ensure group: %w", err)
 	}
 
-	// subscribe (blocking)
+	// subscribe (blocking until ctx cancelled or persistent failure)
 	err := s.queue.Subscribe(ctx, func(ctx context.Context, msg *domain.OrderMessage) error {
 		return s.processMessage(ctx, msg)
 	})
 
+	// Clean shutdown is signalled via ctx.Canceled; anything else is a
+	// real failure (connection lost permanently, auth drift, bounded
+	// consecutive-error threshold tripped) and must propagate.
 	if err != nil && !errors.Is(err, context.Canceled) {
-		s.logger.Error(ctx, "Worker subscription failed", tag.Error(err))
+		return fmt.Errorf("worker subscribe: %w", err)
 	}
+	return nil
 }
 
 // processMessage handles a single order message within a DB transaction.

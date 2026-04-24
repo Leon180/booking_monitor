@@ -19,6 +19,14 @@ const (
 	streamKey = "orders:stream"
 	groupName = "orders:group"
 	dlqKey    = "orders:dlq"
+
+	// maxConsecutiveReadErrors bounds how long Subscribe tolerates a
+	// broken Redis before giving up and letting the caller restart us.
+	// At the current 2s block + 1s sleep cadence, 30 errors ≈ 90s of
+	// persistent failure — long enough to ride out a brief blip, short
+	// enough that k8s can restart the pod before the booking backlog
+	// becomes unrecoverable.
+	maxConsecutiveReadErrors = 30
 )
 
 type redisOrderQueue struct {
@@ -65,6 +73,13 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 		// We log but continue, ensuring we at least process new messages.
 	}
 
+	// consecutiveErrors tracks persistent XReadGroup failures so a
+	// durably-broken Redis exits the loop instead of spinning forever
+	// — previously the subscribe loop would log "XReadGroup Error"
+	// once per second indefinitely while the process looked alive to
+	// k8s (no restart trigger).
+	consecutiveErrors := 0
+
 	for {
 		// Check for context cancellation
 		select {
@@ -83,13 +98,22 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 		}).Result()
 
 		if err != nil {
+			// redis.Nil means "no new messages within Block window" — a
+			// SUCCESS case, not a failure.
 			if errors.Is(err, redis.Nil) {
+				consecutiveErrors = 0
 				continue
+			}
+
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveReadErrors {
+				return fmt.Errorf("XReadGroup: %d consecutive errors, last: %w", consecutiveErrors, err)
 			}
 
 			// Self-healing: If group is missing (e.g. after FLUSHALL), recreate it.
 			if strings.Contains(err.Error(), "NOGROUP") {
-				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group...")
+				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group...",
+					mlog.Int("consecutive_errors", consecutiveErrors))
 				if ensureErr := q.EnsureGroup(ctx); ensureErr != nil {
 					q.logger.Error(ctx, "Failed to recreate group", tag.Error(ensureErr))
 				}
@@ -98,10 +122,14 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 			}
 
 			// Log error and sleep briefly
-			q.logger.Error(ctx, "XReadGroup Error", tag.Error(err))
+			q.logger.Error(ctx, "XReadGroup Error",
+				tag.Error(err), mlog.Int("consecutive_errors", consecutiveErrors))
 			time.Sleep(1 * time.Second)
 			continue
 		}
+
+		// Reset on any successful read (including empty stream batches).
+		consecutiveErrors = 0
 
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {

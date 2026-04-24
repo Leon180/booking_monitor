@@ -362,7 +362,12 @@ func startBackgroundRunners(
 	logger *mlog.Logger,
 	shutdowner fx.Shutdowner,
 ) {
-	go worker.Start(ctx)
+	go func() {
+		if err := worker.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.L().Error("Worker stopped with error", tag.Error(err))
+			_ = shutdowner.Shutdown(fx.ExitCode(1))
+		}
+	}()
 
 	go func() {
 		if err := sagaConsumer.Start(ctx, compensator); err != nil && !errors.Is(err, context.Canceled) {
