@@ -205,6 +205,7 @@ func runServer(_ *cobra.Command, _ []string) {
 		fx.Provide(func(cfg *config.Config) int { return cfg.Kafka.OutboxBatchSize }),
 
 		fx.Provide(observability.NewWorkerMetrics),
+		fx.Provide(observability.NewBookingMetrics),
 		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
 			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
