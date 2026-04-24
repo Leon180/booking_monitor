@@ -28,7 +28,7 @@ type workerService struct {
 	eventRepo  domain.EventRepository
 	outboxRepo domain.OutboxRepository
 	uow        domain.UnitOfWork
-	metrics    domain.WorkerMetrics
+	metrics    WorkerMetrics
 	logger     *mlog.Logger
 }
 
@@ -38,7 +38,7 @@ func NewWorkerService(
 	eventRepo domain.EventRepository,
 	outboxRepo domain.OutboxRepository,
 	uow domain.UnitOfWork,
-	metrics domain.WorkerMetrics,
+	metrics WorkerMetrics,
 	logger *mlog.Logger,
 ) WorkerService {
 	return &workerService{
