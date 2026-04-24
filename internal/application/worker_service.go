@@ -2,14 +2,11 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
-	"booking_monitor/internal/log/tag"
 )
 
 type WorkerService interface {
@@ -23,32 +20,21 @@ type WorkerService interface {
 }
 
 type workerService struct {
-	queue      domain.OrderQueue
-	orderRepo  domain.OrderRepository
-	eventRepo  domain.EventRepository
-	outboxRepo domain.OutboxRepository
-	uow        domain.UnitOfWork
-	metrics    WorkerMetrics
-	logger     *mlog.Logger
+	queue     domain.OrderQueue
+	processor MessageProcessor
+	logger    *mlog.Logger
 }
 
-func NewWorkerService(
-	queue domain.OrderQueue,
-	orderRepo domain.OrderRepository,
-	eventRepo domain.EventRepository,
-	outboxRepo domain.OutboxRepository,
-	uow domain.UnitOfWork,
-	metrics WorkerMetrics,
-	logger *mlog.Logger,
-) WorkerService {
+// NewWorkerService wires a worker around a (typically metrics-decorated)
+// MessageProcessor. The processor passed in is treated as an opaque
+// handler — the worker is only responsible for queue lifecycle
+// (EnsureGroup, Subscribe, ctx handling); per-message observability and
+// processing logic live in the processor chain.
+func NewWorkerService(queue domain.OrderQueue, processor MessageProcessor, logger *mlog.Logger) WorkerService {
 	return &workerService{
-		queue:      queue,
-		orderRepo:  orderRepo,
-		eventRepo:  eventRepo,
-		outboxRepo: outboxRepo,
-		uow:        uow,
-		metrics:    metrics,
-		logger:     logger.With(mlog.String("component", "worker_service")),
+		queue:     queue,
+		processor: processor,
+		logger:    logger.With(mlog.String("component", "worker_service")),
 	}
 }
 
@@ -68,10 +54,11 @@ func (s *workerService) Start(ctx context.Context) error {
 		return fmt.Errorf("worker ensure group: %w", err)
 	}
 
-	// subscribe (blocking until ctx cancelled or persistent failure)
-	err := s.queue.Subscribe(ctx, func(ctx context.Context, msg *domain.OrderMessage) error {
-		return s.processMessage(ctx, msg)
-	})
+	// subscribe (blocking until ctx cancelled or persistent failure).
+	// Handing processor.Process directly means the decorator chain
+	// intercepts every message — if we inlined a closure that called
+	// an unexported method, the decorator would be bypassed.
+	err := s.queue.Subscribe(ctx, s.processor.Process)
 
 	// Clean shutdown is signalled via ctx.Canceled; anything else is a
 	// real failure (connection lost permanently, auth drift, bounded
@@ -80,79 +67,4 @@ func (s *workerService) Start(ctx context.Context) error {
 		return fmt.Errorf("worker subscribe: %w", err)
 	}
 	return nil
-}
-
-// processMessage handles a single order message within a DB transaction.
-func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMessage) error {
-	// Record duration in defer so panics, early returns, and future
-	// refactors that add new return paths cannot silently skip the
-	// histogram. Go 1.14+ open-coded defer overhead is negligible
-	// next to the DB transaction below.
-	start := time.Now()
-	defer func() {
-		s.metrics.RecordProcessingDuration(time.Since(start))
-	}()
-
-	return s.uow.Do(ctx, func(txCtx context.Context) error {
-		// 1. Double Check Inventory (Source of Truth)
-		if err := s.eventRepo.DecrementTicket(txCtx, msg.EventID, msg.Quantity); err != nil {
-			if errors.Is(err, domain.ErrSoldOut) {
-				s.logger.Warn(txCtx, "Inventory conflict: Redis approved but DB sold out",
-					tag.MsgID(msg.ID), tag.EventID(msg.EventID))
-				s.metrics.RecordInventoryConflict()
-				s.metrics.RecordOrderOutcome("sold_out")
-				return err
-			}
-			s.logger.Error(txCtx, "Failed to decrement ticket in DB", tag.MsgID(msg.ID), tag.Error(err))
-			s.metrics.RecordOrderOutcome("db_error")
-			return err
-		}
-
-		order := &domain.Order{
-			UserID:    msg.UserID,
-			EventID:   msg.EventID,
-			Quantity:  msg.Quantity,
-			Status:    domain.OrderStatusPending,
-			CreatedAt: time.Now(),
-		}
-
-		if err := s.orderRepo.Create(txCtx, order); err != nil {
-			if errors.Is(err, domain.ErrUserAlreadyBought) {
-				s.logger.Warn(txCtx, "Duplicate purchase blocked by DB constraint",
-					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
-				s.metrics.RecordOrderOutcome("duplicate")
-				return err
-			}
-			s.logger.Error(txCtx, "Failed to create order", tag.MsgID(msg.ID), tag.Error(err))
-			s.metrics.RecordOrderOutcome("db_error")
-			return err
-		}
-
-		// 3. Outbox Pattern. Marshal errors are theoretical for the
-		// current *domain.Order shape (ints, string, time.Time, enum)
-		// but we still surface them so a future field addition can't
-		// ship a silent nil-payload outbox row.
-		payload, err := json.Marshal(order)
-		if err != nil {
-			s.logger.Error(txCtx, "Failed to marshal order for outbox", tag.MsgID(msg.ID), tag.Error(err))
-			s.metrics.RecordOrderOutcome("db_error")
-			return fmt.Errorf("marshal outbox payload: %w", err)
-		}
-		outboxEvent := &domain.OutboxEvent{
-			EventType: "order.created",
-			Payload:   payload,
-			Status:    "PENDING",
-		}
-
-		if err := s.outboxRepo.Create(txCtx, outboxEvent); err != nil {
-			s.logger.Error(txCtx, "Failed to create outbox event", tag.MsgID(msg.ID), tag.Error(err))
-			s.metrics.RecordOrderOutcome("db_error")
-			return err
-		}
-
-		s.logger.Info(txCtx, "Order processed successfully with Outbox",
-			tag.MsgID(msg.ID), tag.OrderID(order.ID))
-		s.metrics.RecordOrderOutcome("success")
-		return nil
-	})
 }
