@@ -117,6 +117,11 @@ func commonFxOptions(cfg *config.Config) fx.Option {
 	)
 }
 
+// runPaymentWorker is the `payment` subcommand entry. Runs the Kafka
+// order.created consumer as its own process so payment compensation can
+// scale / restart independently of the API server. stdlog.Fatalf on
+// config-load failure because the app logger is constructed downstream
+// of config and isn't available yet.
 func runPaymentWorker(_ *cobra.Command, _ []string) {
 	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
@@ -182,6 +187,9 @@ func installPaymentWorker(
 	return nil
 }
 
+// runServer is the `server` subcommand entry: load config, wire fx DI,
+// block on app.Run until SIGINT/SIGTERM. Uses stdlog.Fatalf for config
+// errors because the app logger isn't constructed until fx starts.
 func runServer(_ *cobra.Command, _ []string) {
 	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
@@ -328,6 +336,10 @@ func buildPprofServer(cfg *config.Config, logger *mlog.Logger) *http.Server {
 	}
 }
 
+// startHTTPServer runs ListenAndServe in a goroutine so installServer can
+// return and fx can finish OnStart. Any non-ErrServerClosed exit means the
+// listener died unexpectedly — escalate via fx.Shutdown so k8s restarts
+// the pod instead of keeping the process up with a dead listener.
 func startHTTPServer(srv *http.Server, cfg *config.Config, logger *mlog.Logger, shutdowner fx.Shutdowner) {
 	go func() {
 		logger.L().Info("Starting server",
@@ -342,6 +354,10 @@ func startHTTPServer(srv *http.Server, cfg *config.Config, logger *mlog.Logger, 
 	}()
 }
 
+// startPprofServer runs the operator-only pprof + /admin/loglevel listener.
+// Deliberately asymmetric with startHTTPServer: pprof is a diagnostics
+// sidecar, so its death is logged but must NOT escalate to fx.Shutdown —
+// losing pprof should never take down the business traffic path.
 func startPprofServer(srv *http.Server, logger *mlog.Logger) {
 	go func() {
 		logger.L().Info("pprof server started", zap.String("addr", srv.Addr))
@@ -520,6 +536,9 @@ func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 	return nil, fmt.Errorf("provideDB: postgres unreachable after %d attempts: %w", attempts, pingErr)
 }
 
+// runStress is the `stress` subcommand entry: a one-shot load generator
+// against POST /api/v1/book. Exits once the job queue drains — no fx,
+// no lifecycle, not a server.
 func runStress(cmd *cobra.Command, _ []string) {
 	// cobra validates these flags at registration; the only failure mode
 	// is "flag not defined", which is a compile-time impossibility here.
@@ -536,6 +555,11 @@ func runStress(cmd *cobra.Command, _ []string) {
 	startStressTest(concurrency, totalRequests, targetURL, eventID, userRange)
 }
 
+// startStressTest orchestrates the load burst. jobs is pre-filled +
+// closed so workers can range to completion without an explicit "done"
+// signal. startChan is a release barrier: every worker blocks on it
+// and they all unblock together, which is what flash-sale traffic
+// actually looks like at the wire.
 func startStressTest(concurrency, totalRequests int, url string, eventID, userRange int) {
 	var successCount, failCount int64
 	var wg sync.WaitGroup
@@ -571,6 +595,9 @@ func startStressTest(concurrency, totalRequests int, url string, eventID, userRa
 	fmt.Printf("Failed: %d\n", failCount)
 }
 
+// stressWorker drains the jobs channel, firing POST /book for each.
+// Blocks on startChan first so every worker fires its first request
+// at approximately the same instant as its peers.
 func stressWorker(
 	jobs <-chan struct{},
 	startChan <-chan struct{},
