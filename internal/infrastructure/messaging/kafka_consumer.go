@@ -34,14 +34,14 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, logger *mlog.Logger) *KafkaConsum
 	scoped := logger.With(mlog.String("component", "kafka_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{cfg.Brokers},
+		Brokers:     cfg.Brokers,
 		GroupID:     cfg.PaymentGroupID,
 		Topic:       cfg.OrderCreatedTopic,
 		StartOffset: kafka.FirstOffset,
 	})
 
 	dlq := &kafka.Writer{
-		Addr:                   kafka.TCP(cfg.Brokers),
+		Addr:                   kafka.TCP(cfg.Brokers...),
 		Topic:                  paymentDLQTopic,
 		Balancer:               &kafka.LeastBytes{},
 		AllowAutoTopicCreation: true,

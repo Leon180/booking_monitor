@@ -87,14 +87,14 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 
 ## 開發規範
 - **Immutable 資料模式**:建立新物件,不要 mutate
-- 檔案 < 800 行,function < 50 行
+- 檔案 < 800 行;function 預設 < 50 行。Bootstrap / DI 組裝 / 線性構造類程式碼(例如 `cmd/booking-cli/main.go` 的 fx.Invoke 主體)在拆分只會增加 indirection、卻不會讓意圖更清楚時,可放寬到 ~80 行。不要純粹為了湊行數而抽 helper。
 - 每一層都要明確處理 error
 - 所有邊界都要驗證輸入
 - 不得硬編密碼/金鑰,一律用環境變數
 - 測試使用 testify/assert + go.uber.org/mock
 
 ## 目前狀態(截至 2026-04-24)
-已完成 15 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。Phase 15(4/23–24)在 PR #18 完成 logger 架構重構 — `pkg/logger/` → `internal/log/`,新增 ctx-aware emit 方法(`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`)會自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`,在 pprof listener 上掛載 `/admin/loglevel` runtime level 端點,並提供 `internal/log/tag/` 型別化欄位建構子。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
+已完成 15 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。Phase 15(4/23–24)在 PR #18 完成 logger 架構重構 — `pkg/logger/` → `internal/log/`,新增 ctx-aware emit 方法(`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`)會自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`,在 pprof listener 上掛載 `/admin/loglevel` runtime level 端點,並提供 `internal/log/tag/` 型別化欄位建構子。Phase 15 後(4/24)於 PR #21/#22/#23 做 review cleanup:對 `cmd/booking-cli/main.go` 做嚴格 review,修復 P0 的 stress URL、payment worker 補 tracer init、pprof 改綁 loopback + 加 timeout、goroutine 失敗時透過 `fx.Shutdowner` 升級關機、function 拆分,並把 pprof / trusted-proxies / db-ping 調整項搬到 `config.Config`(`KAFKA_BROKERS` 與 `TRUSTED_PROXIES` 改為 cleanenv 的 `[]string` + `env-separator`,順便修掉一個 multi-broker 靜默失效的 bug)。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
 
 ## Logging 使用慣例(PR #18 之後)
 - **Pattern A — 長生命週期元件**:透過 constructor 注入 `*log.Logger`,在建構時一次性用 `With()` 加上 `component=<subsystem>` 標籤(例:`worker_service`、`outbox_relay`、`saga_compensator`)。呼叫 `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware 方法會自動注入 correlation/trace ids。
@@ -110,11 +110,23 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 - **真實支付閘道**:目前只有 mock
 - **管理後台**:目前沒有管理 UI
 
-## 關鍵環境變數(GC / Tracing / Profiling)
+## 關鍵環境變數
+完整清單見 [docs/PROJECT_SPEC.zh-TW.md § 7](../docs/PROJECT_SPEC.zh-TW.md)。最常用的幾組:
+
+**Runtime / GC / Tracing**
 - `GOGC`(`.env` 預設 `400`,docker-compose fallback `100`)— 數值越高 GC 觸發越少
 - `GOMEMLIMIT=256MiB` — 軟記憶體上限;搭配 GOGC 使用,只有在接近上限時才變積極
 - `OTEL_TRACES_SAMPLER_RATIO`(預設 `0.01`)— 採樣 1%;`1` = 永遠採樣,`0` = 全不採樣
-- `ENABLE_PPROF`(預設 `false`)— 設為 `true` 時 pprof 會開在 `:6060`
+
+**安全敏感(PR #21/#22 之後)**
+- `ENABLE_PPROF`(預設 `false`)— 設為 `true` 時啟動 pprof + `/admin/loglevel` listener
+- `PPROF_ADDR`(預設 `127.0.0.1:6060`)— **預設綁 loopback**;僅在真的需要遠端 pprof 時才覆寫。Heap dump 與 log level 調整都掛在這裡
+- `TRUSTED_PROXIES`(CSV,預設 RFC1918 CIDR)— Gin 做 `ClientIP()` 時信任的 CIDR;RFC1918 外的 service mesh(GKE、部分 EKS)要覆寫
+
+**維運相關(PR #21/#22 之後)**
+- `CONFIG_PATH`(預設 `config/config.yml`)— config 檔路徑;CWD 不同時(systemd、k8s initContainer)需要覆寫
+- `DB_PING_ATTEMPTS` / `DB_PING_INTERVAL` / `DB_PING_PER_ATTEMPT` — DB 啟動探測預算;依賴較慢時拉高 attempts
+- `KAFKA_BROKERS`(CSV,預設 `localhost:9092`)— 現在透過 cleanenv 的 `env-separator:","` parse 成 `[]string`
 
 ## `.claude/` 下的可用工具
 

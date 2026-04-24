@@ -377,12 +377,30 @@ Pre-provisioned 6-panel dashboard: RPS, Latency Quantiles, Conversion Rate, IP F
 
 ### Runtime tuning env vars
 
+Go-runtime + OTel + pprof gate. Shipped via `.env` for local dev and referenced by `docker-compose.yml`.
+
 | Variable | Default (.env) | Fallback (compose) | Purpose |
 |----------|----------------|--------------------|---------|
 | `GOGC` | `400` | `100` | GC trigger ratio. Higher = GC less often, higher peak heap |
 | `GOMEMLIMIT` | `256MiB` | (unset) | Soft memory limit. Pairs with GOGC so GC is aggressive only near the cap |
 | `OTEL_TRACES_SAMPLER_RATIO` | `0.01` | `1` | Fraction of requests sampled. `0` disables, `1` always samples |
-| `ENABLE_PPROF` | `true` | `false` | Whether to start the pprof listener on `:6060` |
+| `ENABLE_PPROF` | `true` | `false` | Whether to start the pprof listener (address from `PPROF_ADDR`, default `127.0.0.1:6060`) |
+
+### Config overrides (yaml + env, post-PR #21 / #22)
+
+These env vars override the same-named keys in `config/config.yml`. cleanenv merges sources as: env-default → yaml → env (env wins when set). Added in the booking-cli review cleanup (PR #21 / #22) so these knobs no longer require a rebuild.
+
+| Variable | yaml key | Default | Purpose |
+|----------|----------|---------|---------|
+| `CONFIG_PATH` | — (bootstrap) | `config/config.yml` | Path to the config file. Lets systemd / k8s initContainer runs use a non-CWD path |
+| `PPROF_ADDR` | `server.pprof_addr` | `127.0.0.1:6060` | pprof listener bind. **Loopback by default** — heap dumps + `/admin/loglevel` must not be publicly reachable without explicit override |
+| `PPROF_READ_TIMEOUT` | `server.pprof_read_timeout` | `5s` | Read deadline on the pprof listener |
+| `PPROF_WRITE_TIMEOUT` | `server.pprof_write_timeout` | `30s` | Large-heap dumps can exceed the default 5s |
+| `TRUSTED_PROXIES` | `server.trusted_proxies` | RFC1918 CIDRs | CIDRs Gin trusts for `ClientIP()`. Env form is comma-separated; yaml is a sequence. Override for service meshes outside RFC1918 (GKE, some EKS setups) |
+| `DB_PING_ATTEMPTS` | `postgres.ping_attempts` | `10` | DB startup probe retries. Raise for slow k8s initContainers / spin-up dependencies |
+| `DB_PING_INTERVAL` | `postgres.ping_interval` | `1s` | Wait between DB ping attempts |
+| `DB_PING_PER_ATTEMPT` | `postgres.ping_per_attempt` | `3s` | Per-probe context timeout |
+| `KAFKA_BROKERS` | `kafka.brokers` | `localhost:9092` | **Type changed in PR #22**: `Brokers` is now `[]string` (cleanenv `env-separator:","`). Env form is comma-separated; yaml is a sequence. Previously `[]string{cfg.Brokers}` wrapped a comma-string as one literal address — multi-broker configs were silently broken |
 
 ---
 

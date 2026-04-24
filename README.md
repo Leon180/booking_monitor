@@ -92,7 +92,7 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 | GET | `/api/v1/events/:id` | View event details |
 | GET | `/metrics` | Prometheus metrics |
 
-**Idempotency**: Include `Idempotency-Key: <uuid>` header on POST /book for at-most-once semantics.
+**Idempotency**: Include `Idempotency-Key: <uuid>` header on `POST /api/v1/book` for at-most-once semantics.
 
 ## Development Commands
 

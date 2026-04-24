@@ -5,11 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	stdlog "log"
 	"math/rand/v2"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	paymentApp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
@@ -25,12 +28,10 @@ import (
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
+	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	postgresRepo "booking_monitor/internal/infrastructure/persistence/postgres"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
-
-	paymentApp "booking_monitor/internal/application/payment"
-	paymentInfra "booking_monitor/internal/infrastructure/payment"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
@@ -40,13 +41,6 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
-	// pprof: registers /debug/pprof/* handlers on http.DefaultServeMux.
-	// A separate listener on :6060 serves these (see runServer OnStart).
-	// This is gated behind the ENABLE_PPROF env var — set to "true" to
-	// start the profiling server. Never expose in production without
-	// network-level access control.
-	_ "net/http/pprof"
-
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -54,130 +48,388 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
+// Code-level constants. Deployer-tunable values live in config.Config
+// (see cfg.Server / cfg.Postgres); the constants below are either program
+// contracts (API version), config bootstrap (can't live in config by
+// definition), OTel-convention fallbacks, or CLI-tool flag defaults.
+const (
+	// apiV1Prefix is the single source of truth for the versioned API
+	// router group. runServer registers it; stress + integration tools
+	// import it to avoid drift.
+	apiV1Prefix = "/api/v1"
+
+	// Config bootstrap — can't be in config by definition.
+	envConfigPath     = "CONFIG_PATH"
+	defaultConfigPath = "config/config.yml"
+
+	// OTel convention: OTEL_SERVICE_NAME is the standard env var; the
+	// const is just a fallback when it's unset.
+	otelServiceNameDefault = "booking-service"
+
+	// Stress-test CLI flag defaults. Not in config because the stress
+	// binary is a one-off tool, not a server process reading config.
+	stressDefaultBaseURL      = "http://localhost:8080"
+	stressDefaultEventID      = 1
+	stressDefaultUserRangeMax = 10000
+	stressClientMaxIdleConns  = 1000
+	stressClientTimeout       = 10 * time.Second
+)
+
 func main() {
-	var rootCmd = &cobra.Command{Use: "booking-cli"}
+	rootCmd := &cobra.Command{Use: "booking-cli"}
 
-	var serverCmd = &cobra.Command{
-		Use:   "server",
-		Short: "Run the API server",
-		Run:   runServer,
-	}
+	serverCmd := &cobra.Command{Use: "server", Short: "Run the API server", Run: runServer}
+	paymentCmd := &cobra.Command{Use: "payment", Short: "Run the Payment Service worker", Run: runPaymentWorker}
 
-	var stressCmd = &cobra.Command{
-		Use:   "stress",
-		Short: "Run stress test",
-		Run:   runStress,
-	}
-
-	// Flags for stress test (still useful to keep as flags since they are runtime args)
+	stressCmd := &cobra.Command{Use: "stress", Short: "Run stress test", Run: runStress}
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
-	stressCmd.Flags().String("port", "8080", "Target server port")
-
-	var paymentCmd = &cobra.Command{
-		Use:   "payment",
-		Short: "Run the Payment Service worker",
-		Run:   runPaymentWorker,
-	}
+	stressCmd.Flags().String("base-url", stressDefaultBaseURL, "Target base URL (scheme://host:port)")
+	stressCmd.Flags().Int("event-id", stressDefaultEventID, "Event ID to book against")
+	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
 	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd)
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func runPaymentWorker(cmd *cobra.Command, args []string) {
-	// 1. Load Config
-	cfg, err := config.LoadConfig("config/config.yml")
+// resolveConfigPath reads CONFIG_PATH, falling back to the repo default.
+// The env var lets us run under systemd / k8s initContainers where CWD differs.
+func resolveConfigPath() string {
+	if p := strings.TrimSpace(os.Getenv(envConfigPath)); p != "" {
+		return p
+	}
+	return defaultConfigPath
+}
+
+// commonFxOptions holds the fx providers shared by every command. Keeps
+// runServer + runPaymentWorker + any future CLI from drifting on logger /
+// config / DB wiring.
+func commonFxOptions(cfg *config.Config) fx.Option {
+	return fx.Options(
+		bootstrap.LogModule,
+		fx.Provide(func() *config.Config { return cfg }),
+		fx.Provide(provideDB),
+		postgresRepo.Module,
+	)
+}
+
+func runPaymentWorker(_ *cobra.Command, _ []string) {
+	cfg, err := config.LoadConfig(resolveConfigPath())
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		stdlog.Fatalf("Failed to load config: %v", err)
 	}
 
 	app := fx.New(
-		// Provide Logger
-		bootstrap.LogModule,
-
-		// Provide Config
-		fx.Provide(func() *config.Config {
-			return cfg
-		}),
-
-		// Provide DB connection using Shared Provider
-		fx.Provide(provideDB),
-
-		// Provide Modules
-		postgresRepo.Module,
-
-		// Payment Specific Providers
+		commonFxOptions(cfg),
 		fx.Provide(
-			// Cast MockGateway to PaymentGateway interface
-			fx.Annotate(
-				paymentInfra.NewMockGateway,
-				fx.As(new(domain.PaymentGateway)),
-			),
-			paymentApp.NewService, // domain.PaymentService
-			// Kafka Consumer
+			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentGateway))),
+			paymentApp.NewService,
 			func(cfg *config.Config, logger *mlog.Logger) *messaging.KafkaConsumer {
 				return messaging.NewKafkaConsumer(&cfg.Kafka, logger)
 			},
 		),
-
-		// Invoke Consumer Start
-		fx.Invoke(func(lc fx.Lifecycle, consumer *messaging.KafkaConsumer, service domain.PaymentService, logger *mlog.Logger) {
-			ctx, cancel := context.WithCancel(context.Background())
-
-			lc.Append(fx.Hook{
-				OnStart: func(context.Context) error {
-					logger.L().Info("Starting Payment Service Worker...")
-					go func() {
-						if err := consumer.Start(ctx, service); err != nil {
-							logger.L().Error("Consumer stopped with error", tag.Error(err))
-						}
-					}()
-					return nil
-				},
-				OnStop: func(ctx context.Context) error {
-					logger.L().Info("Stopping Payment Service Worker...")
-					cancel()
-					_ = logger.Sync()
-					return consumer.Close()
-				},
-			})
-		}),
+		fx.Invoke(installPaymentWorker),
 	)
-
 	app.Run()
 }
 
-// initTracer constructs the OTLP tracer provider. Errors are FATAL.
-// Previously both error paths only produced a `log.Printf` and fell
-// through, which left `traceExporter == nil` and crashed on the first
-// span export (trace.WithBatcher(nil) panics). Either we have real
-// tracing or the process refuses to start.
+// installPaymentWorker wires the tracer + Kafka consumer into the fx
+// lifecycle. Previously the payment process had NO tracer, which broke
+// trace-context continuity coming off the order.created topic.
+func installPaymentWorker(
+	lc fx.Lifecycle,
+	shutdowner fx.Shutdowner,
+	consumer *messaging.KafkaConsumer,
+	service domain.PaymentService,
+	logger *mlog.Logger,
+) error {
+	tp, err := initTracer()
+	if err != nil {
+		return fmt.Errorf("installPaymentWorker: %w", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+
+	lc.Append(fx.Hook{
+		OnStart: func(_ context.Context) error {
+			logger.L().Info("Starting Payment Service Worker...")
+			go func() {
+				if err := consumer.Start(runCtx, service); err != nil && !errors.Is(err, context.Canceled) {
+					logger.L().Error("Payment consumer stopped with error", tag.Error(err))
+					_ = shutdowner.Shutdown(fx.ExitCode(1))
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			logger.L().Info("Stopping Payment Service Worker...")
+			cancel()
+			if err := consumer.Close(); err != nil {
+				logger.L().Error("Kafka consumer close error", tag.Error(err))
+			}
+			shutdownErr := tp.Shutdown(ctx)
+			if shutdownErr != nil {
+				logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
+			}
+			_ = logger.Sync() // zap Sync on stderr returns an OS-specific error; swallow.
+			return shutdownErr
+		},
+	})
+	return nil
+}
+
+func runServer(_ *cobra.Command, _ []string) {
+	cfg, err := config.LoadConfig(resolveConfigPath())
+	if err != nil {
+		stdlog.Fatalf("Failed to load config: %v", err)
+	}
+
+	app := fx.New(
+		commonFxOptions(cfg),
+
+		cache.Module,
+		application.Module,
+		api.Module,
+		messaging.Module,
+
+		fx.Provide(func(cfg *config.Config) messaging.MessagingConfig {
+			return messaging.MessagingConfig{
+				Brokers:      cfg.Kafka.Brokers,
+				WriteTimeout: cfg.Kafka.WriteTimeout,
+			}
+		}),
+		fx.Provide(func(cfg *config.Config) int { return cfg.Kafka.OutboxBatchSize }),
+
+		fx.Provide(observability.NewWorkerMetrics),
+		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
+			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
+		}),
+
+		fx.Invoke(installServer),
+	)
+	app.Run()
+}
+
+// installServer builds + wires the HTTP server, pprof server, and
+// background runners. Each start* helper is small enough to keep the
+// lifecycle hook readable (previously the OnStart closure was 80 lines).
+func installServer(
+	lc fx.Lifecycle,
+	shutdowner fx.Shutdowner,
+	handler api.BookingHandler,
+	logger *mlog.Logger,
+	cfg *config.Config,
+	worker application.WorkerService,
+	sagaConsumer *messaging.SagaConsumer,
+	compensator application.SagaCompensator,
+) error {
+	tp, err := initTracer()
+	if err != nil {
+		return fmt.Errorf("installServer: %w", err)
+	}
+
+	engine, err := buildGinEngine(cfg, logger, handler)
+	if err != nil {
+		return fmt.Errorf("installServer: %w", err)
+	}
+
+	httpServer := buildHTTPServer(cfg, engine)
+	var pprofServer *http.Server
+	if cfg.Server.EnablePprof {
+		pprofServer = buildPprofServer(cfg, logger)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+
+	lc.Append(fx.Hook{
+		OnStart: func(_ context.Context) error {
+			startHTTPServer(httpServer, cfg, logger, shutdowner)
+			if pprofServer != nil {
+				startPprofServer(pprofServer, logger)
+			}
+			startBackgroundRunners(runCtx, worker, sagaConsumer, compensator, logger, shutdowner)
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			return shutdownAll(ctx, cancel, sagaConsumer, pprofServer, httpServer, tp, logger)
+		},
+	})
+	return nil
+}
+
+// buildGinEngine constructs the Gin engine with middleware. Trusted-proxy
+// config failure used to degrade silently to a Warn — that left ClientIP()
+// returning the nginx pod IP, defeating rate-limits and audit logs. Now
+// fatal at construction time.
+func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.BookingHandler) (*gin.Engine, error) {
+	r := gin.New()
+	r.Use(gin.Recovery())
+
+	if err := r.SetTrustedProxies(cfg.Server.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("buildGinEngine: SetTrustedProxies: %w", err)
+	}
+
+	// Single combined middleware: logger + correlation ID in ONE
+	// context.WithValue + ONE c.Request.WithContext (see Phase 14 GC work).
+	r.Use(api.CombinedMiddleware(logger))
+	r.Use(observability.MetricsMiddleware())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	v1 := r.Group(apiV1Prefix)
+	api.RegisterRoutes(v1, handler)
+	// NOTE: the legacy POST /book route (Phase 0) was removed because it
+	// bypassed the nginx `location /api/` rate-limit zone. All callers
+	// must use /api/v1/book. Closes action-list item H9.
+	return r, nil
+}
+
+// buildHTTPServer sets explicit timeouts so we honour cfg.Server.Read/Write
+// limits (r.Run() would discard them, leaving slow-loris exposure).
+func buildHTTPServer(cfg *config.Config, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ":" + cfg.Server.Port,
+		Handler:           h,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		ReadHeaderTimeout: cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       2 * cfg.Server.WriteTimeout,
+		MaxHeaderBytes:    1 << 20, // 1 MiB.
+	}
+}
+
+// buildPprofServer returns the operator-only listener that carries pprof
+// endpoints + /admin/loglevel. Binds to 127.0.0.1 by default: heap dumps
+// + goroutine traces + log-level control must not be reachable on the
+// public interface without explicit opt-in (cfg.Server.PprofAddr /
+// PPROF_ADDR override).
+//
+// Uses a private ServeMux so we don't inherit whatever http.DefaultServeMux
+// accumulates elsewhere in the binary (tests, third-party libs, etc.).
+func buildPprofServer(cfg *config.Config, logger *mlog.Logger) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/admin/loglevel", logger.LevelHandler())
+
+	return &http.Server{
+		Addr:              cfg.Server.PprofAddr,
+		Handler:           mux,
+		ReadTimeout:       cfg.Server.PprofReadTimeout,
+		ReadHeaderTimeout: cfg.Server.PprofReadTimeout,
+		WriteTimeout:      cfg.Server.PprofWriteTimeout,
+	}
+}
+
+func startHTTPServer(srv *http.Server, cfg *config.Config, logger *mlog.Logger, shutdowner fx.Shutdowner) {
+	go func() {
+		logger.L().Info("Starting server",
+			zap.String("addr", srv.Addr),
+			zap.Duration("read_timeout", cfg.Server.ReadTimeout),
+			zap.Duration("write_timeout", cfg.Server.WriteTimeout),
+		)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.L().Error("Server failed", tag.Error(err))
+			_ = shutdowner.Shutdown(fx.ExitCode(1))
+		}
+	}()
+}
+
+func startPprofServer(srv *http.Server, logger *mlog.Logger) {
+	go func() {
+		logger.L().Info("pprof server started", zap.String("addr", srv.Addr))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.L().Error("pprof server failed", tag.Error(err))
+		}
+	}()
+}
+
+// startBackgroundRunners launches the Redis-stream worker and saga
+// consumer. Either failure triggers fx shutdown so k8s restarts the pod;
+// previously saga failure was Error-logged but the process kept serving
+// new bookings against a dead compensation path.
+func startBackgroundRunners(
+	ctx context.Context,
+	worker application.WorkerService,
+	sagaConsumer *messaging.SagaConsumer,
+	compensator application.SagaCompensator,
+	logger *mlog.Logger,
+	shutdowner fx.Shutdowner,
+) {
+	go worker.Start(ctx)
+
+	go func() {
+		if err := sagaConsumer.Start(ctx, compensator); err != nil && !errors.Is(err, context.Canceled) {
+			logger.L().Error("Saga consumer stopped with error", tag.Error(err))
+			_ = shutdowner.Shutdown(fx.ExitCode(1))
+		}
+	}()
+}
+
+// shutdownAll flushes HTTP + pprof + tracer + worker in order. Only the
+// tracer error is returned — lost span data is a real observability gap;
+// HTTP / pprof close races during fast SIGINT are expected.
+func shutdownAll(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	sagaConsumer *messaging.SagaConsumer,
+	pprofServer, httpServer *http.Server,
+	tp *trace.TracerProvider,
+	logger *mlog.Logger,
+) error {
+	logger.L().Info("Stopping worker services...")
+	cancel()
+	if err := sagaConsumer.Close(); err != nil {
+		logger.L().Error("Saga consumer close error", tag.Error(err))
+	}
+
+	if pprofServer != nil {
+		logger.L().Info("Shutting down pprof server")
+		if err := pprofServer.Shutdown(ctx); err != nil {
+			logger.L().Error("pprof server shutdown error", tag.Error(err))
+		}
+	}
+
+	if httpServer != nil {
+		logger.L().Info("Shutting down HTTP server")
+		if err := httpServer.Shutdown(ctx); err != nil {
+			logger.L().Error("HTTP server shutdown error", tag.Error(err))
+		}
+	}
+
+	logger.L().Info("Shutting down tracer provider")
+	shutdownErr := tp.Shutdown(ctx)
+	if shutdownErr != nil {
+		logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
+	}
+
+	_ = logger.Sync() // zap Sync on stderr is OS-specific; swallow.
+	return shutdownErr
+}
+
+// initTracer constructs the OTLP tracer provider. Errors are fatal: a
+// nil exporter would make the first span-export call panic.
 func initTracer() (*trace.TracerProvider, error) {
 	ctx := context.Background()
 
 	svcName := os.Getenv("OTEL_SERVICE_NAME")
 	if svcName == "" {
-		svcName = "booking-service"
+		svcName = otelServiceNameDefault
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceName(svcName),
-		),
-	)
+	res, err := resource.New(ctx, resource.WithAttributes(semconv.ServiceName(svcName)))
 	if err != nil {
 		return nil, fmt.Errorf("initTracer: resource.New: %w", err)
 	}
 
-	// Will automatically use OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
-	// If not set, defaults to localhost:4317. It handles http/https prefixes correctly.
-	//
-	// WithInsecure() is OK for the in-cluster Jaeger collector; once we
-	// run against a remote collector, gate this on OTEL_EXPORTER_OTLP_INSECURE.
+	// WithInsecure is fine for the in-cluster Jaeger collector; gate on
+	// OTEL_EXPORTER_OTLP_INSECURE once we talk to a remote collector.
 	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
 	if err != nil {
 		return nil, fmt.Errorf("initTracer: otlptracegrpc.New: %w", err)
@@ -194,14 +446,11 @@ func initTracer() (*trace.TracerProvider, error) {
 
 // resolveSampler picks the trace sampler based on OTEL_TRACES_SAMPLER_RATIO.
 // Accepted values:
-//   - unset or empty:        AlwaysSample (backwards compatible default)
-//   - "0":                   NeverSample
-//   - "1" / "1.0":           AlwaysSample
-//   - 0 < r < 1 (float):     TraceIDRatioBased(r)
-//   - anything else:         log a warning and fall back to AlwaysSample
-//
-// Closes action-list item M15 (configurable sampler ratio so
-// production can drop the AlwaysSample default).
+//   - unset/empty: AlwaysSample (backwards-compat default)
+//   - "0":         NeverSample
+//   - "1"/"1.0":   AlwaysSample
+//   - 0<r<1:       TraceIDRatioBased(r)
+//   - else:        warn + fallback to AlwaysSample
 func resolveSampler() trace.Sampler {
 	raw := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_RATIO"))
 	if raw == "" {
@@ -209,7 +458,7 @@ func resolveSampler() trace.Sampler {
 	}
 	r, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
-		log.Printf("initTracer: invalid OTEL_TRACES_SAMPLER_RATIO=%q, falling back to AlwaysSample: %v", raw, err)
+		stdlog.Printf("initTracer: invalid OTEL_TRACES_SAMPLER_RATIO=%q, falling back to AlwaysSample: %v", raw, err)
 		return trace.AlwaysSample()
 	}
 	switch {
@@ -222,253 +471,76 @@ func resolveSampler() trace.Sampler {
 	}
 }
 
-func runServer(cmd *cobra.Command, args []string) {
-	// 1. Load Config
-	cfg, err := config.LoadConfig("config/config.yml")
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-
-	app := fx.New(
-		// Provide Logger
-		bootstrap.LogModule,
-
-		// Provide Config
-		fx.Provide(func() *config.Config {
-			return cfg
-		}),
-
-		// Provide DB connection using Shared Provider
-		fx.Provide(provideDB),
-
-		// Provide Modules
-		postgresRepo.Module,
-		cache.Module,
-		application.Module,
-		api.Module,
-
-		// Provide Kafka publisher (lifecycle-managed: Close() called on shutdown)
-		messaging.Module,
-		fx.Provide(func(cfg *config.Config) messaging.MessagingConfig {
-			return messaging.MessagingConfig{
-				Brokers:      messaging.ParseBrokers(cfg.Kafka.Brokers),
-				WriteTimeout: cfg.Kafka.WriteTimeout,
-			}
-		}),
-		// Provide OutboxBatchSize so Fx can inject it into NewOutboxRelay.
-		fx.Provide(func(cfg *config.Config) int { return cfg.Kafka.OutboxBatchSize }),
-
-		// Provide concrete implementations of application interfaces
-		fx.Provide(observability.NewWorkerMetrics),
-		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
-			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
-		}),
-
-		// Run Server -> Invoke
-		fx.Invoke(func(lc fx.Lifecycle, handler api.BookingHandler, logger *mlog.Logger, cfg *config.Config, worker application.WorkerService, sagaConsumer *messaging.SagaConsumer, compensator application.SagaCompensator) error {
-			// Fail fast if the tracer cannot be initialized: a nil
-			// traceExporter would crash the first span export.
-			tp, err := initTracer()
-			if err != nil {
-				return fmt.Errorf("runServer: %w", err)
-			}
-
-			// Context for worker shutdown
-			workerCtx, workerCancel := context.WithCancel(context.Background())
-
-			// Shared between OnStart and OnStop so servers can be
-			// gracefully shut down. Constructed inside OnStart.
-			var httpServer *http.Server
-			var pprofServer *http.Server
-
-			// Hooks
-			lc.Append(fx.Hook{
-				OnStart: func(context.Context) error {
-					r := gin.New()        // Use New() to control middleware
-					r.Use(gin.Recovery()) // Recovery from panics
-
-					// Secure ClientIP resolution behind Nginx Proxy (Docker default subnets)
-					if err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}); err != nil {
-						logger.L().Warn("Failed to set trusted proxies", tag.Error(err))
-					}
-
-					// Single combined middleware: logger + correlation ID in ONE
-					// context.WithValue + ONE c.Request.WithContext. The old
-					// two-middleware chain did 2+2 of these (~464 bytes/req).
-					r.Use(api.CombinedMiddleware(logger))
-
-					r.Use(observability.MetricsMiddleware())
-					r.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-					v1 := r.Group("/api/v1")
-					api.RegisterRoutes(v1, handler)
-					// Legacy POST /book route removed: it was registered
-					// outside the /api/v1 group, which meant it bypassed
-					// the nginx `location /api/` rate-limit zone and also
-					// sat outside any future Go-layer rate-limit
-					// middleware. All callers should use /api/v1/book.
-					// Closes action-list item H9.
-
-					// Construct http.Server explicitly so configured ReadTimeout /
-					// WriteTimeout take effect. `r.Run()` wraps a default
-					// http.Server which ignores these, leaving the process open
-					// to slow-loris attacks.
-					httpServer = &http.Server{
-						Addr:              ":" + cfg.Server.Port,
-						Handler:           r,
-						ReadTimeout:       cfg.Server.ReadTimeout,
-						ReadHeaderTimeout: cfg.Server.ReadTimeout,
-						WriteTimeout:      cfg.Server.WriteTimeout,
-						IdleTimeout:       2 * cfg.Server.WriteTimeout,
-						MaxHeaderBytes:    1 << 20, // 1 MiB
-					}
-
-					go func() {
-						logger.L().Info("Starting server",
-							zap.String("port", cfg.Server.Port),
-							zap.Duration("read_timeout", cfg.Server.ReadTimeout),
-							zap.Duration("write_timeout", cfg.Server.WriteTimeout),
-						)
-						if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-							logger.L().Error("Server failed", tag.Error(err))
-						}
-					}()
-
-					// pprof server on :6060 (opt-in via ENABLE_PPROF=true).
-					// Uses http.DefaultServeMux which already has /debug/pprof/*
-					// registered via the blank import above. Wrapped in an
-					// http.Server so OnStop can shut it down cleanly.
-					//
-					// The dynamic log-level handler mounts here too — same
-					// operator-only listener, same ENABLE_PPROF gate.
-					if strings.EqualFold(os.Getenv("ENABLE_PPROF"), "true") {
-						http.Handle("/admin/loglevel", logger.LevelHandler())
-						pprofServer = &http.Server{Addr: ":6060", Handler: nil}
-						go func() {
-							logger.L().Info("pprof server started", zap.String("addr", ":6060"))
-							if err := pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-								logger.L().Error("pprof server failed", tag.Error(err))
-							}
-						}()
-					}
-
-					// Start Background Worker (Redis -> DB Outbox)
-					go worker.Start(workerCtx)
-
-					// Start Saga Consumer (Kafka order.failed -> Restore DB/Redis)
-					go func() {
-						if err := sagaConsumer.Start(workerCtx, compensator); err != nil {
-							logger.L().Error("Saga consumer stopped with error", tag.Error(err))
-						}
-					}()
-
-					return nil
-				},
-				OnStop: func(ctx context.Context) error {
-					logger.L().Info("Stopping worker services...")
-					workerCancel()
-					_ = sagaConsumer.Close()
-
-					if pprofServer != nil {
-						logger.L().Info("Shutting down pprof server")
-						if err := pprofServer.Shutdown(ctx); err != nil {
-							logger.L().Error("pprof server shutdown error", tag.Error(err))
-						}
-					}
-
-					if httpServer != nil {
-						logger.L().Info("Shutting down HTTP server")
-						if err := httpServer.Shutdown(ctx); err != nil {
-							logger.L().Error("HTTP server shutdown error", tag.Error(err))
-						}
-					}
-
-					logger.L().Info("Shutting down tracer provider")
-					shutdownErr := tp.Shutdown(ctx)
-					if shutdownErr != nil {
-						logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
-					}
-
-					// Flush any buffered log entries before the process exits.
-					_ = logger.Sync()
-
-					// Return the tracer error so fx reports a non-zero exit
-					// code on graceful-shutdown failure. Other shutdown errors
-					// (HTTP, pprof) are logged but not returned because they
-					// are expected during fast shutdowns (e.g. SIGINT mid-
-					// request). A tracer flush failure is different — it
-					// means span data is actually lost.
-					return shutdownErr
-				},
-			})
-			return nil
-		}),
-	)
-
-	app.Run()
-}
-
-// provideDB creates a database connection with retry logic.
+// provideDB opens Postgres, applies pool settings, then retries Ping
+// until the DB is reachable or the budget expires. PingContext is used
+// so a stuck network call cannot exceed our per-attempt timeout.
 func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 	db, err := sql.Open("postgres", cfg.Postgres.DSN)
 	if err != nil {
-		return nil, fmt.Errorf("sql.Open: %w", err)
+		return nil, fmt.Errorf("provideDB: sql.Open: %w", err)
 	}
 
-	// Apply pool configuration BEFORE the first ping so that the retry
-	// loop exercises conns with the configured limits. Previously the
-	// setters ran AFTER the ping loop, which meant the initial Ping ran
-	// against default pool settings and a transient error burned a
-	// connection slot without respecting MaxOpenConns / MaxIdleConns.
+	// Pool settings BEFORE the retry loop so retries exercise the
+	// configured limits (previously setters ran after the first Ping,
+	// which meant the initial probe burned a slot at default pool size).
 	db.SetMaxOpenConns(cfg.Postgres.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.Postgres.MaxIdleConns)
 	db.SetConnMaxIdleTime(cfg.Postgres.MaxIdleTime)
-	// MaxLifetime forces periodic recycling of busy conns to bound
-	// long-lived connection staleness (memory, prepared-statement
-	// caches, PgBouncer auth drift). Closes action-list item M5.
+	// MaxLifetime forces periodic conn recycling; bounds long-lived
+	// connection staleness (prepared-stmt caches, PgBouncer auth drift).
 	db.SetConnMaxLifetime(cfg.Postgres.MaxLifetime)
 
-	// Retry ping until Postgres is reachable or we exhaust the budget.
-	// A bounded retry loop is intentional here — we want the process
-	// to exit with a clear error if the DB never comes up, rather than
-	// block forever waiting on it.
+	attempts := cfg.Postgres.PingAttempts
+	interval := cfg.Postgres.PingInterval
+	perAttempt := cfg.Postgres.PingPerAttempt
+
+	totalBudget := time.Duration(attempts) * (interval + perAttempt)
+	ctx, cancel := context.WithTimeout(context.Background(), totalBudget)
+	defer cancel()
+
 	var pingErr error
-	for i := 0; i < 10; i++ {
-		if pingErr = db.Ping(); pingErr == nil {
+	for attempt := 1; attempt <= attempts; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, perAttempt)
+		pingErr = db.PingContext(attemptCtx)
+		attemptCancel()
+		if pingErr == nil {
+			return db, nil
+		}
+		logger.L().Warn("waiting for Postgres", zap.Int("attempt", attempt), tag.Error(pingErr))
+		if attempt == attempts {
 			break
 		}
-		logger.L().Warn("waiting for Postgres", zap.Int("attempt", i+1), tag.Error(pingErr))
-		time.Sleep(1 * time.Second)
+		select {
+		case <-time.After(interval):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("provideDB: context cancelled: %w", ctx.Err())
+		}
 	}
-	if pingErr != nil {
-		return nil, fmt.Errorf("provideDB: postgres unreachable after 10 attempts: %w", pingErr)
-	}
-
-	return db, nil
+	return nil, fmt.Errorf("provideDB: postgres unreachable after %d attempts: %w", attempts, pingErr)
 }
 
-// Ported from stress_test/main.go
-func runStress(cmd *cobra.Command, args []string) {
+func runStress(cmd *cobra.Command, _ []string) {
+	// cobra validates these flags at registration; the only failure mode
+	// is "flag not defined", which is a compile-time impossibility here.
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	totalRequests, _ := cmd.Flags().GetInt("requests")
-	port, _ := cmd.Flags().GetString("port")
+	baseURL, _ := cmd.Flags().GetString("base-url")
+	eventID, _ := cmd.Flags().GetInt("event-id")
+	userRange, _ := cmd.Flags().GetInt("user-range")
 
-	targetURL := fmt.Sprintf("http://localhost:%s/book", port)
-	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s\n", concurrency, totalRequests, targetURL)
+	targetURL := strings.TrimRight(baseURL, "/") + apiV1Prefix + "/book"
+	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s (event=%d, user_range=%d)\n",
+		concurrency, totalRequests, targetURL, eventID, userRange)
 
-	// Start the stress test
-	startStressTest(concurrency, totalRequests, targetURL)
+	startStressTest(concurrency, totalRequests, targetURL, eventID, userRange)
 }
 
-func startStressTest(concurrency, totalRequests int, url string) {
-	var successCount int64
-	var failCount int64
+func startStressTest(concurrency, totalRequests int, url string, eventID, userRange int) {
+	var successCount, failCount int64
 	var wg sync.WaitGroup
 
-	start := time.Now()
-
 	jobs := make(chan struct{}, totalRequests)
-	for i := 0; i < totalRequests; i++ {
+	for range totalRequests {
 		jobs <- struct{}{}
 	}
 	close(jobs)
@@ -476,46 +548,14 @@ func startStressTest(concurrency, totalRequests int, url string) {
 	startChan := make(chan struct{})
 
 	wg.Add(concurrency)
-	for i := 0; i < concurrency; i++ {
-		go func() {
-			defer wg.Done()
-			client := &http.Client{
-				Transport: &http.Transport{
-					MaxIdleConns:        1000,
-					MaxIdleConnsPerHost: 1000,
-				},
-				Timeout: 10 * time.Second,
-			}
-
-			<-startChan
-
-			for range jobs {
-				reqBody, _ := json.Marshal(map[string]int{
-					"user_id":  rand.IntN(10000) + 1,
-					"event_id": 1,
-					"quantity": 1, // Fix quantity to 1 for easier calculation
-				})
-
-				resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))
-				if err != nil {
-					atomic.AddInt64(&failCount, 1)
-					continue
-				}
-				if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-					fmt.Println("Error consumption body:", err)
-				}
-				_ = resp.Body.Close()
-
-				if resp.StatusCode == 200 {
-					atomic.AddInt64(&successCount, 1)
-				} else {
-					atomic.AddInt64(&failCount, 1)
-				}
-			}
-		}()
+	for range concurrency {
+		go stressWorker(jobs, startChan, &wg, &successCount, &failCount, url, eventID, userRange)
 	}
 
+	// Sleep gives workers time to block on <-startChan so they start
+	// flooding at approximately the same moment.
 	time.Sleep(1 * time.Second)
+	start := time.Now()
 	fmt.Println("Flooding...")
 	close(startChan)
 
@@ -528,4 +568,49 @@ func startStressTest(concurrency, totalRequests int, url string) {
 	}
 	fmt.Printf("Success: %d\n", successCount)
 	fmt.Printf("Failed: %d\n", failCount)
+}
+
+func stressWorker(
+	jobs <-chan struct{},
+	startChan <-chan struct{},
+	wg *sync.WaitGroup,
+	successCount, failCount *int64,
+	url string,
+	eventID, userRange int,
+) {
+	defer wg.Done()
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        stressClientMaxIdleConns,
+			MaxIdleConnsPerHost: stressClientMaxIdleConns,
+		},
+		Timeout: stressClientTimeout,
+	}
+
+	<-startChan
+
+	for range jobs {
+		// json.Marshal of map[string]int cannot fail for these types.
+		reqBody, _ := json.Marshal(map[string]int{
+			"user_id":  rand.IntN(userRange) + 1,
+			"event_id": eventID,
+			"quantity": 1,
+		})
+
+		resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			atomic.AddInt64(failCount, 1)
+			continue
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			fmt.Println("Error consumption body:", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			atomic.AddInt64(successCount, 1)
+		} else {
+			atomic.AddInt64(failCount, 1)
+		}
+	}
 }

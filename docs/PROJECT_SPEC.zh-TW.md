@@ -365,12 +365,30 @@ Prometheus metrics 端點。
 
 ### Runtime 調優環境變數
 
+Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`docker-compose.yml` 引用。
+
 | 變數 | 預設(.env) | Fallback(compose) | 用途 |
 |------|--------------|---------------------|------|
 | `GOGC` | `400` | `100` | GC 觸發比例,越大 GC 越少、peak heap 越高 |
 | `GOMEMLIMIT` | `256MiB` | (未設) | 軟記憶體上限,搭配 GOGC 讓 GC 只在接近上限時變積極 |
 | `OTEL_TRACES_SAMPLER_RATIO` | `0.01` | `1` | 採樣比例。`0` 全關,`1` 全開 |
-| `ENABLE_PPROF` | `true` | `false` | 是否啟動 `:6060` 的 pprof listener |
+| `ENABLE_PPROF` | `true` | `false` | 是否啟動 pprof listener(位址由 `PPROF_ADDR` 控制,預設 `127.0.0.1:6060`) |
+
+### Config 覆寫變數(yaml + env,PR #21 / #22 後新增)
+
+以下 env vars 覆寫 `config/config.yml` 裡同名的 key。cleanenv 合併順序:env-default → yaml → env(env 優先)。booking-cli review cleanup(PR #21 / #22)把這些調整項從 const 改搬到 config,之後不用重 build 就能改。
+
+| 變數 | yaml key | 預設 | 用途 |
+|------|----------|------|------|
+| `CONFIG_PATH` | —(bootstrap) | `config/config.yml` | Config 檔路徑。讓 systemd / k8s initContainer 可以使用非 CWD 的位置 |
+| `PPROF_ADDR` | `server.pprof_addr` | `127.0.0.1:6060` | pprof listener 綁定位址。**預設綁 loopback** — heap dump 與 `/admin/loglevel` 不得在沒有明確覆寫的情況下對外可達 |
+| `PPROF_READ_TIMEOUT` | `server.pprof_read_timeout` | `5s` | pprof listener 的 read deadline |
+| `PPROF_WRITE_TIMEOUT` | `server.pprof_write_timeout` | `30s` | 大 heap dump 可能超過預設的 5s |
+| `TRUSTED_PROXIES` | `server.trusted_proxies` | RFC1918 CIDR | Gin 做 `ClientIP()` 解析時信任的 CIDR。env 用逗號分隔;yaml 是 sequence。要用在 RFC1918 以外的 service mesh(GKE、部分 EKS 設定)時覆寫 |
+| `DB_PING_ATTEMPTS` | `postgres.ping_attempts` | `10` | DB 啟動探測重試次數。k8s initContainer / 依賴服務較慢時要拉高 |
+| `DB_PING_INTERVAL` | `postgres.ping_interval` | `1s` | 兩次 DB ping 之間的間隔 |
+| `DB_PING_PER_ATTEMPT` | `postgres.ping_per_attempt` | `3s` | 單次探測的 context timeout |
+| `KAFKA_BROKERS` | `kafka.brokers` | `localhost:9092` | **PR #22 型別變更**:`Brokers` 改為 `[]string`(cleanenv `env-separator:","`)。env 用逗號分隔;yaml 是 sequence。先前 `[]string{cfg.Brokers}` 把整個逗號字串當成單一位址 — multi-broker 設定先前其實靜默失效 |
 
 ---
 

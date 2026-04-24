@@ -53,7 +53,7 @@ func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client, logger *mlog.Lo
 	scoped := logger.With(mlog.String("component", "saga_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{cfg.Brokers},
+		Brokers:     cfg.Brokers,
 		GroupID:     cfg.SagaGroupID, // Different group from payment!
 		Topic:       cfg.OrderFailedTopic,
 		StartOffset: kafka.FirstOffset,
@@ -62,7 +62,7 @@ func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client, logger *mlog.Lo
 	})
 
 	dlq := &kafka.Writer{
-		Addr:                   kafka.TCP(cfg.Brokers),
+		Addr:                   kafka.TCP(cfg.Brokers...),
 		Topic:                  sagaDLQTopic,
 		Balancer:               &kafka.LeastBytes{},
 		AllowAutoTopicCreation: true,
