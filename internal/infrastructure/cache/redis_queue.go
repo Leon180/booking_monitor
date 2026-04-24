@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
@@ -29,11 +30,12 @@ type redisOrderQueue struct {
 	client                   *redis.Client
 	inventoryRepo            domain.InventoryRepository
 	logger                   *mlog.Logger
+	metrics                  application.QueueMetrics
 	consumerName             string
 	maxConsecutiveReadErrors int
 }
 
-func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *mlog.Logger, cfg *config.Config) domain.OrderQueue {
+func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *mlog.Logger, cfg *config.Config, metrics application.QueueMetrics) domain.OrderQueue {
 	return &redisOrderQueue{
 		client:        client,
 		inventoryRepo: inventoryRepo,
@@ -41,6 +43,7 @@ func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepo
 			mlog.String("component", "redis_order_queue"),
 			mlog.String("worker_id", cfg.App.WorkerID),
 		),
+		metrics:                  metrics,
 		consumerName:             cfg.App.WorkerID,
 		maxConsecutiveReadErrors: cfg.Redis.MaxConsecutiveReadErrors,
 	}
@@ -166,6 +169,7 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 // is operator-visible.
 func (q *redisOrderQueue) ackOrLog(ctx context.Context, msgID string) {
 	if err := q.client.XAck(ctx, streamKey, groupName, msgID).Err(); err != nil {
+		q.metrics.RecordXAckFailure()
 		q.logger.Error(ctx, "XAck failed — message will be re-delivered via PEL",
 			tag.Error(err), tag.MsgID(msgID))
 	}
@@ -211,6 +215,7 @@ func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.Or
 	defer cancel()
 
 	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
+		q.metrics.RecordRevertFailure()
 		q.logger.Error(ctx, "RevertInventory failed — leaving message in PEL for retry",
 			tag.Error(revertErr),
 			tag.MsgID(rawMsg.ID),
@@ -254,6 +259,7 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 		Stream: dlqKey,
 		Values: values,
 	}).Err(); addErr != nil {
+		q.metrics.RecordXAddFailure("dlq")
 		q.logger.Error(ctx, "XAdd to DLQ failed",
 			tag.Error(addErr),
 			mlog.String("original_id", msg.ID),

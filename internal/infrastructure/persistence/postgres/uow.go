@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -14,14 +15,16 @@ type txKey struct{}
 
 // PostgresUnitOfWork implements domain.UnitOfWork
 type PostgresUnitOfWork struct {
-	db     *sql.DB
-	logger *mlog.Logger
+	db      *sql.DB
+	logger  *mlog.Logger
+	metrics application.DBMetrics
 }
 
-func NewPostgresUnitOfWork(db *sql.DB, logger *mlog.Logger) domain.UnitOfWork {
+func NewPostgresUnitOfWork(db *sql.DB, logger *mlog.Logger, metrics application.DBMetrics) domain.UnitOfWork {
 	return &PostgresUnitOfWork{
-		db:     db,
-		logger: logger.With(mlog.String("component", "unit_of_work")),
+		db:      db,
+		logger:  logger.With(mlog.String("component", "unit_of_work")),
+		metrics: metrics,
 	}
 }
 
@@ -48,6 +51,7 @@ func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context
 		// but do NOT overwrite the fn error — callers need the original
 		// cause, not the rollback failure.
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			u.metrics.RecordRollbackFailure()
 			u.logger.Error(ctx, "tx rollback failed after fn error",
 				tag.Error(rbErr),
 				mlog.NamedError("fn_error", err),

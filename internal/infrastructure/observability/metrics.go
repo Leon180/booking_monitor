@@ -119,6 +119,55 @@ var (
 		},
 		[]string{"topic", "reason"},
 	)
+
+	// --- Infrastructure Failure Metrics (PR: worker-observability-cleanup) ---
+	//
+	// These counters surface log-only infra failures — rollback errors,
+	// XAck / XAdd failures, failed compensation — as first-class signals.
+	// Rate > 0 on any of these is an operational red flag; corresponding
+	// log lines remain for post-mortem detail.
+
+	// DBRollbackFailuresTotal increments when tx.Rollback returns a
+	// non-sql.ErrTxDone error. ErrTxDone is expected after certain
+	// fatal errors and is filtered at the call site.
+	DBRollbackFailuresTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "db_rollback_failures_total",
+			Help: "Total number of transaction rollbacks that themselves failed (excluding sql.ErrTxDone)",
+		},
+	)
+
+	// RedisXAckFailuresTotal increments on XAck failure — message is
+	// retained in PEL and will be re-delivered, so this counter is the
+	// only leading signal that double-processing may have occurred.
+	RedisXAckFailuresTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_xack_failures_total",
+			Help: "Total number of Redis XAck failures (message stays in PEL and will be re-delivered)",
+		},
+	)
+
+	// RedisXAddFailuresTotal increments on XAdd failure, labelled by
+	// target stream. Currently only DLQ writes use XAdd from Go; label
+	// is kept so future main-stream writers can share this counter.
+	RedisXAddFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "redis_xadd_failures_total",
+			Help: "Total number of Redis XAdd failures by target stream",
+		},
+		[]string{"stream"},
+	)
+
+	// RedisRevertFailuresTotal increments when handleFailure's
+	// RevertInventory call fails — the message stays in PEL, so the
+	// counter lets operators alert on compensation drift before it
+	// shows up as Redis/DB inventory disagreement.
+	RedisRevertFailuresTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "redis_revert_failures_total",
+			Help: "Total number of RevertInventory failures during worker compensation (message retained in PEL)",
+		},
+	)
 )
 
 func MetricsMiddleware() gin.HandlerFunc {
@@ -149,4 +198,8 @@ func init() {
 	for _, topic := range []string{"order.created", "order.failed"} {
 		KafkaConsumerRetryTotal.WithLabelValues(topic, "transient_processing_error")
 	}
+	// Pre-warm the DLQ stream label so it appears in /metrics at startup.
+	// Today "dlq" is the only value written; future main-stream writers
+	// will add their own label values here.
+	RedisXAddFailuresTotal.WithLabelValues("dlq")
 }

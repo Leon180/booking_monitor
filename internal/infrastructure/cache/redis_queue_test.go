@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
@@ -14,6 +15,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// noopQueueMetrics satisfies application.QueueMetrics for tests that
+// aren't asserting observability — keeps the constructor calls below
+// short without pulling a mock framework.
+type noopQueueMetrics struct{}
+
+func (noopQueueMetrics) RecordXAckFailure()            {}
+func (noopQueueMetrics) RecordXAddFailure(_ string)    {}
+func (noopQueueMetrics) RecordRevertFailure()          {}
+func newNoopQueueMetrics() application.QueueMetrics    { return noopQueueMetrics{} }
+
 func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	// Setup Miniredis
 	s := miniredis.RunT(t)
@@ -22,7 +33,7 @@ func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, newNoopQueueMetrics())
 
 	ctx := context.Background()
 
@@ -51,7 +62,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// No mock needed for happy path
 	// Setup Config
 	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg, newNoopQueueMetrics())
 	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
@@ -108,7 +119,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, newNoopQueueMetrics())
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -147,7 +158,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, newNoopQueueMetrics())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

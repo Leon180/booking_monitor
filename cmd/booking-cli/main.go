@@ -107,12 +107,15 @@ func resolveConfigPath() string {
 
 // commonFxOptions holds the fx providers shared by every command. Keeps
 // runServer + runPaymentWorker + any future CLI from drifting on logger /
-// config / DB wiring.
+// config / DB wiring. DBMetrics is shared because every command that
+// opens a Postgres connection uses PostgresUnitOfWork and therefore
+// needs the rollback-failure counter.
 func commonFxOptions(cfg *config.Config) fx.Option {
 	return fx.Options(
 		bootstrap.LogModule,
 		fx.Provide(func() *config.Config { return cfg }),
 		fx.Provide(provideDB),
+		fx.Provide(observability.NewDBMetrics),
 		postgresRepo.Module,
 	)
 }
@@ -220,6 +223,7 @@ func runServer(_ *cobra.Command, _ []string) {
 
 		fx.Provide(observability.NewWorkerMetrics),
 		fx.Provide(observability.NewBookingMetrics),
+		fx.Provide(observability.NewQueueMetrics),
 		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
 			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
