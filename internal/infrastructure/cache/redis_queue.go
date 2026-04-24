@@ -137,17 +137,24 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 				if err != nil {
 					q.logger.Error(ctx, "Malformed message — routing to DLQ",
 						tag.Error(err), tag.MsgID(msg.ID))
-					q.moveToDLQ(ctx, msg, err)
+					// If DLQ write fails, leave message in PEL; it'll
+					// be retried on the next cycle. Better to grow PEL
+					// under DLQ outage than silently lose the trace.
+					if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
+						continue
+					}
 					q.ackOrLog(ctx, msg.ID)
 					continue
 				}
 
 				// Process with Retry
 				if err := q.processWithRetry(ctx, handler, orderMsg); err != nil {
-					// Exhausted retries -> DLQ + Compensate
-					q.handleFailure(ctx, orderMsg, msg, err)
+					// Exhausted retries. handleFailure returns false
+					// when compensation failed — leave in PEL for retry.
+					if q.handleFailure(ctx, orderMsg, msg, err) {
+						q.ackOrLog(ctx, msg.ID)
+					}
 				} else {
-					// Success -> Ack
 					q.ackOrLog(ctx, msg.ID)
 				}
 			}
@@ -187,25 +194,54 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 	return lastErr
 }
 
-func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.OrderMessage, rawMsg redis.XMessage, err error) {
-	// 1. Compensate Inventory
-	// We use background context with timeout because we must ensure compensation happens even if request ctx is cancelled
+// handleFailure runs the compensation path for an exhausted-retry message:
+// revert Redis inventory (the Lua deduct fired during API ingress) then
+// record the failure in the DLQ. Returns true when BOTH compensation
+// steps succeed and the caller may ACK; returns false to leave the
+// message in the PEL so the next consumer cycle retries compensation.
+//
+// Why retry-via-PEL instead of ACK-and-alert: RevertInventory is
+// idempotent (revert.lua + msgID SETNX), so PEL reclaim is safe. If we
+// ACKed on revert failure, Redis inventory would stay permanently
+// under-counted — the user visible symptom is tickets appearing sold
+// when they aren't. Operator alerting on PEL length is strictly
+// cheaper than chasing inventory drift after the fact.
+func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.OrderMessage, rawMsg redis.XMessage, err error) bool {
+	// Background context with timeout: compensation MUST run even if the
+	// parent ctx was cancelled mid-processing.
 	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
-		q.logger.Error(ctx, "RevertInventory failed during handleFailure",
-			tag.Error(revertErr), tag.EventID(orderMsg.EventID), tag.Quantity(orderMsg.Quantity))
+		q.logger.Error(ctx, "RevertInventory failed — leaving message in PEL for retry",
+			tag.Error(revertErr),
+			tag.MsgID(rawMsg.ID),
+			tag.EventID(orderMsg.EventID),
+			tag.Quantity(orderMsg.Quantity),
+		)
+		return false
 	}
 
-	// 2. Move to DLQ
-	q.moveToDLQ(bgCtx, rawMsg, err)
+	if dlqErr := q.moveToDLQ(bgCtx, rawMsg, err); dlqErr != nil {
+		// Inventory was reverted (idempotent), only DLQ write failed.
+		// PEL retry will re-run the whole path — RevertInventory will
+		// noop on the second pass, DLQ will be retried.
+		q.logger.Error(ctx, "moveToDLQ failed after successful revert — leaving message in PEL for retry",
+			tag.Error(dlqErr),
+			tag.MsgID(rawMsg.ID),
+		)
+		return false
+	}
 
-	// 3. Ack original message so we don't process it again
-	q.ackOrLog(bgCtx, rawMsg.ID)
+	return true
 }
 
-func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err error) {
+// moveToDLQ writes the original message plus failure metadata to the
+// DLQ stream. Returns the XAdd error so callers can decide whether to
+// ACK (and lose the trace) or leave the message in PEL for retry.
+// Historical behaviour of "log and fall through" meant a DLQ outage
+// permanently lost failure traces — now the caller is in the loop.
+func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err error) error {
 	values := map[string]interface{}{
 		"original_id": msg.ID,
 		"error":       err.Error(),
@@ -220,12 +256,14 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 		Stream: dlqKey,
 		Values: values,
 	}).Err(); addErr != nil {
-		q.logger.Error(ctx, "XAdd to DLQ failed — failure trace lost",
+		q.logger.Error(ctx, "XAdd to DLQ failed",
 			tag.Error(addErr),
 			mlog.String("original_id", msg.ID),
 			mlog.String("dlq", dlqKey),
 		)
+		return fmt.Errorf("moveToDLQ XAdd: %w", addErr)
 	}
+	return nil
 }
 
 func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
@@ -304,16 +342,22 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 			orderMsg, err := parseMessage(msg)
 			if err != nil {
 				q.logger.Error(ctx, "Malformed pending message", tag.MsgID(msg.ID), tag.Error(err))
-				q.moveToDLQ(ctx, msg, err)
+				// DLQ unreachable → leave in PEL; next recovery cycle retries.
+				if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
+					continue
+				}
 				q.ackOrLog(ctx, msg.ID)
 				continue
 			}
 
 			// Process with Retry
 			if err := q.processWithRetry(ctx, handler, orderMsg); err != nil {
-				q.handleFailure(ctx, orderMsg, msg, err)
+				// handleFailure returns false when compensation failed;
+				// leaving in PEL means next cycle retries revert + DLQ.
+				if q.handleFailure(ctx, orderMsg, msg, err) {
+					q.ackOrLog(ctx, msg.ID)
+				}
 			} else {
-				// Success
 				q.ackOrLog(ctx, msg.ID)
 				q.logger.Info(ctx, "Recovered and processed pending message", tag.MsgID(msg.ID))
 			}

@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"booking_monitor/internal/domain"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -11,11 +14,15 @@ type txKey struct{}
 
 // PostgresUnitOfWork implements domain.UnitOfWork
 type PostgresUnitOfWork struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *mlog.Logger
 }
 
-func NewPostgresUnitOfWork(db *sql.DB) domain.UnitOfWork {
-	return &PostgresUnitOfWork{db: db}
+func NewPostgresUnitOfWork(db *sql.DB, logger *mlog.Logger) domain.UnitOfWork {
+	return &PostgresUnitOfWork{
+		db:     db,
+		logger: logger.With(mlog.String("component", "unit_of_work")),
+	}
 }
 
 func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context) error) error {
@@ -33,7 +40,19 @@ func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context
 	txCtx := context.WithValue(ctx, txKey{}, tx)
 
 	if err := fn(txCtx); err != nil {
-		_ = tx.Rollback()
+		// Rollback can legitimately return sql.ErrTxDone when the driver
+		// has already closed the tx after a fatal error (broken conn,
+		// deadlock, etc.) — that's expected, not a failure. Any OTHER
+		// rollback error is a real problem: the tx may be left hanging,
+		// connection may be poisoned, or partial state may leak. Log it
+		// but do NOT overwrite the fn error — callers need the original
+		// cause, not the rollback failure.
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			u.logger.Error(ctx, "tx rollback failed after fn error",
+				tag.Error(rbErr),
+				mlog.NamedError("fn_error", err),
+			)
+		}
 		return err
 	}
 

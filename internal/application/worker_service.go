@@ -84,9 +84,16 @@ func (s *workerService) Start(ctx context.Context) error {
 
 // processMessage handles a single order message within a DB transaction.
 func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMessage) error {
+	// Record duration in defer so panics, early returns, and future
+	// refactors that add new return paths cannot silently skip the
+	// histogram. Go 1.14+ open-coded defer overhead is negligible
+	// next to the DB transaction below.
 	start := time.Now()
+	defer func() {
+		s.metrics.RecordProcessingDuration(time.Since(start))
+	}()
 
-	err := s.uow.Do(ctx, func(txCtx context.Context) error {
+	return s.uow.Do(ctx, func(txCtx context.Context) error {
 		// 1. Double Check Inventory (Source of Truth)
 		if err := s.eventRepo.DecrementTicket(txCtx, msg.EventID, msg.Quantity); err != nil {
 			if errors.Is(err, domain.ErrSoldOut) {
@@ -148,7 +155,4 @@ func (s *workerService) processMessage(ctx context.Context, msg *domain.OrderMes
 		s.metrics.RecordOrderOutcome("success")
 		return nil
 	})
-
-	s.metrics.RecordProcessingDuration(time.Since(start))
-	return err
 }
