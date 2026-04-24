@@ -57,8 +57,14 @@ func (s *workerService) Start(ctx context.Context) error {
 
 	// ensure group. A startup-time failure here means the stream /
 	// consumer group can't be created — no point continuing; bubble
-	// up so the process exits and k8s restarts us.
+	// up so the process exits and k8s restarts us. ctx.Canceled during
+	// startup is a shutdown race (SIGINT arrived before Subscribe), not
+	// a fault — treat it like clean exit so we don't log a spurious
+	// failure or burn an exit(1) restart.
 	if err := s.queue.EnsureGroup(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return fmt.Errorf("worker ensure group: %w", err)
 	}
 
