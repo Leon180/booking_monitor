@@ -15,25 +15,22 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// streamKey / groupName / dlqKey are wire contracts between the API-side
+// Lua producer and the worker consumer: a mismatch means silent split
+// brain (one side writes, the other reads nothing). Kept as const so
+// they can't be independently overridden per process via env vars.
 const (
 	streamKey = "orders:stream"
 	groupName = "orders:group"
 	dlqKey    = "orders:dlq"
-
-	// maxConsecutiveReadErrors bounds how long Subscribe tolerates a
-	// broken Redis before giving up and letting the caller restart us.
-	// At the current 2s block + 1s sleep cadence, 30 errors ≈ 90s of
-	// persistent failure — long enough to ride out a brief blip, short
-	// enough that k8s can restart the pod before the booking backlog
-	// becomes unrecoverable.
-	maxConsecutiveReadErrors = 30
 )
 
 type redisOrderQueue struct {
-	client        *redis.Client
-	inventoryRepo domain.InventoryRepository
-	logger        *mlog.Logger
-	consumerName  string
+	client                   *redis.Client
+	inventoryRepo            domain.InventoryRepository
+	logger                   *mlog.Logger
+	consumerName             string
+	maxConsecutiveReadErrors int
 }
 
 func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *mlog.Logger, cfg *config.Config) domain.OrderQueue {
@@ -44,7 +41,8 @@ func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepo
 			mlog.String("component", "redis_order_queue"),
 			mlog.String("worker_id", cfg.App.WorkerID),
 		),
-		consumerName: cfg.App.WorkerID,
+		consumerName:             cfg.App.WorkerID,
+		maxConsecutiveReadErrors: cfg.Redis.MaxConsecutiveReadErrors,
 	}
 }
 
@@ -106,7 +104,7 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 			}
 
 			consecutiveErrors++
-			if consecutiveErrors >= maxConsecutiveReadErrors {
+			if consecutiveErrors >= q.maxConsecutiveReadErrors {
 				return fmt.Errorf("XReadGroup: %d consecutive errors, last: %w", consecutiveErrors, err)
 			}
 

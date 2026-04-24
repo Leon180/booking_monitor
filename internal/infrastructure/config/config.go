@@ -55,6 +55,16 @@ type RedisConfig struct {
 	ReadTimeout  time.Duration `yaml:"read_timeout" env:"REDIS_READ_TIMEOUT" env-default:"500ms"`
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"REDIS_WRITE_TIMEOUT" env-default:"500ms"`
 	PoolTimeout  time.Duration `yaml:"pool_timeout" env:"REDIS_POOL_TIMEOUT" env-default:"2s"`
+
+	// MaxConsecutiveReadErrors bounds how long the order-stream Subscribe
+	// loop tolerates a broken Redis before returning and letting the
+	// caller restart the worker. At the current 2s block + 1s sleep
+	// cadence, 30 ≈ 90s of persistent failure — long enough to ride out
+	// a brief blip, short enough that k8s restarts the pod before the
+	// booking backlog becomes unrecoverable. Raise for stricter pods
+	// that should self-heal rather than restart; lower for clusters
+	// that want faster shedding to a healthy replica.
+	MaxConsecutiveReadErrors int `yaml:"max_consecutive_read_errors" env:"REDIS_MAX_CONSECUTIVE_READ_ERRORS" env-default:"30"`
 }
 
 type PostgresConfig struct {

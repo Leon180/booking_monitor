@@ -31,6 +31,11 @@ redis:
   read_timeout: "500ms"
   write_timeout: "500ms"
   pool_timeout: "2s"
+  # Order-stream Subscribe tolerates this many consecutive XReadGroup
+  # failures before returning so fx.Shutdowner can restart the pod.
+  # Default 30 ≈ 90s of persistent failure at the current 2s block +
+  # 1s sleep cadence.
+  max_consecutive_read_errors: 30
 
 postgres:
   max_open_conns: 50
