@@ -26,7 +26,7 @@ clean: ## Clean build directory
 	rm -rf $(BUILD_DIR)
 
 test: ## Run tests with race detection
-	go test -race -v ./internal/... ./pkg/...
+	go test -race -v ./internal/...
 
 lint: ## Run linter
 	@which golangci-lint > /dev/null || echo "Please install golangci-lint"
