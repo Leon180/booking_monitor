@@ -94,7 +94,7 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 - Tests use testify/assert + go.uber.org/mock
 
 ## Current State (as of 2026-04-24)
-15 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). Phase 15 (Apr 23–24) landed the logger architecture refactor in PR #18 — `pkg/logger/` → `internal/log/` with ctx-aware emit methods (`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`) that auto-inject `correlation_id` + OTEL `trace_id`/`span_id`, `/admin/loglevel` runtime level endpoint on the pprof listener, and the typed `internal/log/tag/` field constructors. See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
+15 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). Phase 15 (Apr 23–24) landed the logger architecture refactor in PR #18 — `pkg/logger/` → `internal/log/` with ctx-aware emit methods (`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`) that auto-inject `correlation_id` + OTEL `trace_id`/`span_id`, `/admin/loglevel` runtime level endpoint on the pprof listener, and the typed `internal/log/tag/` field constructors. Post-Phase-15 (Apr 24) review cleanup in PRs #21/#22/#23: strict review of `cmd/booking-cli/main.go` landed the P0 stress URL fix, payment-worker tracer init, pprof loopback binding + timeouts, `fx.Shutdowner` escalation for failing goroutines, function decomposition, and promotion of pprof + trusted-proxy + db-ping tunables into `config.Config` (with `KAFKA_BROKERS` + `TRUSTED_PROXIES` switching to cleanenv `[]string` + `env-separator`, eliminating a silent multi-broker bug). See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
 
 ## Logging Conventions (post-PR #18)
 - **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
@@ -109,11 +109,23 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 - Horizontal scaling tests
 - Real payment gateway integration
 
-## Key Env Vars (GC / Tracing / Profiling)
+## Key Env Vars
+See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most-used knobs:
+
+**Runtime / GC / Tracing**
 - `GOGC` (default `400` in `.env`, `100` fallback in docker-compose) — higher = less frequent GC
 - `GOMEMLIMIT=256MiB` — soft memory limit; pairs with GOGC so GC gets aggressive only near the cap
 - `OTEL_TRACES_SAMPLER_RATIO` (default `0.01`) — 1% sampling; `1` = always, `0` = never
-- `ENABLE_PPROF` (default `false`) — when `true`, pprof endpoints served on `:6060`
+
+**Security-sensitive (post-PR #21/#22)**
+- `ENABLE_PPROF` (default `false`) — when `true`, starts the pprof + `/admin/loglevel` listener
+- `PPROF_ADDR` (default `127.0.0.1:6060`) — **loopback by default**; override only when remote pprof is genuinely needed. Heap dumps + log-level control live here
+- `TRUSTED_PROXIES` (CSV, default RFC1918 CIDRs) — Gin trusts these for `ClientIP()`; override for service meshes outside RFC1918 (GKE, some EKS)
+
+**Operational (post-PR #21/#22)**
+- `CONFIG_PATH` (default `config/config.yml`) — config path; needed when CWD differs (systemd units, k8s initContainers)
+- `DB_PING_ATTEMPTS` / `DB_PING_INTERVAL` / `DB_PING_PER_ATTEMPT` — DB startup probe budget; raise attempts for slow dependencies
+- `KAFKA_BROKERS` (CSV, default `localhost:9092`) — now parsed as `[]string` via cleanenv's `env-separator:","`
 
 ## Available Tooling under `.claude/`
 
