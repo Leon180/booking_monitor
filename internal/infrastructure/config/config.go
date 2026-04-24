@@ -28,6 +28,22 @@ type ServerConfig struct {
 	Port         string        `yaml:"port" env:"PORT" env-default:"8080"`
 	ReadTimeout  time.Duration `yaml:"read_timeout" env:"SERVER_READ_TIMEOUT" env-default:"5s"`
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"SERVER_WRITE_TIMEOUT" env-default:"10s"`
+
+	// EnablePprof gates the operator-only pprof listener. Off by default
+	// so heap dumps + /admin/loglevel aren't exposed in every deployment.
+	EnablePprof bool `yaml:"enable_pprof" env:"ENABLE_PPROF" env-default:"false"`
+	// PprofAddr is the bind address for the pprof listener. Defaults to
+	// loopback so remote access requires an explicit override.
+	PprofAddr         string        `yaml:"pprof_addr" env:"PPROF_ADDR" env-default:"127.0.0.1:6060"`
+	PprofReadTimeout  time.Duration `yaml:"pprof_read_timeout" env:"PPROF_READ_TIMEOUT" env-default:"5s"`
+	PprofWriteTimeout time.Duration `yaml:"pprof_write_timeout" env:"PPROF_WRITE_TIMEOUT" env-default:"30s"`
+
+	// TrustedProxies is the list of CIDRs Gin trusts for ClientIP()
+	// resolution. Default covers RFC1918 ranges (docker / k8s pod
+	// CIDRs); override for service meshes with non-RFC1918 IPs (some
+	// GKE / EKS setups). In yaml write as a sequence; env vars are
+	// parsed as a comma-separated list (env-separator:",").
+	TrustedProxies []string `yaml:"trusted_proxies" env:"TRUSTED_PROXIES" env-separator:"," env-default:"10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"`
 }
 
 type RedisConfig struct {
@@ -52,11 +68,22 @@ type PostgresConfig struct {
 	// staleness (memory, prepared statement caches, PgBouncer auth
 	// drift). 30m is a safe default for most deployments.
 	MaxLifetime time.Duration `yaml:"max_lifetime" env:"DB_MAX_LIFETIME" env-default:"30m"`
+
+	// PingAttempts / PingInterval / PingPerAttempt bound how long the
+	// startup loop waits for Postgres to become reachable. Slower
+	// environments (k8s initContainers, spin-up dependencies) should
+	// raise PingAttempts; there's no exponential backoff so total budget
+	// is roughly PingAttempts * (PingInterval + PingPerAttempt).
+	PingAttempts   int           `yaml:"ping_attempts" env:"DB_PING_ATTEMPTS" env-default:"10"`
+	PingInterval   time.Duration `yaml:"ping_interval" env:"DB_PING_INTERVAL" env-default:"1s"`
+	PingPerAttempt time.Duration `yaml:"ping_per_attempt" env:"DB_PING_PER_ATTEMPT" env-default:"3s"`
 }
 
 type KafkaConfig struct {
-	// Brokers is a comma-separated list of Kafka broker addresses.
-	Brokers string `yaml:"brokers" env:"KAFKA_BROKERS" env-default:"localhost:9092"`
+	// Brokers is the list of Kafka broker addresses. In yaml write as
+	// a sequence; env vars are parsed as a comma-separated list
+	// (env-separator:",").
+	Brokers []string `yaml:"brokers" env:"KAFKA_BROKERS" env-separator:"," env-default:"localhost:9092"`
 	// WriteTimeout is the max time to wait for a Kafka write to complete.
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"KAFKA_WRITE_TIMEOUT" env-default:"5s"`
 	// OutboxBatchSize controls how many outbox events are processed per relay tick.
@@ -117,7 +144,7 @@ func (c *Config) Validate() error {
 		if isLocalhostAddr(c.Redis.Addr) {
 			missing = append(missing, "redis.addr / REDIS_ADDR (localhost default not permitted in production)")
 		}
-		if isLocalhostAddr(c.Kafka.Brokers) {
+		if isLocalhostBrokers(c.Kafka.Brokers) {
 			missing = append(missing, "kafka.brokers / KAFKA_BROKERS (localhost default not permitted in production)")
 		}
 	}
@@ -129,10 +156,15 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// isLocalhostAddr returns true if the address string is one of the
-// unconfigured localhost defaults cleanenv hands back when nothing
-// overrides REDIS_ADDR / KAFKA_BROKERS.
+// isLocalhostAddr returns true if the string matches the unconfigured
+// localhost default cleanenv hands back when REDIS_ADDR is unset.
 func isLocalhostAddr(addr string) bool {
-	a := strings.TrimSpace(addr)
-	return a == "localhost:6379" || a == "localhost:9092"
+	return strings.TrimSpace(addr) == "localhost:6379"
+}
+
+// isLocalhostBrokers returns true if the broker slice is the single
+// unconfigured localhost default cleanenv hands back when KAFKA_BROKERS
+// is unset.
+func isLocalhostBrokers(brokers []string) bool {
+	return len(brokers) == 1 && strings.TrimSpace(brokers[0]) == "localhost:9092"
 }

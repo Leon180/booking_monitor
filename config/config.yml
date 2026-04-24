@@ -7,6 +7,22 @@ server:
   port: "8080"
   read_timeout: "5s"
   write_timeout: "10s"
+  # pprof / /admin/loglevel listener. Off by default. When enabled,
+  # binds to loopback so remote operators need an explicit override
+  # (PPROF_ADDR or yaml pprof_addr) — heap dumps must not be public.
+  enable_pprof: false
+  pprof_addr: "127.0.0.1:6060"
+  pprof_read_timeout: "5s"
+  # heap dumps on large-heap pods can take a while.
+  pprof_write_timeout: "30s"
+  # CIDRs trusted for Gin's ClientIP() resolution. RFC1918 default
+  # covers docker / k8s pod networks. Override for service meshes (GKE,
+  # some EKS configs) where the proxy lives outside RFC1918. Env var
+  # TRUSTED_PROXIES accepts a comma-separated list.
+  trusted_proxies:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
 
 redis:
   addr: "localhost:6379"
@@ -20,10 +36,18 @@ postgres:
   max_open_conns: 50
   max_idle_conns: 50
   max_idle_time: "5m"
+  # Startup ping retry budget. Raise ping_attempts on slow environments
+  # (k8s initContainers, spin-up dependencies). Total wait is roughly
+  # ping_attempts * (ping_interval + ping_per_attempt).
+  ping_attempts: 10
+  ping_interval: "1s"
+  ping_per_attempt: "3s"
 
 kafka:
-  # Local dev default. In production, set KAFKA_BROKERS env var instead — never commit real broker addresses.
-  brokers: "localhost:9092"
+  # Local dev default. In production, set KAFKA_BROKERS env var instead
+  # (comma-separated) — never commit real broker addresses.
+  brokers:
+    - "localhost:9092"
   # Max time to wait for a Kafka write to complete. Override via KAFKA_WRITE_TIMEOUT.
   write_timeout: "5s"
   # Number of outbox events processed per relay tick. Override via KAFKA_OUTBOX_BATCH_SIZE.

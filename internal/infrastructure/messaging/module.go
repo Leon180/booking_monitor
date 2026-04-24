@@ -2,7 +2,6 @@ package messaging
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"booking_monitor/internal/domain"
@@ -29,18 +28,3 @@ var Module = fx.Module("messaging",
 		return pub
 	}),
 )
-
-// ParseBrokers splits a comma-separated broker string into a slice.
-func ParseBrokers(raw string) []string {
-	if raw == "" {
-		return []string{"localhost:9092"}
-	}
-	parts := strings.Split(raw, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if s := strings.TrimSpace(p); s != "" {
-			result = append(result, s)
-		}
-	}
-	return result
-}
