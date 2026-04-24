@@ -5,15 +5,19 @@ import (
 	"errors"
 
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/observability"
 )
 
 type bookingServiceMetricsDecorator struct {
-	next BookingService
+	next    BookingService
+	metrics BookingMetrics
 }
 
-func NewBookingServiceMetricsDecorator(next BookingService) BookingService {
-	return &bookingServiceMetricsDecorator{next: next}
+// NewBookingServiceMetricsDecorator wraps the booking service with a
+// metrics decorator. The caller provides the BookingMetrics
+// implementation (typically Prometheus-backed from the observability
+// package) — keeps application independent of infrastructure.
+func NewBookingServiceMetricsDecorator(next BookingService, metrics BookingMetrics) BookingService {
+	return &bookingServiceMetricsDecorator{next: next, metrics: metrics}
 }
 
 func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
@@ -21,13 +25,13 @@ func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID,
 
 	switch {
 	case err == nil:
-		observability.BookingsTotal.WithLabelValues("success").Inc()
+		d.metrics.RecordBookingOutcome("success")
 	case errors.Is(err, domain.ErrSoldOut):
-		observability.BookingsTotal.WithLabelValues("sold_out").Inc()
+		d.metrics.RecordBookingOutcome("sold_out")
 	default:
 		// ErrUserAlreadyBought is now only returned by the worker (async DB constraint).
 		// BookTicket at the API layer will never return it, so we treat unknowns as errors.
-		observability.BookingsTotal.WithLabelValues("error").Inc()
+		d.metrics.RecordBookingOutcome("error")
 	}
 
 	return err

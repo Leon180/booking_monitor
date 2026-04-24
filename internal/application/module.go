@@ -25,10 +25,12 @@ var Module = fx.Module("application",
 			orderRepo domain.OrderRepository,
 			inventoryRepo domain.InventoryRepository,
 			uow domain.UnitOfWork,
+			metrics BookingMetrics,
 		) BookingService {
 			base := NewBookingService(eventRepo, orderRepo, inventoryRepo, uow)
 			return NewBookingServiceMetricsDecorator(
 				NewBookingServiceTracingDecorator(base),
+				metrics,
 			)
 		},
 		NewEventService,
@@ -45,7 +47,7 @@ var Module = fx.Module("application",
 			eventRepo domain.EventRepository,
 			outboxRepo domain.OutboxRepository,
 			uow domain.UnitOfWork,
-			metrics domain.WorkerMetrics,
+			metrics WorkerMetrics,
 			logger *mlog.Logger,
 		) WorkerService {
 			base := NewWorkerService(queue, orderRepo, eventRepo, outboxRepo, uow, metrics, logger)
