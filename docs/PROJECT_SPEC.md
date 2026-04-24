@@ -49,7 +49,7 @@ or Postgres writes.
 |---|-----------|-------|-----------------|--------|-------------------|
 | 1 | Gin API handler (`/api/v1/book`) | User request | Redis (idempotency key, 24h TTL) | `Idempotency-Key` header, if present, is looked up first — a hit replays the cached 2xx/4xx/5xx body verbatim and skips the rest | Missing/duplicate body → 400 `"invalid request body"`; `mapError` sanitizes any downstream leak |
 | 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis via `deduct.lua` (atomic) | `DECRBY event:{id}:qty` → if `>= 0` also `XADD orders:stream` → return 200; if `< 0` `INCRBY` revert and return 409 `sold out` | API returns immediately after Redis — the order is **not yet persisted**, just queued |
-| 3 | `WorkerService.processMessage` (consumer group on `orders:stream`) | Stream message | PostgreSQL (single UoW transaction) | `DecrementTicket` (DB row-level double-check, guards against Redis/DB drift) → `orderRepo.Create` (UNIQUE partial index catches duplicate purchase) → `outboxRepo.Create(event_type="order.created")` — **all three in one tx** | `DecrementTicket` rejects → revert Redis + ACK (inventory conflict metric); `orderRepo.Create` hits `ErrUserAlreadyBought` → revert Redis + ACK (duplicate metric); other errors → no ACK, `processWithRetry` 3×, then DLQ (`orders:dlq`) + Redis revert |
+| 3 | `WorkerService` → `MessageProcessor.Process` (consumer group on `orders:stream`) | Stream message | PostgreSQL (single UoW transaction) | `DecrementTicket` (DB row-level double-check, guards against Redis/DB drift) → `orderRepo.Create` (UNIQUE partial index catches duplicate purchase) → `outboxRepo.Create(event_type="order.created")` — **all three in one tx** | `DecrementTicket` rejects → revert Redis + ACK (inventory conflict metric); `orderRepo.Create` hits `ErrUserAlreadyBought` → revert Redis + ACK (duplicate metric); other errors → no ACK, `processWithRetry` 3×, then DLQ (`orders:dlq`) + Redis revert |
 | 4 | `OutboxRelay` (background goroutine, single leader elected via Postgres advisory lock 1001) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL (read + update) → Kafka topic `order.created` | Polls every 500ms (partial index `events_outbox_pending_idx` covers this), publishes up to 100 events per tick, then `UPDATE processed_at = NOW()`. Publish failure → skip `MarkProcessed` so the next tick retries. MarkProcessed failure after a successful publish → event will be re-published on next tick, consumers MUST be idempotent | Leader crash → advisory lock auto-releases (session-bound) → a standby acquires it on its next tick |
 | 5 | `KafkaConsumer` → `PaymentService.ProcessOrder` | `OrderCreatedEvent` | Redis (idempotency via `orderRepo.GetByID` → status check) → `PaymentGateway.Charge` → PostgreSQL (status update) | If order is already `confirmed`/`failed`/`compensated` → skip (idempotent). Otherwise charge mock gateway. On success: `UPDATE orders SET status='confirmed'`. Commit Kafka offset | Malformed JSON / `ErrInvalidPaymentEvent` → dead-letter to `order.created.dlq` with provenance headers + commit offset. Transient DB/Redis errors → do NOT commit, Kafka rebalance re-delivers |
 
@@ -337,6 +337,10 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 | `dlq_messages_total` | Counter (`topic`, `reason`) | Messages written to a dead-letter topic. Pre-initialized labels cover `order.created.dlq` and `order.failed.dlq` for reasons `invalid_payload`, `invalid_event`, `max_retries` |
 | `saga_poison_messages_total` | Counter | Saga events dead-lettered after exceeding `sagaMaxRetries` |
 | `kafka_consumer_retry_total` | Counter (`topic`, `reason`) | Messages left UNCOMMITTED for Kafka rebalance retry because of a transient downstream error. Intentionally NOT dead-lettered (would cause overselling during DB hiccups). The `KafkaConsumerStuck` alert watches this — a sustained non-zero rate means a downstream dependency is degraded |
+| `db_rollback_failures_total` | Counter | `tx.Rollback()` returned a non-`sql.ErrTxDone` error. `ErrTxDone` is expected (driver already closed the tx after a fatal error) and is filtered at the call site; any other rollback failure means the tx may be left hanging or the connection is poisoned |
+| `redis_xack_failures_total` | Counter | Redis `XAck` failed on a successfully-processed message — the message stays in the PEL and will be re-delivered. This counter is the only leading signal that double-processing may occur |
+| `redis_xadd_failures_total` | Counter (`stream`) | Redis `XAdd` failed, labelled by target stream. Currently only the DLQ stream (`stream="dlq"`) writes from Go; label kept for future main-stream writers |
+| `redis_revert_failures_total` | Counter | `RevertInventory` failed during worker `handleFailure` — the message stays in the PEL for PEL-reclaim retry. A non-zero rate means Redis inventory is drifting relative to DB state |
 
 **Alerts (`deploy/prometheus/alerts.yml`):**
 
@@ -346,7 +350,7 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 - `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1` for 2m. Paired contract with the `kafka_consumer_retry_total` counter: when transient errors cause sustained rebalance retries, this alert fires so oncall investigates **downstream infra** (DB / Redis / payment gateway), NOT the consumer. The consumer is working as designed; the alert exists so "stuck but not dead" is operator-visible without having to dead-letter in-flight orders.
 
 ### Tracing (OpenTelemetry + Jaeger)
-- Decorator pattern: `BookingServiceTracingDecorator`, `WorkerServiceMetricsDecorator`, `OutboxRelayTracingDecorator`
+- Decorator pattern: `BookingServiceTracingDecorator`, `MessageProcessorMetricsDecorator`, `OutboxRelayTracingDecorator`
 - `OutboxRelayTracingDecorator` now calls `span.RecordError` + `span.SetStatus(codes.Error)` on batch failures — the previous version always closed spans as OK
 - `api/handler_tracing.go` uses a shared `recordHTTPResult(span, status)` helper that sets `span.status = Error` for **all** status >= 400, not just 5xx, so 4xx client errors show up in Jaeger search
 - GRPC exporter to Jaeger (port 4317)
@@ -506,17 +510,22 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/domain/payment.go` | PaymentGateway + PaymentService interfaces |
 | `internal/domain/lock.go` | DistributedLock interface |
 | `internal/domain/idempotency.go` | IdempotencyRepository interface |
-| `internal/domain/worker_metrics.go` | WorkerMetrics interface |
 | `internal/domain/uow.go` | UnitOfWork interface |
 
 ### Application Services
 | File | Purpose |
 |------|---------|
 | `internal/application/booking_service.go` | Core booking logic (Redis deduction) |
-| `internal/application/worker_service.go` | Background order processing from streams |
+| `internal/application/worker_service.go` | Queue lifecycle (EnsureGroup, Subscribe, ctx handling); delegates per-message work to the decorated MessageProcessor |
+| `internal/application/message_processor.go` | `MessageProcessor` interface + base impl (DB transaction: DecrementTicket → orderRepo.Create → outbox.Create). Split out of worker_service so metrics / tracing can be layered as real decorators |
+| `internal/application/message_processor_metrics.go` | Metrics decorator: classifies error via `errors.Is` and emits `worker_orders_total` / `worker_processing_duration_seconds` / `inventory_conflicts_total` |
 | `internal/application/outbox_relay.go` | Transactional outbox -> Kafka publisher |
 | `internal/application/saga_compensator.go` | Payment failure compensation |
 | `internal/application/payment/service.go` | Payment processing logic |
+| `internal/application/worker_metrics.go` | WorkerMetrics port |
+| `internal/application/booking_metrics.go` | BookingMetrics port |
+| `internal/application/db_metrics.go` | DBMetrics port (rollback-failure counter) |
+| `internal/application/queue_metrics.go` | QueueMetrics port (XAck / XAdd / Revert failure counters) |
 
 ### Infrastructure
 | File | Purpose |
@@ -535,7 +544,11 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/infrastructure/messaging/kafka_publisher.go` | Kafka event publisher |
 | `internal/infrastructure/messaging/kafka_consumer.go` | Payment Kafka consumer |
 | `internal/infrastructure/messaging/saga_consumer.go` | Saga Kafka consumer |
-| `internal/infrastructure/observability/metrics.go` | Prometheus metrics setup |
+| `internal/infrastructure/observability/metrics.go` | Prometheus counter / histogram definitions (shared by all `*_metrics.go` impls) |
+| `internal/infrastructure/observability/worker_metrics.go` | Prometheus impl of `application.WorkerMetrics` |
+| `internal/infrastructure/observability/booking_metrics.go` | Prometheus impl of `application.BookingMetrics` |
+| `internal/infrastructure/observability/db_metrics.go` | Prometheus impl of `application.DBMetrics` |
+| `internal/infrastructure/observability/queue_metrics.go` | Prometheus impl of `application.QueueMetrics` |
 | `internal/infrastructure/config/config.go` | YAML config + env overrides |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock payment gateway |
 
