@@ -33,12 +33,21 @@ const (
 	OutboxStatusPending = "PENDING"
 )
 
+// Event is the domain aggregate. Field names have no `json:` tags
+// because Event values are never marshalled directly to a wire format
+// — the API layer maps to api/dto.EventResponse, which owns the JSON
+// contract. Adding a json tag here would re-introduce the "domain
+// model leaks into HTTP wire contract" coupling that PR 31 removed.
+//
+// (domain.Order still carries json tags because the outbox payload
+// path still uses json.Marshal(order). PR 32 introduces a domain
+// event payload type and that last tag set will go away.)
 type Event struct {
-	ID               int    `json:"id"`
-	Name             string `json:"name"`
-	TotalTickets     int    `json:"total_tickets"`
-	AvailableTickets int    `json:"available_tickets"`
-	Version          int    `json:"version"` // Added Version
+	ID               int
+	Name             string
+	TotalTickets     int
+	AvailableTickets int
+	Version          int
 }
 
 // NewEvent constructs a fresh Event with the canonical "available =
