@@ -107,15 +107,14 @@ func resolveConfigPath() string {
 
 // commonFxOptions holds the fx providers shared by every command. Keeps
 // runServer + runPaymentWorker + any future CLI from drifting on logger /
-// config / DB wiring. DBMetrics is shared because every command that
-// opens a Postgres connection uses PostgresUnitOfWork and therefore
-// needs the rollback-failure counter.
+// config / DB wiring. DBMetrics is provided inside postgresRepo.Module
+// so the metrics provider always travels with PostgresUnitOfWork (its
+// only consumer) — see postgres/module.go for the rationale.
 func commonFxOptions(cfg *config.Config) fx.Option {
 	return fx.Options(
 		bootstrap.LogModule,
 		fx.Provide(func() *config.Config { return cfg }),
 		fx.Provide(provideDB),
-		fx.Provide(observability.NewDBMetrics),
 		postgresRepo.Module,
 	)
 }
