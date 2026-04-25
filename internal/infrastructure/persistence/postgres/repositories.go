@@ -245,8 +245,18 @@ func (r *postgresOutboxRepository) Create(ctx context.Context, event domain.Outb
 	if err := r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&id); err != nil {
 		return domain.OutboxEvent{}, fmt.Errorf("outboxRepository.Create type=%s: %w", event.EventType, err)
 	}
-	event.ID = id
-	return event, nil
+	// Construct a fresh value rather than mutating the parameter copy.
+	// Both produce identical output, but matching OrderRepository.Create's
+	// "assemble new value" style keeps the immutability contract on
+	// OutboxRepository.Create's docstring honest end-to-end and avoids
+	// setting a precedent that the next entity's repo would copy.
+	return domain.OutboxEvent{
+		ID:          id,
+		EventType:   event.EventType,
+		Payload:     event.Payload,
+		Status:      event.Status,
+		ProcessedAt: event.ProcessedAt,
+	}, nil
 }
 
 func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {

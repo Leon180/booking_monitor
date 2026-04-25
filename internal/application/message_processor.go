@@ -52,8 +52,21 @@ func NewOrderMessageProcessor(
 // Returns raw domain errors so decorators (metrics, tracing) can
 // classify outcome via errors.Is. Callers that need to know outcome
 // category should NOT parse the error string — use errors.Is against
-// domain.ErrSoldOut / domain.ErrUserAlreadyBought.
+// domain.ErrSoldOut / domain.ErrUserAlreadyBought / domain.ErrInvalid*.
 func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMessage) error {
+	// Validate BEFORE opening a tx. A malformed queue message will
+	// never become valid via PEL retry — failing fast saves a DB
+	// transaction and lets the metrics decorator classify it as
+	// "malformed_message" instead of "db_error". The Redis-side
+	// inventory revert still happens on the worker's compensation
+	// path (handleFailure -> RevertInventory).
+	newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+	if err != nil {
+		p.logger.Error(ctx, "Malformed order message",
+			tag.MsgID(msg.ID), tag.Error(err))
+		return err
+	}
+
 	return p.uow.Do(ctx, func(txCtx context.Context) error {
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
@@ -65,17 +78,6 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 				return err
 			}
 			p.logger.Error(txCtx, "Failed to decrement ticket in DB",
-				tag.MsgID(msg.ID), tag.Error(err))
-			return err
-		}
-
-		newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
-		if err != nil {
-			// Invariant violation in the queue message itself —
-			// surface as a domain error so the worker classifier
-			// can DLQ it (the message will never be valid no matter
-			// how many times PEL re-delivers).
-			p.logger.Error(txCtx, "Malformed order message",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}

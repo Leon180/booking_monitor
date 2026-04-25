@@ -68,6 +68,15 @@ func NewOrder(userID, eventID, quantity int) (Order, error) {
 // the invariant validation in NewOrder because the row was already
 // validated at insert time and persisted state is trusted. Use ONLY
 // from repository row-scanning code, never to "create" a new order.
+//
+// CONTRACT NOTE: This function is in the public surface of the
+// domain package, so the "only repos may call this" rule is
+// comment-only — the compiler doesn't enforce it. A future PR
+// (tracked under "tx-control refactor / Pattern B" in the post-#28
+// follow-up plan) is expected to fold reconstruction into a
+// persistence-private helper or move the type behind an unexported
+// constructor, at which point this comment can become a compile-time
+// invariant. Until then: do not call from application code.
 func ReconstructOrder(id, userID, eventID, quantity int, status OrderStatus, createdAt time.Time) Order {
 	return Order{
 		ID:        id,

@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"booking_monitor/internal/mocks"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -54,12 +56,20 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
-					o.ID = 42 // simulate DB-assigned id
+					o.ID = 42 // simulate DB-assigned id; asserted downstream in the outbox payload
 					return o, nil
 				})
 				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
-					assert.Equal(t, "order.created", e.EventType)
-					assert.Equal(t, "PENDING", e.Status)
+					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType)
+					assert.Equal(t, domain.OutboxStatusPending, e.Status)
+					// Verify the DB-assigned ID propagates into the
+					// outbox payload — the whole point of returning
+					// the persisted Order from orderRepo.Create is so
+					// downstream consumers (Kafka subscribers) receive
+					// a fully-populated event, not a partial one.
+					var orderInPayload domain.Order
+					require.NoError(t, json.Unmarshal(e.Payload, &orderInPayload))
+					assert.Equal(t, 42, orderInPayload.ID, "outbox payload must include the DB-assigned order ID")
 					e.ID = 99
 					return e, nil
 				})
@@ -100,6 +110,23 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
 			},
 			expectedError: errors.New("db connection failed"),
+		},
+		{
+			// Validates that NewOrder's invariant violation propagates
+			// out of Process unwrapped, so messageProcessorMetricsDecorator
+			// can errors.Is-classify it as "malformed_message" instead
+			// of "db_error". Also verifies the fail-fast path: the
+			// processor MUST NOT open a tx or call DecrementTicket
+			// when the message itself is malformed.
+			name: "Malformed message — invalid UserID short-circuits before tx",
+			msg:  &domain.OrderMessage{ID: "5-0", EventID: 1, UserID: 0, Quantity: 1},
+			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+				// Deliberately empty: no uow.Do, no DecrementTicket,
+				// no Create expectations. gomock will fail the test
+				// if any of those fire, which is exactly what we want
+				// to assert — a malformed message must not touch the DB.
+			},
+			expectedError: domain.ErrInvalidUserID,
 		},
 	}
 

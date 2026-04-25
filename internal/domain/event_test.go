@@ -16,7 +16,6 @@ func TestNewOrderCreatedOutbox(t *testing.T) {
 	got := domain.NewOrderCreatedOutbox(payload)
 
 	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType)
-	assert.Equal(t, "order.created", got.EventType, "EventType const must match the wire string consumers expect")
 	assert.Equal(t, domain.OutboxStatusPending, got.Status)
 	assert.Equal(t, payload, got.Payload)
 	assert.Equal(t, 0, got.ID, "ID is repo-assigned")
@@ -30,11 +29,22 @@ func TestNewOrderFailedOutbox(t *testing.T) {
 	got := domain.NewOrderFailedOutbox(payload)
 
 	assert.Equal(t, domain.EventTypeOrderFailed, got.EventType)
-	assert.Equal(t, "order.failed", got.EventType)
 	assert.Equal(t, domain.OutboxStatusPending, got.Status)
 	assert.Equal(t, payload, got.Payload)
 	assert.Equal(t, 0, got.ID)
 	assert.Nil(t, got.ProcessedAt)
+}
+
+// TestEventTypeConstantsAreStable pins the wire format of the outbox
+// event-type constants. The factories above use these constants, so
+// renaming the const to a different string would silently break every
+// downstream consumer (Kafka subscribers / saga compensator). Keep
+// this test passing or coordinate the rename across all consumers.
+func TestEventTypeConstantsAreStable(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "order.created", domain.EventTypeOrderCreated)
+	assert.Equal(t, "order.failed", domain.EventTypeOrderFailed)
+	assert.Equal(t, "PENDING", domain.OutboxStatusPending)
 }
 
 func TestEvent_Deduct(t *testing.T) {
