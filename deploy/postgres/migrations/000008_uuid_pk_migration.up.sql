@@ -62,7 +62,15 @@ CREATE TABLE events_outbox (
     payload JSONB NOT NULL,
     status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    processed_at TIMESTAMP
+    -- processed_at must be TIMESTAMPTZ to preserve the original schema
+    -- from migration 000005. Plain TIMESTAMP (timezone-naive) would
+    -- silently degrade timezone-aware reads and cause MarkProcessed's
+    -- NOW() value to be interpreted differently across clients.
+    -- The other timestamp columns above (orders.created_at,
+    -- events_outbox.created_at) stay TIMESTAMP because that's their
+    -- original type since 000002/000003 — standardising the whole
+    -- schema to TIMESTAMPTZ is a separate cleanup.
+    processed_at TIMESTAMPTZ
 );
 
 -- Re-create the partial index for relay polling (carried over from 000007).

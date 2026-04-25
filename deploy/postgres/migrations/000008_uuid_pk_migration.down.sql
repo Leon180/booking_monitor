@@ -34,7 +34,9 @@ CREATE TABLE events_outbox (
     payload JSONB NOT NULL,
     status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    processed_at TIMESTAMP
+    -- TIMESTAMPTZ matches migration 000005's original column type;
+    -- a rollback must restore the prior shape exactly.
+    processed_at TIMESTAMPTZ
 );
 
 CREATE INDEX events_outbox_pending_idx ON events_outbox (id) WHERE processed_at IS NULL;

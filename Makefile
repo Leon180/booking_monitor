@@ -106,15 +106,20 @@ mocks: tools ## Generate mocks using local wrapper
 	@echo "Generating mocks..."
 	@PATH=$(shell pwd)/bin:$(PATH) go generate ./...
 
-reset-db: ## Reset database (clear orders, reset event inventory to 100)
+reset-db: ## Reset database — truncate orders/events/outbox + flush Redis. Tests create their own events via POST /api/v1/events
 	@echo "Resetting database..."
+	# Post-PR-34 events.id is UUID, so the previous "seed event id=1"
+	# pattern is gone (and was already obsolete: stress test requires
+	# --event-id <uuid>, k6 scripts call POST /api/v1/events in their
+	# setup()). Truncate everything; each test run creates a fresh
+	# event via the API. Redis is flushed wholesale because the
+	# event:{uuid}:qty keys are scoped per event and a stale UUID
+	# from a previous run carries no value.
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE orders;"
-	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events WHERE id != 1;"
-	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "UPDATE events SET total_tickets = 100, available_tickets = 100, name = 'Jay Chou Concert', version = 0 WHERE id = 1;"
-	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "INSERT INTO events (id, name, total_tickets, available_tickets, version) VALUES (1, 'Jay Chou Concert', 100, 100, 0) ON CONFLICT (id) DO NOTHING;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE events_outbox;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events;"
 	@docker exec booking_redis redis-cli FLUSHALL
-	@docker exec booking_redis redis-cli SET event:1:qty 100
-	@echo "Database and Redis reset complete."
+	@echo "Database and Redis reset complete. Create a fresh event via POST /api/v1/events for the next test run."
 
 help: ## Show help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
