@@ -6,12 +6,12 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/api/dto"
 	"booking_monitor/internal/infrastructure/observability"
 	"booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 )
 
 type BookingHandler interface {
@@ -31,81 +31,48 @@ func NewBookingHandler(service application.BookingService, eventService applicat
 	return &bookingHandler{service: service, eventService: eventService, idempotencyRepo: idempotencyRepo}
 }
 
-type bookRequest struct {
-	UserID   int `json:"user_id" binding:"required"`
-	EventID  int `json:"event_id" binding:"required"`
-	Quantity int `json:"quantity" binding:"required,min=1,max=10"`
-}
-
-type listBookingsResponse struct {
-	Data []domain.Order `json:"data"`
-	Meta meta            `json:"meta"`
-}
-
-type meta struct {
-	Total int `json:"total"`
-	Page  int `json:"page"`
-	Size  int `json:"size"`
-}
-
 func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	var req struct {
-		Page   int     `form:"page"`
-		Size   int     `form:"size"`
-		Status *string `form:"status"`
-	}
-	if err := c.ShouldBindQuery(&req); err != nil {
+	var params dto.ListBookingsQueryParams
+	if err := c.ShouldBindQuery(&params); err != nil {
 		log.Warn(ctx, "invalid history query params", tag.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters"})
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid query parameters"})
 		return
 	}
 
-	if req.Page < 1 {
-		req.Page = 1
+	if params.Page < 1 {
+		params.Page = 1
 	}
-	if req.Size < 1 {
-		req.Size = 10
-	}
-
-	var orserStatus *domain.OrderStatus
-	if req.Status != nil {
-		orserStatus = lo.ToPtr(domain.OrderStatus(*req.Status))
+	if params.Size < 1 {
+		params.Size = 10
 	}
 
-	orders, total, err := h.service.GetBookingHistory(ctx, req.Page, req.Size, orserStatus)
+	orders, total, err := h.service.GetBookingHistory(ctx, params.Page, params.Size, params.StatusFilter())
 	if err != nil {
 		log.Error(ctx, "GetBookingHistory failed", tag.Error(err))
 		status, public := mapError(err)
-		c.JSON(status, gin.H{"error": public})
+		c.JSON(status, dto.ErrorResponse{Error: public})
 		return
 	}
 
-	c.JSON(http.StatusOK, listBookingsResponse{
-		Data: orders,
-		Meta: meta{
-			Total: total,
-			Page:  req.Page,
-			Size:  req.Size,
-		},
-	})
+	c.JSON(http.StatusOK, dto.ListBookingsResponseFromDomain(orders, total, params.Page, params.Size))
 }
 
 func (h *bookingHandler) HandleBook(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	var req bookRequest
+	var req dto.BookingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		log.Warn(ctx, "invalid book request body", tag.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body"})
 		return
 	}
 
 	// Idempotency key check
 	idempotencyKey := c.GetHeader("Idempotency-Key")
 	if len(idempotencyKey) > 128 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key must be 128 characters or fewer"})
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Idempotency-Key must be 128 characters or fewer"})
 		return
 	}
 	if idempotencyKey != "" {
@@ -131,12 +98,16 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		)
 
 		status, publicMsg := mapError(err)
-		errJSON, _ := json.Marshal(gin.H{"error": publicMsg})
+		// Marshal via the DTO so the wire shape is centralised — every
+		// error response the API emits goes through dto.ErrorResponse.
+		// The marshal cannot fail for this fixed-shape struct.
+		errJSON, _ := json.Marshal(dto.ErrorResponse{Error: publicMsg})
 		statusCode = status
 		body = string(errJSON)
 	} else {
 		statusCode = http.StatusOK
-		body = `{"message":"booking successful"}`
+		successJSON, _ := json.Marshal(dto.BookingSuccessResponse{Message: "booking successful"})
+		body = string(successJSON)
 	}
 
 	// Cache the result for idempotency
@@ -150,18 +121,13 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	c.Data(statusCode, "application/json", []byte(body))
 }
 
-type createEventRequest struct {
-	Name         string `json:"name" binding:"required"`
-	TotalTickets int    `json:"total_tickets" binding:"required,min=1"`
-}
-
 func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	var req createEventRequest
+	var req dto.CreateEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		log.Warn(ctx, "invalid create event request", tag.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid request body"})
 		return
 	}
 
@@ -173,11 +139,11 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 			log.Int("total_tickets", req.TotalTickets),
 		)
 		status, public := mapError(err)
-		c.JSON(status, gin.H{"error": public})
+		c.JSON(status, dto.ErrorResponse{Error: public})
 		return
 	}
 
-	c.JSON(http.StatusCreated, event)
+	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(*event))
 }
 
 func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
