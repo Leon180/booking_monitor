@@ -1,6 +1,10 @@
 package domain
 
-import "context"
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
 
 // InventoryRepository defines the interface for hot inventory management.
 // This is typically implemented by a fast in-memory store like Redis.
@@ -8,15 +12,15 @@ import "context"
 //go:generate mockgen -destination=../mocks/mock_inventory_repository.go -package=mocks . InventoryRepository
 type InventoryRepository interface {
 	// SetInventory sets the initial inventory count for an event.
-	SetInventory(ctx context.Context, eventID int, count int) error
+	SetInventory(ctx context.Context, eventID uuid.UUID, count int) error
 
 	// DeductInventory atomically decrements the inventory count.
 	// userID is passed through to the Redis stream for async order processing.
 	// Duplicate purchase prevention is handled by the database UNIQUE constraint.
 	// Returns true if successful, false if insufficient inventory (ErrSoldOut).
-	DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error)
+	DeductInventory(ctx context.Context, eventID uuid.UUID, userID int, count int) (bool, error)
 
 	// RevertInventory restores inventory count.
 	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
-	RevertInventory(ctx context.Context, eventID int, count int, compensationID string) error
+	RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error
 }

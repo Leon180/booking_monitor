@@ -7,6 +7,7 @@ import (
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -14,14 +15,16 @@ func TestOrderResponseFromDomain(t *testing.T) {
 	t.Parallel()
 
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	orderID := uuid.New()
+	eventID := uuid.New()
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		42, 7, 99, 3, domain.OrderStatusConfirmed, created,
+		orderID, 7, eventID, 3, domain.OrderStatusConfirmed, created,
 	))
 
 	// Field-by-field — a swap (e.g. UserID/EventID) silently breaks
 	// the wire contract for every consumer; this test is what stops it.
-	assert.Equal(t, 42, got.ID)
-	assert.Equal(t, 99, got.EventID, "EventID must come from domain.Event field, not UserID")
+	assert.Equal(t, orderID, got.ID)
+	assert.Equal(t, eventID, got.EventID, "EventID must come from domain.Event field, not UserID")
 	assert.Equal(t, 7, got.UserID, "UserID must come from domain.UserID field, not EventID")
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, "confirmed", got.Status, "Status flattens domain.OrderStatus enum to plain string")
@@ -31,11 +34,12 @@ func TestOrderResponseFromDomain(t *testing.T) {
 func TestEventResponseFromDomain(t *testing.T) {
 	t.Parallel()
 
+	id := uuid.New()
 	got := dto.EventResponseFromDomain(domain.ReconstructEvent(
-		1, "Concert", 100, 42, 5,
+		id, "Concert", 100, 42, 5,
 	))
 
-	assert.Equal(t, 1, got.ID)
+	assert.Equal(t, id, got.ID)
 	assert.Equal(t, "Concert", got.Name)
 	assert.Equal(t, 100, got.TotalTickets)
 	assert.Equal(t, 42, got.AvailableTickets, "AvailableTickets and TotalTickets must not be swapped")
@@ -46,9 +50,11 @@ func TestListBookingsResponseFromDomain(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
+	id1 := uuid.New()
+	id2 := uuid.New()
 	orders := []domain.Order{
-		domain.ReconstructOrder(1, 7, 1, 1, domain.OrderStatusPending, now),
-		domain.ReconstructOrder(2, 8, 2, 5, domain.OrderStatusConfirmed, now),
+		domain.ReconstructOrder(id1, 7, uuid.New(), 1, domain.OrderStatusPending, now),
+		domain.ReconstructOrder(id2, 8, uuid.New(), 5, domain.OrderStatusConfirmed, now),
 	}
 
 	got := dto.ListBookingsResponseFromDomain(orders, 17, 2, 10)
@@ -60,9 +66,9 @@ func TestListBookingsResponseFromDomain(t *testing.T) {
 
 	// Data block — assembled in input order, type converted via mapper
 	assert.Len(t, got.Data, 2)
-	assert.Equal(t, 1, got.Data[0].ID)
+	assert.Equal(t, id1, got.Data[0].ID)
 	assert.Equal(t, "pending", got.Data[0].Status)
-	assert.Equal(t, 2, got.Data[1].ID)
+	assert.Equal(t, id2, got.Data[1].ID)
 	assert.Equal(t, "confirmed", got.Data[1].Status)
 }
 
@@ -109,5 +115,5 @@ func TestListBookingsQueryParams_StatusFilter(t *testing.T) {
 	}
 }
 
-func ptr[T any](v T) *T                             { return &v }
+func ptr[T any](v T) *T                                       { return &v }
 func orderStatusPtr(s domain.OrderStatus) *domain.OrderStatus { return &s }

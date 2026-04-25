@@ -4,17 +4,15 @@ import "booking_monitor/internal/domain"
 
 // OrderResponseFromDomain converts a domain.Order into the API
 // response DTO. Performs the in-memory copy that decouples wire
-// contract from domain shape — adding a domain field doesn't
-// automatically change the API, and adding a DTO field doesn't
-// require a domain change.
+// contract from domain shape.
 func OrderResponseFromDomain(o domain.Order) OrderResponse {
 	return OrderResponse{
-		ID:        o.ID,
-		EventID:   o.EventID,
-		UserID:    o.UserID,
-		Quantity:  o.Quantity,
-		Status:    string(o.Status),
-		CreatedAt: o.CreatedAt,
+		ID:        o.ID(),
+		EventID:   o.EventID(),
+		UserID:    o.UserID(),
+		Quantity:  o.Quantity(),
+		Status:    string(o.Status()),
+		CreatedAt: o.CreatedAt(),
 	}
 }
 
@@ -22,11 +20,11 @@ func OrderResponseFromDomain(o domain.Order) OrderResponse {
 // response DTO.
 func EventResponseFromDomain(e domain.Event) EventResponse {
 	return EventResponse{
-		ID:               e.ID,
-		Name:             e.Name,
-		TotalTickets:     e.TotalTickets,
-		AvailableTickets: e.AvailableTickets,
-		Version:          e.Version,
+		ID:               e.ID(),
+		Name:             e.Name(),
+		TotalTickets:     e.TotalTickets(),
+		AvailableTickets: e.AvailableTickets(),
+		Version:          e.Version(),
 	}
 }
 

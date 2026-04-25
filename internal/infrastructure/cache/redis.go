@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
 
@@ -103,13 +103,15 @@ func NewRedisInventoryRepository(client *redis.Client) domain.InventoryRepositor
 	}
 }
 
-// inventoryKeyPrefix + strconv avoids fmt.Sprintf interface boxing
-// on every call (~1 alloc saved per request vs fmt.Sprintf).
+// inventoryKeyPrefix builds the canonical Redis key for an event's
+// inventory counter — `event:{uuid}:qty`. UUID's String() method
+// produces the canonical 36-char form; this matches what the deduct
+// / revert Lua scripts pattern-match on KEYS[1].
 const inventoryKeyPrefix = "event:"
 const inventoryKeySuffix = ":qty"
 
-func inventoryKey(eventID int) string {
-	return inventoryKeyPrefix + strconv.Itoa(eventID) + inventoryKeySuffix
+func inventoryKey(eventID uuid.UUID) string {
+	return inventoryKeyPrefix + eventID.String() + inventoryKeySuffix
 }
 
 // inventoryTTL is the maximum lifetime of a Redis inventory key. It is
@@ -122,20 +124,22 @@ func inventoryKey(eventID int) string {
 // growth. See action-list item L3.
 const inventoryTTL = 30 * 24 * time.Hour
 
-func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID int, count int) error {
+func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uuid.UUID, count int) error {
 	return r.client.Set(ctx, inventoryKey(eventID), count, inventoryTTL).Err()
 }
 
-func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID int, userID int, count int) (bool, error) {
+func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID uuid.UUID, userID int, count int) (bool, error) {
 	key := inventoryKey(eventID)
 	keys := []string{key}
 
 	// Reuse args slice from pool to avoid per-call allocation.
 	// The int→interface{} boxing still escapes, but the slice header doesn't.
+	// eventID is passed as the canonical UUID string so the Lua script
+	// can include it in the produced stream message verbatim.
 	argsPtr := argsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count
-	args[1] = eventID
+	args[1] = eventID.String()
 	args[2] = userID
 	defer argsPool.Put(argsPtr)
 
@@ -159,7 +163,7 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID 
 	}
 }
 
-func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID int, count int, compensationID string) error {
+func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
 	keys := []string{inventoryKey(eventID), "saga:reverted:" + compensationID}
 
 	// Reuse pooled args slice (sub-slice to 1 element for revert).

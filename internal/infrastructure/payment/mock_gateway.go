@@ -6,6 +6,8 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/google/uuid"
+
 	"booking_monitor/internal/domain"
 )
 
@@ -29,7 +31,7 @@ func NewMockGateway() *MockGateway {
 }
 
 // Charge simulates processing a payment.
-func (g *MockGateway) Charge(ctx context.Context, orderID int, amount float64) error {
+func (g *MockGateway) Charge(ctx context.Context, orderID uuid.UUID, amount float64) error {
 	// Simulate network latency
 	// rand.Int64N returns a non-negative pseudo-random number in [0,n).
 	latencyDelay := g.MaxLatency - g.MinLatency

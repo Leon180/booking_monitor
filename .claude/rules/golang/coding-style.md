@@ -71,6 +71,26 @@ rule (every layer, but most strictly here), the conventions are:
    one positive case + one case per invariant violation + one
    immutability-of-receiver test for any `WithX` method.
 
+7. **Domain entity fields are unexported.** Reads via accessor
+   methods (Wild Workouts pattern: `Status()` not `GetStatus()`,
+   no `Get` prefix — aligned with Go stdlib like `time.Time.Hour()`).
+   Writes via factories or immutable `WithX` transitions. Boundary
+   layers handle their own JSON / SQL serialisation (DTOs in
+   `api/dto/`, persistence rows in `postgres/*_row.go`); the
+   domain itself never carries `json:` or `db:` tags. PR 34
+   established this pattern across all three aggregates (Order,
+   Event, OutboxEvent).
+
+8. **IDs are factory-generated, never DB-assigned, never
+   ORM-hook-assigned.** Use `uuid.NewV7()` (RFC 9562) at construction
+   time inside `NewX()` factories. The aggregate is fully complete
+   the moment the factory returns — no repository "fills in"
+   anything. Repos pass IDs through verbatim; INSERT statements
+   write all factory-assigned values explicitly (no `RETURNING id`).
+   `CreatedAt` follows the same rule: factory-assigned via
+   `time.Now()`, not DB-assigned. Rationale: aggregate identity is
+   a domain concern, not a persistence concern (Vaughn Vernon, IDDD).
+
 ## Reference
 
 See skill: `golang-patterns` for comprehensive Go idioms and patterns.

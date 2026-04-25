@@ -61,19 +61,19 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	errUow := s.uow.Do(ctx, func(txCtx context.Context) error {
 		order, err := s.orderRepo.GetByID(txCtx, event.OrderID)
 		if err != nil {
-			return fmt.Errorf("orderRepo.GetByID order_id=%d: %w", event.OrderID, err)
+			return fmt.Errorf("orderRepo.GetByID order_id=%s: %w", event.OrderID, err)
 		}
-		if order.Status == domain.OrderStatusCompensated {
+		if order.Status() == domain.OrderStatusCompensated {
 			// Idempotent: already rolled back in DB
 			return nil
 		}
 
 		if err := s.eventRepo.IncrementTicket(txCtx, event.EventID, event.Quantity); err != nil {
-			return fmt.Errorf("eventRepo.IncrementTicket event_id=%d: %w", event.EventID, err)
+			return fmt.Errorf("eventRepo.IncrementTicket event_id=%s: %w", event.EventID, err)
 		}
 
 		if err := s.orderRepo.UpdateStatus(txCtx, event.OrderID, domain.OrderStatusCompensated); err != nil {
-			return fmt.Errorf("orderRepo.UpdateStatus order_id=%d: %w", event.OrderID, err)
+			return fmt.Errorf("orderRepo.UpdateStatus order_id=%s: %w", event.OrderID, err)
 		}
 		return nil
 	})
@@ -86,13 +86,13 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	// 2. Rollback Redis Inventory (Hot path). Idempotency is enforced
 	// by the Lua script via an EXISTS-then-SET guard on a compensation
 	// key (see revert.lua for the crash-safety trade-off).
-	compensationID := fmt.Sprintf("order:%d", event.OrderID)
+	compensationID := fmt.Sprintf("order:%s", event.OrderID)
 	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, event.Quantity, compensationID); err != nil {
 		s.log.Error(ctx, "failed to rollback Redis inventory",
 			tag.OrderID(event.OrderID),
 			tag.Error(err),
 		)
-		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%d: %w", event.OrderID, err)
+		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%s: %w", event.OrderID, err)
 	}
 
 	s.log.Info(ctx, "rollback successful", tag.OrderID(event.OrderID))

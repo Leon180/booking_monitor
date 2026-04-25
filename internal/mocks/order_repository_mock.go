@@ -14,6 +14,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -57,7 +58,7 @@ func (mr *MockOrderRepositoryMockRecorder) Create(ctx, order any) *gomock.Call {
 }
 
 // GetByID mocks base method.
-func (m *MockOrderRepository) GetByID(ctx context.Context, id int) (domain.Order, error) {
+func (m *MockOrderRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.Order, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByID", ctx, id)
 	ret0, _ := ret[0].(domain.Order)
@@ -88,7 +89,7 @@ func (mr *MockOrderRepositoryMockRecorder) ListOrders(ctx, limit, offset, status
 }
 
 // UpdateStatus mocks base method.
-func (m *MockOrderRepository) UpdateStatus(ctx context.Context, id int, status domain.OrderStatus) error {
+func (m *MockOrderRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "UpdateStatus", ctx, id, status)
 	ret0, _ := ret[0].(error)

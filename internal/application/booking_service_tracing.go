@@ -4,6 +4,7 @@ import (
 	"booking_monitor/internal/domain"
 	"context"
 
+	"github.com/google/uuid"
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -18,10 +19,10 @@ func NewBookingServiceTracingDecorator(next BookingService) BookingService {
 	return &bookingServiceTracingDecorator{next: next}
 }
 
-func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
+func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "BookTicket", trace.WithAttributes(
 		attribute.Int("user_id", userID),
-		attribute.Int("event_id", eventID),
+		attribute.String("event_id", eventID.String()),
 		attribute.Int("quantity", quantity),
 	))
 	defer span.End()

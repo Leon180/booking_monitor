@@ -9,11 +9,15 @@ import (
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 
+	"github.com/google/uuid"
 	"go.uber.org/mock/gomock"
 )
 
 func TestOutboxRelay_ProcessBatch(t *testing.T) {
 	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
+
+	id1 := uuid.New()
+	id2 := uuid.New()
 
 	tests := []struct {
 		name       string
@@ -25,8 +29,8 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
-					{ID: 2, EventType: "test.event", Payload: []byte("payload2")},
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
+					domain.ReconstructOutboxEvent(id2, "test.event", []byte("payload2"), domain.OutboxStatusPending, nil),
 				}
 
 				// 1. ListPending
@@ -34,11 +38,11 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 
 				// 2. Publish & Mark Processed (Event 1)
 				pub.EXPECT().Publish(ctx, "test.event", []byte("payload1")).Return(nil)
-				repo.EXPECT().MarkProcessed(ctx, 1).Return(nil)
+				repo.EXPECT().MarkProcessed(ctx, id1).Return(nil)
 
 				// 3. Publish & Mark Processed (Event 2)
 				pub.EXPECT().Publish(ctx, "test.event", []byte("payload2")).Return(nil)
-				repo.EXPECT().MarkProcessed(ctx, 2).Return(nil)
+				repo.EXPECT().MarkProcessed(ctx, id2).Return(nil)
 			},
 		},
 		{
@@ -53,7 +57,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
 				}
 
 				repo.EXPECT().ListPending(ctx, 10).Return(events, nil)
@@ -69,7 +73,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
 				}
 
 				repo.EXPECT().ListPending(ctx, 10).Return(events, nil)
@@ -78,7 +82,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 				pub.EXPECT().Publish(ctx, "test.event", []byte("payload1")).Return(nil)
 
 				// MarkProcessed Fails (Log and Continue)
-				repo.EXPECT().MarkProcessed(ctx, 1).Return(errors.New("db update error"))
+				repo.EXPECT().MarkProcessed(ctx, id1).Return(errors.New("db update error"))
 			},
 		},
 	}

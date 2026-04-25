@@ -11,6 +11,7 @@ import (
 	mlog "booking_monitor/internal/log"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
@@ -58,12 +59,13 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// 1. Create Stream & Group
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
 
-	// 2. Add a message and claim it (simulate pending)
-	// Add message
+	// 2. Add a message and claim it (simulate pending). event_id is a
+	// UUID string post-PR-34; user_id stays int (external reference).
+	eventUUID := uuid.New().String()
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"user_id": "1", "event_id": "1", "quantity": "1",
+			"user_id": "1", "event_id": eventUUID, "quantity": "1",
 		},
 	}).Result()
 

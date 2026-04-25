@@ -1,12 +1,19 @@
 package domain
 
-import "context"
+import (
+	"context"
 
-// OrderMessage represents the payload in the stream
+	"github.com/google/uuid"
+)
+
+// OrderMessage represents the payload in the Redis stream consumed
+// by the worker. The ID is a Redis-stream entry id (format
+// "millis-seq"), distinct from the domain Order.ID — it identifies
+// the queue message, not the eventual order.
 type OrderMessage struct {
-	ID         string // Stream Message ID
-	UserID     int
-	EventID    int
+	ID         string    // Redis stream message ID (NOT a UUID)
+	UserID     int       // External user reference (this service does not own users)
+	EventID    uuid.UUID // FK to events.id
 	Quantity   int
 	RetryCount int
 }

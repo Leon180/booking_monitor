@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -46,9 +48,9 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 	// commit the offset. Previously this function returned nil, which the
 	// consumer interpreted as "success, commit offset" — permanently
 	// losing the event without any operator-visible signal.
-	if event.OrderID <= 0 {
-		s.log.Error(ctx, "Invalid OrderID", tag.OrderID(event.OrderID))
-		return fmt.Errorf("order_id=%d: %w", event.OrderID, domain.ErrInvalidPaymentEvent)
+	if event.OrderID == uuid.Nil {
+		s.log.Error(ctx, "Invalid OrderID (zero UUID)", tag.OrderID(event.OrderID))
+		return fmt.Errorf("order_id is zero UUID: %w", domain.ErrInvalidPaymentEvent)
 	}
 	if event.Amount < 0 {
 		s.log.Error(ctx, "Invalid Amount",
@@ -62,9 +64,9 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 		s.log.Error(ctx, "Failed to get order for idempotency check", tag.Error(err))
 		return err
 	}
-	if order.Status != domain.OrderStatusPending {
+	if order.Status() != domain.OrderStatusPending {
 		s.log.Info(ctx, "Order already processed, skipping payment",
-			tag.OrderID(event.OrderID), tag.Status(string(order.Status)))
+			tag.OrderID(event.OrderID), tag.Status(string(order.Status())))
 		return nil
 	}
 
@@ -90,7 +92,11 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 				return marshalErr
 			}
 
-			_, createErr := s.outboxRepo.Create(txCtx, domain.NewOrderFailedOutbox(payload))
+			outboxEvent, outboxErr := domain.NewOrderFailedOutbox(payload)
+			if outboxErr != nil {
+				return fmt.Errorf("construct outbox event: %w", outboxErr)
+			}
+			_, createErr := s.outboxRepo.Create(txCtx, outboxEvent)
 			return createErr
 		})
 		if errUow != nil {

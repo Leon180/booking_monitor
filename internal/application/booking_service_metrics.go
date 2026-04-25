@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
+
 	"booking_monitor/internal/domain"
 )
 
@@ -20,7 +22,7 @@ func NewBookingServiceMetricsDecorator(next BookingService, metrics BookingMetri
 	return &bookingServiceMetricsDecorator{next: next, metrics: metrics}
 }
 
-func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
+func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error {
 	err := d.next.BookTicket(ctx, userID, eventID, quantity)
 
 	switch {

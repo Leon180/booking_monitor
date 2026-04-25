@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 // ErrInvalidPaymentEvent is returned by PaymentService.ProcessOrder when the
@@ -14,7 +16,7 @@ var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 
 // PaymentGateway defines the interface for external payment processing.
 type PaymentGateway interface {
-	Charge(ctx context.Context, orderID int, amount float64) error
+	Charge(ctx context.Context, orderID uuid.UUID, amount float64) error
 }
 
 // PaymentService defines the application service for processing payments.

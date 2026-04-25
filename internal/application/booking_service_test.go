@@ -10,6 +10,7 @@ import (
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks" // Generated Mocks
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 )
@@ -19,10 +20,12 @@ func TestBookingService_BookTicket(t *testing.T) {
 	// in zap internals in tests.
 	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
+	eventID := uuid.New()
+
 	tests := []struct {
 		name          string
 		userID        int
-		eventID       int
+		eventID       uuid.UUID
 		quantity      int
 		mockSetup     func(*mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockInventoryRepository, *mocks.MockUnitOfWork)
 		expectedError error
@@ -30,22 +33,22 @@ func TestBookingService_BookTicket(t *testing.T) {
 		{
 			name:     "Success",
 			userID:   1,
-			eventID:  1,
+			eventID:  eventID,
 			quantity: 2,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
 				// Phase 6: buyers set removed from Redis, userID still passed for stream publishing
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 2).Return(true, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 2).Return(true, nil)
 			},
 			expectedError: nil,
 		},
 		{
 			name:     "Sold Out (Redis)",
 			userID:   1,
-			eventID:  1,
+			eventID:  eventID,
 			quantity: 5,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 5).Return(false, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 5).Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
@@ -55,10 +58,10 @@ func TestBookingService_BookTicket(t *testing.T) {
 			// This test verifies that a Redis error is propagated correctly.
 			name:     "Redis Error",
 			userID:   1,
-			eventID:  1,
+			eventID:  eventID,
 			quantity: 1,
 			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
-				i.EXPECT().DeductInventory(gomock.Any(), 1, 1, 1).Return(false, errors.New("connection failed"))
+				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},
