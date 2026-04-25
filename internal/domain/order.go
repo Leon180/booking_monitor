@@ -25,13 +25,23 @@ const (
 	OrderStatusCompensated OrderStatus = "compensated"
 )
 
+// Order is the domain aggregate. Field names have NO `json:` tags
+// because Order values are never marshalled directly to a wire format
+// — the API layer maps to api/dto.OrderResponse, and the messaging
+// layer maps to domain.OrderCreatedEvent. Adding a json tag here
+// would re-introduce the "domain model leaks into HTTP / Kafka wire
+// contract" coupling that PRs 31-32 removed.
+//
+// All three domain entities (Order / Event / OutboxEvent) are now
+// JSON-unaware. The boundary types in api/dto and order_events.go
+// own their respective wire contracts.
 type Order struct {
-	ID        int         `json:"id"`
-	EventID   int         `json:"event_id"`
-	UserID    int         `json:"user_id"`
-	Quantity  int         `json:"quantity"`
-	Status    OrderStatus `json:"status"`
-	CreatedAt time.Time   `json:"created_at"`
+	ID        int
+	EventID   int
+	UserID    int
+	Quantity  int
+	Status    OrderStatus
+	CreatedAt time.Time
 }
 
 // NewOrder constructs a fresh pending order. Enforces invariants at

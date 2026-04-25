@@ -94,13 +94,16 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 			return err
 		}
 
-		// Outbox pattern. Marshal errors are theoretical for the
-		// current Order shape (ints, string, time.Time, enum) but
-		// we still surface them so a future field addition can't
-		// ship a silent nil-payload outbox row.
-		payload, err := json.Marshal(created)
+		// Outbox pattern. Marshal an explicit OrderCreatedEvent
+		// payload — the wire contract with the payment consumer —
+		// rather than json.Marshal(created) which would tie the
+		// Kafka shape to the domain.Order struct. Marshal errors
+		// are theoretical for the current event shape but we
+		// surface them so a future field addition can't ship a
+		// silent nil-payload outbox row.
+		payload, err := json.Marshal(domain.NewOrderCreatedEvent(created))
 		if err != nil {
-			p.logger.Error(txCtx, "Failed to marshal order for outbox",
+			p.logger.Error(txCtx, "Failed to marshal order_created event for outbox",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}

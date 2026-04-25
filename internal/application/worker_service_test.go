@@ -62,14 +62,15 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
 					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType)
 					assert.Equal(t, domain.OutboxStatusPending, e.Status)
-					// Verify the DB-assigned ID propagates into the
-					// outbox payload — the whole point of returning
-					// the persisted Order from orderRepo.Create is so
-					// downstream consumers (Kafka subscribers) receive
-					// a fully-populated event, not a partial one.
-					var orderInPayload domain.Order
-					require.NoError(t, json.Unmarshal(e.Payload, &orderInPayload))
-					assert.Equal(t, 42, orderInPayload.ID, "outbox payload must include the DB-assigned order ID")
+					// Verify the DB-assigned ID + the schema version
+					// propagate into the wire payload. Unmarshal into
+					// the explicit OrderCreatedEvent type (PR 32) —
+					// not domain.Order — because that's the actual
+					// contract the payment consumer expects.
+					var eventPayload domain.OrderCreatedEvent
+					require.NoError(t, json.Unmarshal(e.Payload, &eventPayload))
+					assert.Equal(t, 42, eventPayload.OrderID, "outbox payload must include the DB-assigned order ID")
+					assert.Equal(t, domain.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
 					e.ID = 99
 					return e, nil
 				})
