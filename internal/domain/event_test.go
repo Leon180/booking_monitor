@@ -6,6 +6,7 @@ import (
 
 	"booking_monitor/internal/domain"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -13,26 +14,28 @@ func TestNewOrderCreatedOutbox(t *testing.T) {
 	t.Parallel()
 	payload, _ := json.Marshal(map[string]int{"order_id": 1})
 
-	got := domain.NewOrderCreatedOutbox(payload)
+	got, err := domain.NewOrderCreatedOutbox(payload)
 
-	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType)
-	assert.Equal(t, domain.OutboxStatusPending, got.Status)
-	assert.Equal(t, payload, got.Payload)
-	assert.Equal(t, 0, got.ID, "ID is repo-assigned")
-	assert.Nil(t, got.ProcessedAt)
+	assert.NoError(t, err)
+	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType())
+	assert.Equal(t, domain.OutboxStatusPending, got.Status())
+	assert.Equal(t, payload, got.Payload())
+	assert.NotEqual(t, uuid.Nil, got.ID(), "ID is factory-generated, must not be zero UUID")
+	assert.Nil(t, got.ProcessedAt())
 }
 
 func TestNewOrderFailedOutbox(t *testing.T) {
 	t.Parallel()
 	payload, _ := json.Marshal(map[string]int{"order_id": 1})
 
-	got := domain.NewOrderFailedOutbox(payload)
+	got, err := domain.NewOrderFailedOutbox(payload)
 
-	assert.Equal(t, domain.EventTypeOrderFailed, got.EventType)
-	assert.Equal(t, domain.OutboxStatusPending, got.Status)
-	assert.Equal(t, payload, got.Payload)
-	assert.Equal(t, 0, got.ID)
-	assert.Nil(t, got.ProcessedAt)
+	assert.NoError(t, err)
+	assert.Equal(t, domain.EventTypeOrderFailed, got.EventType())
+	assert.Equal(t, domain.OutboxStatusPending, got.Status())
+	assert.Equal(t, payload, got.Payload())
+	assert.NotEqual(t, uuid.Nil, got.ID())
+	assert.Nil(t, got.ProcessedAt())
 }
 
 // TestEventTypeConstantsAreStable pins the wire format of the outbox
@@ -78,12 +81,12 @@ func TestNewEvent(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-			assert.Equal(t, tt.eventName, got.Name)
-			assert.Equal(t, tt.totalTickets, got.TotalTickets)
-			assert.Equal(t, tt.totalTickets, got.AvailableTickets,
+			assert.Equal(t, tt.eventName, got.Name())
+			assert.Equal(t, tt.totalTickets, got.TotalTickets())
+			assert.Equal(t, tt.totalTickets, got.AvailableTickets(),
 				"new events must start with AvailableTickets == TotalTickets")
-			assert.Equal(t, 0, got.ID, "ID is repo-assigned, must be zero at construction")
-			assert.Equal(t, 0, got.Version, "Version starts at 0")
+			assert.NotEqual(t, uuid.Nil, got.ID(), "ID is factory-generated, must not be zero UUID")
+			assert.Equal(t, 0, got.Version(), "Version starts at 0")
 		})
 	}
 }
@@ -92,17 +95,16 @@ func TestReconstructEvent_BypassesInvariants(t *testing.T) {
 	t.Parallel()
 
 	// ReconstructEvent must accept any persisted state, including
-	// values NewEvent would reject (e.g. AvailableTickets = 0 for
-	// a sold-out event, empty-name for a row predating an invariant
-	// tightening). The repository is the source of truth for
-	// rehydration; invariants only apply at create-time.
-	got := domain.ReconstructEvent(42, "", 0, 0, 7)
+	// values NewEvent would reject. The repository is the source of
+	// truth for rehydration; invariants only apply at create-time.
+	id := uuid.New()
+	got := domain.ReconstructEvent(id, "", 0, 0, 7)
 
-	assert.Equal(t, 42, got.ID)
-	assert.Equal(t, "", got.Name, "Reconstruct should not validate name")
-	assert.Equal(t, 0, got.TotalTickets, "Reconstruct should not validate totals")
-	assert.Equal(t, 0, got.AvailableTickets)
-	assert.Equal(t, 7, got.Version)
+	assert.Equal(t, id, got.ID())
+	assert.Equal(t, "", got.Name(), "Reconstruct should not validate name")
+	assert.Equal(t, 0, got.TotalTickets(), "Reconstruct should not validate totals")
+	assert.Equal(t, 0, got.AvailableTickets())
+	assert.Equal(t, 7, got.Version())
 }
 
 func TestEvent_Deduct(t *testing.T) {
@@ -140,7 +142,7 @@ func TestEvent_Deduct(t *testing.T) {
 			name:           "Invalid Quantity",
 			initialTickets: 10,
 			deductAmount:   -1,
-			expectedError:  assert.AnError, // We just check error presence, or specific error if exported
+			expectedError:  assert.AnError, // We just check error presence
 			expectedRemain: 10,
 		},
 	}
@@ -151,11 +153,8 @@ func TestEvent_Deduct(t *testing.T) {
 			t.Parallel()
 			// Use ReconstructEvent (not NewEvent) because the test
 			// drives Deduct against arbitrary AvailableTickets values
-			// — including the "exact amount" / "sold out" boundary
-			// cases that NewEvent's invariants would reject. The
-			// repo-bypass contract on ReconstructEvent fits exactly.
-			ev := domain.ReconstructEvent(0, "test event", tt.initialTickets, tt.initialTickets, 0)
-			event := &ev
+			// including boundary cases NewEvent's invariants reject.
+			event := domain.ReconstructEvent(uuid.New(), "test event", tt.initialTickets, tt.initialTickets, 0)
 			next, err := event.Deduct(tt.deductAmount)
 
 			if tt.expectedError != nil {
@@ -165,17 +164,15 @@ func TestEvent_Deduct(t *testing.T) {
 					assert.Equal(t, tt.expectedError, err)
 				}
 				// Original event must be untouched on failure.
-				assert.Equal(t, tt.initialTickets, event.AvailableTickets)
-				assert.Nil(t, next)
+				assert.Equal(t, tt.initialTickets, event.AvailableTickets())
+				assert.Equal(t, domain.Event{}, next, "Deduct must return zero Event on error")
 				return
 			}
 
 			assert.NoError(t, err)
 			// Original receiver is never mutated (immutable pattern).
-			assert.Equal(t, tt.initialTickets, event.AvailableTickets)
-			// Returned *Event reflects the deducted state.
-			assert.NotNil(t, next)
-			assert.Equal(t, tt.expectedRemain, next.AvailableTickets)
+			assert.Equal(t, tt.initialTickets, event.AvailableTickets())
+			assert.Equal(t, tt.expectedRemain, next.AvailableTickets())
 		})
 	}
 }

@@ -11,6 +11,7 @@ import (
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -40,6 +41,7 @@ func (s *SpyingWorkerMetrics) RecordInventoryConflict() {
 // those assertions moved to TestMessageProcessorMetricsDecorator_Process.
 func TestOrderMessageProcessor_Process(t *testing.T) {
 	nopLogger := mlog.NewNop()
+	validEventID := uuid.New()
 
 	tests := []struct {
 		name          string
@@ -49,29 +51,30 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			msg:  &domain.OrderMessage{ID: "1-0", EventID: 1, UserID: 1, Quantity: 1},
+			msg:  &domain.OrderMessage{ID: "1-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
 					return fn(ctx)
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
+				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
-					o.ID = 42 // simulate DB-assigned id; asserted downstream in the outbox payload
+					// Repo returns the same order; ID was factory-generated
+					// in NewOrder before this point, so o.ID() is already
+					// the production-style UUID v7 id.
 					return o, nil
 				})
 				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
-					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType)
-					assert.Equal(t, domain.OutboxStatusPending, e.Status)
-					// Verify the DB-assigned ID + the schema version
-					// propagate into the wire payload. Unmarshal into
-					// the explicit OrderCreatedEvent type (PR 32) —
-					// not domain.Order — because that's the actual
-					// contract the payment consumer expects.
+					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType())
+					assert.Equal(t, domain.OutboxStatusPending, e.Status())
+					// Verify the order's UUID id + the schema version
+					// propagate into the wire payload via the explicit
+					// OrderCreatedEvent type — that's the contract the
+					// payment consumer expects.
 					var eventPayload domain.OrderCreatedEvent
-					require.NoError(t, json.Unmarshal(e.Payload, &eventPayload))
-					assert.Equal(t, 42, eventPayload.OrderID, "outbox payload must include the DB-assigned order ID")
+					require.NoError(t, json.Unmarshal(e.Payload(), &eventPayload))
+					assert.NotEqual(t, uuid.Nil, eventPayload.OrderID, "outbox payload must include the order's UUID")
+					assert.Equal(t, validEventID, eventPayload.EventID, "outbox payload event_id must match input")
 					assert.Equal(t, domain.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
-					e.ID = 99
 					return e, nil
 				})
 			},
@@ -79,35 +82,35 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &domain.OrderMessage{ID: "2-0", EventID: 1, UserID: 1, Quantity: 1},
+			msg:  &domain.OrderMessage{ID: "2-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
 					return fn(ctx)
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(domain.ErrSoldOut)
+				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(domain.ErrSoldOut)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &domain.OrderMessage{ID: "3-0", EventID: 1, UserID: 1, Quantity: 1},
+			msg:  &domain.OrderMessage{ID: "3-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
 					return fn(ctx)
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
+				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, domain.ErrUserAlreadyBought)
 			},
 			expectedError: domain.ErrUserAlreadyBought,
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &domain.OrderMessage{ID: "4-0", EventID: 1, UserID: 1, Quantity: 1},
+			msg:  &domain.OrderMessage{ID: "4-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
 					return fn(ctx)
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
+				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
 			},
 			expectedError: errors.New("db connection failed"),
@@ -120,12 +123,10 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &domain.OrderMessage{ID: "5-0", EventID: 1, UserID: 0, Quantity: 1},
+			msg:  &domain.OrderMessage{ID: "5-0", EventID: validEventID, UserID: 0, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				// Deliberately empty: no uow.Do, no DecrementTicket,
-				// no Create expectations. gomock will fail the test
-				// if any of those fire, which is exactly what we want
-				// to assert — a malformed message must not touch the DB.
+				// Deliberately empty — gomock will fail the test if any
+				// repo call fires, asserting fail-fast.
 			},
 			expectedError: domain.ErrInvalidUserID,
 		},

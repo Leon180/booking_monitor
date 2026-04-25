@@ -14,6 +14,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -56,7 +57,7 @@ func (mr *MockEventRepositoryMockRecorder) Create(ctx, event any) *gomock.Call {
 }
 
 // DecrementTicket mocks base method.
-func (m *MockEventRepository) DecrementTicket(ctx context.Context, eventID, quantity int) error {
+func (m *MockEventRepository) DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DecrementTicket", ctx, eventID, quantity)
 	ret0, _ := ret[0].(error)
@@ -70,7 +71,7 @@ func (mr *MockEventRepositoryMockRecorder) DecrementTicket(ctx, eventID, quantit
 }
 
 // Delete mocks base method.
-func (m *MockEventRepository) Delete(ctx context.Context, id int) error {
+func (m *MockEventRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Delete", ctx, id)
 	ret0, _ := ret[0].(error)
@@ -84,7 +85,7 @@ func (mr *MockEventRepositoryMockRecorder) Delete(ctx, id any) *gomock.Call {
 }
 
 // GetByID mocks base method.
-func (m *MockEventRepository) GetByID(ctx context.Context, id int) (*domain.Event, error) {
+func (m *MockEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByID", ctx, id)
 	ret0, _ := ret[0].(*domain.Event)
@@ -99,7 +100,7 @@ func (mr *MockEventRepositoryMockRecorder) GetByID(ctx, id any) *gomock.Call {
 }
 
 // GetByIDForUpdate mocks base method.
-func (m *MockEventRepository) GetByIDForUpdate(ctx context.Context, id int) (*domain.Event, error) {
+func (m *MockEventRepository) GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByIDForUpdate", ctx, id)
 	ret0, _ := ret[0].(*domain.Event)
@@ -114,7 +115,7 @@ func (mr *MockEventRepositoryMockRecorder) GetByIDForUpdate(ctx, id any) *gomock
 }
 
 // IncrementTicket mocks base method.
-func (m *MockEventRepository) IncrementTicket(ctx context.Context, eventID, quantity int) error {
+func (m *MockEventRepository) IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "IncrementTicket", ctx, eventID, quantity)
 	ret0, _ := ret[0].(error)
@@ -196,7 +197,7 @@ func (mr *MockOutboxRepositoryMockRecorder) ListPending(ctx, limit any) *gomock.
 }
 
 // MarkProcessed mocks base method.
-func (m *MockOutboxRepository) MarkProcessed(ctx context.Context, id int) error {
+func (m *MockOutboxRepository) MarkProcessed(ctx context.Context, id uuid.UUID) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "MarkProcessed", ctx, id)
 	ret0, _ := ret[0].(error)

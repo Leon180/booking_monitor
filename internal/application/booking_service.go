@@ -4,13 +4,15 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"booking_monitor/internal/domain"
 )
 
 const tracerName = "application/service"
 
 type BookingService interface {
-	BookTicket(ctx context.Context, userID, eventID, quantity int) error
+	BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error
 	GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error)
 }
 
@@ -42,7 +44,7 @@ func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize i
 	return s.orderRepo.ListOrders(ctx, pageSize, offset, status)
 }
 
-func (s *bookingService) BookTicket(ctx context.Context, userID, eventID, quantity int) error {
+func (s *bookingService) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error {
 	// 1. Atomic Deduct from Redis (hot path — buyers set removed, no SISMEMBER)
 	success, err := s.inventoryRepo.DeductInventory(ctx, eventID, userID, quantity)
 	if err != nil {

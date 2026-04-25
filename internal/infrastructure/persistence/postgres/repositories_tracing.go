@@ -3,12 +3,13 @@ package postgres
 import (
 	"context"
 
-	"booking_monitor/internal/domain"
-
+	"github.com/google/uuid"
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+
+	"booking_monitor/internal/domain"
 )
 
 const tracerName = "infrastructure/persistence/postgres"
@@ -25,7 +26,7 @@ func NewEventRepositoryTracingDecorator(next domain.EventRepository) domain.Even
 
 func (d *eventRepositoryTracingDecorator) Create(ctx context.Context, event *domain.Event) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "CreateEvent", trace.WithAttributes(
-		attribute.Int("event_id", event.ID),
+		attribute.String("event_id", event.ID().String()),
 	))
 	defer span.End()
 
@@ -36,8 +37,8 @@ func (d *eventRepositoryTracingDecorator) Create(ctx context.Context, event *dom
 	return err
 }
 
-func (d *eventRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (*domain.Event, error) {
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetByID", trace.WithAttributes(attribute.Int("event_id", id)))
+func (d *eventRepositoryTracingDecorator) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetByID", trace.WithAttributes(attribute.String("event_id", id.String())))
 	defer span.End()
 
 	event, err := d.next.GetByID(ctx, id)
@@ -47,9 +48,9 @@ func (d *eventRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (
 	return event, err
 }
 
-func (d *eventRepositoryTracingDecorator) GetByIDForUpdate(ctx context.Context, id int) (*domain.Event, error) {
+func (d *eventRepositoryTracingDecorator) GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetByIDForUpdate", trace.WithAttributes(
-		attribute.Int("event_id", id),
+		attribute.String("event_id", id.String()),
 	))
 	defer span.End()
 
@@ -60,9 +61,9 @@ func (d *eventRepositoryTracingDecorator) GetByIDForUpdate(ctx context.Context, 
 	return event, err
 }
 
-func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, eventID, quantity int) error {
+func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "DecrementTicket", trace.WithAttributes(
-		attribute.Int("event_id", eventID),
+		attribute.String("event_id", eventID.String()),
 		attribute.Int("quantity", quantity),
 	))
 	defer span.End()
@@ -74,9 +75,9 @@ func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, e
 	return err
 }
 
-func (d *eventRepositoryTracingDecorator) IncrementTicket(ctx context.Context, eventID, quantity int) error {
+func (d *eventRepositoryTracingDecorator) IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "IncrementTicket", trace.WithAttributes(
-		attribute.Int("event_id", eventID),
+		attribute.String("event_id", eventID.String()),
 		attribute.Int("quantity", quantity),
 	))
 	defer span.End()
@@ -90,7 +91,7 @@ func (d *eventRepositoryTracingDecorator) IncrementTicket(ctx context.Context, e
 
 func (d *eventRepositoryTracingDecorator) Update(ctx context.Context, event *domain.Event) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateEvent", trace.WithAttributes(
-		attribute.Int("event_id", event.ID),
+		attribute.String("event_id", event.ID().String()),
 	))
 	defer span.End()
 
@@ -101,9 +102,9 @@ func (d *eventRepositoryTracingDecorator) Update(ctx context.Context, event *dom
 	return err
 }
 
-func (d *eventRepositoryTracingDecorator) Delete(ctx context.Context, id int) error {
+func (d *eventRepositoryTracingDecorator) Delete(ctx context.Context, id uuid.UUID) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "DeleteEvent", trace.WithAttributes(
-		attribute.Int("event_id", id),
+		attribute.String("event_id", id.String()),
 	))
 	defer span.End()
 
@@ -126,8 +127,8 @@ func NewOrderRepositoryTracingDecorator(next domain.OrderRepository) domain.Orde
 
 func (d *orderRepositoryTracingDecorator) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "CreateOrder", trace.WithAttributes(
-		attribute.Int("user_id", order.UserID),
-		attribute.Int("event_id", order.EventID),
+		attribute.Int("user_id", order.UserID()),
+		attribute.String("event_id", order.EventID().String()),
 	))
 	defer span.End()
 
@@ -138,9 +139,9 @@ func (d *orderRepositoryTracingDecorator) Create(ctx context.Context, order doma
 	return created, err
 }
 
-func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (domain.Order, error) {
+func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id uuid.UUID) (domain.Order, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetOrderByID", trace.WithAttributes(
-		attribute.Int("order_id", id),
+		attribute.String("order_id", id.String()),
 	))
 	defer span.End()
 
@@ -166,9 +167,9 @@ func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit,
 	return orders, total, err
 }
 
-func (d *orderRepositoryTracingDecorator) UpdateStatus(ctx context.Context, id int, status domain.OrderStatus) error {
+func (d *orderRepositoryTracingDecorator) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateOrderStatus", trace.WithAttributes(
-		attribute.Int("order_id", id),
+		attribute.String("order_id", id.String()),
 		attribute.String("status", string(status)),
 	))
 	defer span.End()

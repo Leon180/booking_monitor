@@ -13,6 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
+	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -41,7 +42,7 @@ func (m *MockInventoryRepository) EXPECT() *MockInventoryRepositoryMockRecorder 
 }
 
 // DeductInventory mocks base method.
-func (m *MockInventoryRepository) DeductInventory(ctx context.Context, eventID, userID, count int) (bool, error) {
+func (m *MockInventoryRepository) DeductInventory(ctx context.Context, eventID uuid.UUID, userID, count int) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeductInventory", ctx, eventID, userID, count)
 	ret0, _ := ret[0].(bool)
@@ -56,7 +57,7 @@ func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, eventID, use
 }
 
 // RevertInventory mocks base method.
-func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID, count int, compensationID string) error {
+func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count, compensationID)
 	ret0, _ := ret[0].(error)
@@ -70,7 +71,7 @@ func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, cou
 }
 
 // SetInventory mocks base method.
-func (m *MockInventoryRepository) SetInventory(ctx context.Context, eventID, count int) error {
+func (m *MockInventoryRepository) SetInventory(ctx context.Context, eventID uuid.UUID, count int) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetInventory", ctx, eventID, count)
 	ret0, _ := ret[0].(error)

@@ -7,6 +7,7 @@ import (
 
 	"booking_monitor/internal/domain"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -14,16 +15,18 @@ func TestNewOrderCreatedEvent(t *testing.T) {
 	t.Parallel()
 
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
-	o := domain.ReconstructOrder(42, 7, 99, 3, domain.OrderStatusPending, created)
+	orderID := uuid.New()
+	eventID := uuid.New()
+	o := domain.ReconstructOrder(orderID, 7, eventID, 3, domain.OrderStatusPending, created)
 
 	got := domain.NewOrderCreatedEvent(o)
 
 	// Field-by-field — a swap (UserID/EventID) silently breaks the
 	// payment consumer's behavior. This test is the seam contract.
-	assert.Equal(t, 42, got.OrderID, "OrderID maps from domain.Order.ID")
+	assert.Equal(t, orderID, got.OrderID, "OrderID maps from domain.Order.ID")
 	assert.Equal(t, "pending", got.Status, "Status flattens enum to plain string")
 	assert.Equal(t, 7, got.UserID, "UserID must come from domain.UserID, not EventID")
-	assert.Equal(t, 99, got.EventID, "EventID must come from domain.EventID, not UserID")
+	assert.Equal(t, eventID, got.EventID, "EventID must come from domain.EventID, not UserID")
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, float64(0), got.Amount, "Amount is 0 today — pre-existing semantic gap, see order_events.go comment")
 	assert.Equal(t, created, got.CreatedAt)
@@ -33,10 +36,12 @@ func TestNewOrderCreatedEvent(t *testing.T) {
 func TestNewOrderFailedEvent(t *testing.T) {
 	t.Parallel()
 
+	orderID := uuid.New()
+	eventID := uuid.New()
 	from := domain.OrderCreatedEvent{
-		OrderID:  42,
+		OrderID:  orderID,
 		UserID:   7,
-		EventID:  99,
+		EventID:  eventID,
 		Quantity: 3,
 		Status:   "pending",
 	}
@@ -46,9 +51,9 @@ func TestNewOrderFailedEvent(t *testing.T) {
 
 	after := time.Now()
 
-	assert.Equal(t, 42, got.OrderID)
+	assert.Equal(t, orderID, got.OrderID)
 	assert.Equal(t, 7, got.UserID)
-	assert.Equal(t, 99, got.EventID)
+	assert.Equal(t, eventID, got.EventID)
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, "gateway timeout", got.Reason)
 	assert.Equal(t, domain.OrderEventVersion, got.Version)
@@ -69,8 +74,9 @@ func TestOrderCreatedEvent_WireFormatStable(t *testing.T) {
 	t.Parallel()
 
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	orderID := uuid.New()
 	ev := domain.NewOrderCreatedEvent(domain.ReconstructOrder(
-		42, 7, 99, 3, domain.OrderStatusPending, created,
+		orderID, 7, uuid.New(), 3, domain.OrderStatusPending, created,
 	))
 
 	bytes, err := json.Marshal(ev)
@@ -84,7 +90,10 @@ func TestOrderCreatedEvent_WireFormatStable(t *testing.T) {
 	for _, key := range []string{"id", "status", "user_id", "event_id", "quantity", "amount", "created_at", "version"} {
 		assert.Contains(t, wire, key, "wire-format key %q must be present", key)
 	}
-	assert.Equal(t, float64(42), wire["id"], "OrderID must serialise under JSON key \"id\" — payment consumer expects this")
+	// UUID serialises as a string under JSON key "id" — the payment
+	// consumer's OrderCreatedEvent.OrderID has json:"id" and uses
+	// uuid.UUID's UnmarshalJSON to parse.
+	assert.Equal(t, orderID.String(), wire["id"], "OrderID must serialise under JSON key \"id\" as the canonical UUID string")
 }
 
 // TestOrderFailedEvent_WireFormatStable pins the field-name contract
@@ -93,7 +102,7 @@ func TestOrderFailedEvent_WireFormatStable(t *testing.T) {
 	t.Parallel()
 
 	ev := domain.NewOrderFailedEvent(domain.OrderCreatedEvent{
-		OrderID: 42, UserID: 7, EventID: 99, Quantity: 3,
+		OrderID: uuid.New(), UserID: 7, EventID: uuid.New(), Quantity: 3,
 	}, "test reason")
 
 	bytes, err := json.Marshal(ev)

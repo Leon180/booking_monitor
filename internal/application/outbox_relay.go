@@ -126,10 +126,10 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		if err := r.publisher.Publish(ctx, e.EventType, e.Payload); err != nil {
+		if err := r.publisher.Publish(ctx, e.EventType(), e.Payload()); err != nil {
 			r.log.Error(ctx, "outbox relay: failed to publish event",
-				mlog.Int("event_id", e.ID),
-				tag.Topic(e.EventType),
+				mlog.String("event_id", e.ID().String()),
+				tag.Topic(e.EventType()),
 				tag.Error(err),
 			)
 			// Intentional: do NOT mark as processed on publish failure.
@@ -137,9 +137,9 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 			continue
 		}
 
-		if err := r.outboxRepo.MarkProcessed(ctx, e.ID); err != nil {
+		if err := r.outboxRepo.MarkProcessed(ctx, e.ID()); err != nil {
 			r.log.Error(ctx, "outbox relay: failed to mark event as processed",
-				mlog.Int("event_id", e.ID),
+				mlog.String("event_id", e.ID().String()),
 				tag.Error(err),
 			)
 			// Intentional: the event was already published. If MarkProcessed

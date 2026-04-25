@@ -3,7 +3,10 @@ package domain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -12,7 +15,7 @@ var (
 	// Invariant violations from NewOrder. Caller-actionable errors —
 	// each maps to a malformed-input case the worker should DLQ.
 	ErrInvalidUserID   = errors.New("order user_id must be positive")
-	ErrInvalidEventID  = errors.New("order event_id must be positive")
+	ErrInvalidEventID  = errors.New("order event_id must not be the zero UUID")
 	ErrInvalidQuantity = errors.New("order quantity must be positive")
 )
 
@@ -25,105 +28,115 @@ const (
 	OrderStatusCompensated OrderStatus = "compensated"
 )
 
-// Order is the domain aggregate. Field names have NO `json:` tags
-// because Order values are never marshalled directly to a wire format
-// — the API layer maps to api/dto.OrderResponse, and the messaging
-// layer maps to domain.OrderCreatedEvent. Adding a json tag here
-// would re-introduce the "domain model leaks into HTTP / Kafka wire
-// contract" coupling that PRs 31-32 removed.
+// Order is the domain aggregate. All fields are unexported; reads
+// happen through accessor methods (Wild Workouts pattern, no Get
+// prefix), writes happen through the NewOrder factory or the
+// immutable WithStatus transition. Construction outside this package
+// is impossible — callers cannot bypass the factory's invariants.
 //
-// All three domain entities (Order / Event / OutboxEvent) are now
-// JSON-unaware. The boundary types in api/dto and order_events.go
-// own their respective wire contracts.
+// Field types:
+//   - id, eventID: uuid.UUID. Both are factory-generated (NewV7) or
+//     received from boundaries; never DB-assigned. UUIDv7 is
+//     time-prefixed so B-tree indexes still cluster (see
+//     memory/uuid_v7_research.md for benchmark).
+//   - userID: int. STAYS int because users are an external concept
+//     (this service does not own the users table).
+//   - createdAt: factory-assigned, NOT DB-assigned. The UUIDv7 already
+//     encodes ms-precision creation time; we keep CreatedAt as a
+//     full time.Time for human-friendly display via DTOs and for
+//     business logic that compares times directly.
 type Order struct {
-	ID        int
-	EventID   int
-	UserID    int
-	Quantity  int
-	Status    OrderStatus
-	CreatedAt time.Time
+	id        uuid.UUID
+	eventID   uuid.UUID
+	userID    int
+	quantity  int
+	status    OrderStatus
+	createdAt time.Time
 }
 
-// NewOrder constructs a fresh pending order. Enforces invariants at
-// the domain boundary so callers can't ship a zero-quantity order or
-// skip the Pending-first lifecycle. Returns an Order value (not a
-// pointer) — the project's coding standard prefers immutable
-// value-typed entities; callers that need a pointer can take its
-// address. ID + CreatedAt are set by the repository on insert.
-func NewOrder(userID, eventID, quantity int) (Order, error) {
+// NewOrder constructs a fresh pending order. Validates invariants at
+// the domain boundary, then assigns a fresh UUIDv7 id and a
+// time.Now() createdAt. The returned Order is fully complete — no
+// repository "fills in" anything.
+func NewOrder(userID int, eventID uuid.UUID, quantity int) (Order, error) {
 	if userID <= 0 {
 		return Order{}, ErrInvalidUserID
 	}
-	if eventID <= 0 {
+	if eventID == uuid.Nil {
 		return Order{}, ErrInvalidEventID
 	}
 	if quantity <= 0 {
 		return Order{}, ErrInvalidQuantity
 	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		// crypto/rand failure — vanishingly rare but not impossible
+		// under entropy exhaustion / fuzz. Surface so callers can
+		// retry or DLQ instead of producing a zero-UUID order.
+		return Order{}, fmt.Errorf("generate order id: %w", err)
+	}
 	return Order{
-		UserID:   userID,
-		EventID:  eventID,
-		Quantity: quantity,
-		Status:   OrderStatusPending,
-		// CreatedAt is left zero here so the repository can set it
-		// from RETURNING created_at — that's the source of truth.
-		// Worker / API code paths that need a CreatedAt before insert
-		// should set it explicitly via a future field-setter; for now
-		// every NewOrder caller hands the result to a repo that fills
-		// it in.
+		id:        id,
+		userID:    userID,
+		eventID:   eventID,
+		quantity:  quantity,
+		status:    OrderStatusPending,
+		createdAt: time.Now(),
 	}, nil
 }
 
 // ReconstructOrder rehydrates an Order from a persisted row. Skips
 // the invariant validation in NewOrder because the row was already
-// validated at insert time and persisted state is trusted. Use ONLY
-// from repository row-scanning code, never to "create" a new order.
-//
-// CONTRACT NOTE: This function is in the public surface of the
-// domain package, so the "only repos may call this" rule is
-// comment-only — the compiler doesn't enforce it. A future PR
-// (tracked under "tx-control refactor / Pattern B" in the post-#28
-// follow-up plan) is expected to fold reconstruction into a
-// persistence-private helper or move the type behind an unexported
-// constructor, at which point this comment can become a compile-time
-// invariant. Until then: do not call from application code.
-func ReconstructOrder(id, userID, eventID, quantity int, status OrderStatus, createdAt time.Time) Order {
+// validated at insert time. Use ONLY from repository row-scanning
+// code, never to "create" a new order. Future refactor: move into
+// internal/infrastructure/persistence/postgres so the visibility
+// matches the contract; for now the comment-only contract holds
+// because all postgres scan code is the only caller.
+func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time) Order {
 	return Order{
-		ID:        id,
-		UserID:    userID,
-		EventID:   eventID,
-		Quantity:  quantity,
-		Status:    status,
-		CreatedAt: createdAt,
+		id:        id,
+		userID:    userID,
+		eventID:   eventID,
+		quantity:  quantity,
+		status:    status,
+		createdAt: createdAt,
 	}
 }
 
 // WithStatus returns a copy of the order with the given status.
-// Immutable transition method — the receiver is untouched, so
-// concurrent reads of the same Order value are safe. Callers that
-// also need to persist the new status should pass the returned value
-// to the repository's UpdateStatus method.
+// Immutable transition — the receiver is untouched, so concurrent
+// reads of the same Order value are safe.
 func (o Order) WithStatus(status OrderStatus) Order {
-	o.Status = status
+	o.status = status
 	return o
 }
 
+// Accessors — read-only views on the unexported fields. Wild Workouts
+// pattern (no "Get" prefix), aligned with Go stdlib (time.Time.Hour()
+// etc.).
+func (o Order) ID() uuid.UUID         { return o.id }
+func (o Order) EventID() uuid.UUID    { return o.eventID }
+func (o Order) UserID() int           { return o.userID }
+func (o Order) Quantity() int         { return o.quantity }
+func (o Order) Status() OrderStatus   { return o.status }
+func (o Order) CreatedAt() time.Time  { return o.createdAt }
+
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
-	// Create persists the order and returns a new Order value with the
-	// repo-assigned ID + CreatedAt populated. The input order's
-	// pre-insert state (UserID/EventID/Quantity/Status) is preserved.
-	// Value-in / value-out: the caller's input is never mutated, and
-	// the returned Order reflects the persisted truth.
+	// Create persists the order and returns it back unchanged. The
+	// caller's input already has its UUID + CreatedAt set by the
+	// factory, so the repo no longer "fills in" anything — Create's
+	// signature still returns (Order, error) for API consistency
+	// with prior code that needed the populated value.
 	Create(ctx context.Context, order Order) (Order, error)
 
-	// ListOrders returns a page of orders by value. Empty result is a
-	// nil slice (not an error).
+	// ListOrders returns a page of orders by value. Empty result is
+	// a nil slice (not an error).
 	ListOrders(ctx context.Context, limit, offset int, status *OrderStatus) ([]Order, int, error)
 
 	// GetByID returns the order by id. ErrOrderNotFound when no row
 	// matches; any other error is wrapped with the query context.
-	GetByID(ctx context.Context, id int) (Order, error)
+	GetByID(ctx context.Context, id uuid.UUID) (Order, error)
 
-	UpdateStatus(ctx context.Context, id int, status OrderStatus) error
+	UpdateStatus(ctx context.Context, id uuid.UUID, status OrderStatus) error
 }

@@ -3,8 +3,11 @@ package domain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -12,9 +15,7 @@ var (
 	ErrSoldOut           = errors.New("event sold out")
 	ErrUserAlreadyBought = errors.New("user already bought ticket")
 
-	// Invariant violations from NewEvent. Same shape as the Order
-	// factory's sentinels — caller-actionable so admin / API code can
-	// branch on errors.Is to surface 4xx vs 5xx.
+	// Invariant violations from NewEvent.
 	ErrInvalidEventName    = errors.New("event name must not be empty")
 	ErrInvalidTotalTickets = errors.New("event total_tickets must be positive")
 )
@@ -33,31 +34,20 @@ const (
 	OutboxStatusPending = "PENDING"
 )
 
-// Event is the domain aggregate. Field names have no `json:` tags
-// because Event values are never marshalled directly to a wire format
-// — the API layer maps to api/dto.EventResponse, which owns the JSON
-// contract. Adding a json tag here would re-introduce the "domain
-// model leaks into HTTP wire contract" coupling that PR 31 removed.
-//
-// (domain.Order still carries json tags because the outbox payload
-// path still uses json.Marshal(order). PR 32 introduces a domain
-// event payload type and that last tag set will go away.)
+// Event is the domain aggregate. Field names are unexported; reads
+// via accessor methods, writes via NewEvent factory or Deduct
+// transition. See order.go for the full rationale.
 type Event struct {
-	ID               int
-	Name             string
-	TotalTickets     int
-	AvailableTickets int
-	Version          int
+	id               uuid.UUID
+	name             string
+	totalTickets     int
+	availableTickets int
+	version          int
 }
 
 // NewEvent constructs a fresh Event with the canonical "available =
 // total at creation" invariant + non-empty name + positive
-// total_tickets. ID is repo-assigned (still int / SERIAL until the
-// post-PR-30 UUID v7 migration; see memory `uuid_v7_research.md`).
-// CreatedAt-equivalent (Version) starts at 0.
-//
-// Mirror of NewOrder — same pattern of returning a value, sentinels
-// for each invariant so callers can errors.Is them.
+// total_tickets. Generates a UUIDv7 id at construction.
 func NewEvent(name string, totalTickets int) (Event, error) {
 	if strings.TrimSpace(name) == "" {
 		return Event{}, ErrInvalidEventName
@@ -65,104 +55,126 @@ func NewEvent(name string, totalTickets int) (Event, error) {
 	if totalTickets <= 0 {
 		return Event{}, ErrInvalidTotalTickets
 	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return Event{}, fmt.Errorf("generate event id: %w", err)
+	}
 	return Event{
-		Name:             name,
-		TotalTickets:     totalTickets,
-		AvailableTickets: totalTickets,
-		Version:          0,
+		id:               id,
+		name:             name,
+		totalTickets:     totalTickets,
+		availableTickets: totalTickets,
+		version:          0,
 	}, nil
 }
 
 // ReconstructEvent rehydrates an Event from a persisted row. Skips
-// the invariant validation in NewEvent because the row was already
-// validated at insert time. Use ONLY from repository row-scanning
-// code, never to "create" a new event. Same comment-only contract
-// as ReconstructOrder.
-func ReconstructEvent(id int, name string, totalTickets, availableTickets, version int) Event {
+// invariant validation; postgres scan code is the only intended caller.
+func ReconstructEvent(id uuid.UUID, name string, totalTickets, availableTickets, version int) Event {
 	return Event{
-		ID:               id,
-		Name:             name,
-		TotalTickets:     totalTickets,
-		AvailableTickets: availableTickets,
-		Version:          version,
+		id:               id,
+		name:             name,
+		totalTickets:     totalTickets,
+		availableTickets: availableTickets,
+		version:          version,
 	}
 }
 
-// Deduct returns a new *Event with AvailableTickets decremented by
-// quantity, or an error. It is immutable: the receiver is NOT mutated.
-// This follows the project's global "create new objects, never mutate"
-// coding style rule and makes concurrent reads of an Event safe.
-func (e *Event) Deduct(quantity int) (*Event, error) {
+// Accessors — Wild Workouts pattern (no Get prefix).
+func (e Event) ID() uuid.UUID      { return e.id }
+func (e Event) Name() string       { return e.name }
+func (e Event) TotalTickets() int  { return e.totalTickets }
+func (e Event) AvailableTickets() int { return e.availableTickets }
+func (e Event) Version() int       { return e.version }
+
+// Deduct returns a new Event with AvailableTickets decremented by
+// quantity, or an error. Immutable: the receiver is NOT mutated.
+func (e Event) Deduct(quantity int) (Event, error) {
 	if quantity < 0 {
-		return nil, errors.New("invalid quantity")
+		return Event{}, errors.New("invalid quantity")
 	}
-	if e.AvailableTickets < quantity {
-		return nil, ErrSoldOut
+	if e.availableTickets < quantity {
+		return Event{}, ErrSoldOut
 	}
-	next := *e
-	next.AvailableTickets -= quantity
-	return &next, nil
+	next := e
+	next.availableTickets -= quantity
+	return next, nil
 }
 
 //go:generate mockgen -source=event.go -destination=../mocks/event_repository_mock.go -package=mocks
 type EventRepository interface {
 	Create(ctx context.Context, event *Event) error
-	// GetByID is a plain read with no row lock. Safe outside a transaction.
-	GetByID(ctx context.Context, id int) (*Event, error)
-	// GetByIDForUpdate takes a FOR UPDATE row lock and MUST be called
-	// inside a UoW-managed transaction. See persistence/postgres for the
-	// rationale.
-	GetByIDForUpdate(ctx context.Context, id int) (*Event, error)
+	// GetByID is a plain read with no row lock.
+	GetByID(ctx context.Context, id uuid.UUID) (*Event, error)
+	// GetByIDForUpdate takes a FOR UPDATE row lock; MUST be called
+	// inside a UoW-managed transaction.
+	GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*Event, error)
 	Update(ctx context.Context, event *Event) error
-	DecrementTicket(ctx context.Context, eventID, quantity int) error
-	IncrementTicket(ctx context.Context, eventID, quantity int) error
-	// Delete removes an event. Used by EventService.CreateEvent as a
-	// compensating action when the dual-write to the Redis hot-path
-	// inventory fails after the DB row has been committed.
-	Delete(ctx context.Context, id int) error
+	DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
+	IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
+// OutboxEvent is the outbox-row aggregate. Field names unexported.
+// ID is factory-assigned (UUIDv7), not DB-assigned.
 type OutboxEvent struct {
-	ID          int
-	EventType   string
-	Payload     []byte // JSON
-	Status      string
-	ProcessedAt *time.Time
+	id          uuid.UUID
+	eventType   string
+	payload     []byte // JSON
+	status      string
+	processedAt *time.Time
 }
+
+// ReconstructOutboxEvent rehydrates from a persisted row.
+func ReconstructOutboxEvent(id uuid.UUID, eventType string, payload []byte, status string, processedAt *time.Time) OutboxEvent {
+	return OutboxEvent{
+		id:          id,
+		eventType:   eventType,
+		payload:     payload,
+		status:      status,
+		processedAt: processedAt,
+	}
+}
+
+// Accessors.
+func (e OutboxEvent) ID() uuid.UUID          { return e.id }
+func (e OutboxEvent) EventType() string      { return e.eventType }
+func (e OutboxEvent) Payload() []byte        { return e.payload }
+func (e OutboxEvent) Status() string         { return e.status }
+func (e OutboxEvent) ProcessedAt() *time.Time { return e.processedAt }
 
 // NewOrderCreatedOutbox constructs a pending outbox event for an
-// `order.created` payload. Centralises the EventType + Status
-// defaults so a typo at a call site can't ship a row that the
-// OutboxRelay then can't classify.
-func NewOrderCreatedOutbox(payload []byte) OutboxEvent {
-	return OutboxEvent{
-		EventType: EventTypeOrderCreated,
-		Payload:   payload,
-		Status:    OutboxStatusPending,
+// `order.created` payload. UUIDv7 id assigned at construction.
+func NewOrderCreatedOutbox(payload []byte) (OutboxEvent, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return OutboxEvent{}, fmt.Errorf("generate outbox event id: %w", err)
 	}
+	return OutboxEvent{
+		id:        id,
+		eventType: EventTypeOrderCreated,
+		payload:   payload,
+		status:    OutboxStatusPending,
+	}, nil
 }
 
 // NewOrderFailedOutbox constructs a pending outbox event for an
 // `order.failed` payload (saga compensation trigger).
-func NewOrderFailedOutbox(payload []byte) OutboxEvent {
-	return OutboxEvent{
-		EventType: EventTypeOrderFailed,
-		Payload:   payload,
-		Status:    OutboxStatusPending,
+func NewOrderFailedOutbox(payload []byte) (OutboxEvent, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return OutboxEvent{}, fmt.Errorf("generate outbox event id: %w", err)
 	}
+	return OutboxEvent{
+		id:        id,
+		eventType: EventTypeOrderFailed,
+		payload:   payload,
+		status:    OutboxStatusPending,
+	}, nil
 }
 
 type OutboxRepository interface {
-	// Create persists the outbox event and returns a new OutboxEvent
-	// with the repo-assigned ID populated. Value-in / value-out for
-	// the same reason as OrderRepository.Create — the caller's input
-	// is never mutated.
 	Create(ctx context.Context, event OutboxEvent) (OutboxEvent, error)
-
-	// ListPending returns up to `limit` outbox rows whose
-	// processed_at IS NULL, ordered by id ascending so older events
-	// publish first. Empty result is a nil slice (not an error).
 	ListPending(ctx context.Context, limit int) ([]OutboxEvent, error)
-
-	MarkProcessed(ctx context.Context, id int) error
+	MarkProcessed(ctx context.Context, id uuid.UUID) error
 }

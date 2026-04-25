@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // Wire-format schema version for the order.* event family. Bumped only
 // when a backward-incompatible change is made (field removal, type
@@ -8,7 +12,11 @@ import "time"
 // fields) keep the same version. Consumers SHOULD branch on this
 // value when they need to support both old and new shapes during a
 // rolling migration.
-const OrderEventVersion = 1
+//
+// Version 2 (PR 34): IDs migrated from int (SERIAL) to UUID v7.
+// Producer now serialises IDs as RFC 4122 strings; consumers that
+// expected int will fail to unmarshal — coordinate the bump.
+const OrderEventVersion = 2
 
 // OrderCreatedEvent is the wire-format payload published to the
 // Kafka order.created topic and consumed by the payment service.
@@ -18,24 +26,17 @@ const OrderEventVersion = 1
 // (NewOrderCreatedEvent) explicitly copies it across.
 //
 // Field-tag history:
-//   - `OrderID json:"id"` — deliberately "id", not "order_id", to
-//     match the existing producer output (domain.Order.ID had
-//     `json:"id"` before PR 32). Kept stable so this PR doesn't break
-//     in-flight messages from any rolling-deployed consumer.
+//   - `OrderID json:"id"` — kept stable; was already "id" in v1.
 //   - `Amount` — pre-existing field expected by the consumer for
 //     gateway.Charge but the producer-side mapper sets it to 0 today
 //     because pricing isn't modelled in domain.Order. Tracked as a
-//     pre-existing semantic gap (see commit message); fixing it
-//     requires introducing an event Pricing model and is out of scope
-//     for PR 32.
-//   - `Version` — added in PR 32, default OrderEventVersion. New
-//     producer always emits; old messages still in flight will
-//     unmarshal with Version=0 and consumers can detect that.
+//     pre-existing semantic gap; out of scope for the UUID migration.
+//   - `Version` — bumped to 2 with the UUID migration.
 type OrderCreatedEvent struct {
-	OrderID   int       `json:"id"`
+	OrderID   uuid.UUID `json:"id"`
 	Status    string    `json:"status"`
 	UserID    int       `json:"user_id"`
-	EventID   int       `json:"event_id"`
+	EventID   uuid.UUID `json:"event_id"`
 	Quantity  int       `json:"quantity"`
 	Amount    float64   `json:"amount"`
 	CreatedAt time.Time `json:"created_at"`
@@ -45,8 +46,8 @@ type OrderCreatedEvent struct {
 // OrderFailedEvent is the wire-format payload published to
 // order.failed (saga compensation trigger).
 type OrderFailedEvent struct {
-	EventID  int       `json:"event_id"`
-	OrderID  int       `json:"order_id"`
+	EventID  uuid.UUID `json:"event_id"`
+	OrderID  uuid.UUID `json:"order_id"`
 	UserID   int       `json:"user_id"`
 	Quantity int       `json:"quantity"`
 	FailedAt time.Time `json:"failed_at"`
@@ -63,13 +64,13 @@ type OrderFailedEvent struct {
 // See the package-level note above.
 func NewOrderCreatedEvent(o Order) OrderCreatedEvent {
 	return OrderCreatedEvent{
-		OrderID:   o.ID,
-		Status:    string(o.Status),
-		UserID:    o.UserID,
-		EventID:   o.EventID,
-		Quantity:  o.Quantity,
+		OrderID:   o.ID(),
+		Status:    string(o.Status()),
+		UserID:    o.UserID(),
+		EventID:   o.EventID(),
+		Quantity:  o.Quantity(),
 		Amount:    0,
-		CreatedAt: o.CreatedAt,
+		CreatedAt: o.CreatedAt(),
 		Version:   OrderEventVersion,
 	}
 }

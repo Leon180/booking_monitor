@@ -108,14 +108,20 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
 
-		if _, err := p.outboxRepo.Create(txCtx, domain.NewOrderCreatedOutbox(payload)); err != nil {
+		outboxEvent, err := domain.NewOrderCreatedOutbox(payload)
+		if err != nil {
+			p.logger.Error(txCtx, "Failed to construct outbox event",
+				tag.MsgID(msg.ID), tag.Error(err))
+			return fmt.Errorf("construct outbox event: %w", err)
+		}
+		if _, err := p.outboxRepo.Create(txCtx, outboxEvent); err != nil {
 			p.logger.Error(txCtx, "Failed to create outbox event",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
 
 		p.logger.Info(txCtx, "Order processed successfully with Outbox",
-			tag.MsgID(msg.ID), tag.OrderID(created.ID))
+			tag.MsgID(msg.ID), tag.OrderID(created.ID()))
 		return nil
 	})
 }

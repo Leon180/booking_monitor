@@ -17,18 +17,23 @@
 package tag
 
 import (
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 // ── Identifiers ──────────────────────────────────────────────────────
 
 // OrderID labels the log entry with a canonical order identifier.
-func OrderID(id int) zap.Field { return zap.Int("order_id", id) }
+// Domain entity IDs are UUID v7 since PR 34.
+func OrderID(id uuid.UUID) zap.Field { return zap.Stringer("order_id", id) }
 
 // EventID labels the log entry with a ticketing event identifier.
-func EventID(id int) zap.Field { return zap.Int("event_id", id) }
+// Domain entity IDs are UUID v7 since PR 34.
+func EventID(id uuid.UUID) zap.Field { return zap.Stringer("event_id", id) }
 
-// UserID labels the log entry with the authenticated user id.
+// UserID labels the log entry with the authenticated user id. Stays
+// int because users are an external concept (this service does not
+// own the users table).
 func UserID(id int) zap.Field { return zap.Int("user_id", id) }
 
 // (correlation_id is auto-injected by the ctx-aware log methods —

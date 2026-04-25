@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -294,7 +295,10 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid user_id %q: %w", userIDStr, err)
 	}
-	eventID, err := strconv.Atoi(eventIDStr)
+	// EventID is a UUID v7 string in the stream message (since PR 34).
+	// uuid.Parse handles canonical 36-char form; producer-side
+	// (deduct.lua via Redis) emits exactly that.
+	eventID, err := uuid.Parse(eventIDStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid event_id %q: %w", eventIDStr, err)
 	}

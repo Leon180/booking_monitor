@@ -68,8 +68,10 @@ const (
 
 	// Stress-test CLI flag defaults. Not in config because the stress
 	// binary is a one-off tool, not a server process reading config.
-	stressDefaultBaseURL      = "http://localhost:8080"
-	stressDefaultEventID      = 1
+	stressDefaultBaseURL = "http://localhost:8080"
+	// stressDefaultEventID was an int=1 before PR 34. Post-UUID-migration
+	// the operator MUST supply a real UUID v7 obtained via
+	// POST /api/v1/events — there is no useful default.
 	stressDefaultUserRangeMax = 10000
 	stressClientMaxIdleConns  = 1000
 	stressClientTimeout       = 10 * time.Second
@@ -85,7 +87,7 @@ func main() {
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
 	stressCmd.Flags().String("base-url", stressDefaultBaseURL, "Target base URL (scheme://host:port)")
-	stressCmd.Flags().Int("event-id", stressDefaultEventID, "Event ID to book against")
+	stressCmd.Flags().String("event-id", "", "Event UUID (v7) to book against — required, obtain via POST /api/v1/events")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
 	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd)
@@ -558,14 +560,19 @@ func runStress(cmd *cobra.Command, _ []string) {
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	totalRequests, _ := cmd.Flags().GetInt("requests")
 	baseURL, _ := cmd.Flags().GetString("base-url")
-	eventID, _ := cmd.Flags().GetInt("event-id")
+	eventIDStr, _ := cmd.Flags().GetString("event-id")
 	userRange, _ := cmd.Flags().GetInt("user-range")
 
-	targetURL := strings.TrimRight(baseURL, "/") + apiV1Prefix + "/book"
-	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s (event=%d, user_range=%d)\n",
-		concurrency, totalRequests, targetURL, eventID, userRange)
+	if eventIDStr == "" {
+		fmt.Fprintln(os.Stderr, "stress: --event-id is required (UUID v7 — create one via POST /api/v1/events first)")
+		os.Exit(1)
+	}
 
-	startStressTest(concurrency, totalRequests, targetURL, eventID, userRange)
+	targetURL := strings.TrimRight(baseURL, "/") + apiV1Prefix + "/book"
+	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s (event=%s, user_range=%d)\n",
+		concurrency, totalRequests, targetURL, eventIDStr, userRange)
+
+	startStressTest(concurrency, totalRequests, targetURL, eventIDStr, userRange)
 }
 
 // startStressTest orchestrates the load burst. jobs is pre-filled +
@@ -573,7 +580,7 @@ func runStress(cmd *cobra.Command, _ []string) {
 // signal. startChan is a release barrier: every worker blocks on it
 // and they all unblock together, which is what flash-sale traffic
 // actually looks like at the wire.
-func startStressTest(concurrency, totalRequests int, url string, eventID, userRange int) {
+func startStressTest(concurrency, totalRequests int, url string, eventID string, userRange int) {
 	var successCount, failCount int64
 	var wg sync.WaitGroup
 
@@ -611,13 +618,19 @@ func startStressTest(concurrency, totalRequests int, url string, eventID, userRa
 // stressWorker drains the jobs channel, firing POST /book for each.
 // Blocks on startChan first so every worker fires its first request
 // at approximately the same instant as its peers.
+//
+// eventID is the UUID v7 string supplied via --event-id; user_id is
+// generated per request from a small int range to spread load across
+// distinct users (the orders.user_id column is still INT — the
+// UUID migration was scoped to internally-owned aggregates).
 func stressWorker(
 	jobs <-chan struct{},
 	startChan <-chan struct{},
 	wg *sync.WaitGroup,
 	successCount, failCount *int64,
 	url string,
-	eventID, userRange int,
+	eventID string,
+	userRange int,
 ) {
 	defer wg.Done()
 	client := &http.Client{
@@ -631,8 +644,8 @@ func stressWorker(
 	<-startChan
 
 	for range jobs {
-		// json.Marshal of map[string]int cannot fail for these types.
-		reqBody, _ := json.Marshal(map[string]int{
+		// json.Marshal cannot fail for this fixed shape.
+		reqBody, _ := json.Marshal(map[string]any{
 			"user_id":  rand.IntN(userRange) + 1,
 			"event_id": eventID,
 			"quantity": 1,

@@ -10,13 +10,22 @@
 // domain types, then map domain results back to DTOs for the response.
 package dto
 
-import "booking_monitor/internal/domain"
+import (
+	"github.com/google/uuid"
 
-// BookingRequest is the wire shape of POST /api/v1/book.
+	"booking_monitor/internal/domain"
+)
+
+// BookingRequest is the wire shape of POST /api/v1/book. EventID is
+// a UUID v7 string in the JSON body (since PR 34 — domain entities
+// use UUID identity); uuid.UUID's UnmarshalJSON handles parsing.
+// `binding:"required"` checks for non-zero value: for uuid.UUID
+// (which is [16]byte) the zero value is uuid.Nil, so a missing /
+// empty event_id is correctly rejected at bind time.
 type BookingRequest struct {
-	UserID   int `json:"user_id" binding:"required"`
-	EventID  int `json:"event_id" binding:"required"`
-	Quantity int `json:"quantity" binding:"required,min=1,max=10"`
+	UserID   int       `json:"user_id" binding:"required"`
+	EventID  uuid.UUID `json:"event_id" binding:"required"`
+	Quantity int       `json:"quantity" binding:"required,min=1,max=10"`
 }
 
 // CreateEventRequest is the wire shape of POST /api/v1/events.
