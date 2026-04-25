@@ -91,8 +91,20 @@ func (o Order) WithStatus(status OrderStatus) Order {
 
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
-	Create(ctx context.Context, order *Order) error
-	ListOrders(ctx context.Context, limit, offset int, status *OrderStatus) ([]*Order, int, error)
-	GetByID(ctx context.Context, id int) (*Order, error)
+	// Create persists the order and returns a new Order value with the
+	// repo-assigned ID + CreatedAt populated. The input order's
+	// pre-insert state (UserID/EventID/Quantity/Status) is preserved.
+	// Value-in / value-out: the caller's input is never mutated, and
+	// the returned Order reflects the persisted truth.
+	Create(ctx context.Context, order Order) (Order, error)
+
+	// ListOrders returns a page of orders by value. Empty result is a
+	// nil slice (not an error).
+	ListOrders(ctx context.Context, limit, offset int, status *OrderStatus) ([]Order, int, error)
+
+	// GetByID returns the order by id. ErrOrderNotFound when no row
+	// matches; any other error is wrapped with the query context.
+	GetByID(ctx context.Context, id int) (Order, error)
+
 	UpdateStatus(ctx context.Context, id int, status OrderStatus) error
 }

@@ -53,11 +53,15 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					return fn(ctx)
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(nil)
-				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(&domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e *domain.OutboxEvent) error {
+				ora.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
+					o.ID = 42 // simulate DB-assigned id
+					return o, nil
+				})
+				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
 					assert.Equal(t, "order.created", e.EventType)
 					assert.Equal(t, "PENDING", e.Status)
-					return nil
+					e.ID = 99
+					return e, nil
 				})
 			},
 			expectedError: nil,
@@ -81,7 +85,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					return fn(ctx)
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.ErrUserAlreadyBought)
+				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, domain.ErrUserAlreadyBought)
 			},
 			expectedError: domain.ErrUserAlreadyBought,
 		},
@@ -93,7 +97,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					return fn(ctx)
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), 1, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(errors.New("db connection failed"))
+				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
 			},
 			expectedError: errors.New("db connection failed"),
 		},

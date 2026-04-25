@@ -24,7 +24,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			name:      "Success - Publish and Mark Processed",
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
-				events := []*domain.OutboxEvent{
+				events := []domain.OutboxEvent{
 					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
 					{ID: 2, EventType: "test.event", Payload: []byte("payload2")},
 				}
@@ -52,7 +52,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			name:      "Publisher Error - Skip MarkProcessed",
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
-				events := []*domain.OutboxEvent{
+				events := []domain.OutboxEvent{
 					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
 				}
 
@@ -68,7 +68,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			name:      "Repo Error - MarkProcessed Fails",
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
-				events := []*domain.OutboxEvent{
+				events := []domain.OutboxEvent{
 					{ID: 1, EventType: "test.event", Payload: []byte("payload1")},
 				}
 

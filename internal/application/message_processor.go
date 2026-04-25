@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -70,15 +69,19 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 			return err
 		}
 
-		order := &domain.Order{
-			UserID:    msg.UserID,
-			EventID:   msg.EventID,
-			Quantity:  msg.Quantity,
-			Status:    domain.OrderStatusPending,
-			CreatedAt: time.Now(),
+		newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+		if err != nil {
+			// Invariant violation in the queue message itself —
+			// surface as a domain error so the worker classifier
+			// can DLQ it (the message will never be valid no matter
+			// how many times PEL re-delivers).
+			p.logger.Error(txCtx, "Malformed order message",
+				tag.MsgID(msg.ID), tag.Error(err))
+			return err
 		}
 
-		if err := p.orderRepo.Create(txCtx, order); err != nil {
+		created, err := p.orderRepo.Create(txCtx, newOrder)
+		if err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
 				p.logger.Warn(txCtx, "Duplicate purchase blocked by DB constraint",
 					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
@@ -90,30 +93,24 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		}
 
 		// Outbox pattern. Marshal errors are theoretical for the
-		// current *domain.Order shape (ints, string, time.Time, enum)
-		// but we still surface them so a future field addition can't
+		// current Order shape (ints, string, time.Time, enum) but
+		// we still surface them so a future field addition can't
 		// ship a silent nil-payload outbox row.
-		payload, err := json.Marshal(order)
+		payload, err := json.Marshal(created)
 		if err != nil {
 			p.logger.Error(txCtx, "Failed to marshal order for outbox",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
 
-		outboxEvent := &domain.OutboxEvent{
-			EventType: "order.created",
-			Payload:   payload,
-			Status:    "PENDING",
-		}
-
-		if err := p.outboxRepo.Create(txCtx, outboxEvent); err != nil {
+		if _, err := p.outboxRepo.Create(txCtx, domain.NewOrderCreatedOutbox(payload)); err != nil {
 			p.logger.Error(txCtx, "Failed to create outbox event",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
 
 		p.logger.Info(txCtx, "Order processed successfully with Outbox",
-			tag.MsgID(msg.ID), tag.OrderID(order.ID))
+			tag.MsgID(msg.ID), tag.OrderID(created.ID))
 		return nil
 	})
 }

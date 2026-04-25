@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lib/pq"
 
@@ -83,33 +84,40 @@ func NewPostgresOrderRepository(db *sql.DB) domain.OrderRepository {
 	return &postgresOrderRepository{db: db}
 }
 
-func (r *postgresOrderRepository) Create(ctx context.Context, order *domain.Order) error {
+func (r *postgresOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	query := "INSERT INTO orders (event_id, user_id, quantity, status) VALUES ($1, $2, $3, $4) RETURNING id, created_at"
-	err := r.getExecutor(ctx).QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&order.ID, &order.CreatedAt)
+	var id int
+	var createdAt time.Time
+	err := r.getExecutor(ctx).QueryRowContext(ctx, query, order.EventID, order.UserID, order.Quantity, order.Status).Scan(&id, &createdAt)
 	if err != nil {
 		var pgErr *pq.Error
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
-			return domain.ErrUserAlreadyBought
+			return domain.Order{}, domain.ErrUserAlreadyBought
 		}
-		return fmt.Errorf("orderRepository.Create: %w", err)
+		return domain.Order{}, fmt.Errorf("orderRepository.Create: %w", err)
 	}
-	return nil
+	return domain.ReconstructOrder(id, order.UserID, order.EventID, order.Quantity, order.Status, createdAt), nil
 }
 
-func (r *postgresOrderRepository) GetByID(ctx context.Context, id int) (*domain.Order, error) {
+func (r *postgresOrderRepository) GetByID(ctx context.Context, id int) (domain.Order, error) {
 	query := "SELECT id, event_id, user_id, quantity, status, created_at FROM orders WHERE id = $1"
-	var o domain.Order
-	err := r.getExecutor(ctx).QueryRowContext(ctx, query, id).Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt)
+	var (
+		oID                       int
+		eventID, userID, quantity int
+		status                    domain.OrderStatus
+		createdAt                 time.Time
+	)
+	err := r.getExecutor(ctx).QueryRowContext(ctx, query, id).Scan(&oID, &eventID, &userID, &quantity, &status, &createdAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, domain.ErrOrderNotFound
+			return domain.Order{}, domain.ErrOrderNotFound
 		}
-		return nil, fmt.Errorf("orderRepository.GetByID id=%d: %w", id, err)
+		return domain.Order{}, fmt.Errorf("orderRepository.GetByID id=%d: %w", id, err)
 	}
-	return &o, nil
+	return domain.ReconstructOrder(oID, userID, eventID, quantity, status, createdAt), nil
 }
 
-func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	var total int
 	var rows *sql.Rows
 	var err error
@@ -137,13 +145,18 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var orders []*domain.Order
+	var orders []domain.Order
 	for rows.Next() {
-		var o domain.Order
-		if err := rows.Scan(&o.ID, &o.EventID, &o.UserID, &o.Quantity, &o.Status, &o.CreatedAt); err != nil {
+		var (
+			oID                       int
+			eventID, userID, quantity int
+			s                         domain.OrderStatus
+			createdAt                 time.Time
+		)
+		if err := rows.Scan(&oID, &eventID, &userID, &quantity, &s, &createdAt); err != nil {
 			return nil, 0, fmt.Errorf("orderRepository.ListOrders scan: %w", err)
 		}
-		orders = append(orders, &o)
+		orders = append(orders, domain.ReconstructOrder(oID, userID, eventID, quantity, s, createdAt))
 	}
 
 	if err := rows.Err(); err != nil {
@@ -226,15 +239,17 @@ func (r *postgresOutboxRepository) getExecutor(ctx context.Context) DBExecutor {
 	return r.db
 }
 
-func (r *postgresOutboxRepository) Create(ctx context.Context, event *domain.OutboxEvent) error {
+func (r *postgresOutboxRepository) Create(ctx context.Context, event domain.OutboxEvent) (domain.OutboxEvent, error) {
 	query := "INSERT INTO events_outbox (event_type, payload, status) VALUES ($1, $2, $3) RETURNING id"
-	if err := r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&event.ID); err != nil {
-		return fmt.Errorf("outboxRepository.Create type=%s: %w", event.EventType, err)
+	var id int
+	if err := r.getExecutor(ctx).QueryRowContext(ctx, query, event.EventType, event.Payload, event.Status).Scan(&id); err != nil {
+		return domain.OutboxEvent{}, fmt.Errorf("outboxRepository.Create type=%s: %w", event.EventType, err)
 	}
-	return nil
+	event.ID = id
+	return event, nil
 }
 
-func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
+func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {
 	query := `SELECT id, event_type, payload, status FROM events_outbox
 	          WHERE processed_at IS NULL
 	          ORDER BY id ASC
@@ -245,9 +260,9 @@ func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) (
 	}
 	defer func() { _ = rows.Close() }()
 
-	var events []*domain.OutboxEvent
+	var events []domain.OutboxEvent
 	for rows.Next() {
-		e := &domain.OutboxEvent{}
+		var e domain.OutboxEvent
 		if err := rows.Scan(&e.ID, &e.EventType, &e.Payload, &e.Status); err != nil {
 			return nil, fmt.Errorf("outboxRepository.ListPending scan: %w", err)
 		}

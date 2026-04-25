@@ -99,7 +99,16 @@ func NewOrderFailedOutbox(payload []byte) OutboxEvent {
 }
 
 type OutboxRepository interface {
-	Create(ctx context.Context, event *OutboxEvent) error
-	ListPending(ctx context.Context, limit int) ([]*OutboxEvent, error)
+	// Create persists the outbox event and returns a new OutboxEvent
+	// with the repo-assigned ID populated. Value-in / value-out for
+	// the same reason as OrderRepository.Create — the caller's input
+	// is never mutated.
+	Create(ctx context.Context, event OutboxEvent) (OutboxEvent, error)
+
+	// ListPending returns up to `limit` outbox rows whose
+	// processed_at IS NULL, ordered by id ascending so older events
+	// publish first. Empty result is a nil slice (not an error).
+	ListPending(ctx context.Context, limit int) ([]OutboxEvent, error)
+
 	MarkProcessed(ctx context.Context, id int) error
 }

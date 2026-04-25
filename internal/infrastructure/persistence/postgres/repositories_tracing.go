@@ -124,21 +124,21 @@ func NewOrderRepositoryTracingDecorator(next domain.OrderRepository) domain.Orde
 	return &orderRepositoryTracingDecorator{next: next}
 }
 
-func (d *orderRepositoryTracingDecorator) Create(ctx context.Context, order *domain.Order) error {
+func (d *orderRepositoryTracingDecorator) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "CreateOrder", trace.WithAttributes(
 		attribute.Int("user_id", order.UserID),
 		attribute.Int("event_id", order.EventID),
 	))
 	defer span.End()
 
-	err := d.next.Create(ctx, order)
+	created, err := d.next.Create(ctx, order)
 	if err != nil {
 		span.RecordError(err)
 	}
-	return err
+	return created, err
 }
 
-func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (*domain.Order, error) {
+func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (domain.Order, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetOrderByID", trace.WithAttributes(
 		attribute.Int("order_id", id),
 	))
@@ -151,7 +151,7 @@ func (d *orderRepositoryTracingDecorator) GetByID(ctx context.Context, id int) (
 	return order, err
 }
 
-func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "ListOrders", trace.WithAttributes(
 		attribute.Int("limit", limit),
 		attribute.Int("offset", offset),

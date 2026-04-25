@@ -11,7 +11,7 @@ const tracerName = "application/service"
 
 type BookingService interface {
 	BookTicket(ctx context.Context, userID, eventID, quantity int) error
-	GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error)
+	GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error)
 }
 
 type bookingService struct {
@@ -30,7 +30,7 @@ func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderR
 	}
 }
 
-func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (s *bookingService) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	if page < 1 {
 		page = 1
 	}
