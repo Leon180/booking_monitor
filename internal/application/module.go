@@ -39,6 +39,14 @@ var Module = fx.Module("application",
 	),
 	// WorkerService is provided as:
 	//   base MessageProcessor -> metrics decorator -> WorkerService
+	//
+	// Future tracing decorator (see BookingServiceTracingDecorator for
+	// the pattern) MUST sit between metrics and WorkerService:
+	//   base -> metrics -> tracing -> WorkerService
+	// so that tracing spans wrap the metrics work too. Reversing the
+	// order would either double-count metrics inside spans or hide
+	// span timing inside the metrics histogram.
+	//
 	// The processor chain is wrapped once here so every code path that
 	// resolves a WorkerService gets the decorated chain. Keeping the
 	// composition inline (not a free-floating fx.Provide of
