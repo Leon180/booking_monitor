@@ -1,12 +1,109 @@
 package domain_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"booking_monitor/internal/domain"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestNewOrderCreatedOutbox(t *testing.T) {
+	t.Parallel()
+	payload, _ := json.Marshal(map[string]int{"order_id": 1})
+
+	got := domain.NewOrderCreatedOutbox(payload)
+
+	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType)
+	assert.Equal(t, domain.OutboxStatusPending, got.Status)
+	assert.Equal(t, payload, got.Payload)
+	assert.Equal(t, 0, got.ID, "ID is repo-assigned")
+	assert.Nil(t, got.ProcessedAt)
+}
+
+func TestNewOrderFailedOutbox(t *testing.T) {
+	t.Parallel()
+	payload, _ := json.Marshal(map[string]int{"order_id": 1})
+
+	got := domain.NewOrderFailedOutbox(payload)
+
+	assert.Equal(t, domain.EventTypeOrderFailed, got.EventType)
+	assert.Equal(t, domain.OutboxStatusPending, got.Status)
+	assert.Equal(t, payload, got.Payload)
+	assert.Equal(t, 0, got.ID)
+	assert.Nil(t, got.ProcessedAt)
+}
+
+// TestEventTypeConstantsAreStable pins the wire format of the outbox
+// event-type constants. The factories above use these constants, so
+// renaming the const to a different string would silently break every
+// downstream consumer (Kafka subscribers / saga compensator). Keep
+// this test passing or coordinate the rename across all consumers.
+func TestEventTypeConstantsAreStable(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "order.created", domain.EventTypeOrderCreated)
+	assert.Equal(t, "order.failed", domain.EventTypeOrderFailed)
+	assert.Equal(t, "PENDING", domain.OutboxStatusPending)
+}
+
+func TestNewEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		eventName    string
+		totalTickets int
+		wantErr      error
+	}{
+		{name: "Valid", eventName: "Concert", totalTickets: 100},
+		{name: "Trims whitespace then validates", eventName: "  Show  ", totalTickets: 1},
+		{name: "Empty name rejected", eventName: "", totalTickets: 100, wantErr: domain.ErrInvalidEventName},
+		{name: "Whitespace-only name rejected", eventName: "   ", totalTickets: 100, wantErr: domain.ErrInvalidEventName},
+		{name: "Zero total tickets rejected", eventName: "Concert", totalTickets: 0, wantErr: domain.ErrInvalidTotalTickets},
+		{name: "Negative total tickets rejected", eventName: "Concert", totalTickets: -5, wantErr: domain.ErrInvalidTotalTickets},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := domain.NewEvent(tt.eventName, tt.totalTickets)
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				assert.Equal(t, domain.Event{}, got, "invalid input must return zero Event")
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.eventName, got.Name)
+			assert.Equal(t, tt.totalTickets, got.TotalTickets)
+			assert.Equal(t, tt.totalTickets, got.AvailableTickets,
+				"new events must start with AvailableTickets == TotalTickets")
+			assert.Equal(t, 0, got.ID, "ID is repo-assigned, must be zero at construction")
+			assert.Equal(t, 0, got.Version, "Version starts at 0")
+		})
+	}
+}
+
+func TestReconstructEvent_BypassesInvariants(t *testing.T) {
+	t.Parallel()
+
+	// ReconstructEvent must accept any persisted state, including
+	// values NewEvent would reject (e.g. AvailableTickets = 0 for
+	// a sold-out event, empty-name for a row predating an invariant
+	// tightening). The repository is the source of truth for
+	// rehydration; invariants only apply at create-time.
+	got := domain.ReconstructEvent(42, "", 0, 0, 7)
+
+	assert.Equal(t, 42, got.ID)
+	assert.Equal(t, "", got.Name, "Reconstruct should not validate name")
+	assert.Equal(t, 0, got.TotalTickets, "Reconstruct should not validate totals")
+	assert.Equal(t, 0, got.AvailableTickets)
+	assert.Equal(t, 7, got.Version)
+}
 
 func TestEvent_Deduct(t *testing.T) {
 	t.Parallel()
@@ -52,7 +149,13 @@ func TestEvent_Deduct(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			event := &domain.Event{AvailableTickets: tt.initialTickets}
+			// Use ReconstructEvent (not NewEvent) because the test
+			// drives Deduct against arbitrary AvailableTickets values
+			// — including the "exact amount" / "sold out" boundary
+			// cases that NewEvent's invariants would reject. The
+			// repo-bypass contract on ReconstructEvent fits exactly.
+			ev := domain.ReconstructEvent(0, "test event", tt.initialTickets, tt.initialTickets, 0)
+			event := &ev
 			next, err := event.Deduct(tt.deductAmount)
 
 			if tt.expectedError != nil {

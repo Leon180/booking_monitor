@@ -38,7 +38,7 @@ type bookRequest struct {
 }
 
 type listBookingsResponse struct {
-	Data []*domain.Order `json:"data"`
+	Data []domain.Order `json:"data"`
 	Meta meta            `json:"meta"`
 }
 

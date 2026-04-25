@@ -33,7 +33,7 @@ func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID,
 	return err
 }
 
-func (s *bookingServiceTracingDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (s *bookingServiceTracingDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetBookingHistory", trace.WithAttributes(
 		attribute.Int("page", page),
 		attribute.Int("page_size", pageSize),

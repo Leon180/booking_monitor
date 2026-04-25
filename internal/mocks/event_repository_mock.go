@@ -166,11 +166,12 @@ func (m *MockOutboxRepository) EXPECT() *MockOutboxRepositoryMockRecorder {
 }
 
 // Create mocks base method.
-func (m *MockOutboxRepository) Create(ctx context.Context, event *domain.OutboxEvent) error {
+func (m *MockOutboxRepository) Create(ctx context.Context, event domain.OutboxEvent) (domain.OutboxEvent, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Create", ctx, event)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(domain.OutboxEvent)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // Create indicates an expected call of Create.
@@ -180,10 +181,10 @@ func (mr *MockOutboxRepositoryMockRecorder) Create(ctx, event any) *gomock.Call 
 }
 
 // ListPending mocks base method.
-func (m *MockOutboxRepository) ListPending(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
+func (m *MockOutboxRepository) ListPending(ctx context.Context, limit int) ([]domain.OutboxEvent, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListPending", ctx, limit)
-	ret0, _ := ret[0].([]*domain.OutboxEvent)
+	ret0, _ := ret[0].([]domain.OutboxEvent)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

@@ -7,6 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"booking_monitor/internal/domain"
 )
 
 var (
@@ -187,15 +189,22 @@ func init() {
 	for _, status := range []string{"success", "sold_out", "duplicate", "error"} {
 		BookingsTotal.WithLabelValues(status)
 	}
-	for _, status := range []string{"success", "sold_out", "duplicate", "db_error"} {
+	for _, status := range []string{"success", "sold_out", "duplicate", "db_error", "malformed_message"} {
 		WorkerOrdersTotal.WithLabelValues(status)
 	}
+	// DLQ topic labels stay inline strings — they're Kafka-side topic
+	// names (with the .dlq suffix) and have no domain-side constant.
+	// If those move to domain consts in a future PR, update here too.
 	for _, topic := range []string{"order.created.dlq", "order.failed.dlq"} {
 		for _, reason := range []string{"invalid_payload", "invalid_event", "max_retries"} {
 			DLQMessagesTotal.WithLabelValues(topic, reason)
 		}
 	}
-	for _, topic := range []string{"order.created", "order.failed"} {
+	// Use the domain constants for the canonical wire event types so
+	// a typo here can't drift from the producer side. The consumer
+	// retry counter watches the same topic strings the producer
+	// publishes via the outbox.
+	for _, topic := range []string{domain.EventTypeOrderCreated, domain.EventTypeOrderFailed} {
 		KafkaConsumerRetryTotal.WithLabelValues(topic, "transient_processing_error")
 	}
 	// Pre-warm the DLQ stream label so it appears in /metrics at startup.

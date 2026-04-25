@@ -93,12 +93,8 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 				return marshalErr
 			}
 
-			outboxEvent := &domain.OutboxEvent{
-				EventType: domain.EventTypeOrderFailed,
-				Payload:   payload,
-				Status:    domain.OutboxStatusPending,
-			}
-			return s.outboxRepo.Create(txCtx, outboxEvent)
+			_, err := s.outboxRepo.Create(txCtx, domain.NewOrderFailedOutbox(payload))
+			return err
 		})
 		if errUow != nil {
 			s.log.Error(ctx, "Failed to save saga compensating event",

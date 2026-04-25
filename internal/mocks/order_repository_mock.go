@@ -42,11 +42,12 @@ func (m *MockOrderRepository) EXPECT() *MockOrderRepositoryMockRecorder {
 }
 
 // Create mocks base method.
-func (m *MockOrderRepository) Create(ctx context.Context, order *domain.Order) error {
+func (m *MockOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Create", ctx, order)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(domain.Order)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // Create indicates an expected call of Create.
@@ -56,10 +57,10 @@ func (mr *MockOrderRepositoryMockRecorder) Create(ctx, order any) *gomock.Call {
 }
 
 // GetByID mocks base method.
-func (m *MockOrderRepository) GetByID(ctx context.Context, id int) (*domain.Order, error) {
+func (m *MockOrderRepository) GetByID(ctx context.Context, id int) (domain.Order, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByID", ctx, id)
-	ret0, _ := ret[0].(*domain.Order)
+	ret0, _ := ret[0].(domain.Order)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -71,10 +72,10 @@ func (mr *MockOrderRepositoryMockRecorder) GetByID(ctx, id any) *gomock.Call {
 }
 
 // ListOrders mocks base method.
-func (m *MockOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (m *MockOrderRepository) ListOrders(ctx context.Context, limit, offset int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListOrders", ctx, limit, offset, status)
-	ret0, _ := ret[0].([]*domain.Order)
+	ret0, _ := ret[0].([]domain.Order)
 	ret1, _ := ret[1].(int)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2

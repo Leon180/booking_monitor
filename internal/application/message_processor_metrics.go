@@ -45,6 +45,15 @@ func (d *messageProcessorMetricsDecorator) Process(ctx context.Context, msg *dom
 		d.metrics.RecordOrderOutcome("sold_out")
 	case errors.Is(err, domain.ErrUserAlreadyBought):
 		d.metrics.RecordOrderOutcome("duplicate")
+	case errors.Is(err, domain.ErrInvalidUserID),
+		errors.Is(err, domain.ErrInvalidEventID),
+		errors.Is(err, domain.ErrInvalidQuantity):
+		// Malformed queue message — invariant violation caught by
+		// NewOrder. Distinct from "db_error" because operators see
+		// these as a permanent dead-letter signal (no amount of PEL
+		// retry will heal a UserID=0 message), whereas "db_error"
+		// implies "transient downstream issue, will recover".
+		d.metrics.RecordOrderOutcome("malformed_message")
 	default:
 		d.metrics.RecordOrderOutcome("db_error")
 	}

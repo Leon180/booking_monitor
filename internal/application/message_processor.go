@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -53,8 +52,21 @@ func NewOrderMessageProcessor(
 // Returns raw domain errors so decorators (metrics, tracing) can
 // classify outcome via errors.Is. Callers that need to know outcome
 // category should NOT parse the error string — use errors.Is against
-// domain.ErrSoldOut / domain.ErrUserAlreadyBought.
+// domain.ErrSoldOut / domain.ErrUserAlreadyBought / domain.ErrInvalid*.
 func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMessage) error {
+	// Validate BEFORE opening a tx. A malformed queue message will
+	// never become valid via PEL retry — failing fast saves a DB
+	// transaction and lets the metrics decorator classify it as
+	// "malformed_message" instead of "db_error". The Redis-side
+	// inventory revert still happens on the worker's compensation
+	// path (handleFailure -> RevertInventory).
+	newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+	if err != nil {
+		p.logger.Error(ctx, "Malformed order message",
+			tag.MsgID(msg.ID), tag.Error(err))
+		return err
+	}
+
 	return p.uow.Do(ctx, func(txCtx context.Context) error {
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
@@ -70,15 +82,8 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 			return err
 		}
 
-		order := &domain.Order{
-			UserID:    msg.UserID,
-			EventID:   msg.EventID,
-			Quantity:  msg.Quantity,
-			Status:    domain.OrderStatusPending,
-			CreatedAt: time.Now(),
-		}
-
-		if err := p.orderRepo.Create(txCtx, order); err != nil {
+		created, err := p.orderRepo.Create(txCtx, newOrder)
+		if err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
 				p.logger.Warn(txCtx, "Duplicate purchase blocked by DB constraint",
 					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
@@ -90,30 +95,24 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		}
 
 		// Outbox pattern. Marshal errors are theoretical for the
-		// current *domain.Order shape (ints, string, time.Time, enum)
-		// but we still surface them so a future field addition can't
+		// current Order shape (ints, string, time.Time, enum) but
+		// we still surface them so a future field addition can't
 		// ship a silent nil-payload outbox row.
-		payload, err := json.Marshal(order)
+		payload, err := json.Marshal(created)
 		if err != nil {
 			p.logger.Error(txCtx, "Failed to marshal order for outbox",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
 
-		outboxEvent := &domain.OutboxEvent{
-			EventType: "order.created",
-			Payload:   payload,
-			Status:    "PENDING",
-		}
-
-		if err := p.outboxRepo.Create(txCtx, outboxEvent); err != nil {
+		if _, err := p.outboxRepo.Create(txCtx, domain.NewOrderCreatedOutbox(payload)); err != nil {
 			p.logger.Error(txCtx, "Failed to create outbox event",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
 
 		p.logger.Info(txCtx, "Order processed successfully with Outbox",
-			tag.MsgID(msg.ID), tag.OrderID(order.ID))
+			tag.MsgID(msg.ID), tag.OrderID(created.ID))
 		return nil
 	})
 }

@@ -37,6 +37,6 @@ func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID,
 	return err
 }
 
-func (d *bookingServiceMetricsDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]*domain.Order, int, error) {
+func (d *bookingServiceMetricsDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	return d.next.GetBookingHistory(ctx, page, pageSize, status)
 }

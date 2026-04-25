@@ -40,6 +40,80 @@ func NewUserService(repo UserRepository, logger Logger) *UserService {
 }
 ```
 
+## Entity Factory + Reconstructor
+
+For domain entities (under `internal/domain/`), pair every entity
+with three things: a `NewX` factory, a `ReconstructX` rehydration
+helper, and immutable `WithX` transition methods.
+
+```go
+// internal/domain/order.go
+
+var (
+    ErrInvalidUserID   = errors.New("order user_id must be positive")
+    ErrInvalidEventID  = errors.New("order event_id must be positive")
+    ErrInvalidQuantity = errors.New("order quantity must be positive")
+)
+
+// NewOrder validates invariants and returns a fresh Pending order.
+// ID + CreatedAt are repo-assigned (RETURNING id, created_at), so they
+// stay zero here.
+func NewOrder(userID, eventID, quantity int) (Order, error) {
+    if userID <= 0   { return Order{}, ErrInvalidUserID }
+    if eventID <= 0  { return Order{}, ErrInvalidEventID }
+    if quantity <= 0 { return Order{}, ErrInvalidQuantity }
+    return Order{
+        UserID: userID, EventID: eventID, Quantity: quantity,
+        Status: OrderStatusPending,
+    }, nil
+}
+
+// ReconstructOrder rehydrates from a persisted row. Skips validation
+// because the row was already validated at insert time. Use ONLY
+// from repository scan code.
+func ReconstructOrder(id, userID, eventID, quantity int, status OrderStatus, createdAt time.Time) Order {
+    return Order{ID: id, UserID: userID, EventID: eventID, Quantity: quantity, Status: status, CreatedAt: createdAt}
+}
+
+// WithStatus is an immutable transition — value receiver, returns a
+// new Order. The original is never mutated.
+func (o Order) WithStatus(s OrderStatus) Order {
+    o.Status = s
+    return o
+}
+```
+
+For events / messages with a small set of well-known types, pair the
+type constant with a typed factory so callers don't spell the wire
+string at all:
+
+```go
+const EventTypeOrderCreated = "order.created"
+const OutboxStatusPending   = "PENDING"
+
+func NewOrderCreatedOutbox(payload []byte) OutboxEvent {
+    return OutboxEvent{
+        EventType: EventTypeOrderCreated,
+        Payload:   payload,
+        Status:    OutboxStatusPending,
+    }
+}
+```
+
+Application-layer call sites become:
+
+```go
+order, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+if err != nil { return err }   // DLQ via worker classifier
+// ... persist via repo
+
+outboxEvent := domain.NewOrderCreatedOutbox(payload)
+if err := s.outboxRepo.Create(ctx, outboxEvent); err != nil { return err }
+```
+
+— no `&domain.Order{...}` literals, no inline `"order.created"`
+string, no possibility of a typo at the call site.
+
 ## Reference
 
 See skill: `golang-patterns` for comprehensive Go patterns including concurrency, error handling, and package organization.
