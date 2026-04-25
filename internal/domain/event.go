@@ -13,8 +13,17 @@ var (
 )
 
 const (
-	EventTypeOrderFailed = "order.failed"
-	OutboxStatusPending  = "PENDING"
+	// EventTypeOrderCreated / EventTypeOrderFailed are the canonical
+	// outbox event_type values. Hardcoding these strings at call sites
+	// is a typo waiting to happen — use the constants and the
+	// `New*Outbox` factories below.
+	EventTypeOrderCreated = "order.created"
+	EventTypeOrderFailed  = "order.failed"
+
+	// OutboxStatusPending is the initial status assigned by every
+	// New*Outbox factory; the OutboxRelay flips rows to PROCESSED
+	// after publish.
+	OutboxStatusPending = "PENDING"
 )
 
 type Event struct {
@@ -65,6 +74,28 @@ type OutboxEvent struct {
 	Payload     []byte // JSON
 	Status      string
 	ProcessedAt *time.Time
+}
+
+// NewOrderCreatedOutbox constructs a pending outbox event for an
+// `order.created` payload. Centralises the EventType + Status
+// defaults so a typo at a call site can't ship a row that the
+// OutboxRelay then can't classify.
+func NewOrderCreatedOutbox(payload []byte) OutboxEvent {
+	return OutboxEvent{
+		EventType: EventTypeOrderCreated,
+		Payload:   payload,
+		Status:    OutboxStatusPending,
+	}
+}
+
+// NewOrderFailedOutbox constructs a pending outbox event for an
+// `order.failed` payload (saga compensation trigger).
+func NewOrderFailedOutbox(payload []byte) OutboxEvent {
+	return OutboxEvent{
+		EventType: EventTypeOrderFailed,
+		Payload:   payload,
+		Status:    OutboxStatusPending,
+	}
 }
 
 type OutboxRepository interface {

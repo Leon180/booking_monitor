@@ -1,12 +1,41 @@
 package domain_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"booking_monitor/internal/domain"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestNewOrderCreatedOutbox(t *testing.T) {
+	t.Parallel()
+	payload, _ := json.Marshal(map[string]int{"order_id": 1})
+
+	got := domain.NewOrderCreatedOutbox(payload)
+
+	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType)
+	assert.Equal(t, "order.created", got.EventType, "EventType const must match the wire string consumers expect")
+	assert.Equal(t, domain.OutboxStatusPending, got.Status)
+	assert.Equal(t, payload, got.Payload)
+	assert.Equal(t, 0, got.ID, "ID is repo-assigned")
+	assert.Nil(t, got.ProcessedAt)
+}
+
+func TestNewOrderFailedOutbox(t *testing.T) {
+	t.Parallel()
+	payload, _ := json.Marshal(map[string]int{"order_id": 1})
+
+	got := domain.NewOrderFailedOutbox(payload)
+
+	assert.Equal(t, domain.EventTypeOrderFailed, got.EventType)
+	assert.Equal(t, "order.failed", got.EventType)
+	assert.Equal(t, domain.OutboxStatusPending, got.Status)
+	assert.Equal(t, payload, got.Payload)
+	assert.Equal(t, 0, got.ID)
+	assert.Nil(t, got.ProcessedAt)
+}
 
 func TestEvent_Deduct(t *testing.T) {
 	t.Parallel()
