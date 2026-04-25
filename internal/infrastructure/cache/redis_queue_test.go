@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
@@ -22,7 +23,7 @@ func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
 
 	ctx := context.Background()
 
@@ -51,7 +52,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// No mock needed for happy path
 	// Setup Config
 	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg, application.NoopQueueMetrics())
 	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
@@ -108,7 +109,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -147,7 +148,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}})
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -37,9 +37,22 @@ var Module = fx.Module("application",
 		NewOutboxRelay,
 		NewSagaCompensator,
 	),
-	// WorkerService is provided similarly — wrap with metrics at the
-	// provide site so any future external consumer gets the decorated
-	// instance.
+	// WorkerService is provided as:
+	//   base MessageProcessor -> metrics decorator -> WorkerService
+	//
+	// Future tracing decorator (see BookingServiceTracingDecorator for
+	// the pattern) MUST sit between metrics and WorkerService:
+	//   base -> metrics -> tracing -> WorkerService
+	// so that tracing spans wrap the metrics work too. Reversing the
+	// order would either double-count metrics inside spans or hide
+	// span timing inside the metrics histogram.
+	//
+	// The processor chain is wrapped once here so every code path that
+	// resolves a WorkerService gets the decorated chain. Keeping the
+	// composition inline (not a free-floating fx.Provide of
+	// MessageProcessor) avoids publishing the base processor into the
+	// fx graph where a future consumer could accidentally depend on
+	// the undecorated instance and skip metrics.
 	fx.Provide(
 		func(
 			queue domain.OrderQueue,
@@ -50,8 +63,9 @@ var Module = fx.Module("application",
 			metrics WorkerMetrics,
 			logger *mlog.Logger,
 		) WorkerService {
-			base := NewWorkerService(queue, orderRepo, eventRepo, outboxRepo, uow, metrics, logger)
-			return NewWorkerServiceMetricsDecorator(base)
+			base := NewOrderMessageProcessor(orderRepo, eventRepo, outboxRepo, uow, logger)
+			processor := NewMessageProcessorMetricsDecorator(base, metrics)
+			return NewWorkerService(queue, processor, logger)
 		},
 	),
 	// Start the outbox relay (with tracing) as a background goroutine managed by the Fx lifecycle.

@@ -45,7 +45,7 @@ Happy path 與 failure path 都從同一個 `POST /api/v1/book` 呼叫開始,在
 |---|------|------|-------------|------|---------|
 | 1 | Gin API handler(`/api/v1/book`) | 使用者請求 | Redis(idempotency key,24 小時 TTL) | 先查 `Idempotency-Key` header,命中就把之前快取的 2xx/4xx/5xx body 原封不動回傳,跳過後續步驟 | Body 缺漏/格式錯 → 400 `"invalid request body"`;`mapError` 會把任何下游錯誤 sanitize |
 | 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis 透過 `deduct.lua`(原子性) | `DECRBY event:{id}:qty`:`>= 0` 就順便 `XADD orders:stream` 並回 200;`< 0` 就 `INCRBY` 還原,回 409 `sold out` | API 在 Redis 一成功就 return — 訂單**還沒真正寫入 DB**,只是進了 queue |
-| 3 | `WorkerService.processMessage`(`orders:stream` 上的 consumer group) | Stream 訊息 | PostgreSQL(單一 UoW 交易) | `DecrementTicket`(DB 上的 row-level 二次驗證,抓 Redis/DB drift)→ `orderRepo.Create`(UNIQUE 部分索引擋重複購票)→ `outboxRepo.Create(event_type="order.created")` — **三步在同一個交易裡** | `DecrementTicket` 拒絕 → 還原 Redis + ACK(記錄 inventory conflict metric);`orderRepo.Create` 遇到 `ErrUserAlreadyBought` → 還原 Redis + ACK(記錄 duplicate);其他錯誤 → 不 ACK,`processWithRetry` 跑 3 次,之後進 DLQ(`orders:dlq`)並還原 Redis |
+| 3 | `WorkerService` → `MessageProcessor.Process`(`orders:stream` 上的 consumer group) | Stream 訊息 | PostgreSQL(單一 UoW 交易) | `DecrementTicket`(DB 上的 row-level 二次驗證,抓 Redis/DB drift)→ `orderRepo.Create`(UNIQUE 部分索引擋重複購票)→ `outboxRepo.Create(event_type="order.created")` — **三步在同一個交易裡** | `DecrementTicket` 拒絕 → 還原 Redis + ACK(記錄 inventory conflict metric);`orderRepo.Create` 遇到 `ErrUserAlreadyBought` → 還原 Redis + ACK(記錄 duplicate);其他錯誤 → 不 ACK,`processWithRetry` 跑 3 次,之後進 DLQ(`orders:dlq`)並還原 Redis |
 | 4 | `OutboxRelay`(背景 goroutine,透過 Postgres advisory lock 1001 選出唯一 leader) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL(讀 + 更新)→ Kafka topic `order.created` | 每 500ms 輪詢一次(部分索引 `events_outbox_pending_idx` 涵蓋此 query),每個 tick 最多發 100 筆,發完再 `UPDATE processed_at = NOW()`。Publish 失敗 → 跳過 `MarkProcessed`,下一個 tick 重發。Publish 成功但 `MarkProcessed` 失敗 → 下一個 tick 會再發一次,consumer **必須**做到 idempotent | Leader crash → advisory lock 自動釋放(session-bound)→ 某個 standby 下一個 tick 接手 |
 | 5 | `KafkaConsumer` → `PaymentService.ProcessOrder` | `OrderCreatedEvent` | Redis(以 `orderRepo.GetByID` → 檢查狀態的方式做 idempotency)→ `PaymentGateway.Charge` → PostgreSQL(更新狀態) | 訂單狀態若已是 `confirmed`/`failed`/`compensated` → 直接跳過(idempotent)。否則呼叫 mock gateway 扣款,成功就 `UPDATE orders SET status='confirmed'`,並 commit Kafka offset | 無法解析 JSON / `ErrInvalidPaymentEvent` → 寫到 `order.created.dlq`(帶 provenance headers)並 commit offset。短暫 DB/Redis 錯誤 → 不 commit,讓 Kafka rebalance 重送 |
 
@@ -325,6 +325,10 @@ Prometheus metrics 端點。
 | `dlq_messages_total` | Counter(`topic`, `reason`) | 寫入 DLQ 的訊息數。預先初始化的 label 涵蓋 `order.created.dlq` 與 `order.failed.dlq`,reason 包含 `invalid_payload`、`invalid_event`、`max_retries` |
 | `saga_poison_messages_total` | Counter | Saga 事件在超過 `sagaMaxRetries` 後被 dead-letter 的次數 |
 | `kafka_consumer_retry_total` | Counter(`topic`, `reason`) | 因為下游短暫錯誤而故意**不 commit**、留給 Kafka rebalance 重送的訊息數。故意**不**進 DLQ(那會在 DB 小抖動時誤傷已經付款的訂單,造成超賣)。配套的 `KafkaConsumerStuck` 告警會監控這個指標 — 持續非零率就代表某個下游依賴正在降級 |
+| `db_rollback_failures_total` | Counter | `tx.Rollback()` 回傳非 `sql.ErrTxDone` 的錯誤。`ErrTxDone` 是預期狀態(驅動在遇到 fatal error 後已自行關閉 tx),在呼叫端會過濾掉;其他類型的 rollback 失敗代表 tx 可能還掛著或連線被污染 |
+| `redis_xack_failures_total` | Counter | Redis `XAck` 對已成功處理的訊息失敗 — 訊息會留在 PEL 等下次重送。這個計數器是「可能發生重複處理」的唯一先行訊號 |
+| `redis_xadd_failures_total` | Counter(`stream`) | Redis `XAdd` 失敗,依目標 stream 分 label。目前只有 DLQ stream(`stream="dlq"`)會從 Go 寫入;label 保留是為了未來擴充主 stream 寫入者 |
+| `redis_revert_failures_total` | Counter | Worker `handleFailure` 呼叫 `RevertInventory` 失敗 — 訊息留在 PEL 等下次 PEL reclaim 重試。非零速率代表 Redis 庫存正在跟 DB 產生漂移 |
 
 **告警(`deploy/prometheus/alerts.yml`):**
 
@@ -334,7 +338,7 @@ Prometheus metrics 端點。
 - `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1`,持續 2m。與 `kafka_consumer_retry_total` 計數器配對使用的契約:當下游短暫錯誤造成持續 rebalance retry 時,這個告警會觸發,讓 oncall 去查**下游基礎設施**(DB / Redis / payment gateway),**不是** consumer 本身。Consumer 是按設計運作的;告警存在的目的是讓「卡住但沒死」這個狀態能被 operator 看到,而不需要靠 dead-letter 正在處理中的訂單來製造可見度。
 
 ### 分散式追蹤(OpenTelemetry + Jaeger)
-- Decorator 模式:`BookingServiceTracingDecorator`, `WorkerServiceMetricsDecorator`, `OutboxRelayTracingDecorator`
+- Decorator 模式:`BookingServiceTracingDecorator`, `MessageProcessorMetricsDecorator`, `OutboxRelayTracingDecorator`
 - `OutboxRelayTracingDecorator` 現在會在批次失敗時呼叫 `span.RecordError` + `span.SetStatus(codes.Error)` — 舊版 span 永遠是 OK
 - `api/handler_tracing.go` 用共用的 `recordHTTPResult(span, status)` helper,對**所有** status >= 400 都會 set `span.status = Error`(不只是 5xx),這樣 4xx client 錯誤也能在 Jaeger 搜尋中浮現
 - GRPC exporter 連至 Jaeger(port 4317)
@@ -494,17 +498,22 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `internal/domain/payment.go` | PaymentGateway + PaymentService 介面 |
 | `internal/domain/lock.go` | DistributedLock 介面 |
 | `internal/domain/idempotency.go` | IdempotencyRepository 介面 |
-| `internal/domain/worker_metrics.go` | WorkerMetrics 介面 |
 | `internal/domain/uow.go` | UnitOfWork 介面 |
 
 ### Application Services
 | 檔案 | 用途 |
 |------|------|
 | `internal/application/booking_service.go` | 訂票主邏輯(Redis 扣減) |
-| `internal/application/worker_service.go` | 從 stream 讀取訂單的背景處理 |
+| `internal/application/worker_service.go` | Queue 生命週期(EnsureGroup、Subscribe、ctx 處理);每則訊息的實際處理委派給已被 decorate 的 MessageProcessor |
+| `internal/application/message_processor.go` | `MessageProcessor` 介面 + 基底實作(DB 交易:DecrementTicket → orderRepo.Create → outbox.Create)。從 worker_service 拆出來,讓 metrics / tracing 可以作為真正的 decorator 疊在外面 |
+| `internal/application/message_processor_metrics.go` | Metrics decorator:透過 `errors.Is` 分類錯誤,發送 `worker_orders_total` / `worker_processing_duration_seconds` / `inventory_conflicts_total` 指標 |
 | `internal/application/outbox_relay.go` | Outbox 發布至 Kafka |
 | `internal/application/saga_compensator.go` | 付款失敗補償 |
 | `internal/application/payment/service.go` | 付款處理邏輯 |
+| `internal/application/worker_metrics.go` | WorkerMetrics port |
+| `internal/application/booking_metrics.go` | BookingMetrics port |
+| `internal/application/db_metrics.go` | DBMetrics port(rollback 失敗計數器) |
+| `internal/application/queue_metrics.go` | QueueMetrics port(XAck / XAdd / Revert 失敗計數器) |
 
 ### Infrastructure
 | 檔案 | 用途 |
@@ -523,7 +532,11 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `internal/infrastructure/messaging/kafka_publisher.go` | Kafka publisher |
 | `internal/infrastructure/messaging/kafka_consumer.go` | Payment Kafka consumer |
 | `internal/infrastructure/messaging/saga_consumer.go` | Saga Kafka consumer |
-| `internal/infrastructure/observability/metrics.go` | Prometheus metrics 設定 |
+| `internal/infrastructure/observability/metrics.go` | Prometheus counter / histogram 定義(由所有 `*_metrics.go` 實作共用) |
+| `internal/infrastructure/observability/worker_metrics.go` | `application.WorkerMetrics` 的 Prometheus 實作 |
+| `internal/infrastructure/observability/booking_metrics.go` | `application.BookingMetrics` 的 Prometheus 實作 |
+| `internal/infrastructure/observability/db_metrics.go` | `application.DBMetrics` 的 Prometheus 實作 |
+| `internal/infrastructure/observability/queue_metrics.go` | `application.QueueMetrics` 的 Prometheus 實作 |
 | `internal/infrastructure/config/config.go` | YAML config + 環境變數 override |
 | `internal/infrastructure/payment/mock_gateway.go` | Mock 付款閘道 |
 

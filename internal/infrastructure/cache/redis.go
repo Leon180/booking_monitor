@@ -13,6 +13,7 @@ import (
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 	_ "embed"
@@ -36,12 +37,18 @@ var argsPool = sync.Pool{
 	},
 }
 
-// Module provides the Redis client and InventoryRepository.
+// Module provides the Redis client and the cache-backed
+// implementations (inventory, order queue, idempotency). It also
+// provides the QueueMetrics impl so the metrics provider always
+// travels with the queue consumer that needs it — including
+// cache.Module without the matching observability provider would
+// otherwise fail at fx startup, not at compile time.
 var Module = fx.Options(
 	fx.Provide(NewRedisClient),
 	fx.Provide(NewRedisInventoryRepository),
 	fx.Provide(NewRedisOrderQueue),
 	fx.Provide(NewRedisIdempotencyRepository),
+	fx.Provide(observability.NewQueueMetrics),
 )
 
 type redisInventoryRepository struct {
