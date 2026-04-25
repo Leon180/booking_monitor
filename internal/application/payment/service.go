@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -80,21 +79,19 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 				return updateErr
 			}
 
-			failedEvent := &domain.OrderFailedEvent{
-				EventID:  event.EventID,
-				OrderID:  event.OrderID,
-				UserID:   event.UserID,
-				Quantity: event.Quantity,
-				FailedAt: time.Now(),
-				Reason:   err.Error(),
-			}
+			// Map directly off the inbound OrderCreatedEvent — payment
+			// service consumes an event from Kafka, it doesn't have a
+			// fresh domain.Order at hand. NewOrderFailedEvent lives
+			// next to OrderCreatedEvent so the messaging contract is
+			// in one place (see internal/domain/order_events.go).
+			failedEvent := domain.NewOrderFailedEvent(*event, err.Error())
 			payload, marshalErr := json.Marshal(failedEvent)
 			if marshalErr != nil {
 				return marshalErr
 			}
 
-			_, err := s.outboxRepo.Create(txCtx, domain.NewOrderFailedOutbox(payload))
-			return err
+			_, createErr := s.outboxRepo.Create(txCtx, domain.NewOrderFailedOutbox(payload))
+			return createErr
 		})
 		if errUow != nil {
 			s.log.Error(ctx, "Failed to save saga compensating event",
