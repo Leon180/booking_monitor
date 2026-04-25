@@ -32,13 +32,6 @@ type orderRow struct {
 // because the parameter list shape differs.
 const orderColumns = "id, event_id, user_id, quantity, status, created_at"
 
-// rowScanner abstracts *sql.Row and *sql.Rows. Both types expose
-// `Scan(dest ...any) error` with identical semantics; defining a
-// local interface lets row.scanInto accept either.
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
 func (r *orderRow) scanInto(s rowScanner) error {
 	return s.Scan(&r.ID, &r.EventID, &r.UserID, &r.Quantity, &r.Status, &r.CreatedAt)
 }
