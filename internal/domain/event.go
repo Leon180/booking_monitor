@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -10,6 +11,12 @@ var (
 	ErrEventNotFound     = errors.New("event not found")
 	ErrSoldOut           = errors.New("event sold out")
 	ErrUserAlreadyBought = errors.New("user already bought ticket")
+
+	// Invariant violations from NewEvent. Same shape as the Order
+	// factory's sentinels — caller-actionable so admin / API code can
+	// branch on errors.Is to surface 4xx vs 5xx.
+	ErrInvalidEventName    = errors.New("event name must not be empty")
+	ErrInvalidTotalTickets = errors.New("event total_tickets must be positive")
 )
 
 const (
@@ -32,6 +39,44 @@ type Event struct {
 	TotalTickets     int    `json:"total_tickets"`
 	AvailableTickets int    `json:"available_tickets"`
 	Version          int    `json:"version"` // Added Version
+}
+
+// NewEvent constructs a fresh Event with the canonical "available =
+// total at creation" invariant + non-empty name + positive
+// total_tickets. ID is repo-assigned (still int / SERIAL until the
+// post-PR-30 UUID v7 migration; see memory `uuid_v7_research.md`).
+// CreatedAt-equivalent (Version) starts at 0.
+//
+// Mirror of NewOrder — same pattern of returning a value, sentinels
+// for each invariant so callers can errors.Is them.
+func NewEvent(name string, totalTickets int) (Event, error) {
+	if strings.TrimSpace(name) == "" {
+		return Event{}, ErrInvalidEventName
+	}
+	if totalTickets <= 0 {
+		return Event{}, ErrInvalidTotalTickets
+	}
+	return Event{
+		Name:             name,
+		TotalTickets:     totalTickets,
+		AvailableTickets: totalTickets,
+		Version:          0,
+	}, nil
+}
+
+// ReconstructEvent rehydrates an Event from a persisted row. Skips
+// the invariant validation in NewEvent because the row was already
+// validated at insert time. Use ONLY from repository row-scanning
+// code, never to "create" a new event. Same comment-only contract
+// as ReconstructOrder.
+func ReconstructEvent(id int, name string, totalTickets, availableTickets, version int) Event {
+	return Event{
+		ID:               id,
+		Name:             name,
+		TotalTickets:     totalTickets,
+		AvailableTickets: availableTickets,
+		Version:          version,
+	}
 }
 
 // Deduct returns a new *Event with AvailableTickets decremented by

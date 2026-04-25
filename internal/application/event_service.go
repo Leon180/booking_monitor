@@ -2,9 +2,7 @@ package application
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
 
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -34,21 +32,20 @@ func NewEventService(repo domain.EventRepository, inventoryRepo domain.Inventory
 }
 
 func (s *eventService) CreateEvent(ctx context.Context, name string, totalTickets int) (*domain.Event, error) {
-	if strings.TrimSpace(name) == "" {
-		return nil, errors.New("event name must not be empty")
-	}
-	if totalTickets <= 0 {
-		return nil, errors.New("total tickets must be positive")
-	}
-
-	event := &domain.Event{
-		Name:             name,
-		TotalTickets:     totalTickets,
-		AvailableTickets: totalTickets,
-		Version:          0,
+	// Invariant validation now lives in domain.NewEvent — caller can
+	// errors.Is against domain.ErrInvalidEventName / ErrInvalidTotalTickets.
+	ev, err := domain.NewEvent(name, totalTickets)
+	if err != nil {
+		return nil, err
 	}
 
-	// 1. Create in DB (Source of Truth for Metadata)
+	// EventRepository.Create still uses the pre-PR-30 pointer-write-back
+	// pattern (the full migration to value-in / value-out is queued in
+	// memory as A2 / the upcoming UUID v7 PR). Take address of the local
+	// `ev` so the repo can scan ID into it; we then return the populated
+	// pointer to the caller. This asymmetry with NewOrder/Create is
+	// intentional and tracked.
+	event := &ev
 	if err := s.repo.Create(ctx, event); err != nil {
 		return nil, fmt.Errorf("eventService.CreateEvent db create: %w", err)
 	}
