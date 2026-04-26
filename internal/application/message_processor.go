@@ -18,7 +18,7 @@ import (
 // is a long-running loop that invokes processing internally via the
 // queue's Subscribe handler, which would bypass any outer wrapper.
 type MessageProcessor interface {
-	Process(ctx context.Context, msg *domain.OrderMessage) error
+	Process(ctx context.Context, msg *QueuedBookingMessage) error
 }
 
 type orderMessageProcessor struct {
@@ -47,7 +47,7 @@ func NewOrderMessageProcessor(uow UnitOfWork, logger *mlog.Logger) MessageProces
 // classify outcome via errors.Is. Callers that need to know outcome
 // category should NOT parse the error string — use errors.Is against
 // domain.ErrSoldOut / domain.ErrUserAlreadyBought / domain.ErrInvalid*.
-func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMessage) error {
+func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingMessage) error {
 	// Validate BEFORE opening a tx. A malformed queue message will
 	// never become valid via PEL retry — failing fast saves a DB
 	// transaction and lets the metrics decorator classify it as
@@ -57,7 +57,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 	newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
 	if err != nil {
 		p.logger.Error(ctx, "Malformed order message",
-			tag.MsgID(msg.ID), tag.Error(err))
+			tag.MsgID(msg.MessageID), tag.Error(err))
 		return err
 	}
 
@@ -68,11 +68,11 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		if err := repos.Event.DecrementTicket(ctx, msg.EventID, msg.Quantity); err != nil {
 			if errors.Is(err, domain.ErrSoldOut) {
 				p.logger.Warn(ctx, "Inventory conflict: Redis approved but DB sold out",
-					tag.MsgID(msg.ID), tag.EventID(msg.EventID))
+					tag.MsgID(msg.MessageID), tag.EventID(msg.EventID))
 				return err
 			}
 			p.logger.Error(ctx, "Failed to decrement ticket in DB",
-				tag.MsgID(msg.ID), tag.Error(err))
+				tag.MsgID(msg.MessageID), tag.Error(err))
 			return err
 		}
 
@@ -80,11 +80,11 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		if err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
 				p.logger.Warn(ctx, "Duplicate purchase blocked by DB constraint",
-					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
+					tag.MsgID(msg.MessageID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
 				return err
 			}
 			p.logger.Error(ctx, "Failed to create order",
-				tag.MsgID(msg.ID), tag.Error(err))
+				tag.MsgID(msg.MessageID), tag.Error(err))
 			return err
 		}
 
@@ -98,24 +98,24 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		payload, err := json.Marshal(domain.NewOrderCreatedEvent(created))
 		if err != nil {
 			p.logger.Error(ctx, "Failed to marshal order_created event for outbox",
-				tag.MsgID(msg.ID), tag.Error(err))
+				tag.MsgID(msg.MessageID), tag.Error(err))
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
 
 		outboxEvent, err := domain.NewOrderCreatedOutbox(payload)
 		if err != nil {
 			p.logger.Error(ctx, "Failed to construct outbox event",
-				tag.MsgID(msg.ID), tag.Error(err))
+				tag.MsgID(msg.MessageID), tag.Error(err))
 			return fmt.Errorf("construct outbox event: %w", err)
 		}
 		if _, err := repos.Outbox.Create(ctx, outboxEvent); err != nil {
 			p.logger.Error(ctx, "Failed to create outbox event",
-				tag.MsgID(msg.ID), tag.Error(err))
+				tag.MsgID(msg.MessageID), tag.Error(err))
 			return err
 		}
 
 		p.logger.Info(ctx, "Order processed successfully with Outbox",
-			tag.MsgID(msg.ID), tag.OrderID(created.ID()))
+			tag.MsgID(msg.MessageID), tag.OrderID(created.ID()))
 		return nil
 	})
 }

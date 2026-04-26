@@ -60,7 +60,7 @@ var Module = fx.Module("application",
 	// the undecorated instance and skip metrics.
 	fx.Provide(
 		func(
-			queue domain.OrderQueue,
+			queue OrderQueue,
 			uow UnitOfWork,
 			metrics WorkerMetrics,
 			logger *mlog.Logger,

@@ -51,13 +51,13 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		msg           *domain.OrderMessage
+		msg           *application.QueuedBookingMessage
 		setupMocks    func(*mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockOutboxRepository, *mocks.MockUnitOfWork)
 		expectedError error
 	}{
 		{
 			name: "Success",
-			msg:  &domain.OrderMessage{ID: "1-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "1-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -88,7 +88,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &domain.OrderMessage{ID: "2-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "2-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -99,7 +99,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &domain.OrderMessage{ID: "3-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "3-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -111,7 +111,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &domain.OrderMessage{ID: "4-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "4-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -129,7 +129,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &domain.OrderMessage{ID: "5-0", EventID: validEventID, UserID: 0, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "5-0", EventID: validEventID, UserID: 0, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — gomock will fail the test if any
 				// repo call fires, asserting fail-fast.
@@ -175,7 +175,7 @@ type fakeMessageProcessor struct {
 	err error
 }
 
-func (f *fakeMessageProcessor) Process(_ context.Context, _ *domain.OrderMessage) error {
+func (f *fakeMessageProcessor) Process(_ context.Context, _ *application.QueuedBookingMessage) error {
 	return f.err
 }
 
@@ -200,7 +200,7 @@ func TestMessageProcessorMetricsDecorator_Process(t *testing.T) {
 			spy := &SpyingWorkerMetrics{}
 			decorated := application.NewMessageProcessorMetricsDecorator(&fakeMessageProcessor{err: tt.innerErr}, spy)
 
-			err := decorated.Process(context.Background(), &domain.OrderMessage{ID: "test"})
+			err := decorated.Process(context.Background(), &application.QueuedBookingMessage{MessageID: "test"})
 
 			if tt.innerErr == nil {
 				assert.NoError(t, err)

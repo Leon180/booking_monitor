@@ -79,7 +79,7 @@ func NewRedisOrderQueue(
 	cfg *config.Config,
 	metrics application.QueueMetrics,
 	retryPolicy application.WorkerRetryPolicy,
-) domain.OrderQueue {
+) application.OrderQueue {
 	if retryPolicy == nil {
 		retryPolicy = func(error) bool { return true }
 	}
@@ -118,7 +118,7 @@ func (q *redisOrderQueue) EnsureGroup(ctx context.Context) error {
 	return nil
 }
 
-func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx context.Context, msg *domain.OrderMessage) error) error {
+func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx context.Context, msg *application.QueuedBookingMessage) error) error {
 	// Consumer Name (unique per pod, using hostname or uuid would be better, but for single node "App" is fine)
 	consumerName := q.consumerName
 
@@ -247,7 +247,7 @@ func (q *redisOrderQueue) ackOrLog(ctx context.Context, msgID string) {
 	}
 }
 
-func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx context.Context, msg *domain.OrderMessage) error, msg *domain.OrderMessage) error {
+func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx context.Context, msg *application.QueuedBookingMessage) error, msg *application.QueuedBookingMessage) error {
 	var lastErr error
 
 	for i := 0; i < q.maxRetries; i++ {
@@ -286,7 +286,7 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 // under-counted — the user visible symptom is tickets appearing sold
 // when they aren't. Operator alerting on PEL length is strictly
 // cheaper than chasing inventory drift after the fact.
-func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.OrderMessage, rawMsg redis.XMessage, err error) bool {
+func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *application.QueuedBookingMessage, rawMsg redis.XMessage, err error) bool {
 	// Background context with timeout: compensation MUST run even if the
 	// parent ctx was cancelled mid-processing. Budget configurable via
 	// `cfg.Worker.FailureTimeout`.
@@ -349,7 +349,7 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 	return nil
 }
 
-func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
+func parseMessage(msg redis.XMessage) (*application.QueuedBookingMessage, error) {
 	// Values is map[string]interface{}. The Lua producer writes user_id /
 	// event_id / quantity as strings; we reject anything that isn't a
 	// well-formed integer so silent ID=0 records never reach the worker.
@@ -385,16 +385,16 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 		return nil, fmt.Errorf("invalid %s %q: %w", fieldQuantity, qtyStr, err)
 	}
 
-	return &domain.OrderMessage{
-		ID:       msg.ID,
-		UserID:   userID,
-		EventID:  eventID,
-		Quantity: qty,
+	return &application.QueuedBookingMessage{
+		MessageID: msg.ID, // redis.XMessage.ID — opaque transport handle for ACK
+		UserID:    userID,
+		EventID:   eventID,
+		Quantity:  qty,
 	}, nil
 }
 
 // processPending fetches and processes messages from the Pending Entries List (PEL).
-func (q *redisOrderQueue) processPending(ctx context.Context, consumerName string, handler func(ctx context.Context, msg *domain.OrderMessage) error) error {
+func (q *redisOrderQueue) processPending(ctx context.Context, consumerName string, handler func(ctx context.Context, msg *application.QueuedBookingMessage) error) error {
 	q.logger.Info(ctx, "Checking for pending messages (PEL)...")
 
 	for {

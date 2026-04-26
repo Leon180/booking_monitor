@@ -107,9 +107,9 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	defer cancel()
 
 	processedCount := 0
-	handler := func(ctx context.Context, msg *domain.OrderMessage) error {
+	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
 		processedCount++
-		assert.Equal(t, id, msg.ID)
+		assert.Equal(t, id, msg.MessageID)
 		assert.Equal(t, 1, msg.UserID)
 		return nil
 	}
@@ -148,7 +148,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	})
 
 	handlerCalled := false
-	handler := func(ctx context.Context, msg *domain.OrderMessage) error {
+	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
 		handlerCalled = true
 		return nil
 	}
@@ -208,7 +208,7 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	// runs until ctx expires, so total elapsed measures ctx lifetime, not
 	// per-message latency.
 	var attempts int
-	handler := func(_ context.Context, _ *domain.OrderMessage) error {
+	handler := func(_ context.Context, _ *application.QueuedBookingMessage) error {
 		attempts++
 		return domain.ErrInvalidUserID
 	}
@@ -265,7 +265,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	s.Close()
 
 	handlerCalled := false
-	handler := func(ctx context.Context, msg *domain.OrderMessage) error {
+	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
 		handlerCalled = true
 		return nil
 	}

@@ -24,7 +24,7 @@ func NewMessageProcessorMetricsDecorator(next MessageProcessor, metrics WorkerMe
 	return &messageProcessorMetricsDecorator{next: next, metrics: metrics}
 }
 
-func (d *messageProcessorMetricsDecorator) Process(ctx context.Context, msg *domain.OrderMessage) error {
+func (d *messageProcessorMetricsDecorator) Process(ctx context.Context, msg *QueuedBookingMessage) error {
 	// Duration in defer so panics, early returns, and future refactors
 	// that add new return paths cannot silently skip the histogram.
 	start := time.Now()
