@@ -17,6 +17,25 @@ var (
 	ErrInvalidUserID   = errors.New("order user_id must be positive")
 	ErrInvalidEventID  = errors.New("order event_id must not be the zero UUID")
 	ErrInvalidQuantity = errors.New("order quantity must be positive")
+
+	// ErrInvalidTransition is returned by Order.MarkConfirmed /
+	// MarkFailed / MarkCompensated (and their repository-side
+	// counterparts) when the source state doesn't permit the
+	// requested transition. The legal transitions form a directed
+	// acyclic graph (terminal node = no outgoing edges):
+	//
+	//   Pending  ──MarkConfirmed──→ Confirmed   (terminal)
+	//   Pending  ──MarkFailed─────→ Failed
+	//   Failed   ──MarkCompensated→ Compensated (terminal)
+	//
+	// Any other transition (e.g. Confirmed→Failed, Pending→Compensated)
+	// is illegal and must surface as ErrInvalidTransition rather than
+	// silently overwrite the row. Callers `errors.Is` against this
+	// sentinel to differentiate "concurrent compensation race" (where
+	// the same transition fires twice — idempotent: caller can
+	// re-load + check Status) from "real bug" (where logic produced
+	// a transition that should never happen).
+	ErrInvalidTransition = errors.New("invalid order status transition")
 )
 
 // IsMalformedOrderInput reports whether err originated from a NewOrder
@@ -127,12 +146,40 @@ func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int,
 	}
 }
 
-// WithStatus returns a copy of the order with the given status.
-// Immutable transition — the receiver is untouched, so concurrent
-// reads of the same Order value are safe.
-func (o Order) WithStatus(status OrderStatus) Order {
-	o.status = status
-	return o
+// MarkConfirmed transitions Pending → Confirmed and returns the new
+// Order value. Immutable: the receiver is unmodified.
+//
+// Returns ErrInvalidTransition when the receiver is not Pending —
+// e.g. attempting to confirm an already-Confirmed (idempotent retry
+// race), Failed (saga path already taken), or Compensated order.
+// Caller should `errors.Is` to differentiate the idempotent-retry
+// case from genuine logic bugs.
+func (o Order) MarkConfirmed() (Order, error) {
+	if o.status != OrderStatusPending {
+		return Order{}, fmt.Errorf("cannot confirm from %s: %w", o.status, ErrInvalidTransition)
+	}
+	o.status = OrderStatusConfirmed
+	return o, nil
+}
+
+// MarkFailed transitions Pending → Failed (saga path entry). Same
+// rules as MarkConfirmed.
+func (o Order) MarkFailed() (Order, error) {
+	if o.status != OrderStatusPending {
+		return Order{}, fmt.Errorf("cannot fail from %s: %w", o.status, ErrInvalidTransition)
+	}
+	o.status = OrderStatusFailed
+	return o, nil
+}
+
+// MarkCompensated transitions Failed → Compensated (saga completion).
+// Returns ErrInvalidTransition for any other source state.
+func (o Order) MarkCompensated() (Order, error) {
+	if o.status != OrderStatusFailed {
+		return Order{}, fmt.Errorf("cannot compensate from %s: %w", o.status, ErrInvalidTransition)
+	}
+	o.status = OrderStatusCompensated
+	return o, nil
 }
 
 // Accessors — read-only views on the unexported fields. Wild Workouts
@@ -162,5 +209,21 @@ type OrderRepository interface {
 	// matches; any other error is wrapped with the query context.
 	GetByID(ctx context.Context, id uuid.UUID) (Order, error)
 
-	UpdateStatus(ctx context.Context, id uuid.UUID, status OrderStatus) error
+	// MarkConfirmed / MarkFailed / MarkCompensated are the typed
+	// state-transition methods that replace the previous
+	// `UpdateStatus(id, status)` escape hatch. Each enforces the
+	// source-state predicate atomically in SQL (UPDATE ... WHERE
+	// status = '<expected>') so a concurrent compensation race
+	// can't silently overwrite the wrong row. Returns:
+	//   - nil                 transition succeeded
+	//   - ErrOrderNotFound    no row with that id exists
+	//   - ErrInvalidTransition row exists but its current status
+	//                         doesn't permit this transition
+	//                         (e.g. MarkConfirmed on a Failed order)
+	//   - other errors        wrapped DB failure
+	//
+	// The legal transition graph is documented on ErrInvalidTransition.
+	MarkConfirmed(ctx context.Context, id uuid.UUID) error
+	MarkFailed(ctx context.Context, id uuid.UUID) error
+	MarkCompensated(ctx context.Context, id uuid.UUID) error
 }

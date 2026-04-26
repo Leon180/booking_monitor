@@ -222,11 +222,55 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 	return orders, total, nil
 }
 
-func (r *postgresOrderRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
-	if _, err := r.exec.ExecContext(ctx, "UPDATE orders SET status = $1 WHERE id = $2", status, id); err != nil {
-		return fmt.Errorf("orderRepository.UpdateStatus id=%s status=%v: %w", id, status, err)
+// transitionStatus is the shared SQL+error-classification body for the
+// three typed Mark* methods. Atomic check-and-set: the WHERE clause
+// rejects rows in the wrong source state without a separate SELECT,
+// so a concurrent transition race can't tear an Order across two
+// states. rowsAffected == 0 means EITHER the row doesn't exist OR its
+// current status doesn't match `from`; we disambiguate by a follow-up
+// existence check via GetByID.
+func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OrderStatus) error {
+	res, err := r.exec.ExecContext(ctx,
+		"UPDATE orders SET status = $1 WHERE id = $2 AND status = $3",
+		to, id, from)
+	if err != nil {
+		return fmt.Errorf("orderRepository.transitionStatus id=%s from=%s to=%s: %w", id, from, to, err)
 	}
-	return nil
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orderRepository.transitionStatus rows: %w", err)
+	}
+	if rowsAffected == 1 {
+		return nil
+	}
+	// 0 rows: either the order doesn't exist, or its status isn't
+	// `from`. Disambiguate so callers see ErrOrderNotFound vs
+	// ErrInvalidTransition.
+	if _, getErr := r.GetByID(ctx, id); errors.Is(getErr, domain.ErrOrderNotFound) {
+		return domain.ErrOrderNotFound
+	}
+	return fmt.Errorf("orderRepository.transitionStatus id=%s from=%s to=%s: %w", id, from, to, domain.ErrInvalidTransition)
+}
+
+// MarkConfirmed atomically transitions Pending → Confirmed. See
+// transitionStatus for the error-classification rules and the
+// concurrency guarantee (the source-state predicate is in the WHERE
+// clause, not a separate SELECT).
+func (r *postgresOrderRepository) MarkConfirmed(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPending, domain.OrderStatusConfirmed)
+}
+
+// MarkFailed atomically transitions Pending → Failed (saga path).
+func (r *postgresOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPending, domain.OrderStatusFailed)
+}
+
+// MarkCompensated atomically transitions Failed → Compensated (saga
+// completion). NOTE: not Pending→Compensated — the saga compensator
+// is invoked AFTER payment failure has already moved the order to
+// Failed, so Compensated only follows Failed.
+func (r *postgresOrderRepository) MarkCompensated(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusFailed, domain.OrderStatusCompensated)
 }
 
 // --- OutboxRepository ---

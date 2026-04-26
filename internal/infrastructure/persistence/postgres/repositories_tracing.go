@@ -167,14 +167,39 @@ func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit,
 	return orders, total, err
 }
 
-func (d *orderRepositoryTracingDecorator) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "UpdateOrderStatus", trace.WithAttributes(
+func (d *orderRepositoryTracingDecorator) MarkConfirmed(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderConfirmed", trace.WithAttributes(
 		attribute.String("order_id", id.String()),
-		attribute.String("status", string(status)),
 	))
 	defer span.End()
 
-	err := d.next.UpdateStatus(ctx, id, status)
+	err := d.next.MarkConfirmed(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkFailed(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderFailed", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkFailed(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkCompensated(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderCompensated", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkCompensated(ctx, id)
 	if err != nil {
 		span.RecordError(err)
 	}

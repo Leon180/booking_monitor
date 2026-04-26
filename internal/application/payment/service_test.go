@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -20,14 +21,18 @@ import (
 
 // makeOrder produces a Pending order matching the supplied event so the
 // idempotency-check GetByID has something realistic to return.
+//
+// Tests need to fabricate orders in any status (including transitions
+// that don't exist in the legal graph — Confirmed/Compensated for
+// idempotency-skip cases). ReconstructOrder is the right tool — it
+// bypasses both NewOrder's invariant checks AND the typed transition
+// state machine, mirroring how the postgres scan path rehydrates
+// arbitrary persisted state from a row.
 func makeOrder(t *testing.T, ev *application.OrderCreatedEvent, status domain.OrderStatus) domain.Order {
 	t.Helper()
-	o, err := domain.NewOrder(1, ev.EventID, 1)
+	orderID, err := uuid.NewV7()
 	require.NoError(t, err)
-	if status != domain.OrderStatusPending {
-		o = o.WithStatus(status)
-	}
-	return o
+	return domain.ReconstructOrder(orderID, 1, ev.EventID, 1, status, time.Now())
 }
 
 func newEvent(t *testing.T) *application.OrderCreatedEvent {
@@ -123,7 +128,7 @@ func TestProcessOrder_HappyPath(t *testing.T) {
 	gomock.InOrder(
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
-		repo.EXPECT().UpdateStatus(gomock.Any(), ev.OrderID, domain.OrderStatusConfirmed).Return(nil),
+		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(nil),
 	)
 
 	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
@@ -156,12 +161,12 @@ func TestProcessOrder_RetryAfterUpdateStatusFailure_ProducesSingleConfirm(t *tes
 		// First attempt
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
-		repo.EXPECT().UpdateStatus(gomock.Any(), ev.OrderID, domain.OrderStatusConfirmed).Return(dbErr),
+		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(dbErr),
 		// Second attempt — idempotency check still sees Pending
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
 		// Charge called again with the same orderID → idempotent gateway returns the cached success
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
-		repo.EXPECT().UpdateStatus(gomock.Any(), ev.OrderID, domain.OrderStatusConfirmed).Return(nil),
+		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(nil),
 	)
 
 	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
@@ -202,7 +207,7 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(chargeErr),
 		// uow.Do invokes the closure: UpdateStatus(Failed) + outbox.Create
-		repo.EXPECT().UpdateStatus(gomock.Any(), ev.OrderID, domain.OrderStatusFailed).Return(nil),
+		repo.EXPECT().MarkFailed(gomock.Any(), ev.OrderID).Return(nil),
 		outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).
 			DoAndReturn(func(_ context.Context, oe domain.OutboxEvent) (domain.OutboxEvent, error) {
 				assert.Equal(t, domain.EventTypeOrderFailed, oe.EventType())
@@ -216,7 +221,7 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 		// Idempotent gateway returns SAME failure
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(chargeErr),
 		// uow.Do invokes closure successfully this time
-		repo.EXPECT().UpdateStatus(gomock.Any(), ev.OrderID, domain.OrderStatusFailed).Return(nil),
+		repo.EXPECT().MarkFailed(gomock.Any(), ev.OrderID).Return(nil),
 		outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).
 			Return(domain.OutboxEvent{}, nil),
 	)
