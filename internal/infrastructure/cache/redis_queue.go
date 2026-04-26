@@ -185,6 +185,17 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 			return nil
 		} else {
 			lastErr = err
+			// Malformed-input fast path: NewOrder invariant violations
+			// (UserID<=0, zero EventID, Quantity<=0) are deterministic —
+			// redelivery returns the same error every time. Skip the
+			// retry budget and route directly to handleFailure (which
+			// reverts Redis inventory + writes the DLQ entry on the
+			// FIRST attempt instead of after ~600ms of pointless
+			// backoff). Outcome metric stays "malformed_message" via
+			// messageProcessorMetricsDecorator either way.
+			if domain.IsMalformedOrderInput(err) {
+				return err
+			}
 			// Backoff while honoring ctx cancellation so shutdown is prompt
 			// (addresses action-list item M8).
 			select {

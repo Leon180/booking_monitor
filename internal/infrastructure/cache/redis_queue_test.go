@@ -139,6 +139,83 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	assert.Equal(t, int64(1), len)
 }
 
+// TestRedisOrderQueue_Subscribe_MalformedFastPath verifies that handler
+// errors classified as `domain.IsMalformedOrderInput` short-circuit the
+// per-message retry budget (3 attempts × 100ms..300ms backoff) and route
+// straight to compensation + DLQ on the first failure. Without the
+// fast-path the worker burns ~600ms of backoff per malformed message
+// before the inevitable DLQ write — under sustained malformed traffic
+// (producer schema bug, ops-side manual XADD, etc.) that backoff piles
+// up goroutines and slows DLQ visibility.
+func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+
+	// Inventory repo is invoked from handleFailure (RevertInventory).
+	// A nil-tolerant happy-path stub is sufficient — we only care that
+	// the FIRST attempt's failure routes here, not that compensation
+	// is exhaustively exercised (covered elsewhere).
+	inv := &fakeInventoryRevert{}
+	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, cfg, application.NoopQueueMetrics())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+
+	// Push a structurally-valid stream entry (parseMessage will succeed)
+	// — invariant validation happens later, inside the handler.
+	rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: "orders:stream",
+		Values: map[string]interface{}{
+			"user_id": "1", "event_id": uuid.New().String(), "quantity": "1",
+		},
+	})
+
+	// Handler returns a malformed-classified error. Counts attempts so
+	// the assertion can distinguish fast-path (1) from full retry budget (3)
+	// without depending on wall-clock timing — Subscribe's outer poll loop
+	// runs until ctx expires, so total elapsed measures ctx lifetime, not
+	// per-message latency.
+	var attempts int
+	handler := func(_ context.Context, _ *domain.OrderMessage) error {
+		attempts++
+		return domain.ErrInvalidUserID
+	}
+
+	_ = queue.Subscribe(ctx, handler)
+
+	assert.Equal(t, 1, attempts,
+		"malformed-classified error must short-circuit the retry budget — "+
+			"without the fast-path attempts would be 3 (one per retry slot)")
+
+	// Compensation ran (RevertInventory called) and DLQ entry written
+	// on the FIRST attempt — not after burning the retry budget.
+	assert.True(t, inv.reverted, "RevertInventory must run for malformed messages — Redis inventory was deducted upstream")
+	dlqLen, _ := rdb.XLen(context.Background(), "orders:dlq").Result()
+	assert.Equal(t, int64(1), dlqLen, "malformed message must end up in DLQ on first attempt")
+}
+
+// fakeInventoryRevert is a minimal domain.InventoryRepository stub for
+// tests that only exercise the revert path. SetInventory / DeductInventory
+// are not relevant here and panic if called (keeps the test honest).
+type fakeInventoryRevert struct{ reverted bool }
+
+func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
+	panic("SetInventory not expected in this test")
+}
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ int, _ int) (bool, error) {
+	panic("DeductInventory not expected in this test")
+}
+func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {
+	f.reverted = true
+	return nil
+}
+
 // TestRedisOrderQueue_Subscribe_PersistentErrorBailout verifies that
 // Subscribe exits with an error (not loops forever) when the underlying
 // Redis is durably unreachable. Previously the loop logged + slept + retried
