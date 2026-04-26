@@ -23,7 +23,7 @@ REPORT_DIR="docs/benchmarks/${TIMESTAMP}_compare_c${VUS}"
 mkdir -p "$REPORT_DIR"
 
 K6_SCRIPT="$(pwd)/scripts/k6_comparison.js"
-DB_URL="postgres://user:password@localhost:5433/booking?sslmode=disable"
+DB_URL="${MIGRATE_DB_URL:-postgres://booking:smoketest_pg_local@localhost:5433/booking?sslmode=disable}"
 
 RUN_A_FILE="$REPORT_DIR/run_a_raw.txt"
 RUN_B_FILE="$REPORT_DIR/run_b_raw.txt"
@@ -39,7 +39,7 @@ echo "============================================"
 
 reset_state() {
     echo "[reset] Flushing Redis and resetting DB..."
-    docker exec booking_redis redis-cli FLUSHALL > /dev/null
+    docker exec booking_redis redis-cli -a "${REDIS_PASSWORD:-smoketest_redis_local}" FLUSHALL > /dev/null 2>&1
     psql "$DB_URL" -q -c "TRUNCATE TABLE orders; UPDATE events SET available_tickets = total_tickets;" > /dev/null
     echo "[reset] Done."
 }
