@@ -93,6 +93,29 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 - No hardcoded secrets - use env vars
 - Tests use testify/assert + go.uber.org/mock
 
+## Benchmark Conventions
+
+Throughput regressions are tracked under `docs/benchmarks/`. The directory layout and contents are convention, not tool-enforced — keep it consistent so historical runs remain comparable.
+
+**Directory naming**: `YYYYMMDD_HHMMSS_compare_c<vus>[_<tag>]` (e.g. `20260426_183530_compare_c500_pr35`). The `c<vus>` segment is the VU count; the optional trailing `_<tag>` describes what is being compared (a PR id, a phase name, etc.).
+
+**Required artifacts** per directory:
+- `comparison.md` — parameters, run-A vs run-B metric table, conclusion, caveats (see `20260426_183530_compare_c500_pr35/comparison.md` as the canonical template)
+- `run_a_raw.txt` — full k6 stdout of the baseline run
+- `run_b_raw.txt` — full k6 stdout of the under-test run
+
+**Standard apples-to-apples conditions** (use these unless deliberately measuring something else):
+- Script: `scripts/k6_comparison.js`
+- VUs: 500
+- Duration: 60s
+- Ticket pool: 500,000 (so the run does not hit sold-out — measures pure capacity)
+- Target: `http://app:8080/api/v1` (direct, bypasses nginx rate limit)
+- Both runs against an equivalent Docker stack on the same host
+
+**When to record**: PRs that touch the booking hot path (handler / `BookingService.BookTicket` / Redis Lua / `OrderMessageProcessor.Process` tx body / outbox relay polling) MUST land a comparison report. Pure refactors that the diff demonstrably leaves the hot path byte-identical (see PR 31→35 for the case that prompted this rule) MAY skip the report — but a report verifying "no regression" is still the cleanest evidence and is preferred.
+
+**Existing tooling**: `make benchmark-compare VUS=500 DURATION=60s` runs `scripts/benchmark_compare.sh` which produces the directory + raw outputs automatically; `comparison.md` is then hand-written referencing the captured raw files. Run-to-run variance for k6-on-Docker laptop is typically 3-5%; deltas below that are noise, not signal.
+
 ## Current State (as of 2026-04-24)
 15 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). Phase 15 (Apr 23–24) landed the logger architecture refactor in PR #18 — `pkg/logger/` → `internal/log/` with ctx-aware emit methods (`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`) that auto-inject `correlation_id` + OTEL `trace_id`/`span_id`, `/admin/loglevel` runtime level endpoint on the pprof listener, and the typed `internal/log/tag/` field constructors. Post-Phase-15 (Apr 24) review cleanup in PRs #21/#22/#23: strict review of `cmd/booking-cli/main.go` landed the P0 stress URL fix, payment-worker tracer init, pprof loopback binding + timeouts, `fx.Shutdowner` escalation for failing goroutines, function decomposition, and promotion of pprof + trusted-proxy + db-ping tunables into `config.Config` (with `KAFKA_BROKERS` + `TRUSTED_PROXIES` switching to cleanenv `[]string` + `env-separator`, eliminating a silent multi-broker bug). See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
 
