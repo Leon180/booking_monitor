@@ -1,0 +1,70 @@
+package application
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
+
+// QueuedBookingMessage is the application-layer DTO for an order
+// message in transit through whatever queue infrastructure backs the
+// worker (currently Redis Streams; could be Kafka / NATS / SQS in
+// future). It carries:
+//
+//   - the booking payload that the worker will turn into a
+//     domain.Order via NewOrder (UserID, EventID, Quantity)
+//   - transport-assigned metadata the queue impl needs back at ACK time
+//     (MessageID — opaque to the worker; the queue interprets it)
+//
+// Lives in application (not domain, not cache) because:
+//   - it has NO business invariants enforced; NewOrder downstream does
+//     the actual validation. So it's not a domain entity, it's a DTO.
+//   - the MessageID's shape is transport-specific (Redis Stream IDs are
+//     "<timestamp>-<seq>"; Kafka offsets are int64; etc.) — leaking
+//     that through domain would tie the domain to today's transport.
+//   - both producers (Lua deduct → Redis Stream) and consumers
+//     (worker → message_processor) live at or below application; no
+//     domain code ever touches this type.
+//
+// The PR-37 relocation of this type from `domain.OrderMessage` was
+// driven by exactly that reasoning: the old comment on the ID field
+// ("Redis stream message ID") was a self-aware admission that the
+// type didn't belong in domain.
+type QueuedBookingMessage struct {
+	// MessageID is the transport-assigned identifier the queue impl
+	// uses for ACK / PEL / DLQ bookkeeping. Opaque to the worker —
+	// only the queue itself interprets it. For Redis Streams this is
+	// the "<timestamp>-<seq>" form; for Kafka it would be a string
+	// rendering of (topic, partition, offset).
+	MessageID string
+
+	UserID   int       // External user reference (this service does not own users)
+	EventID  uuid.UUID // FK to events.id
+	Quantity int
+}
+
+//go:generate mockgen -source=queue.go -destination=../mocks/queue_mock.go -package=mocks
+
+// OrderQueue is the application-side port for the order-stream
+// consumer. The implementation (`infrastructure/cache/redis_queue.go`)
+// owns the stream/group/DLQ machinery; this interface is the contract
+// application services depend on.
+//
+// Why application, not domain: the queue is a transport abstraction
+// (broker / stream / pubsub), not a domain concept. Compare to
+// `domain.OrderRepository` which IS a domain port (defines how the
+// Order aggregate is persisted) — that legitimately belongs in domain.
+// "Where messages buffer between processes" is application-layer.
+type OrderQueue interface {
+	// EnsureGroup is idempotent group + stream creation. Run once at
+	// startup before Subscribe; safe to call repeatedly.
+	EnsureGroup(ctx context.Context) error
+
+	// Subscribe is the long-running consumer loop. Blocks until ctx
+	// is cancelled or a persistent failure threshold trips. Returns
+	// nil on clean ctx-cancel shutdown; wraps the underlying error
+	// otherwise. handler is invoked per-message with the parsed
+	// QueuedBookingMessage; the queue manages retry / ACK / DLQ
+	// based on what handler returns and the injected retry policy.
+	Subscribe(ctx context.Context, handler func(ctx context.Context, msg *QueuedBookingMessage) error) error
+}

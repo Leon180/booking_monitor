@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 )
 
@@ -20,7 +19,7 @@ type WorkerService interface {
 }
 
 type workerService struct {
-	queue     domain.OrderQueue
+	queue     OrderQueue
 	processor MessageProcessor
 	logger    *mlog.Logger
 }
@@ -30,7 +29,7 @@ type workerService struct {
 // handler — the worker is only responsible for queue lifecycle
 // (EnsureGroup, Subscribe, ctx handling); per-message observability and
 // processing logic live in the processor chain.
-func NewWorkerService(queue domain.OrderQueue, processor MessageProcessor, logger *mlog.Logger) WorkerService {
+func NewWorkerService(queue OrderQueue, processor MessageProcessor, logger *mlog.Logger) WorkerService {
 	return &workerService{
 		queue:     queue,
 		processor: processor,

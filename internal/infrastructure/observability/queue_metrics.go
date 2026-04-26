@@ -20,3 +20,7 @@ func (m *prometheusQueueMetrics) RecordXAddFailure(stream string) {
 func (m *prometheusQueueMetrics) RecordRevertFailure() {
 	RedisRevertFailuresTotal.Inc()
 }
+
+func (m *prometheusQueueMetrics) RecordDLQRoute(reason string) {
+	RedisDLQRoutedTotal.WithLabelValues(reason).Inc()
+}

@@ -19,6 +19,30 @@ var (
 	ErrInvalidQuantity = errors.New("order quantity must be positive")
 )
 
+// IsMalformedOrderInput reports whether err originated from a NewOrder
+// invariant violation (zero/negative user_id, zero UUID event_id, or
+// non-positive quantity).
+//
+// The booking pipeline uses this to route deterministic-failure
+// messages straight to the DLQ instead of cycling the per-message
+// retry budget. A UserID=0 message will return ErrInvalidUserID on
+// every redelivery — retrying it 3× wastes ~600ms of backoff and 2
+// pointless tx-open attempts before the inevitable DLQ write. The
+// classifier short-circuits to first-attempt DLQ.
+//
+// Distinct from "transient" errors (DB conn lost, sold-out conflict,
+// duplicate-purchase race) where redelivery has a chance of producing
+// a different outcome — those still go through the retry budget.
+//
+// Lives in domain because the predicate is a property of the error
+// itself; the queue/infrastructure layer that consumes it is just
+// reading what the domain already exposes.
+func IsMalformedOrderInput(err error) bool {
+	return errors.Is(err, ErrInvalidUserID) ||
+		errors.Is(err, ErrInvalidEventID) ||
+		errors.Is(err, ErrInvalidQuantity)
+}
+
 type OrderStatus string
 
 const (

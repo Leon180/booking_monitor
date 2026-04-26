@@ -7,22 +7,40 @@ import (
 	"time"
 
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const idempotencyTTL = 24 * time.Hour
-
 type redisIdempotencyRepository struct {
-	client *redis.Client
+	client         *redis.Client
+	idempotencyTTL time.Duration
 }
 
-func NewRedisIdempotencyRepository(client *redis.Client) domain.IdempotencyRepository {
-	return &redisIdempotencyRepository{client: client}
+func NewRedisIdempotencyRepository(client *redis.Client, cfg *config.Config) domain.IdempotencyRepository {
+	return &redisIdempotencyRepository{
+		client:         client,
+		idempotencyTTL: cfg.Redis.IdempotencyTTL,
+	}
 }
 
 func idempotencyKey(key string) string {
 	return "idempotency:" + key
+}
+
+// idempotencyRecord is the Redis-side wire format for a cached
+// idempotency result. The `json:` tags live HERE, not on
+// `domain.IdempotencyResult`, so the domain type stays JSON-unaware
+// (boundary owns its serialisation, per coding-style rule 7).
+//
+// Translation between the two is one-line each way; the indirection
+// pays back the moment we ever change wire keys (`status_code` →
+// `statusCode`) without touching the domain, or migrate to a
+// different serialiser (msgpack, protobuf) without touching the
+// domain.
+type idempotencyRecord struct {
+	StatusCode int    `json:"status_code"`
+	Body       string `json:"body"`
 }
 
 func (r *redisIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, error) {
@@ -34,17 +52,24 @@ func (r *redisIdempotencyRepository) Get(ctx context.Context, key string) (*doma
 		return nil, err
 	}
 
-	var result domain.IdempotencyResult
-	if err := json.Unmarshal([]byte(val), &result); err != nil {
+	var rec idempotencyRecord
+	if err := json.Unmarshal([]byte(val), &rec); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return &domain.IdempotencyResult{
+		StatusCode: rec.StatusCode,
+		Body:       rec.Body,
+	}, nil
 }
 
 func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult) error {
-	data, err := json.Marshal(result)
+	rec := idempotencyRecord{
+		StatusCode: result.StatusCode,
+		Body:       result.Body,
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	return r.client.Set(ctx, idempotencyKey(key), data, idempotencyTTL).Err()
+	return r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err()
 }

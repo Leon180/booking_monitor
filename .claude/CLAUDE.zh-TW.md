@@ -151,6 +151,14 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 - `DB_PING_ATTEMPTS` / `DB_PING_INTERVAL` / `DB_PING_PER_ATTEMPT` — DB 啟動探測預算;依賴較慢時拉高 attempts
 - `KAFKA_BROKERS`(CSV,預設 `localhost:9092`)— 現在透過 cleanenv 的 `env-separator:","` parse 成 `[]string`
 
+**Worker / Cache(PR #37 之後)**
+- `WORKER_STREAM_READ_COUNT`(預設 `10`)/ `WORKER_STREAM_BLOCK_TIMEOUT`(預設 `2s`)— 訂單 stream consumer 的 XReadGroup 批次大小與 block 時長
+- `WORKER_MAX_RETRIES`(預設 `3`)/ `WORKER_RETRY_BASE_DELAY`(預設 `100ms`)— 每則訊息的 retry 預算 + 線性 backoff 基數;確定性失敗(deterministic failure)的錯誤透過 application 層的 retry policy 直接 bypass 預算
+- `WORKER_FAILURE_TIMEOUT`(預設 `5s`)— handleFailure 補償流程的 ctx 預算(Redis revert + DLQ XAdd)
+- `WORKER_PENDING_BLOCK_TIMEOUT`(預設 `100ms`)/ `WORKER_READ_ERROR_BACKOFF`(預設 `1s`)— 啟動時 PEL 掃描的 block 時長 + 讀取錯誤的 retry 間隔
+- `REDIS_INVENTORY_TTL`(預設 `720h`)/ `REDIS_IDEMPOTENCY_TTL`(預設 `24h`)— Redis 快取 key 的存活期;以前是寫死的 const
+- `REDIS_MAX_CONSECUTIVE_READ_ERRORS`(預設 `30`)— Redis 持續異常時 worker 退出讓 k8s 重啟的容忍度
+
 ## `.claude/` 下的可用工具
 
 Claude Code 會自動探索 `.claude/agents/` 與 `.claude/skills/` 下的資產。以下工具採自 [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code)(MIT),完整來源清單見 [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md)。

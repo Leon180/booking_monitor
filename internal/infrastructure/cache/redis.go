@@ -52,8 +52,9 @@ var Module = fx.Options(
 )
 
 type redisInventoryRepository struct {
-	client  *redis.Client
-	scripts map[string]*redis.Script
+	client       *redis.Client
+	scripts      map[string]*redis.Script
+	inventoryTTL time.Duration
 }
 
 func NewRedisClient(cfg *config.Config, logger *mlog.Logger) *redis.Client {
@@ -93,13 +94,14 @@ var deductScriptSource string
 //go:embed lua/revert.lua
 var revertScriptSource string
 
-func NewRedisInventoryRepository(client *redis.Client) domain.InventoryRepository {
+func NewRedisInventoryRepository(client *redis.Client, cfg *config.Config) domain.InventoryRepository {
 	return &redisInventoryRepository{
 		client: client,
 		scripts: map[string]*redis.Script{
 			"deduct": redis.NewScript(deductScriptSource),
 			"revert": redis.NewScript(revertScriptSource),
 		},
+		inventoryTTL: cfg.Redis.InventoryTTL,
 	}
 }
 
@@ -114,18 +116,15 @@ func inventoryKey(eventID uuid.UUID) string {
 	return inventoryKeyPrefix + eventID.String() + inventoryKeySuffix
 }
 
-// inventoryTTL is the maximum lifetime of a Redis inventory key. It is
-// intentionally long (30 days) so any active event's inventory is
-// re-upserted by operational flows (CreateEvent, saga revert, manual
-// reset) well before expiry — but orphaned keys from deleted events
-// eventually fall off Redis instead of accumulating forever.
-//
-// Previously the TTL was 0 (never expires), which caused unbounded key
-// growth. See action-list item L3.
-const inventoryTTL = 30 * 24 * time.Hour
-
+// SetInventory writes the inventory counter for an event with the
+// configured TTL (`cfg.Redis.InventoryTTL`, default 30d). Long-by-
+// default so active events are re-upserted well before expiry by
+// operational flows (CreateEvent, saga revert, manual reset);
+// orphaned keys from deleted events eventually fall off Redis
+// instead of accumulating forever. Previously the TTL was 0 (never
+// expires) → unbounded key growth, see action-list L3.
 func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uuid.UUID, count int) error {
-	return r.client.Set(ctx, inventoryKey(eventID), count, inventoryTTL).Err()
+	return r.client.Set(ctx, inventoryKey(eventID), count, r.inventoryTTL).Err()
 }
 
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID uuid.UUID, userID int, count int) (bool, error) {

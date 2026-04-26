@@ -3,9 +3,15 @@ package domain
 import "context"
 
 // IdempotencyResult stores the cached outcome of a processed request.
+//
+// No json/db tags — domain types stay JSON-unaware (per
+// `.claude/rules/golang/coding-style.md` rule 7). The Redis
+// implementation marshals via its own `idempotencyRecord` translator
+// (`internal/infrastructure/cache/idempotency.go`) so the wire format
+// is owned by the boundary, not the domain.
 type IdempotencyResult struct {
-	StatusCode int    `json:"status_code"`
-	Body       string `json:"body"`
+	StatusCode int
+	Body       string
 }
 
 // IdempotencyRepository provides idempotency key storage.

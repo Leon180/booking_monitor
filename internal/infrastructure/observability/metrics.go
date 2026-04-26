@@ -170,6 +170,22 @@ var (
 			Help: "Total number of RevertInventory failures during worker compensation (message retained in PEL)",
 		},
 	)
+
+	// RedisDLQRoutedTotal counts SUCCESSFUL routes to the Redis DLQ
+	// (orders:dlq), labelled by reason so operators can distinguish
+	// malformed-parse failures from malformed-classification failures
+	// from exhausted-retry failures. Counterpart to
+	// RedisXAddFailuresTotal(stream="dlq") — that one only fires on
+	// failure; this one fires on success. Together they let alerts
+	// trigger on either spike (malformed flood) or absence (DLQ
+	// throughput drops to zero, suggesting upstream is silent).
+	RedisDLQRoutedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "redis_dlq_routed_total",
+			Help: "Total number of messages successfully routed to orders:dlq, labelled by reason",
+		},
+		[]string{"reason"},
+	)
 )
 
 func MetricsMiddleware() gin.HandlerFunc {
@@ -211,4 +227,11 @@ func init() {
 	// Today "dlq" is the only value written; future main-stream writers
 	// will add their own label values here.
 	RedisXAddFailuresTotal.WithLabelValues("dlq")
+	// Pre-warm the DLQ-route reason labels so all three series exist in
+	// /metrics from boot, even on a worker that hasn't yet seen any
+	// failures. Keep these strings in sync with the const block in
+	// internal/infrastructure/cache/redis_queue.go (DLQReason*).
+	for _, reason := range []string{"malformed_parse", "malformed_classified", "exhausted_retries"} {
+		RedisDLQRoutedTotal.WithLabelValues(reason)
+	}
 }
