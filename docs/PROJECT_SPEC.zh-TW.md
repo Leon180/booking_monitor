@@ -109,7 +109,7 @@ Types: order.created, order.failed
 | OrderQueue | 非同步訂單串流(Enqueue/Dequeue/Ack) | Redis Streams |
 | IdempotencyRepository | 請求去重(24 小時 TTL) | Redis |
 | EventPublisher | 發布領域事件 | Kafka |
-| PaymentService | 處理付款事件(遇到無效輸入回傳 `ErrInvalidPaymentEvent`,讓 consumer 能 dead-letter) | 領域層服務 |
+| PaymentService | 處理付款事件(遇到無效輸入回傳 `ErrInvalidPaymentEvent`,讓 consumer 能 dead-letter) | 應用層服務 |
 | PaymentGateway | 扣款 | Mock(可設定成功率) |
 | DistributedLock | 領導者選舉 | PostgreSQL advisory locks |
 | UnitOfWork | 交易管理 | PostgreSQL |
@@ -495,7 +495,8 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `internal/domain/inventory.go` | InventoryRepository 介面 |
 | `internal/domain/queue.go` | OrderQueue 介面 |
 | `internal/domain/messaging.go` | EventPublisher 介面 |
-| `internal/domain/payment.go` | PaymentGateway + PaymentService 介面 |
+| `internal/domain/payment.go` | PaymentGateway 介面(真正的領域 port — 外部整合邊界) |
+| `internal/application/payment_service.go` | PaymentService 介面 + ErrInvalidPaymentEvent(PR #38 從 domain 搬過來 — 接受 `*OrderCreatedEvent`,屬於應用層的 wire DTO) |
 | `internal/domain/lock.go` | DistributedLock 介面 |
 | `internal/domain/idempotency.go` | IdempotencyRepository 介面 |
 | `internal/domain/uow.go` | UnitOfWork 介面 |

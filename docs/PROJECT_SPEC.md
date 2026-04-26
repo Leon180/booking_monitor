@@ -113,7 +113,7 @@ Types: order.created, order.failed
 | OrderQueue | Async order stream (Enqueue/Dequeue/Ack) | Redis Streams |
 | IdempotencyRepository | Request deduplication (24h TTL) | Redis |
 | EventPublisher | Publish domain events | Kafka |
-| PaymentService | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Domain-layer service |
+| PaymentService | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Application-layer service |
 | PaymentGateway | Charge payments | Mock (configurable success rate) |
 | DistributedLock | Leader election | PostgreSQL advisory locks |
 | UnitOfWork | Transaction management | PostgreSQL |
@@ -507,7 +507,8 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/domain/inventory.go` | InventoryRepository interface |
 | `internal/domain/queue.go` | OrderQueue interface |
 | `internal/domain/messaging.go` | EventPublisher interface |
-| `internal/domain/payment.go` | PaymentGateway + PaymentService interfaces |
+| `internal/domain/payment.go` | PaymentGateway interface (true domain port — external integration boundary) |
+| `internal/application/payment_service.go` | PaymentService interface + ErrInvalidPaymentEvent (moved from domain in PR #38 — accepts `*OrderCreatedEvent`, an application-layer wire DTO) |
 | `internal/domain/lock.go` | DistributedLock interface |
 | `internal/domain/idempotency.go` | IdempotencyRepository interface |
 | `internal/domain/uow.go` | UnitOfWork interface |

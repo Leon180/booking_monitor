@@ -105,7 +105,7 @@ func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCrea
 			// service consumes an event from Kafka, it doesn't have a
 			// fresh domain.Order at hand. NewOrderFailedEvent lives
 			// next to OrderCreatedEvent so the messaging contract is
-			// in one place (see internal/domain/order_events.go).
+			// in one place (see internal/application/order_events.go).
 			failedEvent := application.NewOrderFailedEvent(*event, err.Error())
 			payload, marshalErr := json.Marshal(failedEvent)
 			if marshalErr != nil {
