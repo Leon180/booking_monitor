@@ -34,7 +34,12 @@ func TestDefaultOrderRetryPolicy(t *testing.T) {
 		{name: "ErrSoldOut retries (transient inventory conflict)", err: domain.ErrSoldOut, want: true},
 		{name: "ErrUserAlreadyBought retries (DB constraint race)", err: domain.ErrUserAlreadyBought, want: true},
 		{name: "generic db error retries", err: errors.New("conn reset by peer"), want: true},
-		{name: "nil error retries (no-op — handler returned success but caller still asks)", err: nil, want: true},
+		// processWithRetry only invokes the policy on the err != nil branch,
+		// so policy(nil) is unreachable in production. Pinned here purely
+		// to document the contract: if a future caller does ask the policy
+		// about nil, the answer is "retry" (default safe behaviour for any
+		// non-classified error).
+		{name: "policy(nil) is unreachable in prod but specified to be 'retry'", err: nil, want: true},
 	}
 
 	for _, tt := range tests {

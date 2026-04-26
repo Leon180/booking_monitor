@@ -223,6 +223,45 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Worker tunables must be positive — a zero-value config (e.g. an
+	// operator setting `WORKER_MAX_RETRIES=0` thinking "disable", or a
+	// partially-constructed `&config.Config{...}` literal that bypasses
+	// cleanenv's env-default tags) makes the worker silently
+	// non-functional rather than producing the assumed behaviour:
+	//
+	//   * MaxRetries=0  → for-loop never iterates → handler never runs → message stuck
+	//   * RetryBaseDelay=0 → backoff is instant → fast spin on transient errors
+	//   * StreamReadCount=0 → Redis interprets as "all messages" → unbounded batch
+	//   * StreamBlockTimeout=0 → busy-poll → CPU pegged
+	//   * MaxConsecutiveReadErrors=0 → exit on first error (looks like "disabled")
+	//
+	// Reject all of these at startup so ops sees the misconfiguration
+	// before traffic hits.
+	if c.Worker.MaxRetries <= 0 {
+		missing = append(missing, "worker.max_retries / WORKER_MAX_RETRIES (must be >= 1)")
+	}
+	if c.Worker.RetryBaseDelay <= 0 {
+		missing = append(missing, "worker.retry_base_delay / WORKER_RETRY_BASE_DELAY (must be > 0)")
+	}
+	if c.Worker.StreamReadCount <= 0 {
+		missing = append(missing, "worker.stream_read_count / WORKER_STREAM_READ_COUNT (must be >= 1)")
+	}
+	if c.Worker.StreamBlockTimeout <= 0 {
+		missing = append(missing, "worker.stream_block_timeout / WORKER_STREAM_BLOCK_TIMEOUT (must be > 0)")
+	}
+	if c.Worker.FailureTimeout <= 0 {
+		missing = append(missing, "worker.failure_timeout / WORKER_FAILURE_TIMEOUT (must be > 0)")
+	}
+	if c.Worker.PendingBlockTimeout <= 0 {
+		missing = append(missing, "worker.pending_block_timeout / WORKER_PENDING_BLOCK_TIMEOUT (must be > 0)")
+	}
+	if c.Worker.ReadErrorBackoff <= 0 {
+		missing = append(missing, "worker.read_error_backoff / WORKER_READ_ERROR_BACKOFF (must be > 0)")
+	}
+	if c.Redis.MaxConsecutiveReadErrors <= 0 {
+		missing = append(missing, "redis.max_consecutive_read_errors / REDIS_MAX_CONSECUTIVE_READ_ERRORS (must be >= 1; 0 silently exits on first error)")
+	}
+
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required config fields: %s", strings.Join(missing, ", "))
 	}

@@ -46,6 +46,15 @@ const (
 	fieldDLQOriginalID = "original_id"
 	fieldDLQError      = "error"
 	fieldDLQFailedAt   = "failed_at"
+
+	// DLQ route reasons — Prometheus label values for
+	// `redis_dlq_routed_total{reason=...}`. Kept in sync with the
+	// pre-warm list in `internal/infrastructure/observability/metrics.go`
+	// init(). Promote to const so a typo (e.g. "malformed_classifed")
+	// can't drift a single emit-site away from the pre-warmed series.
+	dlqReasonMalformedParse      = "malformed_parse"
+	dlqReasonMalformedClassified = "malformed_classified"
+	dlqReasonExhaustedRetries    = "exhausted_retries"
 )
 
 type redisOrderQueue struct {
@@ -167,11 +176,24 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 			}
 
 			// Self-healing: If group is missing (e.g. after FLUSHALL), recreate it.
+			//
+			// On a successful EnsureGroup we reset `consecutiveErrors` so a
+			// recurring-NOGROUP storm (e.g., FLUSHALL followed by slow
+			// recreation, or a deliberate group reset by ops) doesn't burn
+			// the read-error budget for a class of errors we ARE recovering
+			// from. Without the reset, sustained NOGROUP would tip the
+			// worker over the bailout threshold even though the self-heal
+			// is succeeding every time — observable as premature pod
+			// restarts during operational group resets.
 			if strings.Contains(err.Error(), "NOGROUP") {
 				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group...",
 					mlog.Int("consecutive_errors", consecutiveErrors))
 				if ensureErr := q.EnsureGroup(ctx); ensureErr != nil {
 					q.logger.Error(ctx, "Failed to recreate group", tag.Error(ensureErr))
+				} else {
+					// Self-heal worked — counter must reset so the next
+					// XReadGroup attempt starts from a clean slate.
+					consecutiveErrors = 0
 				}
 				if !q.sleepCtx(ctx, q.readErrorBackoff) {
 					return ctx.Err()
@@ -203,15 +225,25 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 					if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
 						continue
 					}
+					q.metrics.RecordDLQRoute(dlqReasonMalformedParse)
 					q.ackOrLog(ctx, msg.ID)
 					continue
 				}
 
-				// Process with Retry
-				if err := q.processWithRetry(ctx, handler, orderMsg); err != nil {
-					// Exhausted retries. handleFailure returns false
-					// when compensation failed — leave in PEL for retry.
+				// Process with Retry. `malformed` is true when the
+				// retry policy short-circuited the budget (deterministic
+				// failure → DLQ fast-path); false on either budget
+				// exhaustion or ctx-cancel mid-backoff.
+				err, malformed := q.processWithRetry(ctx, handler, orderMsg)
+				if err != nil {
+					// handleFailure returns false when compensation failed
+					// — leave in PEL for retry.
 					if q.handleFailure(ctx, orderMsg, msg, err) {
+						reason := dlqReasonExhaustedRetries
+						if malformed {
+							reason = dlqReasonMalformedClassified
+						}
+						q.metrics.RecordDLQRoute(reason)
 						q.ackOrLog(ctx, msg.ID)
 					}
 				} else {
@@ -247,13 +279,27 @@ func (q *redisOrderQueue) ackOrLog(ctx context.Context, msgID string) {
 	}
 }
 
-func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx context.Context, msg *application.QueuedBookingMessage) error, msg *application.QueuedBookingMessage) error {
+// processWithRetry returns (err, malformed). When err is non-nil,
+// `malformed` distinguishes the two reasons we'd surface the message
+// to handleFailure → DLQ:
+//   - malformed=true:  retry policy declared the error deterministic
+//                      (fast-path bypass). DLQ reason is "malformed_classified".
+//   - malformed=false: budget exhausted on a transient error, OR ctx
+//                      cancelled mid-backoff. DLQ reason is "exhausted_retries"
+//                      (or no DLQ if ctx cancelled — see Subscribe).
+//
+// The caller uses the bool to label the `redis_dlq_routed_total` metric.
+// Returning the bool from here (rather than re-evaluating
+// `q.retryPolicy(err)` at the call site) keeps the policy a one-shot
+// observation per message — desirable because the policy implementation
+// is not strictly required to be idempotent.
+func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx context.Context, msg *application.QueuedBookingMessage) error, msg *application.QueuedBookingMessage) (error, bool) {
 	var lastErr error
 
 	for i := 0; i < q.maxRetries; i++ {
 		err := handler(ctx, msg)
 		if err == nil {
-			return nil
+			return nil, false
 		}
 		lastErr = err
 		// Application-supplied retry policy decides whether this error
@@ -263,15 +309,15 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 		// waiting out the backoff. Transient errors fall through to
 		// the backoff and the next attempt.
 		if !q.retryPolicy(err) {
-			return err
+			return err, true
 		}
 		// Backoff (linear: attempt N waits N * RetryBaseDelay) while
 		// honoring ctx cancellation so shutdown is prompt.
 		if !q.sleepCtx(ctx, time.Duration(i+1)*q.retryBaseDelay) {
-			return ctx.Err()
+			return ctx.Err(), false
 		}
 	}
-	return lastErr
+	return lastErr, false
 }
 
 // handleFailure runs the compensation path for an exhausted-retry message:
@@ -432,15 +478,22 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 				if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
 					continue
 				}
+				q.metrics.RecordDLQRoute(dlqReasonMalformedParse)
 				q.ackOrLog(ctx, msg.ID)
 				continue
 			}
 
-			// Process with Retry
-			if err := q.processWithRetry(ctx, handler, orderMsg); err != nil {
+			// Process with Retry — see Subscribe for the malformed-bool semantics.
+			err, malformed := q.processWithRetry(ctx, handler, orderMsg)
+			if err != nil {
 				// handleFailure returns false when compensation failed;
 				// leaving in PEL means next cycle retries revert + DLQ.
 				if q.handleFailure(ctx, orderMsg, msg, err) {
+					reason := dlqReasonExhaustedRetries
+					if malformed {
+						reason = dlqReasonMalformedClassified
+					}
+					q.metrics.RecordDLQRoute(reason)
 					q.ackOrLog(ctx, msg.ID)
 				}
 			} else {

@@ -25,6 +25,17 @@ type QueueMetrics interface {
 	// (RevertInventory) fails during handleFailure. A non-zero rate
 	// here means Redis inventory is drifting from DB state.
 	RecordRevertFailure()
+
+	// RecordDLQRoute increments per SUCCESSFUL message route to the
+	// Redis DLQ, labelled by reason. Distinguishes:
+	//   - "malformed_parse"      parseMessage failed (missing field, bad UUID)
+	//   - "malformed_classified" handler returned a malformed-input error
+	//                            (the DLQ fast-path that bypasses retry budget)
+	//   - "exhausted_retries"    handler exceeded retry budget on transient errors
+	// Counterpart to RecordXAddFailure(stream="dlq") which fires only
+	// on failure — without RecordDLQRoute, operators have no positive
+	// signal of DLQ throughput, only the absence of failures.
+	RecordDLQRoute(reason string)
 }
 
 // noopQueueMetrics satisfies QueueMetrics for tests and unwired paths.
@@ -33,6 +44,7 @@ type noopQueueMetrics struct{}
 func (noopQueueMetrics) RecordXAckFailure()         {}
 func (noopQueueMetrics) RecordXAddFailure(_ string) {}
 func (noopQueueMetrics) RecordRevertFailure()       {}
+func (noopQueueMetrics) RecordDLQRoute(_ string)    {}
 
 // NoopQueueMetrics returns a no-op QueueMetrics implementation. Use in
 // tests that don't assert on queue-failure observability, instead of
