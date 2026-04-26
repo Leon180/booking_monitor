@@ -95,7 +95,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		// are theoretical for the current event shape but we
 		// surface them so a future field addition can't ship a
 		// silent nil-payload outbox row.
-		payload, err := json.Marshal(domain.NewOrderCreatedEvent(created))
+		payload, err := json.Marshal(NewOrderCreatedEvent(created))
 		if err != nil {
 			p.logger.Error(ctx, "Failed to marshal order_created event for outbox",
 				tag.MsgID(msg.MessageID), tag.Error(err))

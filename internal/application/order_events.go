@@ -1,28 +1,44 @@
-package domain
+package application
 
 import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"booking_monitor/internal/domain"
 )
 
-// Wire-format schema version for the order.* event family. Bumped only
-// when a backward-incompatible change is made (field removal, type
-// change, semantic redefinition); additive changes (new optional
-// fields) keep the same version. Consumers SHOULD branch on this
-// value when they need to support both old and new shapes during a
-// rolling migration.
+// OrderCreatedEvent / OrderFailedEvent + their factories live here, in
+// application, NOT in domain. They are wire-format DTOs published to
+// Kafka (`order.created` / `order.failed`) — application owns that
+// transport contract. Putting them in domain would smuggle JSON wire
+// concerns into entity definitions (the rule-7 violation closed by
+// PR #38). Mirrors the OrderQueue / QueuedBookingMessage relocation
+// from PR #37.
 //
-// Version 2 (PR 34): IDs migrated from int (SERIAL) to UUID v7.
-// Producer now serialises IDs as RFC 4122 strings; consumers that
-// expected int will fail to unmarshal — coordinate the bump.
+// json tags ARE legitimate here: the types are DTOs by purpose (no
+// invariants enforced, no behaviour, just shape), unlike domain
+// entities which the rule keeps tag-free.
+
+// OrderEventVersion is the wire-format schema version for the
+// `order.*` event family. Bumped only when a backward-incompatible
+// change is made (field removal, type change, semantic redefinition);
+// additive changes (new optional fields) keep the same version.
+// Consumers SHOULD branch on this value when they need to support
+// both old and new shapes during a rolling migration.
+//
+// Version history:
+//   - v1 (pre PR 34): int IDs (SERIAL).
+//   - v2 (PR 34):     IDs migrated from int to UUID v7. Producer
+//     serialises IDs as RFC 4122 strings; consumers that expected int
+//     fail to unmarshal — coordinate the bump.
 const OrderEventVersion = 2
 
 // OrderCreatedEvent is the wire-format payload published to the
-// Kafka order.created topic and consumed by the payment service.
-// Defined separately from domain.Order so the messaging contract can
-// evolve independently of the domain model — adding a domain field
-// no longer leaks into the wire format unless the mapper
+// Kafka `order.created` topic and consumed by the payment service.
+// Defined separately from `domain.Order` so the messaging contract
+// can evolve independently of the domain model — adding a domain
+// field no longer leaks into the wire format unless the mapper
 // (NewOrderCreatedEvent) explicitly copies it across.
 //
 // Field-tag history:
@@ -30,7 +46,7 @@ const OrderEventVersion = 2
 //   - `Amount` — pre-existing field expected by the consumer for
 //     gateway.Charge but the producer-side mapper sets it to 0 today
 //     because pricing isn't modelled in domain.Order. Tracked as a
-//     pre-existing semantic gap; out of scope for the UUID migration.
+//     pre-existing semantic gap; out of scope for the rule-7 audit.
 //   - `Version` — bumped to 2 with the UUID migration.
 type OrderCreatedEvent struct {
 	OrderID   uuid.UUID `json:"id"`
@@ -44,7 +60,7 @@ type OrderCreatedEvent struct {
 }
 
 // OrderFailedEvent is the wire-format payload published to
-// order.failed (saga compensation trigger).
+// `order.failed` (saga compensation trigger).
 type OrderFailedEvent struct {
 	EventID  uuid.UUID `json:"event_id"`
 	OrderID  uuid.UUID `json:"order_id"`
@@ -62,7 +78,7 @@ type OrderFailedEvent struct {
 //
 // Amount is set to 0 because domain.Order has no pricing field today.
 // See the package-level note above.
-func NewOrderCreatedEvent(o Order) OrderCreatedEvent {
+func NewOrderCreatedEvent(o domain.Order) OrderCreatedEvent {
 	return OrderCreatedEvent{
 		OrderID:   o.ID(),
 		Status:    string(o.Status()),

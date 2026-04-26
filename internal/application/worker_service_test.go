@@ -76,11 +76,11 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					// propagate into the wire payload via the explicit
 					// OrderCreatedEvent type — that's the contract the
 					// payment consumer expects.
-					var eventPayload domain.OrderCreatedEvent
+					var eventPayload application.OrderCreatedEvent
 					require.NoError(t, json.Unmarshal(e.Payload(), &eventPayload))
 					assert.NotEqual(t, uuid.Nil, eventPayload.OrderID, "outbox payload must include the order's UUID")
 					assert.Equal(t, validEventID, eventPayload.EventID, "outbox payload event_id must match input")
-					assert.Equal(t, domain.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
+					assert.Equal(t, application.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
 					return e, nil
 				})
 			},

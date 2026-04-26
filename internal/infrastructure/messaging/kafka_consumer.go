@@ -9,7 +9,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
-	"booking_monitor/internal/domain"
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
@@ -58,7 +58,7 @@ func NewKafkaConsumer(cfg *config.KafkaConfig, logger *mlog.Logger) *KafkaConsum
 // Start consumes messages and invokes the handler. Unprocessable messages
 // are written to the DLQ topic and their offsets committed so they do not
 // block the partition.
-func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService) error {
+func (c *KafkaConsumer) Start(ctx context.Context, handler application.PaymentService) error {
 	c.log.Info(ctx, "Starting Kafka consumer for topic: order.created")
 
 	for {
@@ -76,7 +76,7 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 		c.log.Info(ctx, "Received message",
 			mlog.ByteString("key", msg.Key), tag.Offset(msg.Offset))
 
-		var event domain.OrderCreatedEvent
+		var event application.OrderCreatedEvent
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			c.log.Error(ctx, "Failed to unmarshal event — dead-lettering",
 				tag.Error(err),
@@ -91,7 +91,7 @@ func (c *KafkaConsumer) Start(ctx context.Context, handler domain.PaymentService
 		if err := handler.ProcessOrder(ctx, &event); err != nil {
 			// Business-invalid input (e.g. OrderID<=0, Amount<0) is
 			// permanently unprocessable. Dead-letter and commit.
-			if errors.Is(err, domain.ErrInvalidPaymentEvent) {
+			if errors.Is(err, application.ErrInvalidPaymentEvent) {
 				c.log.Warn(ctx, "Invalid payment event — dead-lettering",
 					tag.Error(err),
 					tag.OrderID(event.OrderID),

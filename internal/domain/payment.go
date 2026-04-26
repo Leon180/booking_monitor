@@ -2,21 +2,18 @@ package domain
 
 import (
 	"context"
-	"errors"
 
 	"github.com/google/uuid"
 )
 
-// ErrInvalidPaymentEvent is returned by PaymentService.ProcessOrder when the
-// OrderCreatedEvent payload fails input validation (zero/negative OrderID,
-// negative Amount, etc.). Consumers MUST treat this as a dead-letter
-// condition: log, publish to DLQ if configured, commit the offset, and move
-// on. It is NEVER a retryable error.
-var ErrInvalidPaymentEvent = errors.New("invalid payment event")
-
 //go:generate mockgen -source=payment.go -destination=../mocks/payment_mock.go -package=mocks
 
-// PaymentGateway defines the interface for external payment processing.
+// PaymentGateway is the domain port for external payment processing.
+// Stays in domain because it's a true domain integration boundary —
+// no wire-format DTOs leak through (orderID is `uuid.UUID`, amount is
+// `float64`, both pure value types). Implementations live in
+// `internal/infrastructure/payment/` (MockGateway today; a real
+// Stripe adapter would land alongside).
 //
 // IDEMPOTENCY CONTRACT (load-bearing — payment service relies on it):
 //
@@ -27,10 +24,11 @@ var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 //
 // Why this contract is required, not optional:
 //
-//   PaymentService.ProcessOrder runs at-least-once (Kafka redelivery
-//   on failure). The ordering Charge → DB UpdateStatus is a two-phase
-//   operation across distinct infrastructures and CANNOT be wrapped
-//   in a tx. Two race windows produce duplicate Charge calls on retry:
+//   `application.PaymentService.ProcessOrder` runs at-least-once
+//   (Kafka redelivery on failure). The ordering Charge → DB
+//   UpdateStatus is a two-phase operation across distinct
+//   infrastructures and CANNOT be wrapped in a tx. Two race windows
+//   produce duplicate Charge calls on retry:
 //
 //     a) Charge succeeds, then UpdateStatus(Confirmed) fails. Kafka
 //        redelivers; the idempotency check (Status==Pending) sees
@@ -56,13 +54,9 @@ type PaymentGateway interface {
 	Charge(ctx context.Context, orderID uuid.UUID, amount float64) error
 }
 
-// PaymentService defines the application service for processing payments.
-type PaymentService interface {
-	ProcessOrder(ctx context.Context, event *OrderCreatedEvent) error
-}
-
-// OrderCreatedEvent and OrderFailedEvent moved to order_events.go in
-// PR 32 — they are wire-format messaging payloads, conceptually
-// distinct from the payment domain interfaces above. Their producer-
-// side mappers (NewOrderCreatedEvent / NewOrderFailedEvent) live with
-// the types so the domain↔wire seam is in one file.
+// `PaymentService` interface, `ErrInvalidPaymentEvent`,
+// `OrderCreatedEvent`, and `OrderFailedEvent` moved to
+// `internal/application/` in PR #38 (rule-7 audit). They are wire-
+// format DTOs / application-service ports — application owns those
+// concerns, not domain. PaymentGateway stays here because it IS a
+// domain port: an external integration boundary with no DTO leaks.
