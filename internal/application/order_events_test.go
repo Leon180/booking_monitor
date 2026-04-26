@@ -1,14 +1,15 @@
-package domain_test
+package application_test
 
 import (
 	"encoding/json"
 	"testing"
 	"time"
 
-	"booking_monitor/internal/domain"
-
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+
+	"booking_monitor/internal/application"
+	"booking_monitor/internal/domain"
 )
 
 func TestNewOrderCreatedEvent(t *testing.T) {
@@ -19,7 +20,7 @@ func TestNewOrderCreatedEvent(t *testing.T) {
 	eventID := uuid.New()
 	o := domain.ReconstructOrder(orderID, 7, eventID, 3, domain.OrderStatusPending, created)
 
-	got := domain.NewOrderCreatedEvent(o)
+	got := application.NewOrderCreatedEvent(o)
 
 	// Field-by-field — a swap (UserID/EventID) silently breaks the
 	// payment consumer's behavior. This test is the seam contract.
@@ -30,7 +31,7 @@ func TestNewOrderCreatedEvent(t *testing.T) {
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, float64(0), got.Amount, "Amount is 0 today — pre-existing semantic gap, see order_events.go comment")
 	assert.Equal(t, created, got.CreatedAt)
-	assert.Equal(t, domain.OrderEventVersion, got.Version, "every produced event must carry the current schema version")
+	assert.Equal(t, application.OrderEventVersion, got.Version, "every produced event must carry the current schema version")
 }
 
 func TestNewOrderFailedEvent(t *testing.T) {
@@ -38,7 +39,7 @@ func TestNewOrderFailedEvent(t *testing.T) {
 
 	orderID := uuid.New()
 	eventID := uuid.New()
-	from := domain.OrderCreatedEvent{
+	from := application.OrderCreatedEvent{
 		OrderID:  orderID,
 		UserID:   7,
 		EventID:  eventID,
@@ -47,7 +48,7 @@ func TestNewOrderFailedEvent(t *testing.T) {
 	}
 	before := time.Now()
 
-	got := domain.NewOrderFailedEvent(from, "gateway timeout")
+	got := application.NewOrderFailedEvent(from, "gateway timeout")
 
 	after := time.Now()
 
@@ -56,7 +57,7 @@ func TestNewOrderFailedEvent(t *testing.T) {
 	assert.Equal(t, eventID, got.EventID)
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, "gateway timeout", got.Reason)
-	assert.Equal(t, domain.OrderEventVersion, got.Version)
+	assert.Equal(t, application.OrderEventVersion, got.Version)
 	// FailedAt is set to time.Now() inside the mapper — bound it
 	// between the test's before/after timestamps to confirm it isn't
 	// taking the value from `from` (which has no FailedAt) or the
@@ -75,7 +76,7 @@ func TestOrderCreatedEvent_WireFormatStable(t *testing.T) {
 
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	orderID := uuid.New()
-	ev := domain.NewOrderCreatedEvent(domain.ReconstructOrder(
+	ev := application.NewOrderCreatedEvent(domain.ReconstructOrder(
 		orderID, 7, uuid.New(), 3, domain.OrderStatusPending, created,
 	))
 
@@ -101,7 +102,7 @@ func TestOrderCreatedEvent_WireFormatStable(t *testing.T) {
 func TestOrderFailedEvent_WireFormatStable(t *testing.T) {
 	t.Parallel()
 
-	ev := domain.NewOrderFailedEvent(domain.OrderCreatedEvent{
+	ev := application.NewOrderFailedEvent(application.OrderCreatedEvent{
 		OrderID: uuid.New(), UserID: 7, EventID: uuid.New(), Quantity: 3,
 	}, "test reason")
 

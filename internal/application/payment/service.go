@@ -33,7 +33,7 @@ func NewService(
 	orderRepo domain.OrderRepository,
 	uow application.UnitOfWork,
 	logger *mlog.Logger,
-) domain.PaymentService {
+) application.PaymentService {
 	return &Service{
 		gateway:   gateway,
 		orderRepo: orderRepo,
@@ -59,7 +59,7 @@ func NewService(
 // gateway implements it via sync.Map. ProcessOrder relies on that
 // contract here — ANY adapter that violates it will produce duplicate
 // charges under retry.
-func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEvent) error {
+func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
 	s.log.Info(ctx, "Processing payment for order",
 		tag.OrderID(event.OrderID), tag.Amount(event.Amount))
 
@@ -70,12 +70,12 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 	// losing the event without any operator-visible signal.
 	if event.OrderID == uuid.Nil {
 		s.log.Error(ctx, "Invalid OrderID (zero UUID)", tag.OrderID(event.OrderID))
-		return fmt.Errorf("order_id is zero UUID: %w", domain.ErrInvalidPaymentEvent)
+		return fmt.Errorf("order_id is zero UUID: %w", application.ErrInvalidPaymentEvent)
 	}
 	if event.Amount < 0 {
 		s.log.Error(ctx, "Invalid Amount",
 			tag.OrderID(event.OrderID), tag.Amount(event.Amount))
-		return fmt.Errorf("amount=%v: %w", event.Amount, domain.ErrInvalidPaymentEvent)
+		return fmt.Errorf("amount=%v: %w", event.Amount, application.ErrInvalidPaymentEvent)
 	}
 
 	// 2. Idempotency Check
@@ -106,7 +106,7 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 			// fresh domain.Order at hand. NewOrderFailedEvent lives
 			// next to OrderCreatedEvent so the messaging contract is
 			// in one place (see internal/domain/order_events.go).
-			failedEvent := domain.NewOrderFailedEvent(*event, err.Error())
+			failedEvent := application.NewOrderFailedEvent(*event, err.Error())
 			payload, marshalErr := json.Marshal(failedEvent)
 			if marshalErr != nil {
 				return marshalErr

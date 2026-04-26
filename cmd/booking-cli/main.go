@@ -153,7 +153,7 @@ func installPaymentWorker(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
 	consumer *messaging.KafkaConsumer,
-	service domain.PaymentService,
+	service application.PaymentService,
 	logger *mlog.Logger,
 ) error {
 	tp, err := initTracer()

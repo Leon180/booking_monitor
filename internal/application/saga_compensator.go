@@ -40,7 +40,7 @@ func NewSagaCompensator(
 }
 
 func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte) error {
-	var event domain.OrderFailedEvent
+	var event OrderFailedEvent
 	if err := json.Unmarshal(payload, &event); err != nil {
 		s.log.Error(ctx, "failed to unmarshal event",
 			tag.Error(err),

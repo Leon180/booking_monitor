@@ -20,7 +20,7 @@ import (
 
 // makeOrder produces a Pending order matching the supplied event so the
 // idempotency-check GetByID has something realistic to return.
-func makeOrder(t *testing.T, ev *domain.OrderCreatedEvent, status domain.OrderStatus) domain.Order {
+func makeOrder(t *testing.T, ev *application.OrderCreatedEvent, status domain.OrderStatus) domain.Order {
 	t.Helper()
 	o, err := domain.NewOrder(1, ev.EventID, 1)
 	require.NoError(t, err)
@@ -30,18 +30,18 @@ func makeOrder(t *testing.T, ev *domain.OrderCreatedEvent, status domain.OrderSt
 	return o
 }
 
-func newEvent(t *testing.T) *domain.OrderCreatedEvent {
+func newEvent(t *testing.T) *application.OrderCreatedEvent {
 	t.Helper()
 	orderID, err := uuid.NewV7()
 	require.NoError(t, err)
 	eventID, err := uuid.NewV7()
 	require.NoError(t, err)
-	return &domain.OrderCreatedEvent{
+	return &application.OrderCreatedEvent{
 		OrderID: orderID,
 		EventID: eventID,
 		UserID:  1,
 		Amount:  100,
-		Version: domain.OrderEventVersion,
+		Version: application.OrderEventVersion,
 	}
 }
 
@@ -69,9 +69,9 @@ func TestProcessOrder_RejectsZeroOrderID(t *testing.T) {
 	uow := mocks.NewMockUnitOfWork(ctrl)
 	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
-	err := svc.ProcessOrder(context.Background(), &domain.OrderCreatedEvent{OrderID: uuid.Nil, Amount: 1})
+	err := svc.ProcessOrder(context.Background(), &application.OrderCreatedEvent{OrderID: uuid.Nil, Amount: 1})
 
-	assert.ErrorIs(t, err, domain.ErrInvalidPaymentEvent)
+	assert.ErrorIs(t, err, application.ErrInvalidPaymentEvent)
 }
 
 func TestProcessOrder_RejectsNegativeAmount(t *testing.T) {
@@ -87,7 +87,7 @@ func TestProcessOrder_RejectsNegativeAmount(t *testing.T) {
 	ev.Amount = -1
 
 	err := svc.ProcessOrder(context.Background(), ev)
-	assert.ErrorIs(t, err, domain.ErrInvalidPaymentEvent)
+	assert.ErrorIs(t, err, application.ErrInvalidPaymentEvent)
 }
 
 // ── Idempotency short-circuit (order already processed) ─────────────
@@ -206,7 +206,7 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 		outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).
 			DoAndReturn(func(_ context.Context, oe domain.OutboxEvent) (domain.OutboxEvent, error) {
 				assert.Equal(t, domain.EventTypeOrderFailed, oe.EventType())
-				var p domain.OrderFailedEvent
+				var p application.OrderFailedEvent
 				require.NoError(t, json.Unmarshal(oe.Payload(), &p))
 				assert.Equal(t, ev.OrderID, p.OrderID)
 				return oe, nil

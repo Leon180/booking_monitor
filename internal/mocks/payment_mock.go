@@ -10,7 +10,6 @@
 package mocks
 
 import (
-	domain "booking_monitor/internal/domain"
 	context "context"
 	reflect "reflect"
 
@@ -54,42 +53,4 @@ func (m *MockPaymentGateway) Charge(ctx context.Context, orderID uuid.UUID, amou
 func (mr *MockPaymentGatewayMockRecorder) Charge(ctx, orderID, amount any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Charge", reflect.TypeOf((*MockPaymentGateway)(nil).Charge), ctx, orderID, amount)
-}
-
-// MockPaymentService is a mock of PaymentService interface.
-type MockPaymentService struct {
-	ctrl     *gomock.Controller
-	recorder *MockPaymentServiceMockRecorder
-	isgomock struct{}
-}
-
-// MockPaymentServiceMockRecorder is the mock recorder for MockPaymentService.
-type MockPaymentServiceMockRecorder struct {
-	mock *MockPaymentService
-}
-
-// NewMockPaymentService creates a new mock instance.
-func NewMockPaymentService(ctrl *gomock.Controller) *MockPaymentService {
-	mock := &MockPaymentService{ctrl: ctrl}
-	mock.recorder = &MockPaymentServiceMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockPaymentService) EXPECT() *MockPaymentServiceMockRecorder {
-	return m.recorder
-}
-
-// ProcessOrder mocks base method.
-func (m *MockPaymentService) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEvent) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ProcessOrder", ctx, event)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ProcessOrder indicates an expected call of ProcessOrder.
-func (mr *MockPaymentServiceMockRecorder) ProcessOrder(ctx, event any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessOrder", reflect.TypeOf((*MockPaymentService)(nil).ProcessOrder), ctx, event)
 }
