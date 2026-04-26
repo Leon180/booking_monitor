@@ -118,7 +118,7 @@ reset-db: ## Reset database — truncate orders/events/outbox + flush Redis. Tes
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE orders;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE events_outbox;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events;"
-	@docker exec booking_redis redis-cli FLUSHALL
+	@docker exec booking_redis redis-cli -a $(REDIS_PASSWORD) --no-auth-warning FLUSHALL
 	@echo "Database and Redis reset complete. Create a fresh event via POST /api/v1/events for the next test run."
 
 help: ## Show help message
