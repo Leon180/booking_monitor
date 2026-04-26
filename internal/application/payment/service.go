@@ -42,6 +42,23 @@ func NewService(
 	}
 }
 
+// ProcessOrder is at-least-once with respect to Kafka redelivery. Two
+// race windows could otherwise cause double-charge:
+//
+//  a) gateway.Charge succeeds, then orderRepo.UpdateStatus(Confirmed)
+//     fails → return err → Kafka redelivers → idempotency check sees
+//     Status=Pending (UpdateStatus failed) → re-enters Charge path.
+//  b) gateway.Charge fails, then the saga uow.Do fails → return err →
+//     Kafka redelivers → re-enters Charge path against a gateway whose
+//     first call may or may not have already debited the customer.
+//
+// Both are eliminated by the IDEMPOTENCY CONTRACT on PaymentGateway
+// (see domain/payment.go): repeat Charge calls with the same orderID
+// return the cached first-call result without re-charging. Real
+// providers (Stripe, Square, Adyen, PayPal) implement this; the mock
+// gateway implements it via sync.Map. ProcessOrder relies on that
+// contract here — ANY adapter that violates it will produce duplicate
+// charges under retry.
 func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEvent) error {
 	s.log.Info(ctx, "Processing payment for order",
 		tag.OrderID(event.OrderID), tag.Amount(event.Amount))
