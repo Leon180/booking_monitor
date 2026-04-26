@@ -43,11 +43,12 @@ func (m *MockEventRepository) EXPECT() *MockEventRepositoryMockRecorder {
 }
 
 // Create mocks base method.
-func (m *MockEventRepository) Create(ctx context.Context, event *domain.Event) error {
+func (m *MockEventRepository) Create(ctx context.Context, event domain.Event) (domain.Event, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Create", ctx, event)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(domain.Event)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // Create indicates an expected call of Create.
@@ -85,10 +86,10 @@ func (mr *MockEventRepositoryMockRecorder) Delete(ctx, id any) *gomock.Call {
 }
 
 // GetByID mocks base method.
-func (m *MockEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
+func (m *MockEventRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.Event, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByID", ctx, id)
-	ret0, _ := ret[0].(*domain.Event)
+	ret0, _ := ret[0].(domain.Event)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -100,10 +101,10 @@ func (mr *MockEventRepositoryMockRecorder) GetByID(ctx, id any) *gomock.Call {
 }
 
 // GetByIDForUpdate mocks base method.
-func (m *MockEventRepository) GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
+func (m *MockEventRepository) GetByIDForUpdate(ctx context.Context, id uuid.UUID) (domain.Event, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetByIDForUpdate", ctx, id)
-	ret0, _ := ret[0].(*domain.Event)
+	ret0, _ := ret[0].(domain.Event)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -129,7 +130,7 @@ func (mr *MockEventRepositoryMockRecorder) IncrementTicket(ctx, eventID, quantit
 }
 
 // Update mocks base method.
-func (m *MockEventRepository) Update(ctx context.Context, event *domain.Event) error {
+func (m *MockEventRepository) Update(ctx context.Context, event domain.Event) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Update", ctx, event)
 	ret0, _ := ret[0].(error)

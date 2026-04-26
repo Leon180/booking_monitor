@@ -1,10 +1,11 @@
-package application
+package application_test
 
 import (
 	"context"
 	"errors"
 	"testing"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
@@ -101,8 +102,8 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			}
 
 			// We test the private method processBatch directly to avoid timing issues with Run()
-			relay := NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
-			relay.processBatch(ctx)
+			relay := application.NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
+			relay.ProcessBatchForTest(ctx)
 		})
 	}
 }

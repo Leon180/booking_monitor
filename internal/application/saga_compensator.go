@@ -15,27 +15,25 @@ type SagaCompensator interface {
 }
 
 type sagaCompensator struct {
-	eventRepo     domain.EventRepository
 	inventoryRepo domain.InventoryRepository
-	orderRepo     domain.OrderRepository
-	uow           domain.UnitOfWork
+	uow           UnitOfWork
 	log           *mlog.Logger
 }
 
 // NewSagaCompensator takes the logger as an explicit dependency rather
 // than reaching for zap's globals, matching the pattern used by
 // WorkerService and keeping tests deterministic (L7).
+//
+// All DB work happens inside uow.Do so the per-aggregate repos are
+// resolved off the closure parameter; the Redis revert outside the
+// tx still uses the long-lived inventoryRepo.
 func NewSagaCompensator(
-	eventRepo domain.EventRepository,
 	inventoryRepo domain.InventoryRepository,
-	orderRepo domain.OrderRepository,
-	uow domain.UnitOfWork,
+	uow UnitOfWork,
 	logger *mlog.Logger,
 ) SagaCompensator {
 	return &sagaCompensator{
-		eventRepo:     eventRepo,
 		inventoryRepo: inventoryRepo,
-		orderRepo:     orderRepo,
 		uow:           uow,
 		log:           logger.With(mlog.String("component", "saga_compensator")),
 	}
@@ -58,8 +56,8 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	)
 
 	// 1. Rollback PostgreSQL Inventory & Ensure Idempotency via UoW
-	errUow := s.uow.Do(ctx, func(txCtx context.Context) error {
-		order, err := s.orderRepo.GetByID(txCtx, event.OrderID)
+	errUow := s.uow.Do(ctx, func(repos *Repositories) error {
+		order, err := repos.Order.GetByID(ctx, event.OrderID)
 		if err != nil {
 			return fmt.Errorf("orderRepo.GetByID order_id=%s: %w", event.OrderID, err)
 		}
@@ -68,11 +66,11 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 			return nil
 		}
 
-		if err := s.eventRepo.IncrementTicket(txCtx, event.EventID, event.Quantity); err != nil {
+		if err := repos.Event.IncrementTicket(ctx, event.EventID, event.Quantity); err != nil {
 			return fmt.Errorf("eventRepo.IncrementTicket event_id=%s: %w", event.EventID, err)
 		}
 
-		if err := s.orderRepo.UpdateStatus(txCtx, event.OrderID, domain.OrderStatusCompensated); err != nil {
+		if err := repos.Order.UpdateStatus(ctx, event.OrderID, domain.OrderStatusCompensated); err != nil {
 			return fmt.Errorf("orderRepo.UpdateStatus order_id=%s: %w", event.OrderID, err)
 		}
 		return nil

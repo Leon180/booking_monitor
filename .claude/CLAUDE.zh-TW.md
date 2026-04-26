@@ -93,6 +93,29 @@ Group ID 與 topic 名稱皆可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CR
 - 不得硬編密碼/金鑰,一律用環境變數
 - 測試使用 testify/assert + go.uber.org/mock
 
+## Benchmark 慣例
+
+效能 regression 追蹤都放在 `docs/benchmarks/`。目錄結構與內容是約定俗成,並非工具強制 — 維持一致才能讓歷史 run 之間可比較。
+
+**目錄命名**:`YYYYMMDD_HHMMSS_compare_c<vus>[_<tag>]`(例:`20260426_183530_compare_c500_pr35`)。`c<vus>` 段表示 VU 數量;尾端的 `_<tag>` 用來描述比較的對象(PR 編號、phase 名稱等),非必填。
+
+**每個目錄必備檔案**:
+- `comparison.md` — 參數、run A vs run B 的指標表、結論、注意事項(範本參考 `20260426_183530_compare_c500_pr35/comparison.md`)
+- `run_a_raw.txt` — baseline run 的完整 k6 stdout
+- `run_b_raw.txt` — 受測 run 的完整 k6 stdout
+
+**Apples-to-apples 標準條件**(除非刻意要量別的東西,否則一律用以下設定):
+- Script:`scripts/k6_comparison.js`
+- VUs:500
+- Duration:60s
+- 票池:500,000(讓整個 run 都不會 sold-out — 測純容量)
+- 目標:`http://app:8080/api/v1`(直連,繞過 nginx 限流)
+- 兩個 run 都在同一台主機、等價的 Docker 環境
+
+**何時要留 report**:會動到訂票 hot path 的 PR(handler / `BookingService.BookTicket` / Redis Lua / `OrderMessageProcessor.Process` 的 tx 主體 / outbox relay 輪詢)**必須**附上比對 report。純重構若 diff 可以證明 hot path 一個 byte 都沒改(例:PR 31→35 就是觸發這條規則的案例)**可以**跳過,但附一份「驗證無 regression」的 report 仍然是最乾淨的證據、也是優先選擇。
+
+**現有工具**:`make benchmark-compare VUS=500 DURATION=60s` 會跑 `scripts/benchmark_compare.sh`,自動建立目錄與 raw 輸出;`comparison.md` 再由人撰寫,引用已存下的 raw 檔。k6-on-Docker laptop 的 run-to-run 變異通常落在 3-5%,低於這個區間的 delta 是 noise 不是信號。
+
 ## 目前狀態(截至 2026-04-24)
 已完成 15 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。Phase 15(4/23–24)在 PR #18 完成 logger 架構重構 — `pkg/logger/` → `internal/log/`,新增 ctx-aware emit 方法(`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`)會自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`,在 pprof listener 上掛載 `/admin/loglevel` runtime level 端點,並提供 `internal/log/tag/` 型別化欄位建構子。Phase 15 後(4/24)於 PR #21/#22/#23 做 review cleanup:對 `cmd/booking-cli/main.go` 做嚴格 review,修復 P0 的 stress URL、payment worker 補 tracer init、pprof 改綁 loopback + 加 timeout、goroutine 失敗時透過 `fx.Shutdowner` 升級關機、function 拆分,並把 pprof / trusted-proxies / db-ping 調整項搬到 `config.Config`(`KAFKA_BROKERS` 與 `TRUSTED_PROXIES` 改為 cleanenv 的 `[]string` + `env-separator`,順便修掉一個 multi-broker 靜默失效的 bug)。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
 

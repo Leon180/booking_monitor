@@ -1,48 +1,81 @@
 package postgres
 
 import (
-	"booking_monitor/internal/application"
-	"booking_monitor/internal/domain"
-	mlog "booking_monitor/internal/log"
-	"booking_monitor/internal/log/tag"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"booking_monitor/internal/application"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
-type txKey struct{}
-
-// PostgresUnitOfWork implements domain.UnitOfWork
+// PostgresUnitOfWork implements application.UnitOfWork on top of
+// `database/sql`. The UoW holds the long-lived non-tx repos (each
+// produced by `NewPostgresXRepository`) and clones them with `WithTx`
+// inside `Do`, so every method call inside the closure runs against
+// the same `*sql.Tx`.
+//
+// Why postgres-package, not application-package: the implementation is
+// inherently database-driver-coupled (BeginTx, Rollback, ErrTxDone).
+// The application port lives one layer in (internal/application/uow.go);
+// this struct satisfies that interface — DIP, exactly as Clean
+// Architecture prescribes.
 type PostgresUnitOfWork struct {
-	db      *sql.DB
-	logger  *mlog.Logger
-	metrics application.DBMetrics
+	db         *sql.DB
+	orderRepo  *postgresOrderRepository
+	eventRepo  *postgresEventRepository
+	outboxRepo *postgresOutboxRepository
+	logger     *mlog.Logger
+	metrics    application.DBMetrics
 }
 
-func NewPostgresUnitOfWork(db *sql.DB, logger *mlog.Logger, metrics application.DBMetrics) domain.UnitOfWork {
+func NewPostgresUnitOfWork(
+	db *sql.DB,
+	orderRepo *postgresOrderRepository,
+	eventRepo *postgresEventRepository,
+	outboxRepo *postgresOutboxRepository,
+	logger *mlog.Logger,
+	metrics application.DBMetrics,
+) application.UnitOfWork {
 	return &PostgresUnitOfWork{
-		db:      db,
-		logger:  logger.With(mlog.String("component", "unit_of_work")),
-		metrics: metrics,
+		db:         db,
+		orderRepo:  orderRepo,
+		eventRepo:  eventRepo,
+		outboxRepo: outboxRepo,
+		logger:     logger.With(mlog.String("component", "unit_of_work")),
+		metrics:    metrics,
 	}
 }
 
-func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context) error) error {
-	// If already in transaction, just execute
-	if _, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
-		return fn(ctx)
-	}
-
+// Do begins a transaction, builds a fresh Repositories bundle bound to
+// that tx, and hands it to fn. Commit on nil return; rollback on error.
+//
+// The Repositories bundle is constructed PER INVOCATION and never
+// cached on the UoW struct — caching would let a tx-bound repo leak to
+// a concurrent caller (Morrison atomic-repositories foot-gun). Each
+// `WithTx` returns a fresh struct, so two concurrent `Do` calls cannot
+// see each other's tx.
+//
+// The previous PR-34 era implementation used `context.WithValue(txKey)`
+// to thread the tx through repo calls and silently fell back to the
+// non-tx pool when the contract was violated. PR 35 removes the ctx
+// machinery entirely — `repos` is a concrete parameter, so "passing
+// the wrong ctx" is no longer a possible state.
+func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(repos *application.Repositories) error) error {
 	tx, err := u.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 
-	// Inject tx into context
-	txCtx := context.WithValue(ctx, txKey{}, tx)
+	repos := &application.Repositories{
+		Order:  u.orderRepo.WithTx(tx),
+		Event:  u.eventRepo.WithTx(tx),
+		Outbox: u.outboxRepo.WithTx(tx),
+	}
 
-	if err := fn(txCtx); err != nil {
+	if err := fn(repos); err != nil {
 		// Rollback can legitimately return sql.ErrTxDone when the driver
 		// has already closed the tx after a fatal error (broken conn,
 		// deadlock, etc.) — that's expected, not a failure. Any OTHER
@@ -63,28 +96,5 @@ func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(ctx context.Context
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
-
 	return nil
-}
-
-// DBExecutor Interface for common methods between *sql.DB and *sql.Tx
-type DBExecutor interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-}
-
-// getExecutor extracts tx from context or returns db
-func (r *postgresEventRepository) getExecutor(ctx context.Context) DBExecutor {
-	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
-		return tx
-	}
-	return r.db
-}
-
-func (r *postgresOrderRepository) getExecutor(ctx context.Context) DBExecutor {
-	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
-		return tx
-	}
-	return r.db
 }

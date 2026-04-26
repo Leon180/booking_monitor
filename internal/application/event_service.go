@@ -10,7 +10,7 @@ import (
 )
 
 type EventService interface {
-	CreateEvent(ctx context.Context, name string, totalTickets int) (*domain.Event, error)
+	CreateEvent(ctx context.Context, name string, totalTickets int) (domain.Event, error)
 }
 
 type eventService struct {
@@ -31,44 +31,39 @@ func NewEventService(repo domain.EventRepository, inventoryRepo domain.Inventory
 	}
 }
 
-func (s *eventService) CreateEvent(ctx context.Context, name string, totalTickets int) (*domain.Event, error) {
-	// Invariant validation now lives in domain.NewEvent — caller can
+func (s *eventService) CreateEvent(ctx context.Context, name string, totalTickets int) (domain.Event, error) {
+	// Invariant validation lives in domain.NewEvent — caller can
 	// errors.Is against domain.ErrInvalidEventName / ErrInvalidTotalTickets.
-	// Factory also generates the UUID v7 id at construction.
+	// Factory generates the UUID v7 id at construction.
 	ev, err := domain.NewEvent(name, totalTickets)
 	if err != nil {
-		return nil, err
+		return domain.Event{}, err
 	}
 
-	// EventRepository.Create still uses the pre-PR-30 pointer-write-back
-	// signature (full migration to value-in / value-out is queued for
-	// PR 35 / A2). Pass &ev for interface compatibility; the impl no
-	// longer mutates `ev.id` since the factory pre-assigned it.
-	event := &ev
-	if err := s.repo.Create(ctx, event); err != nil {
-		return nil, fmt.Errorf("eventService.CreateEvent db create: %w", err)
+	created, err := s.repo.Create(ctx, ev)
+	if err != nil {
+		return domain.Event{}, fmt.Errorf("eventService.CreateEvent db create: %w", err)
 	}
 
-	// 2. Set in Redis (Hot Inventory). If this fails after the DB row is
-	// committed, we must compensate by deleting the DB row — otherwise
-	// the event exists in Postgres but has no Redis inventory and is
+	// Set in Redis (Hot Inventory). If this fails after the DB row is
+	// committed, compensate by deleting the DB row — otherwise the
+	// event exists in Postgres but has no Redis inventory and is
 	// permanently unsellable (the booking hot path reads from Redis).
-	if err := s.inventoryRepo.SetInventory(ctx, event.ID(), totalTickets); err != nil {
-		if delErr := s.repo.Delete(ctx, event.ID()); delErr != nil {
-			// Compensation failed — we now have a dangling event row
-			// in the DB with no Redis inventory. Surface BOTH errors
-			// so the operator can reconcile manually.
+	if err := s.inventoryRepo.SetInventory(ctx, created.ID(), totalTickets); err != nil {
+		if delErr := s.repo.Delete(ctx, created.ID()); delErr != nil {
+			// Compensation failed — dangling event row in DB with no
+			// Redis inventory. Surface BOTH errors for manual recon.
 			s.log.Error(ctx, "COMPENSATION FAILED — dangling event row",
-				tag.EventID(event.ID()),
+				tag.EventID(created.ID()),
 				mlog.NamedError("redis_error", err),
 				mlog.NamedError("delete_error", delErr),
 			)
-			return nil, fmt.Errorf("eventService.CreateEvent: redis SetInventory failed (%v) AND compensating DB delete failed: %w", err, delErr)
+			return domain.Event{}, fmt.Errorf("eventService.CreateEvent: redis SetInventory failed (%v) AND compensating DB delete failed: %w", err, delErr)
 		}
 		s.log.Warn(ctx, "compensated dangling event after Redis failure",
-			tag.EventID(event.ID()), tag.Error(err))
-		return nil, fmt.Errorf("eventService.CreateEvent redis SetInventory: %w", err)
+			tag.EventID(created.ID()), tag.Error(err))
+		return domain.Event{}, fmt.Errorf("eventService.CreateEvent redis SetInventory: %w", err)
 	}
 
-	return event, nil
+	return created, nil
 }
