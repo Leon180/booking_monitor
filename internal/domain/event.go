@@ -103,13 +103,19 @@ func (e Event) Deduct(quantity int) (Event, error) {
 
 //go:generate mockgen -source=event.go -destination=../mocks/event_repository_mock.go -package=mocks
 type EventRepository interface {
-	Create(ctx context.Context, event *Event) error
-	// GetByID is a plain read with no row lock.
-	GetByID(ctx context.Context, id uuid.UUID) (*Event, error)
+	// Create persists the event. Factory has assigned id + version, so
+	// the input is value-in; the returned Event mirrors the persisted
+	// row (currently unchanged from input, but the signature leaves
+	// room for future server-side defaults — symmetric with
+	// OrderRepository.Create).
+	Create(ctx context.Context, event Event) (Event, error)
+	// GetByID is a plain read with no row lock. Returns a value Event;
+	// Event{}+ErrEventNotFound when no row matches.
+	GetByID(ctx context.Context, id uuid.UUID) (Event, error)
 	// GetByIDForUpdate takes a FOR UPDATE row lock; MUST be called
 	// inside a UoW-managed transaction.
-	GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*Event, error)
-	Update(ctx context.Context, event *Event) error
+	GetByIDForUpdate(ctx context.Context, id uuid.UUID) (Event, error)
+	Update(ctx context.Context, event Event) error
 	DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
 	IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
 	Delete(ctx context.Context, id uuid.UUID) error

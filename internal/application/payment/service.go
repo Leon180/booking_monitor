@@ -7,35 +7,38 @@ import (
 
 	"github.com/google/uuid"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
 type Service struct {
-	gateway    domain.PaymentGateway
-	orderRepo  domain.OrderRepository
-	outboxRepo domain.OutboxRepository
-	uow        domain.UnitOfWork
-	log        *mlog.Logger
+	gateway   domain.PaymentGateway
+	orderRepo domain.OrderRepository
+	uow       application.UnitOfWork
+	log       *mlog.Logger
 }
 
 // NewService takes the logger as an explicit dependency instead of
 // reaching for zap's globals — that way fx can guarantee the logger is
 // initialised before ProcessOrder starts handling Kafka messages.
+//
+// orderRepo is kept on the struct because the idempotency check
+// (GetByID) and the success-path UpdateStatus run OUTSIDE uow.Do.
+// The failure-path tx (UpdateStatus + outbox Create) reaches its
+// repos through the Do closure parameter.
 func NewService(
 	gateway domain.PaymentGateway,
 	orderRepo domain.OrderRepository,
-	outboxRepo domain.OutboxRepository,
-	uow domain.UnitOfWork,
+	uow application.UnitOfWork,
 	logger *mlog.Logger,
 ) domain.PaymentService {
 	return &Service{
-		gateway:    gateway,
-		orderRepo:  orderRepo,
-		outboxRepo: outboxRepo,
-		uow:        uow,
-		log:        logger.With(mlog.String("component", "payment_service")),
+		gateway:   gateway,
+		orderRepo: orderRepo,
+		uow:       uow,
+		log:       logger.With(mlog.String("component", "payment_service")),
 	}
 }
 
@@ -76,8 +79,8 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 			tag.OrderID(event.OrderID), tag.Error(err))
 
 		// Create Saga compensating event (order.failed) atomically with status update
-		errUow := s.uow.Do(ctx, func(txCtx context.Context) error {
-			if updateErr := s.orderRepo.UpdateStatus(txCtx, event.OrderID, domain.OrderStatusFailed); updateErr != nil {
+		errUow := s.uow.Do(ctx, func(repos *application.Repositories) error {
+			if updateErr := repos.Order.UpdateStatus(ctx, event.OrderID, domain.OrderStatusFailed); updateErr != nil {
 				return updateErr
 			}
 
@@ -96,7 +99,7 @@ func (s *Service) ProcessOrder(ctx context.Context, event *domain.OrderCreatedEv
 			if outboxErr != nil {
 				return fmt.Errorf("construct outbox event: %w", outboxErr)
 			}
-			_, createErr := s.outboxRepo.Create(txCtx, outboxEvent)
+			_, createErr := repos.Outbox.Create(ctx, outboxEvent)
 			return createErr
 		})
 		if errUow != nil {

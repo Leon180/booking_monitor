@@ -17,18 +17,18 @@ type BookingService interface {
 }
 
 type bookingService struct {
-	eventRepo     domain.EventRepository
 	orderRepo     domain.OrderRepository
 	inventoryRepo domain.InventoryRepository
-	uow           domain.UnitOfWork
 }
 
-func NewBookingService(eventRepo domain.EventRepository, orderRepo domain.OrderRepository, inventoryRepo domain.InventoryRepository, uow domain.UnitOfWork) BookingService {
+// NewBookingService wires the BookingService. eventRepo / uow used to
+// be parameters too, but PR 35 confirmed they were dead injection —
+// BookTicket only touches Redis (the worker handles all DB work
+// asynchronously) and GetBookingHistory only needs orderRepo.
+func NewBookingService(orderRepo domain.OrderRepository, inventoryRepo domain.InventoryRepository) BookingService {
 	return &bookingService{
-		eventRepo:     eventRepo,
 		orderRepo:     orderRepo,
 		inventoryRepo: inventoryRepo,
-		uow:           uow,
 	}
 }
 

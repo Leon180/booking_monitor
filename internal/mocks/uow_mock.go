@@ -10,6 +10,7 @@
 package mocks
 
 import (
+	application "booking_monitor/internal/application"
 	context "context"
 	reflect "reflect"
 
@@ -41,7 +42,7 @@ func (m *MockUnitOfWork) EXPECT() *MockUnitOfWorkMockRecorder {
 }
 
 // Do mocks base method.
-func (m *MockUnitOfWork) Do(ctx context.Context, fn func(context.Context) error) error {
+func (m *MockUnitOfWork) Do(ctx context.Context, fn func(*application.Repositories) error) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Do", ctx, fn)
 	ret0, _ := ret[0].(error)

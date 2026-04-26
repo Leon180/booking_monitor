@@ -143,7 +143,7 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(*event))
+	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(event))
 }
 
 func (h *bookingHandler) HandleViewEvent(c *gin.Context) {

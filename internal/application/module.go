@@ -21,13 +21,11 @@ var Module = fx.Module("application",
 	// the provide site sidesteps the scoping issue entirely.
 	fx.Provide(
 		func(
-			eventRepo domain.EventRepository,
 			orderRepo domain.OrderRepository,
 			inventoryRepo domain.InventoryRepository,
-			uow domain.UnitOfWork,
 			metrics BookingMetrics,
 		) BookingService {
-			base := NewBookingService(eventRepo, orderRepo, inventoryRepo, uow)
+			base := NewBookingService(orderRepo, inventoryRepo)
 			return NewBookingServiceMetricsDecorator(
 				NewBookingServiceTracingDecorator(base),
 				metrics,
@@ -56,14 +54,11 @@ var Module = fx.Module("application",
 	fx.Provide(
 		func(
 			queue domain.OrderQueue,
-			orderRepo domain.OrderRepository,
-			eventRepo domain.EventRepository,
-			outboxRepo domain.OutboxRepository,
-			uow domain.UnitOfWork,
+			uow UnitOfWork,
 			metrics WorkerMetrics,
 			logger *mlog.Logger,
 		) WorkerService {
-			base := NewOrderMessageProcessor(orderRepo, eventRepo, outboxRepo, uow, logger)
+			base := NewOrderMessageProcessor(uow, logger)
 			processor := NewMessageProcessorMetricsDecorator(base, metrics)
 			return NewWorkerService(queue, processor, logger)
 		},

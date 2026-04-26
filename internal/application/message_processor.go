@@ -22,29 +22,23 @@ type MessageProcessor interface {
 }
 
 type orderMessageProcessor struct {
-	orderRepo  domain.OrderRepository
-	eventRepo  domain.EventRepository
-	outboxRepo domain.OutboxRepository
-	uow        domain.UnitOfWork
-	logger     *mlog.Logger
+	uow    UnitOfWork
+	logger *mlog.Logger
 }
 
 // NewOrderMessageProcessor returns the base (undecorated) processor.
 // Consumers should typically use the version wrapped with
 // NewMessageProcessorMetricsDecorator — see module.go wiring.
-func NewOrderMessageProcessor(
-	orderRepo domain.OrderRepository,
-	eventRepo domain.EventRepository,
-	outboxRepo domain.OutboxRepository,
-	uow domain.UnitOfWork,
-	logger *mlog.Logger,
-) MessageProcessor {
+//
+// All repo work happens inside uow.Do, so the per-repo dependencies
+// are accessed via the closure's `repos *Repositories` parameter
+// rather than fields on the processor struct. This keeps the tx
+// boundary explicit at the call site (no field access can accidentally
+// bypass it).
+func NewOrderMessageProcessor(uow UnitOfWork, logger *mlog.Logger) MessageProcessor {
 	return &orderMessageProcessor{
-		orderRepo:  orderRepo,
-		eventRepo:  eventRepo,
-		outboxRepo: outboxRepo,
-		uow:        uow,
-		logger:     logger.With(mlog.String("component", "message_processor")),
+		uow:    uow,
+		logger: logger.With(mlog.String("component", "message_processor")),
 	}
 }
 
@@ -67,29 +61,29 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		return err
 	}
 
-	return p.uow.Do(ctx, func(txCtx context.Context) error {
+	return p.uow.Do(ctx, func(repos *Repositories) error {
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
 		// Redis view is ahead of DB (compensation path will fix it).
-		if err := p.eventRepo.DecrementTicket(txCtx, msg.EventID, msg.Quantity); err != nil {
+		if err := repos.Event.DecrementTicket(ctx, msg.EventID, msg.Quantity); err != nil {
 			if errors.Is(err, domain.ErrSoldOut) {
-				p.logger.Warn(txCtx, "Inventory conflict: Redis approved but DB sold out",
+				p.logger.Warn(ctx, "Inventory conflict: Redis approved but DB sold out",
 					tag.MsgID(msg.ID), tag.EventID(msg.EventID))
 				return err
 			}
-			p.logger.Error(txCtx, "Failed to decrement ticket in DB",
+			p.logger.Error(ctx, "Failed to decrement ticket in DB",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
 
-		created, err := p.orderRepo.Create(txCtx, newOrder)
+		created, err := repos.Order.Create(ctx, newOrder)
 		if err != nil {
 			if errors.Is(err, domain.ErrUserAlreadyBought) {
-				p.logger.Warn(txCtx, "Duplicate purchase blocked by DB constraint",
+				p.logger.Warn(ctx, "Duplicate purchase blocked by DB constraint",
 					tag.MsgID(msg.ID), tag.UserID(msg.UserID), tag.EventID(msg.EventID))
 				return err
 			}
-			p.logger.Error(txCtx, "Failed to create order",
+			p.logger.Error(ctx, "Failed to create order",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
@@ -103,24 +97,24 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *domain.OrderMe
 		// silent nil-payload outbox row.
 		payload, err := json.Marshal(domain.NewOrderCreatedEvent(created))
 		if err != nil {
-			p.logger.Error(txCtx, "Failed to marshal order_created event for outbox",
+			p.logger.Error(ctx, "Failed to marshal order_created event for outbox",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return fmt.Errorf("marshal outbox payload: %w", err)
 		}
 
 		outboxEvent, err := domain.NewOrderCreatedOutbox(payload)
 		if err != nil {
-			p.logger.Error(txCtx, "Failed to construct outbox event",
+			p.logger.Error(ctx, "Failed to construct outbox event",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return fmt.Errorf("construct outbox event: %w", err)
 		}
-		if _, err := p.outboxRepo.Create(txCtx, outboxEvent); err != nil {
-			p.logger.Error(txCtx, "Failed to create outbox event",
+		if _, err := repos.Outbox.Create(ctx, outboxEvent); err != nil {
+			p.logger.Error(ctx, "Failed to create outbox event",
 				tag.MsgID(msg.ID), tag.Error(err))
 			return err
 		}
 
-		p.logger.Info(txCtx, "Order processed successfully with Outbox",
+		p.logger.Info(ctx, "Order processed successfully with Outbox",
 			tag.MsgID(msg.ID), tag.OrderID(created.ID()))
 		return nil
 	})

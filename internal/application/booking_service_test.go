@@ -8,7 +8,7 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
-	"booking_monitor/internal/mocks" // Generated Mocks
+	"booking_monitor/internal/mocks"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -27,7 +27,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 		userID        int
 		eventID       uuid.UUID
 		quantity      int
-		mockSetup     func(*mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockInventoryRepository, *mocks.MockUnitOfWork)
+		mockSetup     func(*mocks.MockOrderRepository, *mocks.MockInventoryRepository)
 		expectedError error
 	}{
 		{
@@ -35,7 +35,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			userID:   1,
 			eventID:  eventID,
 			quantity: 2,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				// Phase 6: buyers set removed from Redis, userID still passed for stream publishing
 				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 2).Return(true, nil)
 			},
@@ -46,7 +46,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			userID:   1,
 			eventID:  eventID,
 			quantity: 5,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				// Redis returns false (Sold Out)
 				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 5).Return(false, nil)
 			},
@@ -60,7 +60,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			userID:   1,
 			eventID:  eventID,
 			quantity: 1,
-			mockSetup: func(e *mocks.MockEventRepository, o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository, u *mocks.MockUnitOfWork) {
+			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
@@ -73,17 +73,15 @@ func TestBookingService_BookTicket(t *testing.T) {
 			defer ctrl.Finish()
 
 			// Setup Mocks
-			mockEventRepo := mocks.NewMockEventRepository(ctrl)
 			mockOrderRepo := mocks.NewMockOrderRepository(ctrl)
 			mockInventoryRepo := mocks.NewMockInventoryRepository(ctrl)
-			mockUoW := mocks.NewMockUnitOfWork(ctrl)
 
 			if tt.mockSetup != nil {
-				tt.mockSetup(mockEventRepo, mockOrderRepo, mockInventoryRepo, mockUoW)
+				tt.mockSetup(mockOrderRepo, mockInventoryRepo)
 			}
 
 			// Service
-			service := application.NewBookingService(mockEventRepo, mockOrderRepo, mockInventoryRepo, mockUoW)
+			service := application.NewBookingService(mockOrderRepo, mockInventoryRepo)
 
 			// Execute
 			err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)

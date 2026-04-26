@@ -1,4 +1,4 @@
-package application
+package application_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
@@ -39,6 +40,11 @@ func (s *SpyingWorkerMetrics) RecordInventoryConflict() {
 // TestOrderMessageProcessor_Process covers the DB-transaction body of
 // message processing. The base processor no longer records metrics —
 // those assertions moved to TestMessageProcessorMetricsDecorator_Process.
+//
+// PR 35: the processor now resolves repos through application.Repositories
+// inside uow.Do (instead of struct fields). The MockUnitOfWork's Do
+// stub builds a Repositories with the individual mock repos and
+// invokes fn — same effective coverage, different plumbing.
 func TestOrderMessageProcessor_Process(t *testing.T) {
 	nopLogger := mlog.NewNop()
 	validEventID := uuid.New()
@@ -53,8 +59,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			name: "Success",
 			msg:  &domain.OrderMessage{ID: "1-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
@@ -84,8 +90,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			name: "Inventory Sold Out (DB Conflict)",
 			msg:  &domain.OrderMessage{ID: "2-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(domain.ErrSoldOut)
 			},
@@ -95,8 +101,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			name: "Duplicate Purchase (DB Constraint)",
 			msg:  &domain.OrderMessage{ID: "3-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, domain.ErrUserAlreadyBought)
@@ -107,8 +113,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			name: "DB Error (Create Order)",
 			msg:  &domain.OrderMessage{ID: "4-0", EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(context.Context) error) error {
-					return fn(ctx)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
 				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
 				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
@@ -146,7 +152,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				tt.setupMocks(mockEventRepo, mockOrderRepo, mockOutbox, mockUoW)
 			}
 
-			p := NewOrderMessageProcessor(mockOrderRepo, mockEventRepo, mockOutbox, mockUoW, nopLogger)
+			p := application.NewOrderMessageProcessor(mockUoW, nopLogger)
 			err := p.Process(context.Background(), tt.msg)
 
 			if tt.expectedError != nil {
@@ -192,7 +198,7 @@ func TestMessageProcessorMetricsDecorator_Process(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			spy := &SpyingWorkerMetrics{}
-			decorated := NewMessageProcessorMetricsDecorator(&fakeMessageProcessor{err: tt.innerErr}, spy)
+			decorated := application.NewMessageProcessorMetricsDecorator(&fakeMessageProcessor{err: tt.innerErr}, spy)
 
 			err := decorated.Process(context.Background(), &domain.OrderMessage{ID: "test"})
 
@@ -223,7 +229,7 @@ func TestWorkerService_Start(t *testing.T) {
 	// Processor is opaque to WorkerService — a fake suffices; Start
 	// never calls Process directly, it hands the method reference to
 	// Subscribe.
-	svc := NewWorkerService(mockQueue, &fakeMessageProcessor{}, nopLogger)
+	svc := application.NewWorkerService(mockQueue, &fakeMessageProcessor{}, nopLogger)
 
 	ctx := context.Background()
 
