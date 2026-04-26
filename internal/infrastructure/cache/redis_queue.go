@@ -17,14 +17,35 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// streamKey / groupName / dlqKey are wire contracts between the API-side
-// Lua producer and the worker consumer: a mismatch means silent split
-// brain (one side writes, the other reads nothing). Kept as const so
-// they can't be independently overridden per process via env vars.
+// Stream / consumer-group / DLQ keys + per-message field names are
+// WIRE CONTRACTS between the API-side Lua producer (`deduct.lua`) and
+// the worker consumer. A mismatch means silent split brain — one side
+// writes to `orders:stream`, the other reads from `bookings:stream`,
+// no error, no messages flow. Kept as const so they can't be
+// independently overridden per process via env vars.
+//
+// Tunables (batch size, block timeout, retry budget, etc.) live in
+// `config.WorkerConfig` instead — those ARE per-environment knobs.
 const (
 	streamKey = "orders:stream"
 	groupName = "orders:group"
 	dlqKey    = "orders:dlq"
+
+	// XADD payload field names — must match the keys `deduct.lua`
+	// writes via `XADD orders:stream * user_id $userID event_id
+	// $eventID quantity $quantity`. parseMessage / parsePending /
+	// moveToDLQ all use these constants instead of inline literals.
+	fieldUserID   = "user_id"
+	fieldEventID  = "event_id"
+	fieldQuantity = "quantity"
+
+	// DLQ payload extra fields — wire contract with whatever
+	// downstream consumer reads `orders:dlq` for forensics. Same
+	// const-vs-config rule as above: a downstream that expects
+	// `original_id` cannot survive a producer that writes `orig_id`.
+	fieldDLQOriginalID = "original_id"
+	fieldDLQError      = "error"
+	fieldDLQFailedAt   = "failed_at"
 )
 
 type redisOrderQueue struct {
@@ -32,11 +53,36 @@ type redisOrderQueue struct {
 	inventoryRepo            domain.InventoryRepository
 	logger                   *mlog.Logger
 	metrics                  application.QueueMetrics
+	retryPolicy              application.WorkerRetryPolicy
 	consumerName             string
 	maxConsecutiveReadErrors int
+	streamReadCount          int
+	streamBlockTimeout       time.Duration
+	maxRetries               int
+	retryBaseDelay           time.Duration
+	failureTimeout           time.Duration
+	pendingBlockTimeout      time.Duration
+	readErrorBackoff         time.Duration
 }
 
-func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepository, logger *mlog.Logger, cfg *config.Config, metrics application.QueueMetrics) domain.OrderQueue {
+// NewRedisOrderQueue wires the order-stream consumer.
+//
+// retryPolicy decides per-error whether the retry budget should burn
+// or short-circuit straight to compensation. nil → "always retry"
+// (preserves the pre-policy behaviour for callers / tests that don't
+// care about the malformed-input fast path). Production wires
+// `application.DefaultOrderRetryPolicy()` via fx.
+func NewRedisOrderQueue(
+	client *redis.Client,
+	inventoryRepo domain.InventoryRepository,
+	logger *mlog.Logger,
+	cfg *config.Config,
+	metrics application.QueueMetrics,
+	retryPolicy application.WorkerRetryPolicy,
+) domain.OrderQueue {
+	if retryPolicy == nil {
+		retryPolicy = func(error) bool { return true }
+	}
 	return &redisOrderQueue{
 		client:        client,
 		inventoryRepo: inventoryRepo,
@@ -45,8 +91,16 @@ func NewRedisOrderQueue(client *redis.Client, inventoryRepo domain.InventoryRepo
 			mlog.String("worker_id", cfg.App.WorkerID),
 		),
 		metrics:                  metrics,
+		retryPolicy:              retryPolicy,
 		consumerName:             cfg.App.WorkerID,
 		maxConsecutiveReadErrors: cfg.Redis.MaxConsecutiveReadErrors,
+		streamReadCount:          cfg.Worker.StreamReadCount,
+		streamBlockTimeout:       cfg.Worker.StreamBlockTimeout,
+		maxRetries:               cfg.Worker.MaxRetries,
+		retryBaseDelay:           cfg.Worker.RetryBaseDelay,
+		failureTimeout:           cfg.Worker.FailureTimeout,
+		pendingBlockTimeout:      cfg.Worker.PendingBlockTimeout,
+		readErrorBackoff:         cfg.Worker.ReadErrorBackoff,
 	}
 }
 
@@ -90,13 +144,13 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 		default:
 		}
 
-		// Block for 2 seconds waiting for messages
+		// Block for cfg.Worker.StreamBlockTimeout waiting for messages.
 		streams, err := q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    groupName,
 			Consumer: consumerName,
 			Streams:  []string{streamKey, ">"},
-			Count:    10,
-			Block:    2 * time.Second,
+			Count:    int64(q.streamReadCount),
+			Block:    q.streamBlockTimeout,
 		}).Result()
 
 		if err != nil {
@@ -119,14 +173,18 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 				if ensureErr := q.EnsureGroup(ctx); ensureErr != nil {
 					q.logger.Error(ctx, "Failed to recreate group", tag.Error(ensureErr))
 				}
-				time.Sleep(1 * time.Second)
+				if !q.sleepCtx(ctx, q.readErrorBackoff) {
+					return ctx.Err()
+				}
 				continue
 			}
 
 			// Log error and sleep briefly
 			q.logger.Error(ctx, "XReadGroup Error",
 				tag.Error(err), mlog.Int("consecutive_errors", consecutiveErrors))
-			time.Sleep(1 * time.Second)
+			if !q.sleepCtx(ctx, q.readErrorBackoff) {
+				return ctx.Err()
+			}
 			continue
 		}
 
@@ -164,6 +222,19 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 	}
 }
 
+// sleepCtx sleeps for d, returning false if ctx was cancelled mid-wait
+// (callers use that to bail out promptly rather than burn the rest of
+// the sleep). Replaces bare `time.Sleep(...)` calls in error-recovery
+// paths so shutdown signals propagate without delay.
+func (q *redisOrderQueue) sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 // ackOrLog ACKs a message and logs any ACK failure. A failed ACK leaves the
 // message in the Pending Entries List (PEL) and will be re-processed on
 // the next processPending cycle — but we MUST log so silent redelivery
@@ -177,32 +248,27 @@ func (q *redisOrderQueue) ackOrLog(ctx context.Context, msgID string) {
 }
 
 func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx context.Context, msg *domain.OrderMessage) error, msg *domain.OrderMessage) error {
-	const maxRetries = 3
 	var lastErr error
 
-	for i := 0; i < maxRetries; i++ {
-		if err := handler(ctx, msg); err == nil {
+	for i := 0; i < q.maxRetries; i++ {
+		err := handler(ctx, msg)
+		if err == nil {
 			return nil
-		} else {
-			lastErr = err
-			// Malformed-input fast path: NewOrder invariant violations
-			// (UserID<=0, zero EventID, Quantity<=0) are deterministic —
-			// redelivery returns the same error every time. Skip the
-			// retry budget and route directly to handleFailure (which
-			// reverts Redis inventory + writes the DLQ entry on the
-			// FIRST attempt instead of after ~600ms of pointless
-			// backoff). Outcome metric stays "malformed_message" via
-			// messageProcessorMetricsDecorator either way.
-			if domain.IsMalformedOrderInput(err) {
-				return err
-			}
-			// Backoff while honoring ctx cancellation so shutdown is prompt
-			// (addresses action-list item M8).
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(i+1) * 100 * time.Millisecond):
-			}
+		}
+		lastErr = err
+		// Application-supplied retry policy decides whether this error
+		// is worth burning a budget slot. Deterministic-failure errors
+		// (e.g. NewOrder invariant violations under the default policy)
+		// short-circuit straight to DLQ via handleFailure without
+		// waiting out the backoff. Transient errors fall through to
+		// the backoff and the next attempt.
+		if !q.retryPolicy(err) {
+			return err
+		}
+		// Backoff (linear: attempt N waits N * RetryBaseDelay) while
+		// honoring ctx cancellation so shutdown is prompt.
+		if !q.sleepCtx(ctx, time.Duration(i+1)*q.retryBaseDelay) {
+			return ctx.Err()
 		}
 	}
 	return lastErr
@@ -222,8 +288,9 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 // cheaper than chasing inventory drift after the fact.
 func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.OrderMessage, rawMsg redis.XMessage, err error) bool {
 	// Background context with timeout: compensation MUST run even if the
-	// parent ctx was cancelled mid-processing.
-	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// parent ctx was cancelled mid-processing. Budget configurable via
+	// `cfg.Worker.FailureTimeout`.
+	bgCtx, cancel := context.WithTimeout(context.Background(), q.failureTimeout)
 	defer cancel()
 
 	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
@@ -258,9 +325,9 @@ func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *domain.Or
 // permanently lost failure traces — now the caller is in the loop.
 func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err error) error {
 	values := map[string]interface{}{
-		"original_id": msg.ID,
-		"error":       err.Error(),
-		"failed_at":   time.Now().Format(time.RFC3339),
+		fieldDLQOriginalID: msg.ID,
+		fieldDLQError:      err.Error(),
+		fieldDLQFailedAt:   time.Now().Format(time.RFC3339),
 	}
 	// Copy original values
 	for k, v := range msg.Values {
@@ -287,35 +354,35 @@ func parseMessage(msg redis.XMessage) (*domain.OrderMessage, error) {
 	// event_id / quantity as strings; we reject anything that isn't a
 	// well-formed integer so silent ID=0 records never reach the worker.
 
-	userIDStr, ok := msg.Values["user_id"].(string)
+	userIDStr, ok := msg.Values[fieldUserID].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing user_id")
+		return nil, fmt.Errorf("missing %s", fieldUserID)
 	}
 
-	eventIDStr, ok := msg.Values["event_id"].(string)
+	eventIDStr, ok := msg.Values[fieldEventID].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing event_id")
+		return nil, fmt.Errorf("missing %s", fieldEventID)
 	}
 
-	qtyStr, ok := msg.Values["quantity"].(string)
+	qtyStr, ok := msg.Values[fieldQuantity].(string)
 	if !ok {
-		return nil, fmt.Errorf("missing quantity")
+		return nil, fmt.Errorf("missing %s", fieldQuantity)
 	}
 
 	userID, err := strconv.Atoi(userIDStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid user_id %q: %w", userIDStr, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldUserID, userIDStr, err)
 	}
 	// EventID is a UUID v7 string in the stream message (since PR 34).
 	// uuid.Parse handles canonical 36-char form; producer-side
 	// (deduct.lua via Redis) emits exactly that.
 	eventID, err := uuid.Parse(eventIDStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid event_id %q: %w", eventIDStr, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldEventID, eventIDStr, err)
 	}
 	qty, err := strconv.Atoi(qtyStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid quantity %q: %w", qtyStr, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldQuantity, qtyStr, err)
 	}
 
 	return &domain.OrderMessage{
@@ -331,15 +398,15 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 	q.logger.Info(ctx, "Checking for pending messages (PEL)...")
 
 	for {
-		// XREADGROUP with ID "0" fetches pending messages for check consumer.
-		// Block:100ms instead of 0 so the call honors shutdown signals
-		// even when the stream is empty (addresses action-list M9).
+		// XREADGROUP with ID "0" fetches pending messages for this consumer.
+		// Block budget honours shutdown signals even when the PEL is empty
+		// (addresses action-list M9).
 		streams, err := q.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    groupName,
 			Consumer: consumerName,
 			Streams:  []string{streamKey, "0"}, // "0" = Pending messages
-			Count:    10,
-			Block:    100 * time.Millisecond,
+			Count:    int64(q.streamReadCount),
+			Block:    q.pendingBlockTimeout,
 		}).Result()
 
 		if err != nil {

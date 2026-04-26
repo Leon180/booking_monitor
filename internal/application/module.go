@@ -34,6 +34,13 @@ var Module = fx.Module("application",
 		NewEventService,
 		NewOutboxRelay,
 		NewSagaCompensator,
+		// WorkerRetryPolicy is wired here (application layer) rather
+		// than in cache so the queue infra never has to import a
+		// domain-specific predicate. The default policy short-circuits
+		// the retry budget on `domain.IsMalformedOrderInput`; an
+		// alternative consumer (e.g. DLQ replay worker) could plug in
+		// its own policy without forking the queue.
+		DefaultOrderRetryPolicy,
 	),
 	// WorkerService is provided as:
 	//   base MessageProcessor -> metrics decorator -> WorkerService

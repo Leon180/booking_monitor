@@ -16,6 +16,32 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// testConfig builds a fully-populated *config.Config with the same
+// defaults cleanenv would apply at production startup. Tests construct
+// configs directly so cleanenv's env-default tags never run; without a
+// helper, the new cfg.Worker fields would all be zero (StreamReadCount=0
+// → Redis "all messages", StreamBlockTimeout=0 → "no block", maxRetries=0
+// → loop never runs) and tests would silently break.
+func testConfig(workerID string) *config.Config {
+	return &config.Config{
+		App: config.AppConfig{WorkerID: workerID},
+		Redis: config.RedisConfig{
+			MaxConsecutiveReadErrors: 30,
+			InventoryTTL:             720 * time.Hour,
+			IdempotencyTTL:           24 * time.Hour,
+		},
+		Worker: config.WorkerConfig{
+			StreamReadCount:     10,
+			StreamBlockTimeout:  2 * time.Second,
+			MaxRetries:          3,
+			RetryBaseDelay:      100 * time.Millisecond,
+			FailureTimeout:      5 * time.Second,
+			PendingBlockTimeout: 100 * time.Millisecond,
+			ReadErrorBackoff:    1 * time.Second,
+		},
+	}
+}
+
 func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	// Setup Miniredis
 	s := miniredis.RunT(t)
@@ -24,7 +50,7 @@ func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
 
 	ctx := context.Background()
 
@@ -51,9 +77,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	nopLogger := mlog.NewNop()
 
 	// No mock needed for happy path
-	// Setup Config
-	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, cfg, application.NoopQueueMetrics())
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
 	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
@@ -111,7 +135,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -159,8 +183,10 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	// the FIRST attempt's failure routes here, not that compensation
 	// is exhaustively exercised (covered elsewhere).
 	inv := &fakeInventoryRevert{}
-	cfg := &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}
-	queue := NewRedisOrderQueue(rdb, inv, nopLogger, cfg, application.NoopQueueMetrics())
+	// Inject DefaultOrderRetryPolicy so the malformed-input fast-path
+	// engages — without it the queue uses the always-retry default
+	// and the test would observe 3 attempts instead of 1.
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), application.DefaultOrderRetryPolicy())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -227,7 +253,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, &config.Config{App: config.AppConfig{WorkerID: "worker-1"}}, application.NoopQueueMetrics())
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

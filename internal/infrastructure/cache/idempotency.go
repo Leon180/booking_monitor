@@ -7,18 +7,21 @@ import (
 	"time"
 
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const idempotencyTTL = 24 * time.Hour
-
 type redisIdempotencyRepository struct {
-	client *redis.Client
+	client         *redis.Client
+	idempotencyTTL time.Duration
 }
 
-func NewRedisIdempotencyRepository(client *redis.Client) domain.IdempotencyRepository {
-	return &redisIdempotencyRepository{client: client}
+func NewRedisIdempotencyRepository(client *redis.Client, cfg *config.Config) domain.IdempotencyRepository {
+	return &redisIdempotencyRepository{
+		client:         client,
+		idempotencyTTL: cfg.Redis.IdempotencyTTL,
+	}
 }
 
 func idempotencyKey(key string) string {
@@ -46,5 +49,5 @@ func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result
 	if err != nil {
 		return err
 	}
-	return r.client.Set(ctx, idempotencyKey(key), data, idempotencyTTL).Err()
+	return r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err()
 }

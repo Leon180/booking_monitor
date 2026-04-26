@@ -150,6 +150,14 @@ See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most
 - `DB_PING_ATTEMPTS` / `DB_PING_INTERVAL` / `DB_PING_PER_ATTEMPT` — DB startup probe budget; raise attempts for slow dependencies
 - `KAFKA_BROKERS` (CSV, default `localhost:9092`) — now parsed as `[]string` via cleanenv's `env-separator:","`
 
+**Worker / Cache (post-PR #37)**
+- `WORKER_STREAM_READ_COUNT` (default `10`) / `WORKER_STREAM_BLOCK_TIMEOUT` (default `2s`) — XReadGroup batch + block window for the order-stream consumer
+- `WORKER_MAX_RETRIES` (default `3`) / `WORKER_RETRY_BASE_DELAY` (default `100ms`) — per-message retry budget + linear-backoff base; deterministic-failure errors bypass via the application-level retry policy
+- `WORKER_FAILURE_TIMEOUT` (default `5s`) — handleFailure compensation ctx budget (Redis revert + DLQ XAdd)
+- `WORKER_PENDING_BLOCK_TIMEOUT` (default `100ms`) / `WORKER_READ_ERROR_BACKOFF` (default `1s`) — startup PEL sweep block + read-error retry sleep
+- `REDIS_INVENTORY_TTL` (default `720h`) / `REDIS_IDEMPOTENCY_TTL` (default `24h`) — Redis cache key lifetimes; previously hardcoded as const
+- `REDIS_MAX_CONSECUTIVE_READ_ERRORS` (default `30`) — broken-Redis tolerance before the worker exits
+
 ## Available Tooling under `.claude/`
 
 Claude Code auto-discovers assets placed under `.claude/agents/` and `.claude/skills/`. These are adopted from [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) (MIT) — see [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md).

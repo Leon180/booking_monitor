@@ -13,6 +13,7 @@ type Config struct {
 	App      AppConfig      `yaml:"app"`
 	Server   ServerConfig   `yaml:"server"`
 	Redis    RedisConfig    `yaml:"redis"`
+	Worker   WorkerConfig   `yaml:"worker"`
 	Postgres PostgresConfig `yaml:"postgres"`
 	Kafka    KafkaConfig    `yaml:"kafka"`
 }
@@ -65,6 +66,69 @@ type RedisConfig struct {
 	// that should self-heal rather than restart; lower for clusters
 	// that want faster shedding to a healthy replica.
 	MaxConsecutiveReadErrors int `yaml:"max_consecutive_read_errors" env:"REDIS_MAX_CONSECUTIVE_READ_ERRORS" env-default:"30"`
+
+	// InventoryTTL is the maximum lifetime of a `event:{uuid}:qty`
+	// inventory key. Long by default (30d) — active events are
+	// re-upserted by operational flows (CreateEvent, saga revert)
+	// well before expiry; the TTL exists so orphaned keys from deleted
+	// events fall off Redis instead of accumulating forever. Lower for
+	// tighter memory budgets; raise for events with very long sale
+	// windows (festival pre-sale, season-pass).
+	InventoryTTL time.Duration `yaml:"inventory_ttl" env:"REDIS_INVENTORY_TTL" env-default:"720h"`
+
+	// IdempotencyTTL bounds how long an `Idempotency-Key`-keyed cached
+	// response is retained. Must align with the longest client retry
+	// window your callers use; raise for financial reconciliation
+	// flows that retry across days.
+	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
+}
+
+// WorkerConfig holds tunables for the order-stream worker loop
+// (`internal/infrastructure/cache/redis_queue.go`). These are pure
+// per-environment knobs — the wire-contract values (`streamKey`,
+// `groupName`, `dlqKey`, the XADD field names) deliberately stay as
+// const because mismatches across replicas would silently split
+// brain. See the Const-vs-Config split documented in
+// `memory/config_tunables_audit.md`.
+type WorkerConfig struct {
+	// StreamReadCount is the XReadGroup batch size. Higher = more
+	// throughput per call, more memory per goroutine; tune for
+	// ingest rate vs. tail latency.
+	StreamReadCount int `yaml:"stream_read_count" env:"WORKER_STREAM_READ_COUNT" env-default:"10"`
+
+	// StreamBlockTimeout is how long XReadGroup blocks waiting for
+	// new messages before returning empty. Lower = faster shutdown
+	// detection, higher CPU; higher = lower CPU, slower shutdown.
+	StreamBlockTimeout time.Duration `yaml:"stream_block_timeout" env:"WORKER_STREAM_BLOCK_TIMEOUT" env-default:"2s"`
+
+	// MaxRetries is the per-message retry budget inside
+	// `processWithRetry`. Each retry that yields a transient error
+	// burns one slot; deterministic-failure errors (NewOrder
+	// invariant violations) bypass the budget via the retry policy
+	// and route directly to DLQ.
+	MaxRetries int `yaml:"max_retries" env:"WORKER_MAX_RETRIES" env-default:"3"`
+
+	// RetryBaseDelay is the base delay for the linear backoff
+	// (attempt N waits N*base). Industry would prefer exponential
+	// + jitter under heavy concurrency to avoid thundering herd on
+	// simultaneous failures; that is a separate refactor.
+	RetryBaseDelay time.Duration `yaml:"retry_base_delay" env:"WORKER_RETRY_BASE_DELAY" env-default:"100ms"`
+
+	// FailureTimeout bounds the `handleFailure` compensation budget
+	// (Redis revert + DLQ XAdd). Runs against a fresh background
+	// context so compensation completes even if the parent ctx was
+	// cancelled mid-processing.
+	FailureTimeout time.Duration `yaml:"failure_timeout" env:"WORKER_FAILURE_TIMEOUT" env-default:"5s"`
+
+	// PendingBlockTimeout is the XReadGroup block timeout used by
+	// the startup PEL recovery sweep. Short so the call honours
+	// shutdown signals on cold boot when the stream is empty.
+	PendingBlockTimeout time.Duration `yaml:"pending_block_timeout" env:"WORKER_PENDING_BLOCK_TIMEOUT" env-default:"100ms"`
+
+	// ReadErrorBackoff is the sleep between XReadGroup failure
+	// retries (NOGROUP / connection drop). Bounds how fast the
+	// outer loop re-attempts under persistent breakage.
+	ReadErrorBackoff time.Duration `yaml:"read_error_backoff" env:"WORKER_READ_ERROR_BACKOFF" env-default:"1s"`
 }
 
 type PostgresConfig struct {
