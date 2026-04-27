@@ -496,7 +496,14 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 ### Entry Points
 | File | Purpose |
 |------|---------|
-| `cmd/booking-cli/main.go` | CLI entry: `server`, `stress`, `payment` commands |
+| `cmd/booking-cli/main.go` | Cobra root + subcommand registration + `resolveConfigPath` |
+| `cmd/booking-cli/server.go` | `server` subcommand: HTTP + pprof + workers + saga consumer lifecycle |
+| `cmd/booking-cli/payment.go` | `payment` subcommand: Kafka `order.created` consumer lifecycle |
+| `cmd/booking-cli/stress.go` | `stress` subcommand: one-shot load generator |
+| `cmd/booking-cli/tracer.go` | OTel tracer init + `OTEL_TRACES_SAMPLER_RATIO` resolver (shared by `server` + `payment`) |
+| `internal/bootstrap/module.go` | `CommonModule(cfg)` — log + config + DB + base observability wiring shared by every subcommand |
+| `internal/bootstrap/db.go` | `provideDB` (retry-until-reachable Postgres pool) + `registerDBPoolCollector` |
+| `internal/bootstrap/logmodule.go` | `LogModule` — ctx-aware `*log.Logger` fx provider |
 
 ### Domain
 | File | Purpose |
