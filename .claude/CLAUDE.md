@@ -29,7 +29,7 @@ This project maintains **paired English + Traditional Chinese (zh-TW)** versions
 High-concurrency ticket booking system (flash sale simulator) built with Go. Uses DDD + Clean Architecture in a modular monolith. Dual-tier inventory (Redis hot path + PostgreSQL source of truth) with async processing via Redis Streams, event publishing via Kafka outbox pattern, and saga-based payment compensation.
 
 ## Tech Stack
-Go 1.24 | Gin | PostgreSQL 15 | Redis 7 | Kafka | Prometheus | Grafana | Jaeger | Nginx
+Go 1.25 | Gin | PostgreSQL 15 | Redis 7 | Kafka | Prometheus | Grafana | Jaeger | Nginx
 
 ## Architecture Layers
 ```
@@ -88,6 +88,19 @@ Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypass
 - `order.failed.dlq` — dead letter for saga events that exceed `sagaMaxRetries=3`
 
 Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`.
+
+## CI
+
+GitHub Actions at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to `main` and every PR. Four jobs in parallel:
+
+| Job | What | Why |
+| :-- | :-- | :-- |
+| `test (race)` | `go vet` + `go test -race -coverprofile ./internal/...` | Race detector loves CI — non-determinism only surfaces in volume. Coverage uploaded as artifact (no gate). |
+| `lint (golangci-lint)` | `golangci-lint run` against [`.golangci.yml`](../.golangci.yml) | Conservative set: errcheck, govet, ineffassign, staticcheck, gosec, revive. Style linters (gocyclo, funlen, lll) deliberately deferred until correctness baseline is clean. |
+| `govulncheck (supply chain)` | `govulncheck ./...` | Maps known CVEs to actual call paths — only fails when a vulnerable symbol is reachable from our code, not on every transitive import. |
+| `docker build` | Multi-stage Dockerfile build (no push) | Catches image-stage breakage that `make build` doesn't. |
+
+Toolchain is pinned via `go.mod`'s `toolchain go1.25.9` directive so CI builds (and any developer using `go install` against this module) automatically get stdlib CVE patches. Bump in lockstep with `Dockerfile`'s `golang:1.25-alpine` tag.
 
 ## Development Conventions
 - Immutable data patterns - create new objects, never mutate

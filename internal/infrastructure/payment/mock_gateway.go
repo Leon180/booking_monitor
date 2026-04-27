@@ -67,7 +67,7 @@ func (g *MockGateway) Charge(ctx context.Context, orderID uuid.UUID, amount floa
 	if latencyDelay <= 0 {
 		latencyDelay = 1 // Safety
 	}
-	latency := g.MinLatency + time.Duration(rand.Int64N(int64(latencyDelay)))
+	latency := g.MinLatency + time.Duration(rand.Int64N(int64(latencyDelay))) //nolint:gosec // G404 — math/rand is correct for simulated latency in a mock; crypto/rand would be misleading
 	select {
 	case <-time.After(latency):
 	case <-ctx.Done():
@@ -80,7 +80,7 @@ func (g *MockGateway) Charge(ctx context.Context, orderID uuid.UUID, amount floa
 	// First-time roll. Cache the verdict before returning so concurrent
 	// retries see a consistent answer.
 	var verdict error
-	if rand.Float64() > g.SuccessRate {
+	if rand.Float64() > g.SuccessRate { //nolint:gosec // G404 — math/rand is correct for simulating a deterministic-failure-rate gateway in tests
 		verdict = errors.New("payment declined by mock gateway")
 	}
 	// LoadOrStore handles the rare race where two goroutines pass the

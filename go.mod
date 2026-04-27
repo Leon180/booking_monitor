@@ -1,6 +1,13 @@
 module booking_monitor
 
-go 1.24.0
+go 1.25.0
+
+// Pin the toolchain to the latest 1.25 patch so CI builds (and any
+// developer using `go install` / `go run` against this module) get
+// stdlib CVE patches automatically — govulncheck flags 18+ stdlib
+// vulns fixed across 1.25.1–1.25.9 if the toolchain isn't bumped.
+// Bump in lockstep with the Dockerfile's `golang:1.25-alpine` tag.
+toolchain go1.25.9
 
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1
@@ -75,10 +82,10 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/arch v0.24.0 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
