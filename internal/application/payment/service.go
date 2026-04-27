@@ -97,7 +97,7 @@ func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCrea
 
 		// Create Saga compensating event (order.failed) atomically with status update
 		errUow := s.uow.Do(ctx, func(repos *application.Repositories) error {
-			if updateErr := repos.Order.UpdateStatus(ctx, event.OrderID, domain.OrderStatusFailed); updateErr != nil {
+			if updateErr := repos.Order.MarkFailed(ctx, event.OrderID); updateErr != nil {
 				return updateErr
 			}
 
@@ -128,10 +128,15 @@ func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCrea
 		return nil // Consume event (don't retry indefinitely for business failures)
 	}
 
-	// 3. Update Order Status
-	if err := s.orderRepo.UpdateStatus(ctx, event.OrderID, domain.OrderStatusConfirmed); err != nil {
-		s.log.Error(ctx, "Failed to update order status to confirmed", tag.Error(err))
-		return err // Retry update
+	// 3. Update Order Status. MarkConfirmed enforces Pending→Confirmed
+	// atomically in SQL; an `ErrInvalidTransition` here means the order
+	// was already moved (e.g. concurrent retry that confirmed first),
+	// which is benign in idempotent-retry semantics. We still surface
+	// it: the caller (Kafka consumer) decides whether to commit or retry,
+	// and the metric+log give operators visibility into the rate.
+	if err := s.orderRepo.MarkConfirmed(ctx, event.OrderID); err != nil {
+		s.log.Error(ctx, "Failed to mark order confirmed", tag.Error(err))
+		return err
 	}
 
 	s.log.Info(ctx, "Payment successful", tag.OrderID(event.OrderID))

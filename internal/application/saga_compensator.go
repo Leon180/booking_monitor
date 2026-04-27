@@ -70,8 +70,8 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 			return fmt.Errorf("eventRepo.IncrementTicket event_id=%s: %w", event.EventID, err)
 		}
 
-		if err := repos.Order.UpdateStatus(ctx, event.OrderID, domain.OrderStatusCompensated); err != nil {
-			return fmt.Errorf("orderRepo.UpdateStatus order_id=%s: %w", event.OrderID, err)
+		if err := repos.Order.MarkCompensated(ctx, event.OrderID); err != nil {
+			return fmt.Errorf("orderRepo.MarkCompensated order_id=%s: %w", event.OrderID, err)
 		}
 		return nil
 	})

@@ -88,16 +88,44 @@ func (mr *MockOrderRepositoryMockRecorder) ListOrders(ctx, limit, offset, status
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListOrders", reflect.TypeOf((*MockOrderRepository)(nil).ListOrders), ctx, limit, offset, status)
 }
 
-// UpdateStatus mocks base method.
-func (m *MockOrderRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OrderStatus) error {
+// MarkCompensated mocks base method.
+func (m *MockOrderRepository) MarkCompensated(ctx context.Context, id uuid.UUID) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateStatus", ctx, id, status)
+	ret := m.ctrl.Call(m, "MarkCompensated", ctx, id)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// UpdateStatus indicates an expected call of UpdateStatus.
-func (mr *MockOrderRepositoryMockRecorder) UpdateStatus(ctx, id, status any) *gomock.Call {
+// MarkCompensated indicates an expected call of MarkCompensated.
+func (mr *MockOrderRepositoryMockRecorder) MarkCompensated(ctx, id any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateStatus", reflect.TypeOf((*MockOrderRepository)(nil).UpdateStatus), ctx, id, status)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkCompensated", reflect.TypeOf((*MockOrderRepository)(nil).MarkCompensated), ctx, id)
+}
+
+// MarkConfirmed mocks base method.
+func (m *MockOrderRepository) MarkConfirmed(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkConfirmed", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkConfirmed indicates an expected call of MarkConfirmed.
+func (mr *MockOrderRepositoryMockRecorder) MarkConfirmed(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkConfirmed", reflect.TypeOf((*MockOrderRepository)(nil).MarkConfirmed), ctx, id)
+}
+
+// MarkFailed mocks base method.
+func (m *MockOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkFailed", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkFailed indicates an expected call of MarkFailed.
+func (mr *MockOrderRepositoryMockRecorder) MarkFailed(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkFailed", reflect.TypeOf((*MockOrderRepository)(nil).MarkFailed), ctx, id)
 }

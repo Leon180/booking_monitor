@@ -59,25 +59,102 @@ func TestNewOrder(t *testing.T) {
 	}
 }
 
-func TestOrder_WithStatus_Immutable(t *testing.T) {
+// TestOrder_Transitions_HappyPath verifies the three legal state-
+// machine edges. Each method takes a value receiver and returns a new
+// Order — the receiver MUST be untouched (immutable transition) so
+// concurrent reads of the same Order value are safe.
+//
+// Transition graph (also documented on ErrInvalidTransition):
+//
+//   Pending ──MarkConfirmed──→  Confirmed   (terminal)
+//   Pending ──MarkFailed─────→  Failed
+//   Failed  ──MarkCompensated→  Compensated (terminal)
+func TestOrder_Transitions_HappyPath(t *testing.T) {
 	t.Parallel()
 
-	original, err := domain.NewOrder(1, uuid.New(), 1)
-	assert.NoError(t, err)
-	assert.Equal(t, domain.OrderStatusPending, original.Status())
+	t.Run("MarkConfirmed: Pending → Confirmed", func(t *testing.T) {
+		t.Parallel()
+		original, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		confirmed, err := original.MarkConfirmed()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusConfirmed, confirmed.Status())
+		assert.Equal(t, domain.OrderStatusPending, original.Status(), "receiver must be untouched")
+		// Identity + non-status fields preserved.
+		assert.Equal(t, original.ID(), confirmed.ID())
+		assert.Equal(t, original.UserID(), confirmed.UserID())
+		assert.Equal(t, original.EventID(), confirmed.EventID())
+		assert.Equal(t, original.Quantity(), confirmed.Quantity())
+	})
 
-	confirmed := original.WithStatus(domain.OrderStatusConfirmed)
+	t.Run("MarkFailed: Pending → Failed", func(t *testing.T) {
+		t.Parallel()
+		original, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		failed, err := original.MarkFailed()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusFailed, failed.Status())
+		assert.Equal(t, domain.OrderStatusPending, original.Status(), "receiver must be untouched")
+	})
 
-	// Original receiver MUST be untouched (immutable transition).
-	assert.Equal(t, domain.OrderStatusPending, original.Status(),
-		"WithStatus must not mutate the receiver")
-	// Returned copy carries the new status.
-	assert.Equal(t, domain.OrderStatusConfirmed, confirmed.Status())
-	// All other fields preserved.
-	assert.Equal(t, original.UserID(), confirmed.UserID())
-	assert.Equal(t, original.EventID(), confirmed.EventID())
-	assert.Equal(t, original.Quantity(), confirmed.Quantity())
-	assert.Equal(t, original.ID(), confirmed.ID())
+	t.Run("MarkCompensated: Failed → Compensated", func(t *testing.T) {
+		t.Parallel()
+		// Build a Failed order via the legal path Pending→Failed.
+		o, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		failed, err := o.MarkFailed()
+		assert.NoError(t, err)
+		compensated, err := failed.MarkCompensated()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusCompensated, compensated.Status())
+		assert.Equal(t, domain.OrderStatusFailed, failed.Status(), "receiver must be untouched")
+	})
+}
+
+// TestOrder_Transitions_IllegalSource verifies every illegal edge in
+// the state graph rejects with `ErrInvalidTransition`. Without these
+// guards, a concurrent compensation race or a logic bug could silently
+// downgrade an already-Confirmed order to Failed (or any other
+// illegal move). The matrix is intentionally exhaustive — adding a
+// new state should also add the corresponding row here.
+func TestOrder_Transitions_IllegalSource(t *testing.T) {
+	t.Parallel()
+
+	type tc struct {
+		name      string
+		from      domain.OrderStatus
+		do        func(o domain.Order) (domain.Order, error)
+		expectErr error
+	}
+	tests := []tc{
+		// MarkConfirmed: only Pending is legal.
+		{"MarkConfirmed from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
+		{"MarkConfirmed from Failed", domain.OrderStatusFailed, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
+		{"MarkConfirmed from Compensated", domain.OrderStatusCompensated, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
+		// MarkFailed: only Pending is legal.
+		{"MarkFailed from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
+		{"MarkFailed from Failed", domain.OrderStatusFailed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
+		{"MarkFailed from Compensated", domain.OrderStatusCompensated, domain.Order.MarkFailed, domain.ErrInvalidTransition},
+		// MarkCompensated: only Failed is legal.
+		{"MarkCompensated from Pending", domain.OrderStatusPending, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+		{"MarkCompensated from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+		{"MarkCompensated from Compensated", domain.OrderStatusCompensated, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Reconstruct an order with the test's source status.
+			id := uuid.New()
+			eventID := uuid.New()
+			o := domain.ReconstructOrder(id, 1, eventID, 1, tt.from, time.Now())
+			got, err := tt.do(o)
+			assert.ErrorIs(t, err, tt.expectErr)
+			// The receiver-side guarantee: failed transitions return a
+			// zero-value Order, NOT a partially-mutated one.
+			assert.Equal(t, domain.OrderStatus(""), got.Status(),
+				"failed transition must return zero-value Order")
+		})
+	}
 }
 
 func TestReconstructOrder_BypassesInvariants(t *testing.T) {
