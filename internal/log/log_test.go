@@ -138,8 +138,10 @@ func TestContext_FallsBackToNop(t *testing.T) {
 }
 
 func TestContext_NilContext(t *testing.T) {
-	// Passing a nil context must not panic.
-	l := log.FromContext(nil)
+	// Passing a nil context must not panic. The whole point of this
+	// test is to pin that behaviour, so the staticcheck SA1012 warning
+	// (which says "don't pass nil ctx") is intentional here.
+	l := log.FromContext(nil) //nolint:staticcheck // SA1012 — deliberately exercising nil-ctx fallback
 	require.NotNil(t, l)
 }
 

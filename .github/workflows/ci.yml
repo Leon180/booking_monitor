@@ -1,0 +1,163 @@
+# GitHub Actions CI — Phase 2 of senior-grade resilience roadmap
+#
+# Why these jobs and not others:
+#   * test    — unit tests with -race. Race detector loves CI: races
+#               are non-deterministic and only surface in volume.
+#               Local runs are too rare to catch them; nightly + per-PR
+#               CI is the right cadence (Go runtime team's own advice).
+#   * lint    — golangci-lint v2; config in .golangci.yml. Conservative
+#               set (errcheck, govet, staticcheck, ineffassign, gosec,
+#               revive) — see .golangci.yml header for ratchet rationale.
+#   * vuln    — govulncheck. Different from gosec: govulncheck maps
+#               known CVEs in go.sum to actual call paths, so a vuln
+#               in a transitively-imported package only fails CI when
+#               we actually call the affected function. Catches new
+#               CVEs the day they're published.
+#   * build   — build the Docker image. Pure correctness gate that the
+#               full multi-stage build succeeds; doesn't push anywhere.
+#
+# Trade-offs deliberately taken:
+#   * No matrix on Go version. The codebase pins go 1.25 in go.mod;
+#     supporting "1.24 or newer" silently would mask version-pinning
+#     drift. When we move to 1.26, we update go.mod AND this file —
+#     the coupling is the feature.
+#   * No coverage gate (yet). Coverage is uploaded as an artifact for
+#     review, but `go test -cover` thresholds reward gaming over real
+#     test quality. N6 (test infra hardening) revisits this.
+#   * No Codecov / SonarCloud. External dashboards add a deploy-time
+#     dep and an account; the artifact is sufficient for the portfolio
+#     scope.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch — saves CI minutes when
+# you push a fixup before the previous run finishes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default minimal permissions — security scanners can request
+# `security-events: write` per-job if they want to upload SARIF.
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  test:
+    name: test (race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # actions/setup-go@v5 caches build + module dirs by default
+          # via the lockfile (go.sum). Hits ~80% on warm runs.
+          cache: true
+
+      - name: Download deps
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race -coverprofile
+        # ./internal/... matches the project's `make test` scope. The
+        # cmd/ binary is a thin fx-DI bootstrap — covered transitively
+        # via integration tests (PR N8 will add a dedicated suite).
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./internal/...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -20
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage.out
+          retention-days: 14
+
+  lint:
+    name: lint (golangci-lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false # the action below maintains its own lint cache
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          # only-new-issues lets CI flag NEW lint findings on PRs
+          # without forcing the PR to also clean up pre-existing
+          # issues outside its scope. Set false on `main` so we
+          # always have a clean baseline of zero findings.
+          only-new-issues: false
+          args: --timeout=5m
+
+  vuln:
+    name: govulncheck (supply chain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        # Scans go.sum vs the vuln DB and only fails when the binary
+        # actually CALLS a vulnerable symbol (not just imports the
+        # package). Lower false-positive rate than naive SCA tools.
+        run: govulncheck ./...
+
+  build:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        # Build the multi-stage Dockerfile end-to-end. We don't push
+        # anywhere — pushing belongs in a separate release workflow
+        # gated on tags. Failure here means the image stage is broken,
+        # which our local `make build` would not have caught.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          # GHA cache backend: fast incremental rebuilds across CI runs
+          # without polluting any container registry.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Single-arch (amd64) for now — multi-arch adds 2-3× build
+          # time and we don't ship images yet. Add arm64 when the
+          # release workflow lands.

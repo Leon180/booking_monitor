@@ -1,0 +1,135 @@
+# golangci-lint v2 config — conservative starting set, ratchets up
+# over time. Phase 2 of the senior-grade resilience roadmap.
+#
+# Philosophy: CI is a ratchet, not a gate. Start with linters that
+# catch real correctness / security bugs; add stricter style linters
+# (gocyclo, funlen, lll) only after the codebase is clean. Opening
+# day-one with `gocyclo` floods the dashboard with false positives
+# and trains everyone to ignore the signal.
+#
+# Linter rationale:
+#   errcheck   — unchecked errors are the #1 source of silent
+#                production bugs in Go (CLAUDE.md global rule).
+#   govet      — stdlib-blessed correctness checks (printf args,
+#                lock-by-value, shadowed vars, atomic alignment).
+#   ineffassign — catches `x := foo(); x = bar(); use(x)` where the
+#                first call's return is discarded by the second.
+#   staticcheck — Dominik Honnef's superset; finds dead code,
+#                misuse of stdlib, and 200+ correctness checks.
+#   gosec      — security findings (SQL injection, weak crypto,
+#                hardcoded creds). Tuned via excludes below.
+#   revive     — fast, configurable golint replacement; we keep
+#                it minimal (var-naming + early-return) — anything
+#                stricter is style, not correctness.
+#
+# Deliberately NOT enabled (will revisit):
+#   gocyclo / funlen / lll — style; too many false positives on
+#                            existing code, drowns CI signal.
+#   depguard               — useful but needs project-specific
+#                            allowlists; defer until after N9
+#                            (auth) when import boundaries matter.
+#   wrapcheck              — codebase already wraps at boundaries
+#                            per CLAUDE.md rule; lint would only
+#                            catch the few ctx-cancel paths we
+#                            deliberately don't wrap.
+
+version: "2"
+
+run:
+  timeout: 5m
+  # Skip the generated mocks dir — go.uber.org/mock output is
+  # consistent and lint findings there are noise, not signal.
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - gosec
+    - revive
+
+  settings:
+    errcheck:
+      # Don't fail on common-and-correct discards — log Sync, Body
+      # close after error path, etc. This keeps signal high.
+      check-type-assertions: false
+      check-blank: false
+      exclude-functions:
+        # zap.Logger.Sync's stderr error is OS-specific & non-actionable
+        - (*go.uber.org/zap.Logger).Sync
+        - (*booking_monitor/internal/log.Logger).Sync
+        # io.Copy(io.Discard, body) — drain-and-discard is the point
+        - io.Copy
+        # response body Close — codebase deliberately swallows after
+        # the success path is already past the error
+        - (io.Closer).Close
+
+    gosec:
+      excludes:
+        # G104 (unchecked errors) — duplicates errcheck; let errcheck
+        # own this surface so we don't double-warn.
+        - G104
+        # G115 (integer overflow conversion) — fires on every
+        # int↔int64 conversion in DB scan code; revisit per-call
+        # when needed instead of muting the linter.
+        - G115
+
+    revive:
+      rules:
+        - name: var-naming
+        - name: early-return
+        # Skip `exported` / `package-comments` — bookkeeping noise on
+        # an in-development codebase; revisit when freezing public API.
+
+    staticcheck:
+      # ST1000 (package comment) — codebase style is per-section
+      # doc comments inside files, not "// Package foo provides..."
+      # at the top. Adding 40 package banners is busywork without
+      # signal. Revisit if/when we publish godoc externally.
+      #
+      # ST1020 (exported method comment form) — flags group-style
+      # comments above accessor blocks ("// Accessors — Wild
+      # Workouts pattern."). The Wild Workouts / DDD pattern
+      # documents the GROUP, not each accessor. Per-method doc
+      # would just be `// ID returns the order id.` × N — pure
+      # noise. Keep ST1020 disabled until we deprecate that
+      # convention.
+      checks:
+        - "all"
+        - "-ST1000"
+        - "-ST1020"
+
+  exclusions:
+    # Keep generated code out of lint reports — by definition it
+    # follows different conventions than human-written code.
+    generated: lax
+    # Vendored / third-party paths — none today, but defensive.
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - internal/mocks
+    rules:
+      # Test code is allowed to be terser than production. It's
+      # also allowed to ignore errors from setup helpers (a t.Fatal
+      # would just be noise where t.Helper-equivalent fails fast).
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - revive
+      # The cmd/ binary is an fx-DI bootstrap with linear init code;
+      # cyclomatic-style flags would target lifecycle hooks that
+      # are deliberately verbose.
+      - path: cmd/booking-cli/main\.go
+        linters:
+          - gosec  # process-launch / signal-handling false positives
+
+issues:
+  # Don't suppress repeated identical findings — every site needs
+  # its own decision; suppressing batches hides systemic gaps.
+  max-same-issues: 0
+  max-issues-per-linter: 0
