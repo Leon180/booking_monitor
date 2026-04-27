@@ -48,6 +48,12 @@ var Module = fx.Options(
 	fx.Provide(NewRedisInventoryRepository),
 	fx.Provide(NewRedisOrderQueue),
 	fx.Provide(NewRedisIdempotencyRepository),
+	// Decorator pattern: the plain Redis repo above is wrapped with
+	// hit/miss instrumentation. Mirrors the TracingBookingHandler
+	// decoration in api/module.go — single source of truth for how
+	// this codebase layers cross-cutting concerns over storage /
+	// handler types. Storage code stays observability-unaware.
+	fx.Decorate(NewInstrumentedIdempotencyRepository),
 	fx.Provide(observability.NewQueueMetrics),
 )
 

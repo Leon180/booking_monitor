@@ -68,9 +68,13 @@ GET  /api/v1/history       # 分頁查詢訂單 (?page=&size=&status=)
 POST /api/v1/events        # 建立活動 (name, total_tickets)
 GET  /api/v1/events/:id    # 查看活動
 GET  /metrics              # Prometheus 指標
+GET  /livez                # 存活探針 — process 還活著就回 200
+GET  /readyz               # 就緒探針 — PG + Redis + Kafka 在 1s 內全部回應才回 200,失敗回 503 並附逐 dep 的 JSON
 ```
 
 舊版 `POST /book` 已於 Phase 13 remediation(PR #9 H9)移除 — 它會繞過 nginx 的限流 zone。所有呼叫端必須改用 `/api/v1/book`。
+
+`/livez` + `/readyz` 遵循 k8s probe 慣例:liveness **不可**依賴下游服務(Redis 抖動不能害每個 pod 都被殺掉),readiness 才實際 ping 依賴。compose 的 `app` service 用 `/livez` 當 HEALTHCHECK。
 
 ## 資料庫
 - PostgreSQL 對外 port 5433(user/password/booking)
