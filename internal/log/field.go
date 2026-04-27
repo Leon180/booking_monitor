@@ -1,6 +1,10 @@
 package log
 
-import "go.uber.org/zap"
+import (
+	"time"
+
+	"go.uber.org/zap"
+)
 
 // Field is an alias for zap.Field. Callers should type their variadic
 // field parameters as log.Field so the log package becomes the single
@@ -34,6 +38,11 @@ func Int64(key string, val int64) Field { return zap.Int64(key, val) }
 // ByteString constructs a Field for a UTF-8 encoded byte slice. Use
 // for marshalled payloads where copying to a string would be wasteful.
 func ByteString(key string, val []byte) Field { return zap.ByteString(key, val) }
+
+// Duration constructs a Field with a time.Duration value. Mirrors
+// zap.Duration; kept here so bootstrap / server / lifecycle callers
+// don't need to import zap just to log a timeout.
+func Duration(key string, val time.Duration) Field { return zap.Duration(key, val) }
 
 // Err attaches err to the log entry under the canonical "error" key.
 // Mirrors zap.Error; kept here so callers don't need to import zap

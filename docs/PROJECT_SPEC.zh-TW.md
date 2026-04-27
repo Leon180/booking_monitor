@@ -484,7 +484,14 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 ### 進入點
 | 檔案 | 用途 |
 |------|------|
-| `cmd/booking-cli/main.go` | CLI 進入點:`server`, `stress`, `payment` 指令 |
+| `cmd/booking-cli/main.go` | Cobra root + 子指令註冊 + `resolveConfigPath` |
+| `cmd/booking-cli/server.go` | `server` 子指令:HTTP + pprof + worker + saga consumer 生命週期 |
+| `cmd/booking-cli/payment.go` | `payment` 子指令:Kafka `order.created` consumer 生命週期 |
+| `cmd/booking-cli/stress.go` | `stress` 子指令:一次性壓測產生器 |
+| `cmd/booking-cli/tracer.go` | OTel tracer 初始化 + `OTEL_TRACES_SAMPLER_RATIO` 解析(`server` + `payment` 共用) |
+| `internal/bootstrap/module.go` | `CommonModule(cfg)` — 每個子指令都需要的 log + config + DB + 基礎 observability wiring |
+| `internal/bootstrap/db.go` | `provideDB`(retry-until-reachable Postgres pool)+ `registerDBPoolCollector` |
+| `internal/bootstrap/logmodule.go` | `LogModule` — ctx-aware `*log.Logger` 的 fx provider |
 
 ### Domain
 | 檔案 | 用途 |

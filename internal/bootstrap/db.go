@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
@@ -56,7 +55,7 @@ func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 		if pingErr == nil {
 			return db, nil
 		}
-		logger.L().Warn("waiting for Postgres", zap.Int("attempt", attempt), tag.Error(pingErr))
+		logger.L().Warn("waiting for Postgres", mlog.Int("attempt", attempt), tag.Error(pingErr))
 		if attempt == attempts {
 			break
 		}

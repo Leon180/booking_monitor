@@ -7,6 +7,7 @@ import (
 	stdlog "log"
 	"net/http"
 	"net/http/pprof"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
@@ -15,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/fx"
-	"go.uber.org/zap"
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/bootstrap"
@@ -190,9 +190,9 @@ func buildPprofServer(cfg *config.Config, logger *mlog.Logger) *http.Server {
 func startHTTPServer(srv *http.Server, cfg *config.Config, logger *mlog.Logger, shutdowner fx.Shutdowner) {
 	go func() {
 		logger.L().Info("Starting server",
-			zap.String("addr", srv.Addr),
-			zap.Duration("read_timeout", cfg.Server.ReadTimeout),
-			zap.Duration("write_timeout", cfg.Server.WriteTimeout),
+			mlog.String("addr", srv.Addr),
+			mlog.Duration("read_timeout", cfg.Server.ReadTimeout),
+			mlog.Duration("write_timeout", cfg.Server.WriteTimeout),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.L().Error("Server failed", tag.Error(err))
@@ -207,7 +207,7 @@ func startHTTPServer(srv *http.Server, cfg *config.Config, logger *mlog.Logger, 
 // losing pprof should never take down the business traffic path.
 func startPprofServer(srv *http.Server, logger *mlog.Logger) {
 	go func() {
-		logger.L().Info("pprof server started", zap.String("addr", srv.Addr))
+		logger.L().Info("pprof server started", mlog.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.L().Error("pprof server failed", tag.Error(err))
 		}
@@ -272,8 +272,18 @@ func shutdownAll(
 		}
 	}
 
+	// Give the tracer its own budget rooted at Background — the fx
+	// OnStop ctx may already be near-expired after sagaConsumer.Close
+	// + pprof.Shutdown + httpServer.Shutdown drained the shared budget
+	// above. Without an independent budget, in-flight spans that were
+	// still buffered would silently drop on a "context deadline
+	// exceeded" return from tp.Shutdown, defeating the whole reason
+	// we set up batched OTLP export.
+	tpCtx, tpCancel := context.WithTimeout(context.Background(), tracerShutdownTimeout)
+	defer tpCancel()
+
 	logger.L().Info("Shutting down tracer provider")
-	shutdownErr := tp.Shutdown(ctx)
+	shutdownErr := tp.Shutdown(tpCtx)
 	if shutdownErr != nil {
 		logger.L().Error("tracer shutdown error", tag.Error(shutdownErr))
 	}
@@ -281,3 +291,8 @@ func shutdownAll(
 	_ = logger.Sync() // zap Sync on stderr is OS-specific; swallow.
 	return shutdownErr
 }
+
+// tracerShutdownTimeout caps tp.Shutdown wall clock independently of
+// the fx OnStop ctx so leftover-budget exhaustion can't truncate span
+// flush. 5s mirrors the OTel SDK's own default batch flush window.
+const tracerShutdownTimeout = 5 * time.Second
