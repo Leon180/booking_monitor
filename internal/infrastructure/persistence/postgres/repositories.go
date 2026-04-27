@@ -223,16 +223,40 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 }
 
 // transitionStatus is the shared SQL+error-classification body for the
-// three typed Mark* methods. Atomic check-and-set: the WHERE clause
-// rejects rows in the wrong source state without a separate SELECT,
-// so a concurrent transition race can't tear an Order across two
-// states. rowsAffected == 0 means EITHER the row doesn't exist OR its
-// current status doesn't match `from`; we disambiguate by a follow-up
-// existence check via GetByID.
+// three typed Mark* methods.
+//
+// Atomic check-and-set + audit log via a single CTE statement:
+//
+//   1. UPDATE orders SET status=$1 WHERE id=$2 AND status=$3 RETURNING id
+//   2. INSERT INTO order_status_history (order_id, from_status, to_status)
+//      SELECT id, $3, $1 FROM the UPDATE's RETURNING set
+//
+// Postgres executes both clauses in one statement under a single
+// snapshot, so EITHER both happen or neither does — no autocommit /
+// tx mode dependence, no race window between the state change and
+// the audit row, no application-level orchestration required.
+//
+// `rowsAffected` reflects the INSERT count (which equals the UPDATE's
+// returned row count): 1 = transition + audit both succeeded, 0 =
+// UPDATE matched nothing (wrong source state OR row missing). We
+// disambiguate the 0 case via a follow-up GetByID so callers see the
+// precise sentinel — ErrOrderNotFound vs ErrInvalidTransition.
+//
+// Audit log design rationale lives in
+// `deploy/postgres/migrations/000009_order_status_history.up.sql`.
 func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OrderStatus) error {
-	res, err := r.exec.ExecContext(ctx,
-		"UPDATE orders SET status = $1 WHERE id = $2 AND status = $3",
-		to, id, from)
+	const sqlStmt = `
+		WITH transitioned AS (
+			UPDATE orders
+			   SET status = $1
+			 WHERE id = $2
+			   AND status = $3
+			RETURNING id
+		)
+		INSERT INTO order_status_history (order_id, from_status, to_status)
+		SELECT id, $3, $1 FROM transitioned`
+
+	res, err := r.exec.ExecContext(ctx, sqlStmt, to, id, from)
 	if err != nil {
 		return fmt.Errorf("orderRepository.transitionStatus id=%s from=%s to=%s: %w", id, from, to, err)
 	}

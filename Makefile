@@ -115,7 +115,12 @@ reset-db: ## Reset database — truncate orders/events/outbox + flush Redis. Tes
 	# event via the API. Redis is flushed wholesale because the
 	# event:{uuid}:qty keys are scoped per event and a stale UUID
 	# from a previous run carries no value.
-	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE orders;"
+	# orders + order_status_history truncated together — FK with
+	# ON DELETE CASCADE rules out plain `TRUNCATE orders` (Postgres
+	# rejects without CASCADE when child tables reference the parent).
+	# RESTART IDENTITY resets the BIGSERIAL on order_status_history so
+	# a fresh test run sees ids starting at 1.
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE TABLE orders, order_status_history RESTART IDENTITY;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE events_outbox;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events;"
 	@docker exec booking_redis redis-cli -a $(REDIS_PASSWORD) --no-auth-warning FLUSHALL
