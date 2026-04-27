@@ -68,9 +68,13 @@ GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
 POST /api/v1/events        # Create event (name, total_tickets)
 GET  /api/v1/events/:id    # View event details
 GET  /metrics              # Prometheus metrics
+GET  /livez                # Liveness probe — always 200 if process is up
+GET  /readyz               # Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 with per-dep JSON otherwise
 ```
 
 Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypassed nginx rate-limit zones. All callers must use `/api/v1/book`.
+
+`/livez` + `/readyz` follow k8s probe conventions: liveness must NOT depend on downstream services (a Redis blip cannot be allowed to kill every pod), readiness pings real dependencies. The compose `app` service uses `/livez` as its HEALTHCHECK.
 
 ## Database
 - PostgreSQL on port 5433 (user/password/booking)

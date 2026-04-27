@@ -171,6 +171,36 @@ var (
 		},
 	)
 
+	// CacheHitsTotal / CacheMissesTotal track every cache lookup that
+	// distinguishes a hit from a miss. Labelled by `cache` so we can
+	// scale to multiple caches later (today only "idempotency" reads
+	// before-or-after; future shapes — event detail cache, user
+	// session — get their own label values).
+	//
+	// Hit-rate alerting is the primary use:
+	//
+	//   rate(cache_hits_total[5m]) /
+	//   (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))
+	//
+	// A sustained drop in this ratio is the canonical "cache cold" /
+	// "cache wrong-keyed" / "cache being bypassed" signal — none of
+	// which surface in latency or error metrics until they're severe.
+	CacheHitsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cache_hits_total",
+			Help: "Total number of cache lookups that returned a cached value, labelled by cache name",
+		},
+		[]string{"cache"},
+	)
+
+	CacheMissesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cache_misses_total",
+			Help: "Total number of cache lookups that did not find a cached value, labelled by cache name",
+		},
+		[]string{"cache"},
+	)
+
 	// RedisDLQRoutedTotal counts SUCCESSFUL routes to the Redis DLQ
 	// (orders:dlq), labelled by reason so operators can distinguish
 	// malformed-parse failures from malformed-classification failures
@@ -233,5 +263,12 @@ func init() {
 	// internal/infrastructure/cache/redis_queue.go (DLQReason*).
 	for _, reason := range []string{"malformed_parse", "malformed_classified", "exhausted_retries"} {
 		RedisDLQRoutedTotal.WithLabelValues(reason)
+	}
+	// Pre-warm the cache labels so the series exist in /metrics before
+	// the first lookup. "idempotency" is the only cache today; add new
+	// values here when new caches are introduced.
+	for _, cache := range []string{"idempotency"} {
+		CacheHitsTotal.WithLabelValues(cache)
+		CacheMissesTotal.WithLabelValues(cache)
 	}
 }

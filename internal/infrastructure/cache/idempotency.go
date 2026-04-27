@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"booking_monitor/internal/domain"
@@ -43,18 +44,23 @@ type idempotencyRecord struct {
 	Body       string `json:"body"`
 }
 
+// Get returns the cached entry, (nil, nil) on cache miss
+// (`redis.Nil`), or a wrapped error on infrastructure failure. Hit /
+// miss counting is the decorator's job (instrumented_idempotency.go);
+// keeping it out of here means storage tests don't mutate the global
+// Prometheus registry as a side effect.
 func (r *redisIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, error) {
 	val, err := r.client.Get(ctx, idempotencyKey(key)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil // Cache miss — not found
 		}
-		return nil, err
+		return nil, fmt.Errorf("idempotency Get: redis: %w", err)
 	}
 
 	var rec idempotencyRecord
 	if err := json.Unmarshal([]byte(val), &rec); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("idempotency Get: unmarshal: %w", err)
 	}
 	return &domain.IdempotencyResult{
 		StatusCode: rec.StatusCode,
@@ -69,7 +75,10 @@ func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
-		return err
+		return fmt.Errorf("idempotency Set: marshal: %w", err)
 	}
-	return r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err()
+	if err := r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err(); err != nil {
+		return fmt.Errorf("idempotency Set: redis: %w", err)
+	}
+	return nil
 }

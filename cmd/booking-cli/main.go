@@ -35,6 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
@@ -228,6 +229,8 @@ func runServer(_ *cobra.Command, _ []string) {
 			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
 
+		fx.Invoke(observability.RegisterRuntimeMetrics),
+		fx.Invoke(registerDBPoolCollector),
 		fx.Invoke(installServer),
 	)
 	app.Run()
@@ -240,6 +243,7 @@ func installServer(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
 	handler api.BookingHandler,
+	healthHandler *api.HealthHandler,
 	logger *mlog.Logger,
 	cfg *config.Config,
 	worker application.WorkerService,
@@ -251,7 +255,7 @@ func installServer(
 		return fmt.Errorf("installServer: %w", err)
 	}
 
-	engine, err := buildGinEngine(cfg, logger, handler)
+	engine, err := buildGinEngine(cfg, logger, handler, healthHandler)
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
@@ -284,7 +288,7 @@ func installServer(
 // config failure used to degrade silently to a Warn — that left ClientIP()
 // returning the nginx pod IP, defeating rate-limits and audit logs. Now
 // fatal at construction time.
-func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.BookingHandler) (*gin.Engine, error) {
+func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.BookingHandler, healthHandler *api.HealthHandler) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -297,6 +301,11 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.Booking
 	r.Use(api.CombinedMiddleware(logger))
 	r.Use(observability.MetricsMiddleware())
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Health probes live at the engine root, not under /api/v1 — they
+	// are operational endpoints with their own contract (k8s probe
+	// targets) and must not move with API versioning.
+	api.RegisterHealthRoutes(r, healthHandler)
 
 	v1 := r.Group(apiV1Prefix)
 	api.RegisterRoutes(v1, handler)
@@ -549,6 +558,26 @@ func provideDB(cfg *config.Config, logger *mlog.Logger) (*sql.DB, error) {
 		}
 	}
 	return nil, fmt.Errorf("provideDB: postgres unreachable after %d attempts: %w", attempts, pingErr)
+}
+
+// registerDBPoolCollector publishes the *sql.DB pool stats as
+// Prometheus gauges/counters (see DBPoolCollector). Wired in fx.Invoke
+// so the `*sql.DB` exists by the time we register; failure is fatal
+// because pool saturation is the most common production-failure mode
+// and we'd rather surface a real registration bug at boot than
+// silently lose the gauges.
+//
+// AlreadyRegisteredError is treated as success — re-invocations
+// (test re-import, fx restart) leave the prior collector in place,
+// which is the desired state, not a failure mode.
+func registerDBPoolCollector(db *sql.DB) error {
+	if err := prometheus.DefaultRegisterer.Register(observability.NewDBPoolCollector(db)); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("registerDBPoolCollector: %w", err)
+		}
+	}
+	return nil
 }
 
 // runStress is the `stress` subcommand entry: a one-shot load generator

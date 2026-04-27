@@ -7,11 +7,28 @@ services:
     command: [ "/app/booking-cli", "server" ]
     ports:
       - "6060:6060"   # pprof (only active when ENABLE_PPROF=true)
+    # `unless-stopped` so a hung container caught by the HEALTHCHECK
+    # below actually restarts in pure-compose envs (staging, CI). k8s
+    # uses livenessProbe to do the same job; this is the docker-side
+    # equivalent — without it, an `unhealthy` container stays up
+    # indefinitely and nginx serves 502s with no recovery.
+    restart: unless-stopped
     depends_on:
       - postgres
       - jaeger
       - kafka
       - redis
+    healthcheck:
+      # /livez is the unconditional process probe (always 200 if the
+      # HTTP listener is up). Using it for compose's healthcheck mirrors
+      # what k8s livenessProbe targets in production. /readyz would
+      # also work but couples app health to dep availability — wrong
+      # for liveness, right for service-mesh routing.
+      test: [ "CMD", "wget", "--quiet", "--spider", "http://localhost:8080/livez" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:?OTEL_EXPORTER_OTLP_ENDPOINT is required}
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:?OTEL_SERVICE_NAME is required}
@@ -40,6 +57,10 @@ services:
     build: .
     container_name: booking_payment_worker
     command: [ "/app/booking-cli", "payment" ]
+    # Same rationale as the `app` service: a crash or hung worker
+    # should auto-restart in pure-compose envs. Worker has no HTTP
+    # listener so no HEALTHCHECK; restart-on-exit covers crash-loops.
+    restart: unless-stopped
     depends_on:
       - postgres
       - kafka
