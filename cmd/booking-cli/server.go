@@ -20,6 +20,9 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/infrastructure/api"
+	"booking_monitor/internal/infrastructure/api/booking"
+	"booking_monitor/internal/infrastructure/api/middleware"
+	"booking_monitor/internal/infrastructure/api/ops"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
@@ -70,8 +73,8 @@ func runServer(_ *cobra.Command, _ []string) {
 func installServer(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
-	handler api.BookingHandler,
-	healthHandler *api.HealthHandler,
+	handler booking.BookingHandler,
+	healthHandler *ops.HealthHandler,
 	logger *mlog.Logger,
 	cfg *config.Config,
 	worker application.WorkerService,
@@ -116,7 +119,15 @@ func installServer(
 // config failure used to degrade silently to a Warn — that left ClientIP()
 // returning the nginx pod IP, defeating rate-limits and audit logs. Now
 // fatal at construction time.
-func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.BookingHandler, healthHandler *api.HealthHandler) (*gin.Engine, error) {
+//
+// Coupling note: this signature accepts subpackage-typed handlers
+// (`booking.BookingHandler`, `*ops.HealthHandler`) directly rather than
+// re-exposing them through the umbrella `api` package. Server-side
+// wiring is the legitimate place for that coupling — the wire layer
+// owns the route topology and benefits from compile-time type checks.
+// `api.Module` remains the single fx import for runtime wiring; the
+// type imports here are a separate concern from fx graph composition.
+func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.BookingHandler, healthHandler *ops.HealthHandler) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -126,17 +137,17 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler api.Booking
 
 	// Single combined middleware: logger + correlation ID in ONE
 	// context.WithValue + ONE c.Request.WithContext (see Phase 14 GC work).
-	r.Use(api.CombinedMiddleware(logger))
+	r.Use(middleware.Combined(logger))
 	r.Use(observability.MetricsMiddleware())
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Health probes live at the engine root, not under /api/v1 — they
 	// are operational endpoints with their own contract (k8s probe
 	// targets) and must not move with API versioning.
-	api.RegisterHealthRoutes(r, healthHandler)
+	ops.RegisterHealthRoutes(r, healthHandler)
 
 	v1 := r.Group(apiV1Prefix)
-	api.RegisterRoutes(v1, handler)
+	booking.RegisterRoutes(v1, handler)
 	// NOTE: the legacy POST /book route (Phase 0) was removed because it
 	// bypassed the nginx `location /api/` rate-limit zone. All callers
 	// must use /api/v1/book. Closes action-list item H9.

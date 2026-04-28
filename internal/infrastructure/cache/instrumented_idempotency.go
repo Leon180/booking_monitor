@@ -20,8 +20,8 @@ const cacheLabelIdempotency = "idempotency"
 //   - Storage code stays purely about Redis I/O — no dependency on
 //     observability, no global-counter side effects in repo tests.
 //   - Mirrors the established TracingBookingHandler pattern in
-//     internal/infrastructure/api/ — single source of truth for
-//     "how this codebase wraps cross-cutting concerns".
+//     internal/infrastructure/api/booking/ — single source of truth
+//     for "how this codebase wraps cross-cutting concerns".
 //   - Composable: future tracing / retry / circuit-breaker decorators
 //     stack via additional fx.Decorate calls without touching this
 //     file or the Redis repo.

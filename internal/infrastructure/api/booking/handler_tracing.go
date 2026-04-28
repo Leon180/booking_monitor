@@ -1,4 +1,4 @@
-package api
+package booking
 
 import (
 	"fmt"

@@ -6,8 +6,9 @@
 // changes) without rippling into the domain or persistence layers.
 //
 // Mappers (in mapper.go) translate between domain values and DTOs.
-// Handlers (in api/handler.go) bind requests, invoke services with
-// domain types, then map domain results back to DTOs for the response.
+// Handlers (in api/booking/handler.go) bind requests, invoke services
+// with domain types, then map domain results back to DTOs for the
+// response.
 package dto
 
 import (

@@ -1,4 +1,4 @@
-package api_test
+package ops_test
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"booking_monitor/internal/infrastructure/api"
+	"booking_monitor/internal/infrastructure/api/ops"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -22,10 +22,10 @@ func init() { gin.SetMode(gin.TestMode) }
 func TestLive_AlwaysOK(t *testing.T) {
 	t.Parallel()
 
-	h := api.NewHealthHandlerForTest(nil, nil, 0)
+	h := ops.NewHealthHandlerForTest(nil, nil, 0)
 
 	r := gin.New()
-	api.RegisterHealthRoutes(r, h)
+	ops.RegisterHealthRoutes(r, h)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
@@ -39,7 +39,7 @@ func TestReady_AllOK(t *testing.T) {
 	t.Parallel()
 
 	ok := func(_ context.Context) error { return nil }
-	h := api.NewHealthHandlerForTest(
+	h := ops.NewHealthHandlerForTest(
 		[]string{"postgres", "redis", "kafka"},
 		[]func(context.Context) error{ok, ok, ok},
 		0,
@@ -63,7 +63,7 @@ func TestReady_OneFailureReturns503(t *testing.T) {
 	ok := func(_ context.Context) error { return nil }
 	boom := func(_ context.Context) error { return errors.New("connection refused") }
 
-	h := api.NewHealthHandlerForTest(
+	h := ops.NewHealthHandlerForTest(
 		[]string{"postgres", "redis", "kafka"},
 		[]func(context.Context) error{ok, boom, ok},
 		0,
@@ -93,7 +93,7 @@ func TestReady_OrderIsDeterministic(t *testing.T) {
 	fast := func(_ context.Context) error { return nil }
 	mid := func(_ context.Context) error { return nil }
 
-	h := api.NewHealthHandlerForTest(
+	h := ops.NewHealthHandlerForTest(
 		[]string{"postgres", "redis", "kafka"},
 		[]func(context.Context) error{slow, fast, mid},
 		0,
@@ -122,7 +122,7 @@ func TestReady_RespectsBudget(t *testing.T) {
 	// 50ms budget keeps the test sub-100ms instead of burning the
 	// 1s production default. Override is the whole reason
 	// probeBudget is a HealthHandler field rather than a const.
-	h := api.NewHealthHandlerForTest(
+	h := ops.NewHealthHandlerForTest(
 		[]string{"postgres", "redis"},
 		[]func(context.Context) error{hang, ok},
 		50*time.Millisecond,
@@ -151,10 +151,10 @@ type readyResponse struct {
 	} `json:"checks"`
 }
 
-func doReady(t *testing.T, h *api.HealthHandler) *httptest.ResponseRecorder {
+func doReady(t *testing.T, h *ops.HealthHandler) *httptest.ResponseRecorder {
 	t.Helper()
 	r := gin.New()
-	api.RegisterHealthRoutes(r, h)
+	ops.RegisterHealthRoutes(r, h)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)

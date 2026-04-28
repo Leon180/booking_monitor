@@ -1,4 +1,4 @@
-package api
+package booking
 
 import (
 	"context"
@@ -18,6 +18,11 @@ import (
 //
 // The second return value is the JSON-safe public message that may be
 // rendered in a response body.
+//
+// Lives in the booking package because every consumer is a booking
+// handler. Operational endpoints (ops/health.go) carry their own
+// per-dependency error shape — there's no cross-package translation
+// to share.
 func mapError(err error) (status int, publicMsg string) {
 	if err == nil {
 		return http.StatusOK, ""

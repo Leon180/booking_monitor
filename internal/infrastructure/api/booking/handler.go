@@ -1,4 +1,19 @@
-package api
+// Package booking is the HTTP boundary for the customer-facing
+// booking surface: POST /book, GET /history, POST /events,
+// GET /events/:id. Lives under internal/infrastructure/api/booking
+// so future operational endpoints (health, auth, admin) live in
+// sibling packages without colliding with business endpoints.
+//
+// Public surface:
+//   - BookingHandler   — interface implemented by the plain handler
+//                        and the tracing decorator
+//   - NewBookingHandler — fx-friendly constructor
+//   - RegisterRoutes   — wires the handler onto a Gin RouterGroup
+//
+// The tracing decorator (handler_tracing.go) and error→HTTP translator
+// (errors.go) live alongside in this package — they're pure
+// implementation details of the booking boundary.
+package booking
 
 import (
 	"encoding/json"
@@ -152,6 +167,11 @@ func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "View event", "event_id": c.Param("id")})
 }
 
+// RegisterRoutes wires the booking endpoints under a versioned router
+// group (typically /api/v1). Operational endpoints (/livez, /readyz)
+// live in the ops subpackage and register at the engine root, NOT
+// under this group — k8s probe targets must not move with API
+// versioning.
 func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler) {
 	r.POST("/book", handler.HandleBook)
 	r.GET("/history", handler.HandleListBookings)

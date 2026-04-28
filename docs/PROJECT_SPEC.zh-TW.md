@@ -217,7 +217,7 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 { "error": "internal server error" }
 ```
 
-錯誤回應都會通過 `api/errors.go :: mapError`:透過 `errors.Is` 比對 sentinel 錯誤後,回傳一個安全的公開訊息。原始的 DB / driver 錯誤只會記錄在伺服器端(帶 correlation ID),**絕不**回給 client。
+錯誤回應都會通過 `api/booking/errors.go :: mapError`:透過 `errors.Is` 比對 sentinel 錯誤後,回傳一個安全的公開訊息。原始的 DB / driver 錯誤只會記錄在伺服器端(帶 correlation ID),**絕不**回給 client。
 
 ### GET /api/v1/history
 分頁查詢訂單歷史。
@@ -340,7 +340,7 @@ Prometheus metrics 端點。
 ### 分散式追蹤(OpenTelemetry + Jaeger)
 - Decorator 模式:`BookingServiceTracingDecorator`, `MessageProcessorMetricsDecorator`, `OutboxRelayTracingDecorator`
 - `OutboxRelayTracingDecorator` 現在會在批次失敗時呼叫 `span.RecordError` + `span.SetStatus(codes.Error)` — 舊版 span 永遠是 OK
-- `api/handler_tracing.go` 用共用的 `recordHTTPResult(span, status)` helper,對**所有** status >= 400 都會 set `span.status = Error`(不只是 5xx),這樣 4xx client 錯誤也能在 Jaeger 搜尋中浮現
+- `api/booking/handler_tracing.go` 用共用的 `recordHTTPResult(span, status)` helper,對**所有** status >= 400 都會 set `span.status = Error`(不只是 5xx),這樣 4xx client 錯誤也能在 Jaeger 搜尋中浮現
 - GRPC exporter 連至 Jaeger(port 4317)
 - **採樣器可設定**:透過 `OTEL_TRACES_SAMPLER_RATIO`:空/1 → AlwaysSample(預設)、0 → NeverSample、0 < r < 1 → TraceIDRatioBased(r)。若值無法解析,會 log warning 並 fallback 到 AlwaysSample(絕不靜默關閉 tracing)
 - `initTracer` 現在會**fail fast**(回傳錯誤給 fx.Invoke),不再讓 `resource.New` 或 `otlptracegrpc.New` 的錯誤落到下一步,導致 nil `traceExporter` 在送第一個 span 時 crash
@@ -351,7 +351,7 @@ Prometheus metrics 端點。
   - **Pattern A** — 長生命週期元件(sagaCompensator、workerService、paymentService、event_service、redisOrderQueue、KafkaConsumer、SagaConsumer、OutboxRelay)使用結構體 DI logger(`s.log *mlog.Logger`),在建構時透過 `With()` 烘入 `component=<subsystem>`,讓每條 log 都能依子系統篩選。
   - **Pattern B** — HTTP handlers、middleware、init 程式碼沒有穩定的 component 身份,使用套件層級的 ctx-aware 呼叫(`log.Error(ctx, ...)`)。
 - **每次呼叫自動補上的欄位**(由 `enrichFields` 前置):
-  - `correlation_id` 取自 context(由 `CombinedMiddleware` 注入)
+  - `correlation_id` 取自 context(由 `middleware.Combined` 注入)
   - `trace_id` / `span_id` 取自 `trace.SpanContextFromContext(ctx)` — ctx 內有 OTEL span 時自動出現,呼叫端完全不需改動
 - **每個 request 不再 clone zap core** — middleware 以一次 `context.WithValue` 存 `{logger, correlationID}` 值結構。happy path 不為 logger 狀態分配任何記憶體。
 - **執行期 level 切換**:`GET`/`POST` `/admin/loglevel` 掛在 pprof listener 上,直接切換 `AtomicLevel`,不用重啟(同樣受 `ENABLE_PPROF=true` 控制)
@@ -414,13 +414,13 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | 11 | 2/21 | `f56ab82` | PostgreSQL advisory lock(OutboxRelay 領導者選舉) |
 | 12 | 2/24 | `4e89ff7` | Saga 補償 + 冪等 Redis 回滾 + 部分唯一索引(允許付款失敗後重試) |
 | 13 | 4/11 | PRs #7 / #8 / #9 / #12 / #13 | **多 agent review 與 remediation**:在 6 個 review 面向(domain/app、persistence、concurrency/cache、messaging/saga、api/payment、observability/deploy)共彙整出 66 項 findings。所有 6 個 CRITICAL 與 13 個 HIGH 在 [`fix/review-critical` (#8)](https://github.com/Leon180/booking_monitor/pull/8) 與 [`fix/review-high` (#9)](https://github.com/Leon180/booking_monitor/pull/9) 修復;17 MEDIUM / 14 LOW / 6 NIT 在 [`fix/review-backlog` (#12)](https://github.com/Leon180/booking_monitor/pull/12) 修復;docs + `kafka_consumer_retry_total` 指標 + `KafkaConsumerStuck` 告警 + [`docs/reviews/SMOKE_TEST_PLAN.md`](reviews/SMOKE_TEST_PLAN.md) 於 [`fix/review-docs` (#13)](https://github.com/Leon180/booking_monitor/pull/13) 完成。彙整後的 backlog 存放在 [`docs/reviews/ACTION_LIST.md`](reviews/ACTION_LIST.md)。使用者面向的改動請看下方的 **Remediation 重點** 區塊。 |
-| 14 | 4/12–13 | PRs #14 / #15 | **GC 優化**:baseline benchmark 發現 RPS 比歷史掉 70%,根因是 fx.Decorate 修好後 tracing/metrics decorator 真的被套用,加上 `AlwaysSample()` 與每個 request 都 clone 一次 zap core。分兩個 PR 修復。[`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) 先建 benchmark harness(pprof endpoint 開在 `:6060`、`scripts/benchmark_gc.sh`、`scripts/gc_metrics.sh`、`scripts/pprof_capture.sh`)並導入三個 quick win(`OTEL_TRACES_SAMPLER_RATIO=0.01`、`GOGC=400`、CorrelationIDMiddleware 不再 clone zap core)— RPS 7,984 → 20,552(+157%)。[`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) 緊接做 deep fix:Redis Lua script args 改用 `sync.Pool`、key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf` boxing)、`GOMEMLIMIT=256MiB`、以及合併後的 `CombinedMiddleware`,每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext` — 每 60 秒分配物件數 258M → 110M(−57%),GC 週期 202 → 86(−57%)。詳細請看下方的 **Phase 14 重點** 區塊。 |
-| 15 | 4/23–24 | PR #18 | **Logger 架構重構**:`pkg/logger/` → `internal/log/`,改採 ctx-aware emit API。Middleware 不再在每個 request 呼叫 `baseLogger.With(tag.CorrelationID(id))`(該呼叫會深度 clone zap 內部 core,約 1.2 KB/req)。改成 `CombinedMiddleware` 以一次 `context.WithValue` 存 `ctxValue{logger, correlationID string}`;`Logger.Error(ctx, msg, fields...)` 與套件層級的 `log.Error(ctx, ...)` 由 `enrichFields` 在實際 emit 時從 ctx 讀出 `correlation_id` 與 OTEL `trace_id`/`span_id`。新增 `LevelHandler()`,把 `GET`/`POST` `/admin/loglevel` 掛在 pprof listener 上做執行期 level 切換;`ParseLevel` 對打錯的 level 直接回報錯誤(不再靜默 fallback 成 info);另新增 `internal/log/tag/` 套件提供型別化的 `zap.Field` 建構子。每個長生命週期元件(sagaCompensator、workerService、paymentService、event_service、redisOrderQueue、KafkaConsumer、SagaConsumer、OutboxRelay)現在都在注入的 logger 上烘入 `component=<subsystem>`,讓 Loki/Grafana 的標籤篩選在所有子系統上一致。詳細請看下方的 **Phase 15 重點** 區塊。 |
+| 14 | 4/12–13 | PRs #14 / #15 | **GC 優化**:baseline benchmark 發現 RPS 比歷史掉 70%,根因是 fx.Decorate 修好後 tracing/metrics decorator 真的被套用,加上 `AlwaysSample()` 與每個 request 都 clone 一次 zap core。分兩個 PR 修復。[`perf/gc-baseline` (#14)](https://github.com/Leon180/booking_monitor/pull/14) 先建 benchmark harness(pprof endpoint 開在 `:6060`、`scripts/benchmark_gc.sh`、`scripts/gc_metrics.sh`、`scripts/pprof_capture.sh`)並導入三個 quick win(`OTEL_TRACES_SAMPLER_RATIO=0.01`、`GOGC=400`、CorrelationIDMiddleware 不再 clone zap core)— RPS 7,984 → 20,552(+157%)。[`perf/gc-deep-fixes` (#15)](https://github.com/Leon180/booking_monitor/pull/15) 緊接做 deep fix:Redis Lua script args 改用 `sync.Pool`、key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf` boxing)、`GOMEMLIMIT=256MiB`、以及合併後的 `middleware.Combined`,每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext` — 每 60 秒分配物件數 258M → 110M(−57%),GC 週期 202 → 86(−57%)。詳細請看下方的 **Phase 14 重點** 區塊。 |
+| 15 | 4/23–24 | PR #18 | **Logger 架構重構**:`pkg/logger/` → `internal/log/`,改採 ctx-aware emit API。Middleware 不再在每個 request 呼叫 `baseLogger.With(tag.CorrelationID(id))`(該呼叫會深度 clone zap 內部 core,約 1.2 KB/req)。改成 `middleware.Combined` 以一次 `context.WithValue` 存 `ctxValue{logger, correlationID string}`;`Logger.Error(ctx, msg, fields...)` 與套件層級的 `log.Error(ctx, ...)` 由 `enrichFields` 在實際 emit 時從 ctx 讀出 `correlation_id` 與 OTEL `trace_id`/`span_id`。新增 `LevelHandler()`,把 `GET`/`POST` `/admin/loglevel` 掛在 pprof listener 上做執行期 level 切換;`ParseLevel` 對打錯的 level 直接回報錯誤(不再靜默 fallback 成 info);另新增 `internal/log/tag/` 套件提供型別化的 `zap.Field` 建構子。每個長生命週期元件(sagaCompensator、workerService、paymentService、event_service、redisOrderQueue、KafkaConsumer、SagaConsumer、OutboxRelay)現在都在注入的 logger 上烘入 `component=<subsystem>`,讓 Loki/Grafana 的標籤篩選在所有子系統上一致。詳細請看下方的 **Phase 15 重點** 區塊。 |
 
 ### Remediation 重點(Phase 13)
 
 - **Kafka DLQ 全鏈路**:新增 topics `order.created.dlq` / `order.failed.dlq`、新增指標 `dlq_messages_total` / `saga_poison_messages_total`、saga 重試計數改為 Redis 持久化、新增 `ErrInvalidPaymentEvent` sentinel。從此不會再有靜默 drop 的訊息。
-- **API 安全**:`r.Run()` 改為顯式建立的 `http.Server{}`,真正套用 `cfg.Server.ReadTimeout`/`WriteTimeout`;`api/errors.go :: mapError` 對每一個錯誤回應做 sanitize,DB / driver 錯誤絕不會外洩;舊版 `POST /book` 已移除。
+- **API 安全**:`r.Run()` 改為顯式建立的 `http.Server{}`,真正套用 `cfg.Server.ReadTimeout`/`WriteTimeout`;`api/booking/errors.go :: mapError` 對每一個錯誤回應做 sanitize,DB / driver 錯誤絕不會外洩;舊版 `POST /book` 已移除。
 - **Secrets 搬到 `.env`**:所有明文密碼(`postgres`、`grafana`、`redis`)都改從 gitignore 的 `.env` 透過 `${VAR}` 取代,並提供追蹤中的 `.env.example`;docker-compose 在缺少必要值時會 fail fast。
 - **`Config.Validate()`** 會拒絕缺少的 `DATABASE_URL`,並在 `APP_ENV=production` 時禁止 `REDIS_ADDR` / `KAFKA_BROKERS` 使用 localhost 預設。
 - **Deploy 強化**:六個原本未 pin 的 image 全部 pin 住(`golang:1.24-alpine`、`alpine:3.20`、`nginx:1.27-alpine`、`prom/prometheus:v2.54.1`、`grafana/grafana:11.2.2`、`jaegertracing/all-in-one:1.60`);Dockerfile runner stage 改以 non-root `uid:10001` 執行;Redis 加上 `--requirepass`。
@@ -432,7 +432,7 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 - **Benchmark harness**:`net/http/pprof` 獨立跑在 `:6060` listener(透過 `ENABLE_PPROF=true` 控制);`scripts/benchmark_gc.sh` / `scripts/gc_metrics.sh` / `scripts/pprof_capture.sh` 把 k6、Go runtime 指標、heap/allocs profile 整合成單一報告,產出在 `docs/benchmarks/`。該 listener 有自己的 `http.Server` 與 fx `OnStop` shutdown hook — 無 goroutine leak。
 - **Sampler 調優**:`OTEL_TRACES_SAMPLER_RATIO` 預設 `0.01`(1%)。未被採樣的 request 只拿到一個 no-op span(零分配),不會走完整的 batch span processor export。
 - **Runtime 調優**:`GOGC=400` + `GOMEMLIMIT=256MiB` — 正常流量下 GC 很鬆,heap 接近 soft limit 時才變積極,避免流量 spike 時 heap 無限成長。
-- **Hot-path 分配削減**:`CombinedMiddleware` 把已綁定 correlation id 的 request 級 logger 一次塞進 context(`internal/log/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
+- **Hot-path 分配削減**:`middleware.Combined` 把已綁定 correlation id 的 request 級 logger 一次塞進 context(`internal/log/context.go`),每個 request 只做 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`;Redis Lua script args 改用 `sync.Pool` 複用 `[]interface{}`;庫存 key 改用 `strconv.Itoa` 串接(取代 `fmt.Sprintf`)避免 interface boxing;用 sentinel error(`errDeductScriptNotFound`、`errRevertScriptNotFound`、`errUnexpectedLuaResult`)取代每次呼叫都 `fmt.Errorf`。
 - **結果**:clean run RPS 7,984 → 20,552(+157%);每 60 秒分配物件數 258M → 110M(−57%);GC 週期 202 → 86(−57%);GC pause 最大值 79ms → 41ms(−48%);heap peak 被 `GOMEMLIMIT` 控制在 ≤256MB。
 
 ### Phase 15 重點(Logger 重構)
@@ -526,10 +526,12 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 ### Infrastructure
 | 檔案 | 用途 |
 |------|------|
-| `internal/infrastructure/api/handler.go` | HTTP handlers + 路由註冊 |
-| `internal/infrastructure/api/errors.go` | `mapError(err) (status, publicMsg)` helper — 負責把錯誤 sanitize 成公開訊息 |
-| `internal/infrastructure/api/handler_tracing.go` | Tracing decorator + `recordHTTPResult` span helper |
-| `internal/infrastructure/api/middleware.go` | `CombinedMiddleware`(Phase 14):一次性注入 logger + correlation ID(每個 request 只 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`) |
+| `internal/infrastructure/api/module.go` | 組合 `booking.Module` + `ops.Module`,讓 `cmd/booking-cli/server.go` 一個 fx import 就可以接上整個 HTTP boundary |
+| `internal/infrastructure/api/booking/handler.go` | 顧客端 HTTP handler(`POST /book`、`GET /history`、`POST /events`、`GET /events/:id`)+ 路由註冊在 `/api/v1` 之下 |
+| `internal/infrastructure/api/booking/errors.go` | `mapError(err) (status, publicMsg)` helper — booking 端點專用的公開錯誤訊息 sanitize |
+| `internal/infrastructure/api/booking/handler_tracing.go` | Tracing decorator + `recordHTTPResult` span helper(4xx + 5xx 都會 set `span.status = Error`) |
+| `internal/infrastructure/api/ops/health.go` | k8s `/livez` + `/readyz` 探針 — process-up vs 依賴-up,掛在 engine root(**不**在 `/api/v1` 之下) |
+| `internal/infrastructure/api/middleware/middleware.go` | `middleware.Combined`(Phase 14):一次性注入 logger + correlation ID(每個 request 只 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`) |
 | `internal/infrastructure/cache/redis.go` | Redis inventory + idempotency repos |
 | `internal/infrastructure/cache/redis_queue.go` | Redis Streams consumer |
 | `internal/infrastructure/cache/lua/deduct.lua` | 原子扣減 Lua script |
