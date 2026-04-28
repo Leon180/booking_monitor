@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/samber/lo"
@@ -165,6 +166,34 @@ func (d *orderRepositoryTracingDecorator) ListOrders(ctx context.Context, limit,
 		span.RecordError(err)
 	}
 	return orders, total, err
+}
+
+func (d *orderRepositoryTracingDecorator) FindStuckCharging(ctx context.Context, minAge time.Duration, limit int) ([]domain.StuckCharging, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "FindStuckCharging", trace.WithAttributes(
+		attribute.String("min_age", minAge.String()),
+		attribute.Int("limit", limit),
+	))
+	defer span.End()
+
+	stuck, err := d.next.FindStuckCharging(ctx, minAge, limit)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.SetAttributes(attribute.Int("found", len(stuck)))
+	return stuck, err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkCharging(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderCharging", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkCharging(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
 }
 
 func (d *orderRepositoryTracingDecorator) MarkConfirmed(ctx context.Context, id uuid.UUID) error {

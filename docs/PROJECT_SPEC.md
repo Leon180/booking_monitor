@@ -320,6 +320,74 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 | Worker | Partial unique index on `(user_id, event_id) WHERE status != 'failed'` | Duplicate orders (allows retry after payment failure) |
 | Saga | `SETNX saga:reverted:{order_id}` in Redis | Duplicate compensations |
 
+### 6.7 Charging Intent Log + Reconciler (A4)
+
+A4 added an `OrderStatusCharging` intermediate state between `Pending` and `Confirmed`/`Failed`. The payment service writes Charging **before** calling the gateway, so a separate `recon` subcommand can resolve stuck-mid-flight orders by querying the gateway via `PaymentStatusReader.GetStatus`.
+
+**Why** — defense-in-depth on top of gateway-side idempotency:
+
+- **Visibility**: `status=charging` rows are orders mid-flight at the gateway right now. Stuck-Charging > 5 min is an alertable signal (Prometheus rule `ReconStuckCharging`).
+- **Cross-process recovery**: a worker crash or Kafka rebalance can leave an order in Charging without the original Charge call ever returning. The `recon` subcommand resolves it without waiting for Kafka redelivery.
+- **Latency metric**: time from `Pending → Charging → Confirmed` becomes the gateway-perceived latency histogram (`recon_resolve_age_seconds`).
+
+**State machine (post-A4)**:
+
+```
+Pending  ──MarkCharging──→  Charging
+Pending  ──MarkConfirmed─→  Confirmed   (transitional — see cutover below)
+Pending  ──MarkFailed────→  Failed      (transitional)
+Charging ──MarkConfirmed─→  Confirmed   (terminal)
+Charging ──MarkFailed────→  Failed
+Failed   ──MarkCompensated→ Compensated (terminal)
+```
+
+**Reconciler subcommand** (`booking-cli recon`):
+
+- Default loop mode: `time.Ticker` driven, runs until SIGTERM. Suits docker-compose / k8s Deployment hosting.
+- `--once` flag: single sweep then exit. Suits k8s CronJob hosting where the orchestrator drives the schedule.
+- Both modes share a single `*Reconciler.Sweep(ctx)` method — no logic drift.
+- `PaymentStatusReader` port (read-only, NO `Charge`) — defense against accidental double-charges from recon code via the type system itself.
+
+**Per-order outcomes** (counter `recon_resolved_total{outcome=...}`):
+
+| Outcome | Trigger | Action |
+| :-- | :-- | :-- |
+| `charged` | Gateway returns `ChargeStatusCharged` | MarkConfirmed |
+| `declined` | Gateway returns `ChargeStatusDeclined` | MarkFailed |
+| `not_found` | Gateway has no record (worker crashed before Charge call) | MarkFailed (customer never charged) |
+| `unknown` | Gateway returned an unclassifiable verdict | Skip; retry next sweep |
+| `max_age_exceeded` | Order age > `RECON_MAX_CHARGING_AGE` (default 24h) | Force MarkFailed; alert fires; manual review |
+| `transition_lost` | Mark* returned `ErrInvalidTransition` (worker won the race) | Idempotent success; counted but logged at Info |
+
+Distinct counter `recon_gateway_errors_total` for infrastructure failures (network, gateway 5xx, ctx timeout) — qualitatively different from the `unknown` verdict.
+
+**Cutover trigger** for tightening the transitional widening:
+
+The current `MarkConfirmed` / `MarkFailed` accept `source ∈ {Pending, Charging}` so in-flight Pending messages queued before A4 deploy still resolve via the old direct path. A follow-up PR will tighten to Charging-only when this **moving-window** query returns 0 for ≥ 5 consecutive checks (run every minute):
+
+```sql
+SELECT count(*) FROM order_status_history
+ WHERE from_status = 'pending'
+   AND to_status   IN ('confirmed', 'failed')
+   AND occurred_at > NOW() - INTERVAL '5 minutes';
+```
+
+The window is a 5-minute lookback (NOT a count since deploy) — that interval matches the longest plausible Kafka redelivery + retry budget for an in-flight Pending message. Five consecutive checks returning 0 = no Pending→terminal transitions in 25 minutes = safe to remove the transitional edges.
+
+Until then the dual-source path is intentional, not legacy.
+
+**Configuration** (every default has a header comment in [config.go](../internal/infrastructure/config/config.go) explaining the rationale; tune via `RECON_*` env vars):
+
+| Knob | Default | What it bounds |
+| :-- | :-- | :-- |
+| `RECON_SWEEP_INTERVAL` | 120s | Loop cadence |
+| `RECON_CHARGING_THRESHOLD` | 120s | Min age before recon considers an order "stuck" |
+| `RECON_GATEWAY_TIMEOUT` | 10s | Per-order GetStatus call budget |
+| `RECON_MAX_CHARGING_AGE` | 24h | Force-fail give-up cutoff |
+| `RECON_BATCH_SIZE` | 100 | Orders processed per sweep |
+
+All defaults are heuristic init values — see config.go header comments for the per-knob rationale + tuning guidance. Adjust after the first production-shaped run produces histograms for `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds`.
+
 ---
 
 ## 7. Observability

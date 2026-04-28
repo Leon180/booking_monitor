@@ -31,8 +31,9 @@ const (
 //	main.go     — root command + subcommand registration + resolveConfigPath
 //	server.go   — `server` subcommand: HTTP + workers + saga consumer
 //	payment.go  — `payment` subcommand: Kafka order.created consumer
+//	recon.go    — `recon` subcommand: stuck-Charging reconciler (loop or --once)
 //	stress.go   — `stress` subcommand: one-shot load generator
-//	tracer.go   — OTel tracer init shared by server + payment
+//	tracer.go   — OTel tracer init shared by server + payment + recon
 //
 // DB pool + log + base observability wiring lives in internal/bootstrap
 // (CommonModule) so it can be re-used by any new subcommand without
@@ -43,6 +44,15 @@ func main() {
 	serverCmd := &cobra.Command{Use: "server", Short: "Run the API server", Run: runServer}
 	paymentCmd := &cobra.Command{Use: "payment", Short: "Run the Payment Service worker", Run: runPaymentWorker}
 
+	reconCmd := &cobra.Command{
+		Use:   "recon",
+		Short: "Run the order-status reconciler (sweeps stuck-Charging orders)",
+		Run:   runRecon,
+	}
+	// --once: single sweep then exit, suitable for k8s CronJob hosts.
+	// Default (loop) is suitable for docker-compose / Deployment hosts.
+	reconCmd.Flags().Bool("once", false, "Run a single sweep then exit (for k8s CronJob hosting)")
+
 	stressCmd := &cobra.Command{Use: "stress", Short: "Run stress test", Run: runStress}
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
@@ -50,7 +60,7 @@ func main() {
 	stressCmd.Flags().String("event-id", "", "Event UUID (v7) to book against — required, obtain via POST /api/v1/events")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd)
+	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

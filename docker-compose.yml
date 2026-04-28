@@ -72,6 +72,31 @@ services:
       - KAFKA_BROKERS=${KAFKA_BROKERS:?KAFKA_BROKERS is required}
       - APP_NAME=booking_payment_worker
 
+  recon:
+    # The order-status reconciler — sweeps stuck-Charging orders and
+    # resolves them via gateway.GetStatus. See PROJECT_SPEC §A4.
+    #
+    # Default loop mode (run forever, sweep every RECON_SWEEP_INTERVAL).
+    # For k8s CronJob hosting, deploy with `--once` instead and let
+    # the cluster scheduler drive the cadence.
+    build: .
+    container_name: booking_recon
+    command: [ "/app/booking-cli", "recon" ]
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
+      - APP_NAME=booking_recon
+      # All RECON_* knobs fall back to defaults from config.go header
+      # comments; override here per-deployment if production data
+      # demands. See ReconConfig struct for rationale on each default.
+      - RECON_SWEEP_INTERVAL=${RECON_SWEEP_INTERVAL:-120s}
+      - RECON_CHARGING_THRESHOLD=${RECON_CHARGING_THRESHOLD:-120s}
+      - RECON_GATEWAY_TIMEOUT=${RECON_GATEWAY_TIMEOUT:-10s}
+      - RECON_MAX_CHARGING_AGE=${RECON_MAX_CHARGING_AGE:-24h}
+      - RECON_BATCH_SIZE=${RECON_BATCH_SIZE:-100}
+
   postgres:
     image: postgres:15-alpine
     container_name: booking_db
