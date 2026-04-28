@@ -1,4 +1,14 @@
-package api
+// Package ops is the HTTP boundary for OPERATIONAL endpoints — k8s
+// liveness / readiness probes today, future N3 (SLO burn-rate) and
+// admin endpoints later. Lives separately from booking/ so that:
+//
+//   - operational endpoints have their own URL contract (engine root,
+//     not /api/v1) — k8s probe targets must not move with API versioning
+//   - liveness vs readiness separation (k8s convention) is visible
+//     in the package layout, not just at function level
+//   - future auth changes that gate admin endpoints land here without
+//     touching customer-facing booking code
+package ops
 
 import (
 	"context"
