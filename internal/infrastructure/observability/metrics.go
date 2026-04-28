@@ -335,6 +335,22 @@ var ReconMarkErrorsTotal = promauto.NewCounter(
 	},
 )
 
+// ReconFindStuckErrorsTotal fires when the per-sweep
+// FindStuckCharging query itself errors (DB outage, missing index
+// from a forgotten migration, query timeout). Without this counter,
+// a sustained sweep-query failure shows nothing on dashboards
+// EXCEPT a stale `recon_stuck_charging_orders` gauge — operators
+// can't distinguish "orders are stuck" from "recon itself is broken".
+//
+// Pairs with the alert: `rate(recon_find_stuck_errors_total[5m]) > 0`
+// fires immediately on any sustained failure.
+var ReconFindStuckErrorsTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "recon_find_stuck_errors_total",
+		Help: "Total FindStuckCharging query failures (DB outage, missing index, timeout)",
+	},
+)
+
 // ReconStuckChargingOrders is a gauge of orders currently in Charging
 // state older than RECON_CHARGING_THRESHOLD. Reset to the latest count
 // on every sweep. Pairs with the alert

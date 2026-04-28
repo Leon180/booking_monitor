@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	stdlog "log"
 	"time"
@@ -110,7 +109,21 @@ func installRecon(
 // runSweepOnce performs ONE sweep then triggers fx shutdown. Used by
 // --once mode (k8s CronJob host). Exit code reflects sweep success:
 //   - 0 on Sweep returning nil
-//   - 1 on Sweep error (preserved via fx.ExitCode)
+//   - 0 when the parent ctx is cancelled (graceful SIGTERM = succeeded
+//     job, per k8s CronJob semantics — the scheduler will retry on
+//     the next cron tick)
+//   - 1 on real Sweep failure (DB error etc.; preserved via fx.ExitCode)
+//
+// We use the `ctx.Err() == nil` pattern rather than enumerating
+// context.Canceled / context.DeadlineExceeded individually:
+//
+//   - If the parent ctx was cancelled → Sweep's error is rooted in
+//     that cancellation → exit 0 (graceful)
+//   - If the parent ctx is healthy but Sweep returned an error → real
+//     failure → exit 1 (operator pages)
+//
+// This handles future context-wrapping scenarios without needing to
+// enumerate every context.* sentinel.
 func runSweepOnce(
 	ctx context.Context,
 	r *recon.Reconciler,
@@ -118,7 +131,7 @@ func runSweepOnce(
 	shutdowner fx.Shutdowner,
 ) {
 	logger.L().Info("recon: starting one-shot sweep")
-	if err := r.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 		logger.L().Error("recon: sweep failed", tag.Error(err))
 		_ = shutdowner.Shutdown(fx.ExitCode(1))
 		return
@@ -151,7 +164,12 @@ func runSweepLoop(
 	// `interval`. Lets docker-compose / Deployment hosts do their
 	// startup-recovery pass on boot rather than waiting `interval`
 	// (potentially minutes) for the first reconciliation.
-	if err := r.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	//
+	// Errors are logged but never abort the loop — the next tick
+	// gets a fresh chance. Suppressed when the parent ctx is
+	// cancelled (graceful SIGTERM); see runSweepOnce comment for
+	// the `ctx.Err() == nil` rationale.
+	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 		logger.L().Error("recon: boot sweep failed (continuing)", tag.Error(err))
 	}
 
@@ -161,7 +179,7 @@ func runSweepLoop(
 			logger.L().Info("recon: loop exiting", tag.Error(ctx.Err()))
 			return
 		case <-ticker.C:
-			if err := r.Sweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 				logger.L().Error("recon: sweep failed (continuing)", tag.Error(err))
 			}
 		}

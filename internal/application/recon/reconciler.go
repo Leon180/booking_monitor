@@ -92,6 +92,12 @@ func NewReconciler(
 func (r *Reconciler) Sweep(ctx context.Context) error {
 	stuck, err := r.orders.FindStuckCharging(ctx, r.cfg.ChargingThreshold, r.cfg.BatchSize)
 	if err != nil {
+		// Increment the dedicated counter so dashboards / alerts can
+		// distinguish "orders are stuck" (gauge > 0) from "recon
+		// itself is broken" (gauge stale, this counter rising).
+		// Without this, a missing-migration / DB-outage scenario
+		// shows nothing on dashboards except a stale gauge.
+		observability.ReconFindStuckErrorsTotal.Inc()
 		return fmt.Errorf("recon Sweep: find stuck: %w", err)
 	}
 

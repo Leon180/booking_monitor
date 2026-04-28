@@ -62,6 +62,26 @@ groups:
           summary: "Stuck Charging orders persisting (recon backlog)"
           description: "recon_stuck_charging_orders has been > 0 for 5m (current: {{ $value }}). Either the payment gateway is slow / degraded, or the reconciler is falling behind. Check recon_gateway_errors_total and recon_gateway_get_status_duration_seconds."
 
+      - alert: ReconFindStuckErrors
+        # Fires when the reconciler's FindStuckCharging query fails —
+        # a separate signal from "orders are stuck" because it means
+        # the sweep itself is broken (DB outage, missing index from a
+        # forgotten migration, query timeout). Without this alert,
+        # a forgotten migration would show nothing visible in
+        # dashboards: the `recon_stuck_charging_orders` gauge would
+        # stay at its last successful value forever, masquerading as
+        # "system is healthy, no backlog."
+        #
+        # Threshold > 0 with `for: 2m` to absorb single transient
+        # errors but page on sustained failure.
+        expr: rate(recon_find_stuck_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reconciler sweep query is failing"
+          description: "FindStuckCharging has been failing for 2m+ at {{ $value }} errors/sec. The reconciler is not detecting stuck orders. Check DB connectivity, migration status (000010 must be applied for the partial index), and query timeouts."
+
       - alert: ReconGatewayErrors
         # Sustained gateway.GetStatus failures. Each error means a
         # stuck order didn't get resolved this cycle and will retry

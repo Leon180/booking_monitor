@@ -305,9 +305,26 @@ func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.
 	// 0 rows: either the order doesn't exist, or its status isn't in
 	// `from`. Disambiguate so callers see ErrOrderNotFound vs
 	// ErrInvalidTransition.
-	if _, getErr := r.GetByID(ctx, id); errors.Is(getErr, domain.ErrOrderNotFound) {
+	//
+	// The disambiguating GetByID itself can fail (DB outage, ctx
+	// cancelled mid-recon-sweep). PRIOR REGRESSION: this code used
+	// to silently fall through to ErrInvalidTransition on any
+	// non-ErrOrderNotFound error, which masked real DB outages as
+	// benign race-loss. The reconciler then counted those as
+	// "transition_lost" (Info-level) instead of incrementing
+	// recon_mark_errors_total → no alert fired during a real
+	// outage. Now we surface the GetByID failure verbatim.
+	_, getErr := r.GetByID(ctx, id)
+	if errors.Is(getErr, domain.ErrOrderNotFound) {
 		return domain.ErrOrderNotFound
 	}
+	if getErr != nil {
+		return fmt.Errorf("orderRepository.transitionStatus id=%s disambiguate via GetByID: %w", id, getErr)
+	}
+	// GetByID succeeded but the row's status isn't in `from` → genuine
+	// invalid-transition (e.g. recon raced the worker and the worker
+	// already wrote Confirmed; we tried to MarkConfirmed from Charging
+	// but row is now Confirmed).
 	return fmt.Errorf("orderRepository.transitionStatus id=%s from=%v to=%s: %w", id, from, to, domain.ErrInvalidTransition)
 }
 

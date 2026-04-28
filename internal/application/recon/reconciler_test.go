@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -14,6 +15,7 @@ import (
 	"booking_monitor/internal/application/recon"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 )
@@ -192,6 +194,7 @@ func TestSweep_MaxAgeExceeded_ForceFails(t *testing.T) {
 	repo := mocks.NewMockOrderRepository(ctrl)
 	cfg := &config.Config{
 		Recon: config.ReconConfig{
+			SweepInterval:     50 * time.Millisecond, // unused by Sweep itself but kept consistent with harness
 			ChargingThreshold: 1 * time.Millisecond,
 			GatewayTimeout:    100 * time.Millisecond,
 			MaxChargingAge:    5 * time.Second,
@@ -208,6 +211,57 @@ func TestSweep_MaxAgeExceeded_ForceFails(t *testing.T) {
 
 	require.NoError(t, r.Sweep(context.Background()))
 	assert.Equal(t, 0, gw.calls, "max-age give-up MUST short-circuit before GetStatus")
+}
+
+// TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric covers the
+// non-ErrInvalidTransition path of handleMarkErr. Without this test,
+// the recon_mark_errors_total counter would have zero coverage —
+// a sustained DB outage during the resolve path would only surface
+// in logs, and a regression that suppressed the counter would go
+// unnoticed.
+func TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New()
+	gw := &fakeStatusReader{
+		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusCharged},
+	}
+	r, repo := reconcilerHarness(t, gw)
+
+	repo.EXPECT().
+		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+	// MarkConfirmed returns a real DB error (NOT ErrInvalidTransition).
+	// This must increment recon_mark_errors_total and Sweep must still
+	// return nil (per-order errors don't abort the sweep).
+	repo.EXPECT().MarkConfirmed(gomock.Any(), id).Return(errors.New("connection reset by peer"))
+
+	before := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
+	require.NoError(t, r.Sweep(context.Background()),
+		"per-order DB errors must NOT propagate as Sweep error")
+	after := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
+	assert.Equal(t, before+1, after,
+		"recon_mark_errors_total must increment exactly once per non-ErrInvalidTransition Mark* failure")
+}
+
+// TestSweep_FindStuckChargingDBError_EmitsFindStuckErrorMetric covers
+// the FindStuckCharging error path's metric increment. Without this,
+// a forgotten migration / DB outage would show nothing on dashboards
+// EXCEPT a stale gauge.
+func TestSweep_FindStuckChargingDBError_EmitsFindStuckErrorMetric(t *testing.T) {
+	t.Parallel()
+
+	r, repo := reconcilerHarness(t, &fakeStatusReader{})
+	repo.EXPECT().
+		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("relation \"orders\" does not exist"))
+
+	before := testutil.ToFloat64(observability.ReconFindStuckErrorsTotal)
+	err := r.Sweep(context.Background())
+	require.Error(t, err, "FindStuckCharging error MUST propagate as Sweep error")
+	after := testutil.ToFloat64(observability.ReconFindStuckErrorsTotal)
+	assert.Equal(t, before+1, after,
+		"recon_find_stuck_errors_total must increment exactly once per FindStuckCharging failure")
 }
 
 func TestSweep_TransitionLost_BenignNoError(t *testing.T) {
