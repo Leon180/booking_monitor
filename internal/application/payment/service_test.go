@@ -127,6 +127,9 @@ func TestProcessOrder_HappyPath(t *testing.T) {
 
 	gomock.InOrder(
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
+		// A4: MarkCharging is the new step BEFORE Charge — intent log
+		// for the recon subcommand to recover stuck-mid-flight orders.
+		repo.EXPECT().MarkCharging(gomock.Any(), ev.OrderID).Return(nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
 		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(nil),
 	)
@@ -158,15 +161,19 @@ func TestProcessOrder_RetryAfterUpdateStatusFailure_ProducesSingleConfirm(t *tes
 	dbErr := errors.New("conn reset by peer")
 
 	gomock.InOrder(
-		// First attempt
+		// First attempt — A4 inserts MarkCharging before Charge.
+		// We assume MarkCharging succeeds; the failure-of-Charging
+		// race is covered by reconciler tests.
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
+		repo.EXPECT().MarkCharging(gomock.Any(), ev.OrderID).Return(nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
 		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(dbErr),
-		// Second attempt — idempotency check still sees Pending
-		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
-		// Charge called again with the same orderID → idempotent gateway returns the cached success
-		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(nil),
-		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(nil),
+		// Second attempt — idempotency check sees Charging (NOT Pending,
+		// because MarkCharging committed on the first attempt). After
+		// A4, Charging triggers the "skip — let the reconciler handle"
+		// branch (see service.go comment). Service returns nil; Kafka
+		// commits the offset; the reconciler resolves via gateway.GetStatus.
+		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusCharging), nil),
 	)
 
 	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
@@ -174,8 +181,14 @@ func TestProcessOrder_RetryAfterUpdateStatusFailure_ProducesSingleConfirm(t *tes
 	err := svc.ProcessOrder(context.Background(), ev)
 	assert.ErrorIs(t, err, dbErr, "first attempt surfaces the DB error so Kafka retries")
 
+	// A4 changes the recovery model: on Kafka redelivery the service
+	// sees status=Charging (the intent log) and SKIPS — the reconciler
+	// resolves via gateway.GetStatus rather than the worker re-entering
+	// the Charge path. Behaviourally equivalent (no double-charge,
+	// final state reaches Confirmed) but the responsibility is split
+	// between worker (forward path) and reconciler (recovery path).
 	err = svc.ProcessOrder(context.Background(), ev)
-	assert.NoError(t, err, "second attempt completes the Confirm transition")
+	assert.NoError(t, err, "second attempt sees Charging status, skips to let reconciler handle")
 }
 
 // ── Race case a: Charge fails, then saga uow.Do fails ───────────────
@@ -205,8 +218,14 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 	gomock.InOrder(
 		// First attempt
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
+		// A4: MarkCharging commits BEFORE Charge — its tx is independent
+		// of the saga uow, so it survives the saga uow.Do failure.
+		repo.EXPECT().MarkCharging(gomock.Any(), ev.OrderID).Return(nil),
 		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(chargeErr),
-		// uow.Do invokes the closure: UpdateStatus(Failed) + outbox.Create
+		// uow.Do invokes the closure: MarkFailed + outbox.Create.
+		// Note MarkFailed is called from Charging→Failed (the widened
+		// transition); the failure flow goes through the same code
+		// path as Pending→Failed.
 		repo.EXPECT().MarkFailed(gomock.Any(), ev.OrderID).Return(nil),
 		outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).
 			DoAndReturn(func(_ context.Context, oe domain.OutboxEvent) (domain.OutboxEvent, error) {
@@ -216,20 +235,18 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 				assert.Equal(t, ev.OrderID, p.OrderID)
 				return oe, nil
 			}),
-		// Second attempt — Pending again (uow rolled back)
-		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusPending), nil),
-		// Idempotent gateway returns SAME failure
-		gw.EXPECT().Charge(gomock.Any(), ev.OrderID, ev.Amount).Return(chargeErr),
-		// uow.Do invokes closure successfully this time
-		repo.EXPECT().MarkFailed(gomock.Any(), ev.OrderID).Return(nil),
-		outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).
-			Return(domain.OutboxEvent{}, nil),
+		// Second attempt — A4 changes the recovery model. The first
+		// attempt left the row at status=Charging (MarkCharging
+		// committed; saga uow rolled back so MarkFailed didn't apply).
+		// Service sees Charging on retry → SKIP → reconciler resolves
+		// via gateway.GetStatus.
+		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusCharging), nil),
 	)
 
-	// First attempt: closure returns nil, but the uow itself "fails to commit"
+	// First attempt: closure runs, but the uow itself "fails to commit"
 	expectUowDoInvokesFn(uow, repos, uowFirstAttemptErr)
-	// Second attempt: closure returns nil, uow commits cleanly
-	expectUowDoInvokesFn(uow, repos, nil)
+	// Second attempt no longer invokes uow.Do (we skip on Charging),
+	// so no second expectUowDoInvokesFn needed.
 
 	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
@@ -237,5 +254,5 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 	assert.ErrorIs(t, err, uowFirstAttemptErr, "first attempt surfaces uow error so Kafka retries")
 
 	err = svc.ProcessOrder(context.Background(), ev)
-	assert.NoError(t, err, "second attempt successfully writes the saga compensating event")
+	assert.NoError(t, err, "second attempt sees Charging status, skips to let reconciler handle")
 }

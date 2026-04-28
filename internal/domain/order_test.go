@@ -109,6 +109,40 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 		assert.Equal(t, domain.OrderStatusCompensated, compensated.Status())
 		assert.Equal(t, domain.OrderStatusFailed, failed.Status(), "receiver must be untouched")
 	})
+
+	// A4 — new transitions through the Charging intent state.
+
+	t.Run("A4 MarkCharging: Pending → Charging", func(t *testing.T) {
+		t.Parallel()
+		original, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		charging, err := original.MarkCharging()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusCharging, charging.Status())
+		assert.Equal(t, domain.OrderStatusPending, original.Status(), "receiver must be untouched")
+	})
+
+	t.Run("A4 MarkConfirmed: Charging → Confirmed (new canonical path)", func(t *testing.T) {
+		t.Parallel()
+		o, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		charging, err := o.MarkCharging()
+		assert.NoError(t, err)
+		confirmed, err := charging.MarkConfirmed()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusConfirmed, confirmed.Status())
+	})
+
+	t.Run("A4 MarkFailed: Charging → Failed (new canonical path)", func(t *testing.T) {
+		t.Parallel()
+		o, err := domain.NewOrder(1, uuid.New(), 1)
+		assert.NoError(t, err)
+		charging, err := o.MarkCharging()
+		assert.NoError(t, err)
+		failed, err := charging.MarkFailed()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusFailed, failed.Status())
+	})
 }
 
 // TestOrder_Transitions_IllegalSource verifies every illegal edge in
@@ -127,16 +161,23 @@ func TestOrder_Transitions_IllegalSource(t *testing.T) {
 		expectErr error
 	}
 	tests := []tc{
-		// MarkConfirmed: only Pending is legal.
+		// MarkCharging: only Pending is legal (A4).
+		{"MarkCharging from Charging", domain.OrderStatusCharging, domain.Order.MarkCharging, domain.ErrInvalidTransition},
+		{"MarkCharging from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkCharging, domain.ErrInvalidTransition},
+		{"MarkCharging from Failed", domain.OrderStatusFailed, domain.Order.MarkCharging, domain.ErrInvalidTransition},
+		{"MarkCharging from Compensated", domain.OrderStatusCompensated, domain.Order.MarkCharging, domain.ErrInvalidTransition},
+		// MarkConfirmed: Pending OR Charging legal (A4 transitional widening).
+		// Confirmed/Failed/Compensated all illegal.
 		{"MarkConfirmed from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
 		{"MarkConfirmed from Failed", domain.OrderStatusFailed, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
 		{"MarkConfirmed from Compensated", domain.OrderStatusCompensated, domain.Order.MarkConfirmed, domain.ErrInvalidTransition},
-		// MarkFailed: only Pending is legal.
+		// MarkFailed: Pending OR Charging legal (A4 transitional widening).
 		{"MarkFailed from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
 		{"MarkFailed from Failed", domain.OrderStatusFailed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
 		{"MarkFailed from Compensated", domain.OrderStatusCompensated, domain.Order.MarkFailed, domain.ErrInvalidTransition},
 		// MarkCompensated: only Failed is legal.
 		{"MarkCompensated from Pending", domain.OrderStatusPending, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+		{"MarkCompensated from Charging", domain.OrderStatusCharging, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 		{"MarkCompensated from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 		{"MarkCompensated from Compensated", domain.OrderStatusCompensated, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 	}

@@ -308,6 +308,74 @@ Prometheus metrics 端點。
 | Worker | `(user_id, event_id) WHERE status != 'failed'` 部分唯一索引 | 重複訂單(允許付款失敗後重試) |
 | Saga | Redis 內 `SETNX saga:reverted:{order_id}` | 重複補償 |
 
+### 6.7 Charging Intent Log + Reconciler(A4)
+
+A4 在 `Pending` 與 `Confirmed`/`Failed` 之間加入 `OrderStatusCharging` 中間狀態。Payment service 在呼叫 gateway **之前** 先寫 Charging,獨立的 `recon` 子指令再透過 `PaymentStatusReader.GetStatus` 解決卡在中途的訂單。
+
+**為什麼** — 在 gateway-side 冪等性之上的 defense-in-depth:
+
+- **可觀測性**:`status=charging` 的列就是「正在 gateway 那邊處理中」的訂單。Stuck-Charging > 5 分鐘是可被告警的訊號(Prometheus rule `ReconStuckCharging`)。
+- **跨 process 復原**:worker crash 或 Kafka rebalance 可能讓訂單卡在 Charging 但原本的 Charge call 永遠不會回來。`recon` 子指令不需要等 Kafka 重新投遞就能解決。
+- **延遲指標**:`Pending → Charging → Confirmed` 的時間變成「gateway-perceived latency」直方圖(`recon_resolve_age_seconds`)。
+
+**狀態機(A4 之後)**:
+
+```
+Pending  ──MarkCharging──→  Charging
+Pending  ──MarkConfirmed─→  Confirmed   (transitional — 詳見下方 cutover)
+Pending  ──MarkFailed────→  Failed      (transitional)
+Charging ──MarkConfirmed─→  Confirmed   (terminal)
+Charging ──MarkFailed────→  Failed
+Failed   ──MarkCompensated→ Compensated (terminal)
+```
+
+**Reconciler 子指令**(`booking-cli recon`):
+
+- 預設 loop mode:`time.Ticker` 驅動,跑到 SIGTERM 為止。適用 docker-compose / k8s Deployment 部署。
+- `--once` flag:跑一次 sweep 後退出。適用 k8s CronJob 模式,排程交給 cluster orchestrator。
+- 兩種模式共用同一個 `*Reconciler.Sweep(ctx)` 方法 — 邏輯不會 drift。
+- `PaymentStatusReader` port(只讀,**沒有** `Charge`)— 用型別系統本身防止 recon 程式碼意外發動 double-charge。
+
+**Per-order 結果**(counter `recon_resolved_total{outcome=...}`):
+
+| Outcome | 觸發條件 | 動作 |
+| :-- | :-- | :-- |
+| `charged` | Gateway 回 `ChargeStatusCharged` | MarkConfirmed |
+| `declined` | Gateway 回 `ChargeStatusDeclined` | MarkFailed |
+| `not_found` | Gateway 沒有此筆紀錄(worker 在 Charge call 之前掛掉) | MarkFailed(顧客未被扣款) |
+| `unknown` | Gateway 回了無法分類的 verdict | Skip,下次 sweep 再試 |
+| `max_age_exceeded` | 訂單年齡 > `RECON_MAX_CHARGING_AGE`(預設 24h) | 強制 MarkFailed;告警觸發;人工 review |
+| `transition_lost` | Mark* 回 `ErrInvalidTransition`(worker 贏了競賽) | 冪等成功;有計數但只記 Info log |
+
+另一個 counter `recon_gateway_errors_total` 專門記基礎設施失敗(網路、gateway 5xx、ctx timeout)— 與 `unknown` verdict 在 operationally 是不同訊號。
+
+**Cutover trigger** — 何時可以收緊 transitional 加寬:
+
+目前 `MarkConfirmed` / `MarkFailed` 接受 `source ∈ {Pending, Charging}`,讓 A4 部署前還在 queue 裡的 in-flight Pending 訊息可以走原本的直接路徑。後續 PR 會在以下 **moving-window** query 連續 5 次(每分鐘跑一次)回傳 0 時收緊成 Charging-only:
+
+```sql
+SELECT count(*) FROM order_status_history
+ WHERE from_status = 'pending'
+   AND to_status   IN ('confirmed', 'failed')
+   AND occurred_at > NOW() - INTERVAL '5 minutes';
+```
+
+window 是 5 分鐘 lookback(**不是** since deploy 的累積值)— 這個 interval 對齊 in-flight Pending 訊息最久的可能 Kafka redelivery + 重試 budget。連續 5 次回 0 = 25 分鐘內沒有 Pending→terminal 轉換 = 可以安全移除 transitional edges。
+
+在那之前,雙來源路徑是有意的設計,不是 legacy。
+
+**設定**(每個預設值在 [config.go](../internal/infrastructure/config/config.go) 的 header comment 裡都有 rationale;透過 `RECON_*` env var 調整):
+
+| 旋鈕 | 預設值 | 控制什麼 |
+| :-- | :-- | :-- |
+| `RECON_SWEEP_INTERVAL` | 120s | Loop 節奏 |
+| `RECON_CHARGING_THRESHOLD` | 120s | recon 認為訂單「卡住」的最短年齡 |
+| `RECON_GATEWAY_TIMEOUT` | 10s | 每筆 GetStatus call 的 budget |
+| `RECON_MAX_CHARGING_AGE` | 24h | 強制 fail 的給予放棄 cutoff |
+| `RECON_BATCH_SIZE` | 100 | 每次 sweep 處理的訂單數 |
+
+所有預設值都是 heuristic init values — 詳見 config.go 的 header comments。等實際 production-shaped run 產生 `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds` 直方圖之後再依資料調整。
+
 ---
 
 ## 7. 可觀測性

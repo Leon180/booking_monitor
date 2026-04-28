@@ -41,6 +41,64 @@ groups:
           summary: "Event Sold Out"
           description: "At least one booking attempt in the last 5 minutes returned sold_out ({{ $value }} attempts)."
 
+      - alert: ReconStuckCharging
+        # Fires when the reconciler's last sweep saw orders that have
+        # been in Charging longer than RECON_CHARGING_THRESHOLD.
+        # Charging is meant to be sub-minute; sustained > 0 means
+        # either the gateway is degraded (real recovery in progress)
+        # or the reconciler is falling behind (BatchSize too small,
+        # SweepInterval too long).
+        #
+        # The 5m `for` filters single-sweep blips (one stuck order
+        # that resolves on the next cycle). A persistent value
+        # demands operator attention. Pairs with the
+        # `recon_resolved_total{outcome="max_age_exceeded"}` counter
+        # which fires for the give-up path.
+        expr: recon_stuck_charging_orders > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stuck Charging orders persisting (recon backlog)"
+          description: "recon_stuck_charging_orders has been > 0 for 5m (current: {{ $value }}). Either the payment gateway is slow / degraded, or the reconciler is falling behind. Check recon_gateway_errors_total and recon_gateway_get_status_duration_seconds."
+
+      - alert: ReconGatewayErrors
+        # Sustained gateway.GetStatus failures. Each error means a
+        # stuck order didn't get resolved this cycle and will retry
+        # next sweep — but a sustained rate signals the gateway is
+        # degraded for the recon path specifically (versus the
+        # Charge path, which would also light up KafkaConsumerStuck).
+        #
+        # Threshold: > 1 error per 30s averaged over 5m. Lower than
+        # KafkaConsumerStuck's > 0 because reconciler errors don't
+        # directly cause user-visible problems (payment worker is
+        # still doing primary processing); they just delay recon.
+        expr: rate(recon_gateway_errors_total[5m]) > (1.0 / 30.0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconciler gateway errors persisting"
+          description: "recon_gateway_errors_total averaging {{ $value }} errors/sec over 5m. Gateway GetStatus is degraded; stuck-Charging orders are not being resolved on schedule."
+
+      - alert: ReconMaxAgeExceeded
+        # Fires when the reconciler force-fails an order that exceeded
+        # RECON_MAX_CHARGING_AGE (default 24h). Any of these = a real
+        # stuck-payment escape that operators need to investigate
+        # manually — the customer's order was abandoned because we
+        # couldn't determine its gateway state in time.
+        #
+        # `increase > 0` over 1h with `for: 0m` so each give-up event
+        # pages immediately. Manual investigation: check
+        # order_status_history for the affected order ids.
+        expr: increase(recon_resolved_total{outcome="max_age_exceeded"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reconciler force-failed stuck order(s) — manual review needed"
+          description: "{{ $value }} order(s) exceeded RECON_MAX_CHARGING_AGE in the last hour and were force-failed. Investigate via order_status_history (from_status=charging, to_status=failed) — the customer was never confirmed as charged."
+
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages
         # uncommitted for rebalance retry — the "stuck but not dead"

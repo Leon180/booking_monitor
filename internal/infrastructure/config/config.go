@@ -16,6 +16,83 @@ type Config struct {
 	Worker   WorkerConfig   `yaml:"worker"`
 	Postgres PostgresConfig `yaml:"postgres"`
 	Kafka    KafkaConfig    `yaml:"kafka"`
+	Recon    ReconConfig    `yaml:"recon"`
+}
+
+// ReconConfig holds the tunables for the `recon` subcommand — the
+// reconciler that sweeps stuck-Charging orders and resolves them via
+// gateway.GetStatus. See internal/application/recon for the loop;
+// see PROJECT_SPEC §A4 for the design.
+//
+// EVERY default below was chosen heuristically — none are backed by
+// production data from this codebase yet. Adjust after the first
+// production-shaped k6 run produces histograms for:
+//
+//	recon_charging_resolve_age_seconds — actual age at resolve time
+//	recon_gateway_get_status_duration_seconds — actual GetStatus latency
+//
+// The defaults are deliberately CONSERVATIVE (longer thresholds, fewer
+// givings-up) so the system tends toward correctness while we collect
+// data.
+type ReconConfig struct {
+	// SweepInterval is how often the reconciler loop fires when running
+	// in default loop mode. Each tick scans for stuck-Charging orders
+	// and resolves them.
+	//
+	// Default 120s rationale: industry standard is "2× provider charge
+	// timeout" (Stripe charge timeout is 30s; 2× = 60s); we add another
+	// 60s for clock skew between payment-worker and DB. If GetStatus
+	// is fast (sub-second) and the gateway is reliable, 120s gives
+	// stuck orders ~2 minutes to resolve naturally before recon
+	// intervenes — far below SLA-impacting territory.
+	//
+	// Lower if production data shows recon resolves orders that are
+	// significantly older than 120s (lost time-to-recovery). Higher
+	// if MockGateway/Stripe call duration trends toward minutes.
+	SweepInterval time.Duration `yaml:"sweep_interval" env:"RECON_SWEEP_INTERVAL" env-default:"120s"`
+
+	// ChargingThreshold is the minimum age a Charging order must have
+	// before recon considers it "stuck" and queries the gateway. Set
+	// HIGHER than the typical successful Pending→Charging→Confirmed
+	// duration to avoid stealing orders mid-flight from the worker.
+	//
+	// Default 120s rationale: same as SweepInterval — typical Stripe
+	// p99 charge duration is well under 60s; 120s ensures we never
+	// race a normal in-flight Charge call.
+	ChargingThreshold time.Duration `yaml:"charging_threshold" env:"RECON_CHARGING_THRESHOLD" env-default:"120s"`
+
+	// GatewayTimeout bounds the per-order GetStatus call. Without a
+	// budget, a hung gateway pins the whole sweep loop and blocks
+	// SIGTERM-driven shutdown indefinitely.
+	//
+	// Default 10s rationale: GET /charges/:id at Stripe is a cached,
+	// indexed read — typical p99 is well under 1s. 10s gives 10×
+	// headroom while keeping the worst case within k8s CronJob
+	// terminationGracePeriodSeconds (default 30s).
+	GatewayTimeout time.Duration `yaml:"gateway_timeout" env:"RECON_GATEWAY_TIMEOUT" env-default:"10s"`
+
+	// MaxChargingAge is the give-up cutoff. A Charging order older
+	// than this is force-transitioned to Failed with reason
+	// "max_charging_age_exceeded" and a Prometheus counter increment.
+	// Without this, a permanently-Unknown order sweeps forever and
+	// the stuck-Charging alert fires with no actionable remediation.
+	//
+	// Default 24h rationale: payment providers (Stripe, PayPal)
+	// typically resolve disputes/manual-review within 24-72h; 24h
+	// is short enough that operators are alerted before a customer
+	// follow-up window, long enough to absorb provider-side multi-day
+	// review states. Tune up to 72h if false-positive give-ups appear.
+	MaxChargingAge time.Duration `yaml:"max_charging_age" env:"RECON_MAX_CHARGING_AGE" env-default:"24h"`
+
+	// BatchSize is the maximum number of orders the reconciler resolves
+	// per sweep cycle. Caps memory + DB transaction count when a
+	// large queue accumulates (e.g., gateway outage drained).
+	//
+	// Default 100 rationale: at 1 order / ~50ms (one GetStatus + one
+	// MarkX), 100 orders = ~5 seconds per sweep. Bounded well below
+	// SweepInterval so the next tick can fire on schedule. Bump if
+	// production data shows persistent backlog growth.
+	BatchSize int `yaml:"batch_size" env:"RECON_BATCH_SIZE" env-default:"100"`
 }
 
 type AppConfig struct {
@@ -260,6 +337,42 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.MaxConsecutiveReadErrors <= 0 {
 		missing = append(missing, "redis.max_consecutive_read_errors / REDIS_MAX_CONSECUTIVE_READ_ERRORS (must be >= 1; 0 silently exits on first error)")
+	}
+
+	// Recon tunables — same rationale as Worker tunables above. Zero
+	// values produce silent reconciler malfunctions:
+	//
+	//   * SweepInterval=0     → time.Ticker panics
+	//   * ChargingThreshold=0 → recon steals every Charging order, even
+	//                           in-flight ones the worker hasn't finished
+	//   * GatewayTimeout=0    → context.WithTimeout fires instantly →
+	//                           every GetStatus call returns ctx error
+	//   * BatchSize=0         → SQL LIMIT 0 → silent no-op every sweep
+	//   * MaxChargingAge ≤ ChargingThreshold → every order recon sees is
+	//                           force-failed before the gateway is queried
+	//
+	// Reject all of these at startup.
+	if c.Recon.SweepInterval <= 0 {
+		missing = append(missing, "recon.sweep_interval / RECON_SWEEP_INTERVAL (must be > 0)")
+	}
+	if c.Recon.ChargingThreshold <= 0 {
+		missing = append(missing, "recon.charging_threshold / RECON_CHARGING_THRESHOLD (must be > 0)")
+	}
+	if c.Recon.GatewayTimeout <= 0 {
+		missing = append(missing, "recon.gateway_timeout / RECON_GATEWAY_TIMEOUT (must be > 0)")
+	}
+	if c.Recon.MaxChargingAge <= 0 {
+		missing = append(missing, "recon.max_charging_age / RECON_MAX_CHARGING_AGE (must be > 0)")
+	}
+	if c.Recon.BatchSize <= 0 {
+		missing = append(missing, "recon.batch_size / RECON_BATCH_SIZE (must be >= 1; 0 makes every sweep a silent no-op)")
+	}
+	if c.Recon.MaxChargingAge > 0 && c.Recon.ChargingThreshold > 0 &&
+		c.Recon.MaxChargingAge <= c.Recon.ChargingThreshold {
+		missing = append(missing, fmt.Sprintf(
+			"recon.max_charging_age (%s) must be > recon.charging_threshold (%s); otherwise every order recon sees is immediately force-failed",
+			c.Recon.MaxChargingAge, c.Recon.ChargingThreshold,
+		))
 	}
 
 	if len(missing) > 0 {

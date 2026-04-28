@@ -18,17 +18,27 @@ var (
 	ErrInvalidEventID  = errors.New("order event_id must not be the zero UUID")
 	ErrInvalidQuantity = errors.New("order quantity must be positive")
 
-	// ErrInvalidTransition is returned by Order.MarkConfirmed /
-	// MarkFailed / MarkCompensated (and their repository-side
-	// counterparts) when the source state doesn't permit the
-	// requested transition. The legal transitions form a directed
-	// acyclic graph (terminal node = no outgoing edges):
+	// ErrInvalidTransition is returned by Order.MarkCharging /
+	// MarkConfirmed / MarkFailed / MarkCompensated (and their
+	// repository-side counterparts) when the source state doesn't
+	// permit the requested transition. The legal transitions form a
+	// directed acyclic graph (terminal node = no outgoing edges):
 	//
-	//   Pending  ──MarkConfirmed──→ Confirmed   (terminal)
-	//   Pending  ──MarkFailed─────→ Failed
+	//   Pending  ──MarkCharging───→ Charging                              (A4)
+	//   Pending  ──MarkConfirmed──→ Confirmed   (terminal, transitional)
+	//   Pending  ──MarkFailed─────→ Failed                  (transitional)
+	//   Charging ──MarkConfirmed──→ Confirmed   (terminal)                (A4)
+	//   Charging ──MarkFailed─────→ Failed                                (A4)
 	//   Failed   ──MarkCompensated→ Compensated (terminal)
 	//
-	// Any other transition (e.g. Confirmed→Failed, Pending→Compensated)
+	// "Transitional" edges (Pending→Confirmed, Pending→Failed) exist
+	// during the A4 migration window so in-flight Pending orders
+	// queued before deploy can still resolve via the old code path.
+	// They will be removed in a follow-up PR after the cutover trigger
+	// fires (zero Pending→terminal transitions for 5+ minutes per
+	// `order_status_history`); see PROJECT_SPEC §A4 for the trigger.
+	//
+	// Any other transition (e.g. Confirmed→Failed, Charging→Compensated)
 	// is illegal and must surface as ErrInvalidTransition rather than
 	// silently overwrite the row. Callers `errors.Is` against this
 	// sentinel to differentiate "concurrent compensation race" (where
@@ -67,9 +77,26 @@ type OrderStatus string
 const (
 	OrderStatusConfirmed   OrderStatus = "confirmed"
 	OrderStatusPending     OrderStatus = "pending"
+	OrderStatusCharging    OrderStatus = "charging" // A4 — intent log between Pending and Confirmed/Failed
 	OrderStatusFailed      OrderStatus = "failed"
 	OrderStatusCompensated OrderStatus = "compensated"
 )
+
+// StuckCharging is the row shape returned by
+// `OrderRepository.FindStuckCharging` — the reconciler's input
+// vocabulary. Lives in domain because the reconciler is an
+// application-layer service that depends on this domain port and the
+// type is a pure value (no JSON / DB tags). Carrying just (id, age)
+// avoids the cost of materializing full Orders that the reconciler
+// won't read most fields of.
+//
+// `Age` is the duration the row has been in Charging at query time,
+// derived from `NOW() - updated_at` in SQL. Used by the reconciler
+// to apply the max-age give-up policy.
+type StuckCharging struct {
+	ID  uuid.UUID
+	Age time.Duration
+}
 
 // Order is the domain aggregate. All fields are unexported; reads
 // happen through accessor methods (Wild Workouts pattern, no Get
@@ -146,26 +173,49 @@ func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int,
 	}
 }
 
-// MarkConfirmed transitions Pending → Confirmed and returns the new
-// Order value. Immutable: the receiver is unmodified.
-//
-// Returns ErrInvalidTransition when the receiver is not Pending —
-// e.g. attempting to confirm an already-Confirmed (idempotent retry
-// race), Failed (saga path already taken), or Compensated order.
-// Caller should `errors.Is` to differentiate the idempotent-retry
-// case from genuine logic bugs.
-func (o Order) MarkConfirmed() (Order, error) {
+// MarkCharging transitions Pending → Charging and returns the new
+// Order value. Immutable: the receiver is unmodified. The
+// Charging state is the "intent log" recorded by the payment service
+// before calling the gateway, so a separate recon process can
+// resolve stuck-mid-flight orders by querying the gateway. See
+// PROJECT_SPEC §A4 for the design.
+func (o Order) MarkCharging() (Order, error) {
 	if o.status != OrderStatusPending {
+		return Order{}, fmt.Errorf("cannot start charging from %s: %w", o.status, ErrInvalidTransition)
+	}
+	o.status = OrderStatusCharging
+	return o, nil
+}
+
+// MarkConfirmed transitions Pending → Confirmed OR Charging →
+// Confirmed and returns the new Order value. Immutable: the receiver
+// is unmodified.
+//
+// Pending→Confirmed is the TRANSITIONAL edge during the A4 migration
+// window. The new code path always goes Pending→Charging→Confirmed
+// (the payment service writes Charging before calling the gateway).
+// The Pending→Confirmed edge stays available so in-flight Pending
+// orders queued before the deploy can still resolve via the old
+// code path. A follow-up PR will tighten this to Charging-only after
+// the cutover trigger fires.
+//
+// Returns ErrInvalidTransition when the receiver is in any other
+// state (Confirmed/Failed/Compensated). Caller should `errors.Is`
+// against ErrInvalidTransition AND check the current status — if the
+// row is already in the target state, the transition is idempotent
+// success (someone else got here first).
+func (o Order) MarkConfirmed() (Order, error) {
+	if o.status != OrderStatusPending && o.status != OrderStatusCharging {
 		return Order{}, fmt.Errorf("cannot confirm from %s: %w", o.status, ErrInvalidTransition)
 	}
 	o.status = OrderStatusConfirmed
 	return o, nil
 }
 
-// MarkFailed transitions Pending → Failed (saga path entry). Same
-// rules as MarkConfirmed.
+// MarkFailed transitions Pending → Failed OR Charging → Failed (saga
+// path entry). Same transitional-edge rationale as MarkConfirmed.
 func (o Order) MarkFailed() (Order, error) {
-	if o.status != OrderStatusPending {
+	if o.status != OrderStatusPending && o.status != OrderStatusCharging {
 		return Order{}, fmt.Errorf("cannot fail from %s: %w", o.status, ErrInvalidTransition)
 	}
 	o.status = OrderStatusFailed
@@ -185,12 +235,12 @@ func (o Order) MarkCompensated() (Order, error) {
 // Accessors — read-only views on the unexported fields. Wild Workouts
 // pattern (no "Get" prefix), aligned with Go stdlib (time.Time.Hour()
 // etc.).
-func (o Order) ID() uuid.UUID         { return o.id }
-func (o Order) EventID() uuid.UUID    { return o.eventID }
-func (o Order) UserID() int           { return o.userID }
-func (o Order) Quantity() int         { return o.quantity }
-func (o Order) Status() OrderStatus   { return o.status }
-func (o Order) CreatedAt() time.Time  { return o.createdAt }
+func (o Order) ID() uuid.UUID        { return o.id }
+func (o Order) EventID() uuid.UUID   { return o.eventID }
+func (o Order) UserID() int          { return o.userID }
+func (o Order) Quantity() int        { return o.quantity }
+func (o Order) Status() OrderStatus  { return o.status }
+func (o Order) CreatedAt() time.Time { return o.createdAt }
 
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
@@ -209,8 +259,21 @@ type OrderRepository interface {
 	// matches; any other error is wrapped with the query context.
 	GetByID(ctx context.Context, id uuid.UUID) (Order, error)
 
-	// MarkConfirmed / MarkFailed / MarkCompensated are the typed
-	// state-transition methods that replace the previous
+	// FindStuckCharging returns orders that have been in the Charging
+	// state for at least `minAge`, up to `limit` rows. Used by the
+	// reconciler subcommand to identify stuck-mid-flight payments
+	// (worker crashed, gateway timeout, kafka rebalance ate the
+	// in-flight call).
+	//
+	// Returns (id, age) pairs rather than full Orders because the
+	// reconciler doesn't need the rest of the entity — it just calls
+	// gateway.GetStatus(id) and resolves the row by id. Pulling the
+	// full row would force a JOIN with order_status_history or a
+	// follow-up GetByID per stuck order — neither pays off.
+	FindStuckCharging(ctx context.Context, minAge time.Duration, limit int) ([]StuckCharging, error)
+
+	// MarkCharging / MarkConfirmed / MarkFailed / MarkCompensated are
+	// the typed state-transition methods that replace the previous
 	// `UpdateStatus(id, status)` escape hatch. Each enforces the
 	// source-state predicate atomically in SQL (UPDATE ... WHERE
 	// status = '<expected>') so a concurrent compensation race
@@ -222,7 +285,14 @@ type OrderRepository interface {
 	//                         (e.g. MarkConfirmed on a Failed order)
 	//   - other errors        wrapped DB failure
 	//
+	// MarkConfirmed and MarkFailed accept source ∈ {Pending, Charging}
+	// during the A4 migration window — the new code path always goes
+	// through Charging, but legacy in-flight Pending messages still
+	// resolve via the old path. A follow-up PR tightens to
+	// Charging-only after the cutover trigger fires.
+	//
 	// The legal transition graph is documented on ErrInvalidTransition.
+	MarkCharging(ctx context.Context, id uuid.UUID) error
 	MarkConfirmed(ctx context.Context, id uuid.UUID) error
 	MarkFailed(ctx context.Context, id uuid.UUID) error
 	MarkCompensated(ctx context.Context, id uuid.UUID) error

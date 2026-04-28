@@ -13,6 +13,7 @@ import (
 	domain "booking_monitor/internal/domain"
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
@@ -57,6 +58,21 @@ func (mr *MockOrderRepositoryMockRecorder) Create(ctx, order any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockOrderRepository)(nil).Create), ctx, order)
 }
 
+// FindStuckCharging mocks base method.
+func (m *MockOrderRepository) FindStuckCharging(ctx context.Context, minAge time.Duration, limit int) ([]domain.StuckCharging, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindStuckCharging", ctx, minAge, limit)
+	ret0, _ := ret[0].([]domain.StuckCharging)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindStuckCharging indicates an expected call of FindStuckCharging.
+func (mr *MockOrderRepositoryMockRecorder) FindStuckCharging(ctx, minAge, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStuckCharging", reflect.TypeOf((*MockOrderRepository)(nil).FindStuckCharging), ctx, minAge, limit)
+}
+
 // GetByID mocks base method.
 func (m *MockOrderRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.Order, error) {
 	m.ctrl.T.Helper()
@@ -86,6 +102,20 @@ func (m *MockOrderRepository) ListOrders(ctx context.Context, limit, offset int,
 func (mr *MockOrderRepositoryMockRecorder) ListOrders(ctx, limit, offset, status any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListOrders", reflect.TypeOf((*MockOrderRepository)(nil).ListOrders), ctx, limit, offset, status)
+}
+
+// MarkCharging mocks base method.
+func (m *MockOrderRepository) MarkCharging(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkCharging", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkCharging indicates an expected call of MarkCharging.
+func (mr *MockOrderRepositoryMockRecorder) MarkCharging(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkCharging", reflect.TypeOf((*MockOrderRepository)(nil).MarkCharging), ctx, id)
 }
 
 // MarkCompensated mocks base method.

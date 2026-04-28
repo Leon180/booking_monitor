@@ -95,5 +95,60 @@ func (g *MockGateway) Charge(ctx context.Context, orderID uuid.UUID, amount floa
 	return verdict
 }
 
-// Ensure MockGateway implements domain.PaymentGateway
-var _ domain.PaymentGateway = (*MockGateway)(nil)
+// GetStatus returns the cached verdict for orderID as a typed
+// ChargeStatus. Implements the PaymentStatusReader port that the
+// recon subcommand uses to resolve stuck-Charging orders.
+//
+// Mapping from the in-memory results sync.Map to ChargeStatus:
+//
+//	cached value nil     → ChargeStatusCharged   (Charge returned nil)
+//	cached value non-nil → ChargeStatusDeclined  (Charge returned a payment-declined error)
+//	no entry             → ChargeStatusNotFound  (Charge was never called for this orderID)
+//
+// A real Stripe/Adyen adapter would call `GET /v1/charges/{id}` and
+// translate the provider's response field to ChargeStatus. The MockGateway
+// internal model is one-to-one because the result cache IS the
+// "provider's response" in this simulation.
+//
+// Why ctx-cancelled Charge calls don't appear here as a distinct
+// status: the Charge implementation deliberately does NOT cache
+// ctx-cancelled outcomes (line 74-77 above). From GetStatus's
+// perspective, a ctx-cancelled prior Charge looks identical to "Charge
+// was never called" → returns NotFound. This matches the recon's
+// recovery model: NotFound = retry the Charge (or transition to
+// Failed if max-age exhausted), and ctx-cancelled is exactly that
+// scenario.
+//
+// GetStatus itself never blocks — it's a sync.Map.Load. The ctx is
+// honored for symmetry with the port contract; a real adapter's
+// HTTP call respects it.
+func (g *MockGateway) GetStatus(ctx context.Context, orderID uuid.UUID) (domain.ChargeStatus, error) {
+	// Honor ctx even on a cheap path so callers can rely on the
+	// timeout boundary. Returning ChargeStatusUnknown + ctx.Err()
+	// is the documented "transient infra failure" branch — the
+	// reconciler treats it as "skip this order, retry next sweep".
+	if err := ctx.Err(); err != nil {
+		return domain.ChargeStatusUnknown, err
+	}
+
+	cached, ok := g.results.Load(orderID)
+	if !ok {
+		return domain.ChargeStatusNotFound, nil
+	}
+	if cached == nil {
+		return domain.ChargeStatusCharged, nil
+	}
+	// Non-nil cached error means a declined verdict from Charge.
+	// We don't surface the underlying error string — ChargeStatus is
+	// the wire vocabulary; the reason lives in logs / order_status_history.
+	return domain.ChargeStatusDeclined, nil
+}
+
+// Ensure MockGateway implements both port halves AND the combined
+// legacy interface. Compile-time check — the assignment fails to
+// type-check if any required method is missing.
+var (
+	_ domain.PaymentCharger      = (*MockGateway)(nil)
+	_ domain.PaymentStatusReader = (*MockGateway)(nil)
+	_ domain.PaymentGateway      = (*MockGateway)(nil)
+)

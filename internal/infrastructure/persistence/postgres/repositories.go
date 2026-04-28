@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -244,21 +245,55 @@ func (r *postgresOrderRepository) ListOrders(ctx context.Context, limit, offset 
 //
 // Audit log design rationale lives in
 // `deploy/postgres/migrations/000009_order_status_history.up.sql`.
-func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OrderStatus) error {
+//
+// A4 changes:
+//   - signature accepts variadic `from` source statuses (was: single
+//     source). Makes the transitional widening (Pending OR Charging
+//     for MarkConfirmed/MarkFailed) explicit in the function shape
+//     rather than hidden in a SQL string.
+//   - SET also writes `updated_at = NOW()` so the reconciler's
+//     `WHERE updated_at < NOW() - threshold` predicate sees fresh
+//     timestamps for every transition. Missing this on any single
+//     Mark* method silently makes orders invisible to the sweep —
+//     the variadic + tests guard against drift.
+//   - Audit log's `from_status` is read via a `before` CTE that takes
+//     a row-level lock and reads the OLD status, so the audit row is
+//     accurate even when the WHERE accepts multiple source values.
+//     A naive hardcoded `from = $3` would produce wrong audit rows
+//     when the actual source was the second variadic element.
+func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.UUID, to domain.OrderStatus, from ...domain.OrderStatus) error {
+	if len(from) == 0 {
+		return fmt.Errorf("orderRepository.transitionStatus: at least one `from` status required")
+	}
+
+	// Convert []OrderStatus to []string for pq.Array. lib/pq's array
+	// support requires the underlying type to be a built-in.
+	fromStrings := make([]string, len(from))
+	for i, s := range from {
+		fromStrings[i] = string(s)
+	}
+
 	const sqlStmt = `
-		WITH transitioned AS (
+		WITH before AS (
+			-- FOR UPDATE so the source status read happens under the
+			-- same row-level lock the UPDATE will hold; rules out a
+			-- concurrent transition between the read and the update.
+			SELECT id, status FROM orders WHERE id = $2 FOR UPDATE
+		),
+		transitioned AS (
 			UPDATE orders
-			   SET status = $1
-			 WHERE id = $2
-			   AND status = $3
-			RETURNING id
+			   SET status = $1, updated_at = NOW()
+			  FROM before
+			 WHERE orders.id = before.id
+			   AND before.status = ANY($3)
+			RETURNING orders.id, before.status AS from_status
 		)
 		INSERT INTO order_status_history (order_id, from_status, to_status)
-		SELECT id, $3, $1 FROM transitioned`
+		SELECT id, from_status, $1 FROM transitioned`
 
-	res, err := r.exec.ExecContext(ctx, sqlStmt, to, id, from)
+	res, err := r.exec.ExecContext(ctx, sqlStmt, to, id, pq.Array(fromStrings))
 	if err != nil {
-		return fmt.Errorf("orderRepository.transitionStatus id=%s from=%s to=%s: %w", id, from, to, err)
+		return fmt.Errorf("orderRepository.transitionStatus id=%s from=%v to=%s: %w", id, from, to, err)
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
@@ -267,26 +302,97 @@ func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.
 	if rowsAffected == 1 {
 		return nil
 	}
-	// 0 rows: either the order doesn't exist, or its status isn't
+	// 0 rows: either the order doesn't exist, or its status isn't in
 	// `from`. Disambiguate so callers see ErrOrderNotFound vs
 	// ErrInvalidTransition.
 	if _, getErr := r.GetByID(ctx, id); errors.Is(getErr, domain.ErrOrderNotFound) {
 		return domain.ErrOrderNotFound
 	}
-	return fmt.Errorf("orderRepository.transitionStatus id=%s from=%s to=%s: %w", id, from, to, domain.ErrInvalidTransition)
+	return fmt.Errorf("orderRepository.transitionStatus id=%s from=%v to=%s: %w", id, from, to, domain.ErrInvalidTransition)
 }
 
-// MarkConfirmed atomically transitions Pending → Confirmed. See
-// transitionStatus for the error-classification rules and the
-// concurrency guarantee (the source-state predicate is in the WHERE
-// clause, not a separate SELECT).
+// FindStuckCharging returns Charging-state orders older than minAge,
+// up to limit rows. Backs the reconciler subcommand's sweep.
+//
+// Query design:
+//   - Hits the partial index `idx_orders_status_updated_at_partial`
+//     created in migration 000010. Index is on (status, updated_at)
+//     WHERE status IN ('charging', 'pending'), so the sweep is an
+//     index-only or index-range scan even on large tables.
+//   - `EXTRACT(EPOCH FROM ...)` gives the age in fractional seconds;
+//     scanned into a float64 then converted to time.Duration. Avoids
+//     pushing duration semantics into SQL.
+//   - ORDER BY updated_at ASC: oldest first. Pairs with batch-size
+//     limit to ensure stuck-est orders resolve before fresh ones,
+//     even under sustained backlog.
+//   - No FOR UPDATE: the subsequent gateway.GetStatus + Mark{Confirmed,Failed}
+//     each carry their own row-level lock; holding a SELECT lock
+//     across the gateway call would block other workers needlessly.
+func (r *postgresOrderRepository) FindStuckCharging(
+	ctx context.Context, minAge time.Duration, limit int,
+) ([]domain.StuckCharging, error) {
+	const sqlStmt = `
+		SELECT id, EXTRACT(EPOCH FROM (NOW() - updated_at))
+		  FROM orders
+		 WHERE status = 'charging'
+		   AND updated_at < NOW() - $1::interval
+		 ORDER BY updated_at ASC
+		 LIMIT $2`
+
+	// $1 is interval-typed; pass as a Postgres interval literal string.
+	// time.Duration → seconds → "X seconds" — Postgres parses that as
+	// an interval.
+	intervalLit := fmt.Sprintf("%f seconds", minAge.Seconds())
+
+	rows, err := r.exec.QueryContext(ctx, sqlStmt, intervalLit, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orderRepository.FindStuckCharging: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.StuckCharging
+	for rows.Next() {
+		var id uuid.UUID
+		var ageSeconds float64
+		if err := rows.Scan(&id, &ageSeconds); err != nil {
+			return nil, fmt.Errorf("orderRepository.FindStuckCharging scan: %w", err)
+		}
+		out = append(out, domain.StuckCharging{
+			ID:  id,
+			Age: time.Duration(ageSeconds * float64(time.Second)),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orderRepository.FindStuckCharging rows: %w", err)
+	}
+	return out, nil
+}
+
+// MarkCharging atomically transitions Pending → Charging. The intent
+// log entry — written before the payment service calls the gateway
+// so a separate recon process can resolve stuck-mid-flight orders
+// via gateway.GetStatus(). See PROJECT_SPEC §A4.
+func (r *postgresOrderRepository) MarkCharging(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusCharging, domain.OrderStatusPending)
+}
+
+// MarkConfirmed atomically transitions Pending OR Charging → Confirmed.
+//
+// The Pending → Confirmed edge is TRANSITIONAL during the A4 migration
+// window: the new code path goes Pending → Charging → Confirmed, but
+// in-flight Pending messages queued before the deploy still resolve
+// via the old direct path. A follow-up PR tightens to Charging-only
+// after the cutover trigger fires (see §A4).
 func (r *postgresOrderRepository) MarkConfirmed(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusPending, domain.OrderStatusConfirmed)
+	return r.transitionStatus(ctx, id, domain.OrderStatusConfirmed,
+		domain.OrderStatusPending, domain.OrderStatusCharging)
 }
 
-// MarkFailed atomically transitions Pending → Failed (saga path).
+// MarkFailed atomically transitions Pending OR Charging → Failed (saga
+// path entry). Same transitional-edge rationale as MarkConfirmed.
 func (r *postgresOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusPending, domain.OrderStatusFailed)
+	return r.transitionStatus(ctx, id, domain.OrderStatusFailed,
+		domain.OrderStatusPending, domain.OrderStatusCharging)
 }
 
 // MarkCompensated atomically transitions Failed → Compensated (saga
@@ -294,7 +400,7 @@ func (r *postgresOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) 
 // is invoked AFTER payment failure has already moved the order to
 // Failed, so Compensated only follows Failed.
 func (r *postgresOrderRepository) MarkCompensated(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusFailed, domain.OrderStatusCompensated)
+	return r.transitionStatus(ctx, id, domain.OrderStatusCompensated, domain.OrderStatusFailed)
 }
 
 // --- OutboxRepository ---
