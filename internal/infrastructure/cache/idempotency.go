@@ -9,9 +9,31 @@ import (
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// maxIdempotencyValueBytes caps the marshalled wire-format size of a
+// cached idempotency entry. Today the only producer is the booking
+// handler emitting fixed-shape JSON responses (~30-100 bytes), so
+// the cap is purely defensive — it prevents a future code path that
+// stored arbitrary client data through this repo from creating a
+// memory-amplification vector. Stripe documents a similar 1KB cap
+// on stored responses; we use 4KB to be generous for any realistic
+// JSON response we might emit in the future.
+//
+// Set returns ErrIdempotencyValueTooLarge on overflow; the handler
+// already discards Set errors (response was already sent — losing
+// the cache entry just means the next retry re-processes), so the
+// cap is enforced loudly via metric + log without affecting the
+// in-flight request.
+const maxIdempotencyValueBytes = 4096
+
+// ErrIdempotencyValueTooLarge fires when a marshalled idempotency
+// record exceeds maxIdempotencyValueBytes. Sentinel so callers can
+// errors.Is without string-matching.
+var ErrIdempotencyValueTooLarge = errors.New("idempotency value exceeds size cap")
 
 type redisIdempotencyRepository struct {
 	client         *redis.Client
@@ -76,6 +98,16 @@ func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("idempotency Set: marshal: %w", err)
+	}
+	// Defensive size cap. See `maxIdempotencyValueBytes` doc for the
+	// rationale; today the booking handler stores ~30-100 byte JSON
+	// responses, so this never fires under normal traffic. If it
+	// ever does, the metric (cache_idempotency_oversize_total) and
+	// log surface the offending key for debugging.
+	if len(data) > maxIdempotencyValueBytes {
+		observability.CacheIdempotencyOversizeTotal.Inc()
+		return fmt.Errorf("idempotency Set: payload %d bytes (cap %d): %w",
+			len(data), maxIdempotencyValueBytes, ErrIdempotencyValueTooLarge)
 	}
 	if err := r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err(); err != nil {
 		return fmt.Errorf("idempotency Set: redis: %w", err)

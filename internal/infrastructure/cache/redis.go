@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/fx"
 
@@ -55,7 +56,26 @@ var Module = fx.Options(
 	// handler types. Storage code stays observability-unaware.
 	fx.Decorate(NewInstrumentedIdempotencyRepository),
 	fx.Provide(observability.NewQueueMetrics),
+	// Streams collector — XLEN / XPENDING / consumer-lag gauges per
+	// scrape. Wired here (not in bootstrap) because the *redis.Client
+	// is server-only; bootstrap.CommonModule is shared by all
+	// subcommands including ones with no Redis.
+	fx.Invoke(registerStreamsCollector),
 )
+
+// registerStreamsCollector attaches the StreamsCollector to the
+// default Prometheus registerer. Same idempotency pattern as
+// bootstrap.registerDBPoolCollector — AlreadyRegisteredError is
+// success on re-invocation (test re-import, fx restart).
+func registerStreamsCollector(client *redis.Client) error {
+	if err := prometheus.DefaultRegisterer.Register(observability.NewStreamsCollector(client)); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("registerStreamsCollector: %w", err)
+		}
+	}
+	return nil
+}
 
 type redisInventoryRepository struct {
 	client       *redis.Client

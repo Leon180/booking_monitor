@@ -125,12 +125,24 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		body = string(successJSON)
 	}
 
-	// Cache the result for idempotency
+	// Cache the result for idempotency. The response was already
+	// generated; a Set failure here just means the next retry
+	// re-processes (still safe — same fingerprint, same
+	// computation). Don't fail the in-flight request, but DO
+	// surface the error so operators can correlate metric spikes
+	// (`cache_idempotency_oversize_total`, Redis errors) with
+	// specific keys at debug time.
 	if idempotencyKey != "" {
-		_ = h.idempotencyRepo.Set(ctx, idempotencyKey, &domain.IdempotencyResult{
+		if setErr := h.idempotencyRepo.Set(ctx, idempotencyKey, &domain.IdempotencyResult{
 			StatusCode: statusCode,
 			Body:       body,
-		})
+		}); setErr != nil {
+			log.Warn(ctx, "idempotency cache Set failed (response already sent; next retry will re-process)",
+				tag.Error(setErr),
+				log.String("idempotency_key", idempotencyKey),
+				log.Int("body_size_bytes", len(body)),
+			)
+		}
 	}
 
 	c.Data(statusCode, "application/json", []byte(body))

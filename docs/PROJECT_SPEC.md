@@ -388,6 +388,47 @@ Until then the dual-source path is intentional, not legacy.
 
 All defaults are heuristic init values — see config.go header comments for the per-knob rationale + tuning guidance. Adjust after the first production-shaped run produces histograms for `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds`.
 
+### 6.8 Redis Streams Hardening
+
+The booking pipeline uses two Redis Streams: `orders:stream` (hot work queue, API → worker) and `orders:dlq` (failed messages awaiting operator review). Three observability + retention concerns landed together:
+
+**Per-stream cap policy** — asymmetric by design:
+
+| Stream | Cap | Why |
+| :-- | :-- | :-- |
+| `orders:stream` | **NO cap** | Every entry is a customer order. `MAXLEN` would silently drop the oldest unprocessed orders → silent data loss → catastrophic. Bounded growth is enforced via tiered alerts + (future) producer-side backpressure. |
+| `orders:dlq` | **`MINID ~ <NOW − 30d>`** on every XADD | DLQ entries are already-failed messages awaiting operator review. After 30d they're either fixed or written off; time-based eviction is bounded retention without silent in-flight loss. Future: archive to S3 before MINID drops them. |
+
+**Streams observability** ([streams_collector.go](../internal/infrastructure/observability/streams_collector.go)) — `prometheus.Collector` reading XLEN + XPENDING summary at scrape time:
+
+| Metric | Source | Use |
+| :-- | :-- | :-- |
+| `redis_stream_length{stream}` | `XLEN` (O(1)) | Hot streams should drain to ~0; sustained > 0 = backlog |
+| `redis_stream_pending_entries{stream,group}` | `XPENDING` summary count | In-flight work (delivered, not yet XACK'd) |
+| `redis_stream_consumer_lag_seconds{stream,group}` | `NOW() − parse_ms(XPENDING.Lower)` | Age of oldest pending entry — canonical Redis Streams lag signal |
+
+Cost: 2 Redis round-trips per stream per scrape (XLEN + XPENDING summary). At Prometheus default 15s scrape × 2 streams = ~0.27 calls/sec. Negligible.
+
+**Tiered alerts** for `orders:stream`:
+
+| Alert | Threshold | Severity | Action |
+| :-- | :-- | :-- | :-- |
+| `OrdersStreamBacklogYellow` | length > 10K for 2m | info | "investigate before tier 2" |
+| `OrdersStreamBacklogOrange` | length > 50K for 2m | warning | "page on-call now" |
+| `OrdersStreamBacklogRed` | length > 200K for 1m | critical | "OOM imminent — manual scale or throttle" |
+| `OrdersStreamConsumerLag` | lag > 60s for 2m | warning | "specific consumer stuck (GC, hung syscall)" |
+| `OrdersDLQNonEmpty` | DLQ length > 0 for 5m | warning | "operator review via XRANGE orders:dlq" |
+
+**Idempotency value-size cap** ([idempotency.go](../internal/infrastructure/cache/idempotency.go)):
+
+The Redis-side cache stores marshalled response bodies. Defensive 4KB cap (`maxIdempotencyValueBytes`) on Set rejects oversize payloads with `ErrIdempotencyValueTooLarge` + `cache_idempotency_oversize_total` counter increment. Today no production caller exceeds ~100 bytes (booking handler emits fixed-shape JSON), so the cap should never fire — a non-zero rate signals a programmer-error introduced by a future PR. Stripe documents a similar 1KB cap; we use 4KB for headroom.
+
+**Deferred to follow-up PRs**:
+
+- **Backpressure at the producer**: `XLEN > threshold` → return 503 from booking handler. Bounds queue at the cost of explicit rejection. Threshold needs k6 + worker-killed load data to tune (after N6 test infra).
+- **Redis 8 + IDMP for DLQ XAdd**: Redis 8's native server-side stream-entry idempotency (`XADD ... IDMP <token>`) eliminates duplicate-DLQ entries from worker-retry-after-XACK-failure. Requires Redis 8 bump (currently on 7-alpine).
+- **Booking-side IDMP**: lower priority since the HTTP-layer idempotency cache already prevents user-visible double-orders.
+
 ---
 
 ## 7. Observability

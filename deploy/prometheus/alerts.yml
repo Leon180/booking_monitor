@@ -41,6 +41,115 @@ groups:
           summary: "Event Sold Out"
           description: "At least one booking attempt in the last 5 minutes returned sold_out ({{ $value }} attempts)."
 
+      - alert: OrdersStreamBacklogYellow
+        # Tier 1 (informational) — orders:stream backlog over 10K. Hot
+        # streams normally drain to ~0; sustained > 10K means workers
+        # are starting to fall behind. Yellow gives ~1 min headroom
+        # before tier 2 escalates.
+        #
+        # Why no MAXLEN on orders:stream: capping with MAXLEN silently
+        # evicts the OLDEST (= oldest unprocessed customer order) →
+        # silent data loss. We rely on tiered alerts + (future)
+        # backpressure + worker autoscale instead. See PROJECT_SPEC §6.8.
+        expr: redis_stream_length{stream="orders:stream"} > 10000
+        for: 2m
+        labels:
+          severity: info
+        annotations:
+          summary: "orders:stream backlog rising (yellow)"
+          description: "Stream length {{ $value }} for 2m. Worker may be slow; investigate before tier 2 (50K) fires."
+
+      - alert: OrdersStreamBacklogOrange
+        # Tier 2 (warning) — backlog over 50K. Worker is dying or
+        # systemically degraded. Page on-call now; do not wait for tier 3.
+        expr: redis_stream_length{stream="orders:stream"} > 50000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "orders:stream backlog severe (orange)"
+          description: "Stream length {{ $value }} for 2m. Worker degraded — scale or restart. Tier 3 fires at 200K."
+
+      - alert: OrdersStreamBacklogRed
+        # Tier 3 (critical) — backlog over 200K. Approaching memory
+        # exhaustion territory. Without backpressure (deferred to
+        # follow-up PR pending k6 load data), this is the last
+        # actionable warning before unbounded growth → OOM crash.
+        expr: redis_stream_length{stream="orders:stream"} > 200000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "orders:stream approaching unbounded growth (red)"
+          description: "Stream length {{ $value }} for 1m. Without intervention, Redis OOM is imminent. Investigate worker liveness; consider manual scale-out or producer-side throttle."
+
+      - alert: OrdersStreamConsumerLag
+        # Companion to length alerts: even if length is low, a high
+        # lag (oldest pending entry > 60s old) means a SPECIFIC
+        # consumer is stuck — the others may be processing fine but
+        # one is dragging the tail. Different from length-based
+        # backlog detection.
+        expr: redis_stream_consumer_lag_seconds{stream="orders:stream",group="orders:group"} > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "orders:stream consumer lag > 60s"
+          description: "Oldest pending entry is {{ $value }}s old for 2m. A consumer is stuck (GC pause, hung syscall, deadlock); inspect XINFO CONSUMERS for idle times."
+
+      - alert: OrdersDLQNonEmpty
+        # DLQ non-empty for 5m = a real failure trail awaits operator
+        # review. Distinct from individual `redis_dlq_routed_total`
+        # increments (which count writes). This alert fires on
+        # unprocessed-by-operator state.
+        #
+        # Why 5m and not 0m: the DLQ writer (worker exhausted-retries
+        # path) and the DLQ-router metric increment fire near-
+        # simultaneously; an immediate alert would page on every
+        # individual failure. 5m gives a chance for retry/recovery
+        # and only pages on persistent failure.
+        expr: redis_stream_length{stream="orders:dlq"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "orders:dlq has unreviewed entries"
+          description: "{{ $value }} entries in DLQ for 5m+. Operator must review via Redis CLI: XRANGE orders:dlq - +. After investigation, XACK or manually XDEL after archiving."
+
+      - alert: RedisStreamCollectorDown
+        # Fires when the StreamsCollector's Redis calls (XLEN /
+        # XPENDING) are persistently failing during Prometheus scrapes.
+        # Without this alert, a sustained Redis outage causes
+        # redis_stream_length / _pending_entries / _consumer_lag_seconds
+        # to silently disappear from /metrics — every other stream-
+        # backlog alert (Yellow / Orange / Red / ConsumerLag /
+        # DLQNonEmpty) goes silent precisely when operators most
+        # need visibility.
+        #
+        # Threshold > 0 with `for: 2m` so a single transient blip
+        # doesn't page; sustained means the collector is degraded.
+        expr: rate(redis_stream_collector_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Streams observability collector is failing"
+          description: "{{ $labels.operation }} on {{ $labels.stream }} averaging {{ $value }} errors/sec for 2m+. Stream backlog gauges are stale; other stream-* alerts CANNOT fire until this is resolved. Check Redis connectivity from the app process."
+
+      - alert: IdempotencyOversize
+        # Defensive — fires if any production caller stores an
+        # idempotency value above maxIdempotencyValueBytes (4KB).
+        # Today the booking handler stores ~30-100 byte JSON, so
+        # any non-zero rate = programmer error introduced in a
+        # future PR. Page on-call immediately; do not wait.
+        expr: rate(cache_idempotency_oversize_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Idempotency cache oversize rejection"
+          description: "{{ $value }} oversize rejections/sec averaged over 5m. A code path is storing payloads > 4KB through the idempotency repo — investigate the caller; this repo wasn't designed for arbitrary-size data."
+
       - alert: ReconStuckCharging
         # Fires when the reconciler's last sweep saw orders that have
         # been in Charging longer than RECON_CHARGING_THRESHOLD.
