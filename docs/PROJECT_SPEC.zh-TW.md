@@ -385,7 +385,7 @@ booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API →
 | Stream | 上限策略 | 原因 |
 | :-- | :-- | :-- |
 | `orders:stream` | **不設上限** | 每筆都是顧客訂單。`MAXLEN` 會默默丟掉最舊的未處理訂單 → 靜默資料遺失 → 災難級。透過分級告警 +(未來)生產者端的反壓來界定有限增長。 |
-| `orders:dlq` | 每次 XADD 帶 **`MINID ~ <NOW − 30d>`** | DLQ 裡是已經失敗、等待 operator 檢視的訊息。30 天後不是被修就是被 write-off;以時間為基礎的淘汰是有界的保留期,不會像 in-flight 訊息那樣被靜默丟掉。未來:在 MINID 把它們淘汰前先封存到 S3。 |
+| `orders:dlq` | 每次 XADD 帶 **`MINID ~ <NOW − REDIS_DLQ_RETENTION>`**(預設 30d) | DLQ 裡是已經失敗、等待 operator 檢視的訊息。過了保留期窗口後不是被修就是被 write-off;以時間為基礎的淘汰是有界的保留期,不會像 in-flight 訊息那樣被靜默丟掉。可透過 `REDIS_DLQ_RETENTION`(`config.RedisConfig.DLQRetention`)設定;`Validate()` 會拒絕 ≤ 0 的值,因為 0 會在每次 XADD 都把全部 entry 砍掉。未來:在 MINID 把它們淘汰前先封存到 S3。 |
 
 **Streams observability** ([streams_collector.go](../internal/infrastructure/observability/streams_collector.go)) — `prometheus.Collector`,在 scrape 時讀 XLEN + XPENDING summary:
 
@@ -407,9 +407,11 @@ booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API →
 | `OrdersStreamConsumerLag` | lag > 60s 持續 2m | warning | 「特定 consumer 卡住(GC、hung syscall)」 |
 | `OrdersDLQNonEmpty` | DLQ 長度 > 0 持續 5m | warning | 「operator 用 XRANGE orders:dlq 檢視」 |
 
-**Idempotency 值大小上限** ([idempotency.go](../internal/infrastructure/cache/idempotency.go)):
+**HTTP 邊界的 request body 大小上限** ([api/middleware/body_size.go](../internal/infrastructure/api/middleware/body_size.go)):
 
-Redis 端的快取存 marshalled 後的 response body。Set 上加防禦性 4KB 上限(`maxIdempotencyValueBytes`),超過會回 `ErrIdempotencyValueTooLarge` + `cache_idempotency_oversize_total` counter +1。今天 production 沒有 caller 會超過 ~100 bytes(booking handler 寫的是固定形狀的 JSON),所以這個上限不應該被觸發 — 任何非零的 rate 都代表後續 PR 引入的 programmer-error。Stripe 文件記載類似的 1KB 上限;我們用 4KB 留 headroom。
+大小驗證放在 HTTP 層,**不在**快取裡(業界慣例 — Stripe / Shopify / GitHub Octokit / AWS API Gateway)。`BodySize(MaxBookingBodyBytes)` 包住 `/api/v1` group:`MaxBookingBodyBytes = 16 KiB`,以 `http.MaxBytesReader` 強制執行(同時擋下宣告的 `Content-Length` 超量、以及 chunked body 在實際讀取時的 overflow)。Oversize 的請求會收到 **413 Payload Too Large**,body 是標準的 `dto.ErrorResponse` 形狀;handler 永遠不會被叫到。
+
+為什麼是 16 KiB 而不是 Stripe 的 1 MB:booking 端點吃的是固定形狀 JSON(實際約 80 bytes)。上限要抓緊 — 寬鬆的上限會放大「合法請求 vs 攻擊請求」的比例。下游的快取層因此可以信任已經驗證過的輸入;`Idempotency-Key` 對應的 value 不可能比產生它的 body 還大。
 
 **延後到後續 PR 處理**:
 

@@ -397,7 +397,7 @@ The booking pipeline uses two Redis Streams: `orders:stream` (hot work queue, AP
 | Stream | Cap | Why |
 | :-- | :-- | :-- |
 | `orders:stream` | **NO cap** | Every entry is a customer order. `MAXLEN` would silently drop the oldest unprocessed orders → silent data loss → catastrophic. Bounded growth is enforced via tiered alerts + (future) producer-side backpressure. |
-| `orders:dlq` | **`MINID ~ <NOW − 30d>`** on every XADD | DLQ entries are already-failed messages awaiting operator review. After 30d they're either fixed or written off; time-based eviction is bounded retention without silent in-flight loss. Future: archive to S3 before MINID drops them. |
+| `orders:dlq` | **`MINID ~ <NOW − REDIS_DLQ_RETENTION>`** (default 30d) on every XADD | DLQ entries are already-failed messages awaiting operator review. After the retention window they're either fixed or written off; time-based eviction is bounded retention without silent in-flight loss. Configurable via `REDIS_DLQ_RETENTION` (`config.RedisConfig.DLQRetention`); `Validate()` rejects ≤ 0 since 0 would trim every entry on every XADD. Future: archive to S3 before MINID drops them. |
 
 **Streams observability** ([streams_collector.go](../internal/infrastructure/observability/streams_collector.go)) — `prometheus.Collector` reading XLEN + XPENDING summary at scrape time:
 
@@ -419,9 +419,11 @@ Cost: 2 Redis round-trips per stream per scrape (XLEN + XPENDING summary). At Pr
 | `OrdersStreamConsumerLag` | lag > 60s for 2m | warning | "specific consumer stuck (GC, hung syscall)" |
 | `OrdersDLQNonEmpty` | DLQ length > 0 for 5m | warning | "operator review via XRANGE orders:dlq" |
 
-**Idempotency value-size cap** ([idempotency.go](../internal/infrastructure/cache/idempotency.go)):
+**Request body-size cap at the HTTP boundary** ([api/middleware/body_size.go](../internal/infrastructure/api/middleware/body_size.go)):
 
-The Redis-side cache stores marshalled response bodies. Defensive 4KB cap (`maxIdempotencyValueBytes`) on Set rejects oversize payloads with `ErrIdempotencyValueTooLarge` + `cache_idempotency_oversize_total` counter increment. Today no production caller exceeds ~100 bytes (booking handler emits fixed-shape JSON), so the cap should never fire — a non-zero rate signals a programmer-error introduced by a future PR. Stripe documents a similar 1KB cap; we use 4KB for headroom.
+Size validation lives at the HTTP layer, NOT inside the cache (industry convention — Stripe / Shopify / GitHub Octokit / AWS API Gateway). `BodySize(MaxBookingBodyBytes)` wraps the `/api/v1` group: `MaxBookingBodyBytes = 16 KiB`, enforced via `http.MaxBytesReader` (which catches both advertised `Content-Length` overruns and chunked-body overflow at read time). Oversize requests get **413 Payload Too Large** with the canonical `dto.ErrorResponse` shape; the handler is never invoked.
+
+Why 16 KiB and not Stripe's 1 MB: the booking endpoints take fixed-shape JSON (~80 bytes realistic). Caps belong tight — looser caps amplify the legitimate-vs-attack ratio. The cache layer downstream therefore trusts pre-validated input; an `Idempotency-Key` value can never be larger than the body that produced it.
 
 **Deferred to follow-up PRs**:
 

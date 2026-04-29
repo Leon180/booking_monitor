@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -84,59 +83,3 @@ func TestRedisIdempotency_TTL(t *testing.T) {
 	assert.Equal(t, 5*time.Second, ttl, "Set must apply cfg.Redis.IdempotencyTTL")
 }
 
-// TestRedisIdempotency_OversizeRejected pins the defensive size cap.
-// Today no production caller stores oversize payloads (the booking
-// handler emits ~30-100 byte JSON), so this test guards against a
-// future regression where an oversize-storing path bypasses the cap.
-func TestRedisIdempotency_OversizeRejected(t *testing.T) {
-	s := miniredis.RunT(t)
-	defer s.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	repo := NewRedisIdempotencyRepository(rdb, &config.Config{
-		Redis: config.RedisConfig{IdempotencyTTL: time.Hour},
-	})
-
-	ctx := context.Background()
-	key := "oversize-probe"
-
-	// Build a body larger than maxIdempotencyValueBytes (4KB).
-	// Use 8KB to leave ample headroom past the JSON envelope.
-	bigBody := strings.Repeat("X", 8192)
-	err := repo.Set(ctx, key, &domain.IdempotencyResult{StatusCode: 200, Body: bigBody})
-	require.Error(t, err, "oversize Set must error, not silently truncate")
-	assert.ErrorIs(t, err, ErrIdempotencyValueTooLarge,
-		"error must be the typed sentinel for caller errors.Is matching")
-
-	// Critical: nothing must have been written to Redis. A partial
-	// write would mean the cap is enforced too late and an oversize
-	// entry occupies memory anyway.
-	exists, err := rdb.Exists(ctx, idempotencyKey(key)).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "oversize Set must NOT write the key")
-}
-
-// TestRedisIdempotency_BoundaryAccepted pins that values just under
-// the cap go through cleanly. Catches off-by-one regressions.
-func TestRedisIdempotency_BoundaryAccepted(t *testing.T) {
-	s := miniredis.RunT(t)
-	defer s.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
-	repo := NewRedisIdempotencyRepository(rdb, &config.Config{
-		Redis: config.RedisConfig{IdempotencyTTL: time.Hour},
-	})
-
-	ctx := context.Background()
-	key := "boundary-probe"
-
-	// 3000 bytes of body + ~30 bytes JSON envelope = ~3030 bytes
-	// marshalled, well under the 4096 cap. Should pass.
-	body := strings.Repeat("Y", 3000)
-	require.NoError(t, repo.Set(ctx, key, &domain.IdempotencyResult{StatusCode: 200, Body: body}))
-
-	got, err := repo.Get(ctx, key)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, body, got.Body)
-}

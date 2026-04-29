@@ -201,24 +201,6 @@ var (
 		[]string{"cache"},
 	)
 
-	// CacheIdempotencyOversizeTotal increments when an idempotency
-	// cache Set is rejected because the marshalled value exceeds the
-	// defensive size cap (maxIdempotencyValueBytes in cache/idempotency.go,
-	// currently 4KB). Today no production code path triggers this —
-	// the only Set caller is the booking handler emitting fixed-shape
-	// JSON responses (~30-100 bytes). A non-zero rate means a future
-	// caller is storing data this repo wasn't designed for.
-	//
-	// Pairs with the alert `IdempotencyOversize` (any non-zero rate
-	// for 5m → page; this is a programmer-error signal, not a runtime
-	// issue, but worth surfacing immediately).
-	CacheIdempotencyOversizeTotal = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "cache_idempotency_oversize_total",
-			Help: "Idempotency Set calls rejected for exceeding the size cap (defensive; should be 0 in steady state)",
-		},
-	)
-
 	// RedisStreamCollectorErrorsTotal increments when the
 	// StreamsCollector's Redis calls (XLEN / XPENDING) fail during
 	// a Prometheus scrape. Without this counter, a sustained Redis

@@ -47,27 +47,11 @@ const (
 	fieldDLQError      = "error"
 	fieldDLQFailedAt   = "failed_at"
 
-	// dlqRetention is the bounded retention window for `orders:dlq`.
-	// Translated to a Redis Streams MINID directive on every XADD so
-	// entries older than (NOW() - dlqRetention) are evicted.
-	//
-	// Why time-based (MINID) and NOT count-based (MAXLEN):
-	//   * MAXLEN drops the OLDEST entries when the stream exceeds N.
-	//     For a hot work-queue (orders:stream) this would silently
-	//     drop unprocessed customer orders — catastrophic. We don't
-	//     cap orders:stream at all (see PROJECT_SPEC §6.8).
-	//   * For DLQ, the entries are already-failed messages awaiting
-	//     operator review. After 30d they're either fixed or written
-	//     off; capping by time is bounded retention without ambiguity.
-	//
-	// Why 30d specifically:
-	//   * Matches typical operator-investigation SLA. Most stuck
-	//     orders are triaged within a sprint; 30d gives extended
-	//     debug headroom for less-watched failure classes.
-	//   * Future: archive DLQ entries to S3/cold-storage on a
-	//     daily cron BEFORE MINID drops them, so historical
-	//     forensics survive eviction. Out of scope for this PR.
-	dlqRetention = 30 * 24 * time.Hour
+	// DLQ retention is now per-environment via cfg.Redis.DLQRetention
+	// (env var REDIS_DLQ_RETENTION, default 720h = 30d). The MINID
+	// time-based eviction policy (vs MAXLEN count-based) is preserved
+	// — see config.go::RedisConfig.DLQRetention doc + PROJECT_SPEC
+	// §6.8 for why MAXLEN would be wrong on a work-queue stream.
 
 	// DLQ route reasons — Prometheus label values for
 	// `redis_dlq_routed_total{reason=...}`. Kept in sync with the
@@ -94,6 +78,7 @@ type redisOrderQueue struct {
 	failureTimeout           time.Duration
 	pendingBlockTimeout      time.Duration
 	readErrorBackoff         time.Duration
+	dlqRetention             time.Duration
 }
 
 // NewRedisOrderQueue wires the order-stream consumer.
@@ -132,6 +117,7 @@ func NewRedisOrderQueue(
 		failureTimeout:           cfg.Worker.FailureTimeout,
 		pendingBlockTimeout:      cfg.Worker.PendingBlockTimeout,
 		readErrorBackoff:         cfg.Worker.ReadErrorBackoff,
+		dlqRetention:             cfg.Redis.DLQRetention,
 	}
 }
 
@@ -417,7 +403,7 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 	// epoch" which is the same intent without the ambiguity. Real
 	// hosts won't hit this, but the cost of the check is one
 	// comparison; the cost of guessing wrong is total DLQ wipe.
-	cutoffMs := time.Now().Add(-dlqRetention).UnixMilli()
+	cutoffMs := time.Now().Add(-q.dlqRetention).UnixMilli()
 	if cutoffMs < 0 {
 		cutoffMs = 0
 	}

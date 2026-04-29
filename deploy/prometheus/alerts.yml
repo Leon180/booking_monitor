@@ -136,20 +136,6 @@ groups:
           summary: "Streams observability collector is failing"
           description: "{{ $labels.operation }} on {{ $labels.stream }} averaging {{ $value }} errors/sec for 2m+. Stream backlog gauges are stale; other stream-* alerts CANNOT fire until this is resolved. Check Redis connectivity from the app process."
 
-      - alert: IdempotencyOversize
-        # Defensive — fires if any production caller stores an
-        # idempotency value above maxIdempotencyValueBytes (4KB).
-        # Today the booking handler stores ~30-100 byte JSON, so
-        # any non-zero rate = programmer error introduced in a
-        # future PR. Page on-call immediately; do not wait.
-        expr: rate(cache_idempotency_oversize_total[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Idempotency cache oversize rejection"
-          description: "{{ $value }} oversize rejections/sec averaged over 5m. A code path is storing payloads > 4KB through the idempotency repo — investigate the caller; this repo wasn't designed for arbitrary-size data."
-
       - alert: ReconStuckCharging
         # Fires when the reconciler's last sweep saw orders that have
         # been in Charging longer than RECON_CHARGING_THRESHOLD.
