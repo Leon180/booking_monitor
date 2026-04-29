@@ -204,11 +204,16 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 訂票。
 ```json
 // Request
-{ "user_id": 123, "event_id": 1, "quantity": 1 }
+{ "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
 // Headers: Idempotency-Key: <uuid>(選填,<= 128 字元)
 
-// 200 OK
-{ "message": "booking successful" }
+// 202 Accepted — Redis 端扣減成功;後續流程是非同步的
+{
+  "order_id": "019dd493-480a-7499-b208-812c930b152e",
+  "status": "processing",
+  "message": "booking accepted, awaiting confirmation",
+  "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
+}
 // 409 Conflict
 { "error": "sold out" }
 // 409 Conflict
@@ -217,7 +222,30 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 { "error": "internal server error" }
 ```
 
+成功時回的是 `202 Accepted` — 對非同步管線是誠實的。Redis 端的庫存扣減成功了(load-shed gate),訂單意圖已經進佇列;DB 持久化 + 付款 + saga 還在進行中。Client 用 `order_id` 對 `GET /api/v1/orders/:id` 輪詢最終狀態。`order_id` 是 UUIDv7,在 API 邊界由 `BookingService.BookTicket` 鑄造,然後沿 Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga 一路串到底。PEL 重送會復用同一個 id;PR-47 之前 worker 在每次重送都鑄一個新 uuid,client 拿到的 id 會跟 DB 的 id 對不起來。
+
 錯誤回應都會通過 `api/booking/errors.go :: mapError`:透過 `errors.Is` 比對 sentinel 錯誤後,回傳一個安全的公開訊息。原始的 DB / driver 錯誤只會記錄在伺服器端(帶 correlation ID),**絕不**回給 client。
+
+### GET /api/v1/orders/:id
+用 id 輪詢一筆訂票的最終狀態。id 是 `POST /api/v1/book` 回應裡的 UUID v7。
+
+```json
+// 200 OK
+{
+  "id": "019dd493-480a-7499-b208-812c930b152e",
+  "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+  "user_id": 123,
+  "quantity": 1,
+  "status": "confirmed",  // 或 "pending" / "charging" / "failed" / "compensated"
+  "created_at": "2026-04-29T13:34:14.230Z"
+}
+// 404 Not Found — 見下方「非同步處理視窗」說明
+{ "error": "order not found" }
+// 400 Bad Request — id 參數不是合法的 UUID
+{ "error": "invalid order id" }
+```
+
+**404 契約**。Worker 是非同步寫入訂單列的,在 `POST /book` 回 202 之後大概 ~ms 才完成。在這個視窗裡 `GET /orders/:id` 會回 404。Client 應該帶 backoff 重試(例如 100ms → 250ms → 500ms,試幾次)。一旦 row 存在了,後續每次 GET 都會回最新狀態。**Auth 缺口**:這個端點目前沒有驗證 — 任何人有 `order_id` 都讀得到。JWT + 擁有者檢查留待 N9 處理。
 
 ### GET /api/v1/history
 分頁查詢訂單歷史。

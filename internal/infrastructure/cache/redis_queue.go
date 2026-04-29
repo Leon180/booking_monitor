@@ -32,9 +32,11 @@ const (
 	dlqKey    = "orders:dlq"
 
 	// XADD payload field names — must match the keys `deduct.lua`
-	// writes via `XADD orders:stream * user_id $userID event_id
-	// $eventID quantity $quantity`. parseMessage / parsePending /
-	// moveToDLQ all use these constants instead of inline literals.
+	// writes via `XADD orders:stream * order_id $orderID user_id
+	// $userID event_id $eventID quantity $quantity`. parseMessage /
+	// parsePending / moveToDLQ all use these constants instead of
+	// inline literals.
+	fieldOrderID  = "order_id"
 	fieldUserID   = "user_id"
 	fieldEventID  = "event_id"
 	fieldQuantity = "quantity"
@@ -427,9 +429,15 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 }
 
 func parseMessage(msg redis.XMessage) (*application.QueuedBookingMessage, error) {
-	// Values is map[string]interface{}. The Lua producer writes user_id /
-	// event_id / quantity as strings; we reject anything that isn't a
-	// well-formed integer so silent ID=0 records never reach the worker.
+	// Values is map[string]interface{}. The Lua producer writes
+	// order_id / user_id / event_id / quantity as strings; we reject
+	// anything malformed so silent zero-UUID / ID=0 records never
+	// reach the worker.
+
+	orderIDStr, ok := msg.Values[fieldOrderID].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing %s", fieldOrderID)
+	}
 
 	userIDStr, ok := msg.Values[fieldUserID].(string)
 	if !ok {
@@ -444,6 +452,17 @@ func parseMessage(msg redis.XMessage) (*application.QueuedBookingMessage, error)
 	qtyStr, ok := msg.Values[fieldQuantity].(string)
 	if !ok {
 		return nil, fmt.Errorf("missing %s", fieldQuantity)
+	}
+
+	// OrderID is a UUID v7 string minted in the API handler since
+	// PR #47 (BookingService.BookTicket). Reject zero UUID / malformed
+	// at the queue boundary so the worker can rely on a valid id.
+	orderID, err := uuid.Parse(orderIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldOrderID, orderIDStr, err)
+	}
+	if orderID == uuid.Nil {
+		return nil, fmt.Errorf("invalid %s: zero UUID", fieldOrderID)
 	}
 
 	userID, err := strconv.Atoi(userIDStr)
@@ -464,6 +483,7 @@ func parseMessage(msg redis.XMessage) (*application.QueuedBookingMessage, error)
 
 	return &application.QueuedBookingMessage{
 		MessageID: msg.ID, // redis.XMessage.ID — opaque transport handle for ACK
+		OrderID:   orderID,
 		UserID:    userID,
 		EventID:   eventID,
 		Quantity:  qty,

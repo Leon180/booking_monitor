@@ -14,6 +14,7 @@ var (
 
 	// Invariant violations from NewOrder. Caller-actionable errors —
 	// each maps to a malformed-input case the worker should DLQ.
+	ErrInvalidOrderID  = errors.New("order id must not be the zero UUID")
 	ErrInvalidUserID   = errors.New("order user_id must be positive")
 	ErrInvalidEventID  = errors.New("order event_id must not be the zero UUID")
 	ErrInvalidQuantity = errors.New("order quantity must be positive")
@@ -49,8 +50,8 @@ var (
 )
 
 // IsMalformedOrderInput reports whether err originated from a NewOrder
-// invariant violation (zero/negative user_id, zero UUID event_id, or
-// non-positive quantity).
+// invariant violation (zero UUID order_id/event_id, zero/negative
+// user_id, or non-positive quantity).
 //
 // The booking pipeline uses this to route deterministic-failure
 // messages straight to the DLQ instead of cycling the per-message
@@ -67,7 +68,8 @@ var (
 // itself; the queue/infrastructure layer that consumes it is just
 // reading what the domain already exposes.
 func IsMalformedOrderInput(err error) bool {
-	return errors.Is(err, ErrInvalidUserID) ||
+	return errors.Is(err, ErrInvalidOrderID) ||
+		errors.Is(err, ErrInvalidUserID) ||
 		errors.Is(err, ErrInvalidEventID) ||
 		errors.Is(err, ErrInvalidQuantity)
 }
@@ -124,11 +126,20 @@ type Order struct {
 	createdAt time.Time
 }
 
-// NewOrder constructs a fresh pending order. Validates invariants at
-// the domain boundary, then assigns a fresh UUIDv7 id and a
+// NewOrder constructs a fresh pending order. The caller supplies the
+// id (typically `uuid.NewV7()` at the API boundary so the response can
+// echo it back to the client and the worker uses the same id verbatim
+// across PEL retries — a worker-side `uuid.NewV7()` would generate a
+// fresh id per redelivery, defeating idempotency-by-id at the DB
+// layer).
+//
+// Validates invariants at the domain boundary, then assigns a
 // time.Now() createdAt. The returned Order is fully complete — no
 // repository "fills in" anything.
-func NewOrder(userID int, eventID uuid.UUID, quantity int) (Order, error) {
+func NewOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int) (Order, error) {
+	if id == uuid.Nil {
+		return Order{}, ErrInvalidOrderID
+	}
 	if userID <= 0 {
 		return Order{}, ErrInvalidUserID
 	}
@@ -137,13 +148,6 @@ func NewOrder(userID int, eventID uuid.UUID, quantity int) (Order, error) {
 	}
 	if quantity <= 0 {
 		return Order{}, ErrInvalidQuantity
-	}
-	id, err := uuid.NewV7()
-	if err != nil {
-		// crypto/rand failure — vanishingly rare but not impossible
-		// under entropy exhaustion / fuzz. Surface so callers can
-		// retry or DLQ instead of producing a zero-UUID order.
-		return Order{}, fmt.Errorf("generate order id: %w", err)
 	}
 	return Order{
 		id:        id,

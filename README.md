@@ -86,13 +86,26 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/book` | Book tickets `{ user_id, event_id, quantity }` |
+| POST | `/api/v1/book` | Book tickets `{ user_id, event_id, quantity }` → 202 with `{order_id, status, links.self}` |
+| GET | `/api/v1/orders/:id` | Poll order status by id (returns 404 during the brief async-processing window) |
 | GET | `/api/v1/history` | Order history `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | Create event `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | View event details |
 | GET | `/metrics` | Prometheus metrics |
 
 **Idempotency**: Include `Idempotency-Key: <uuid>` header on `POST /api/v1/book` for at-most-once semantics.
+
+**Booking response shape** (202 Accepted):
+```json
+{
+  "order_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+  "status": "processing",
+  "message": "booking accepted, awaiting confirmation",
+  "links": { "self": "/api/v1/orders/019dd493-47ae-79b1-b954-8e0f14a6a482" }
+}
+```
+
+The `order_id` is a UUIDv7 minted at the API boundary; the rest of the lifecycle (DB persist → payment → saga) happens async. Poll `GET /api/v1/orders/:id` with backoff for the terminal status (`confirmed` / `failed` / `compensated`).
 
 ## Development Commands
 

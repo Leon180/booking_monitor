@@ -14,23 +14,26 @@ import (
 func TestNewOrder(t *testing.T) {
 	t.Parallel()
 
+	validOrderID := uuid.New()
 	validEventID := uuid.New()
 
 	tests := []struct {
 		name      string
+		orderID   uuid.UUID
 		userID    int
 		eventID   uuid.UUID
 		quantity  int
 		wantErr   error
 		assertSet bool
 	}{
-		{name: "Valid", userID: 1, eventID: validEventID, quantity: 1, assertSet: true},
-		{name: "Valid larger qty", userID: 42, eventID: uuid.New(), quantity: 3, assertSet: true},
-		{name: "Zero userID rejected", userID: 0, eventID: validEventID, quantity: 1, wantErr: domain.ErrInvalidUserID},
-		{name: "Negative userID rejected", userID: -1, eventID: validEventID, quantity: 1, wantErr: domain.ErrInvalidUserID},
-		{name: "Zero eventID (uuid.Nil) rejected", userID: 1, eventID: uuid.Nil, quantity: 1, wantErr: domain.ErrInvalidEventID},
-		{name: "Zero quantity rejected", userID: 1, eventID: validEventID, quantity: 0, wantErr: domain.ErrInvalidQuantity},
-		{name: "Negative quantity rejected", userID: 1, eventID: validEventID, quantity: -5, wantErr: domain.ErrInvalidQuantity},
+		{name: "Valid", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 1, assertSet: true},
+		{name: "Valid larger qty", orderID: uuid.New(), userID: 42, eventID: uuid.New(), quantity: 3, assertSet: true},
+		{name: "Zero orderID (uuid.Nil) rejected", orderID: uuid.Nil, userID: 1, eventID: validEventID, quantity: 1, wantErr: domain.ErrInvalidOrderID},
+		{name: "Zero userID rejected", orderID: validOrderID, userID: 0, eventID: validEventID, quantity: 1, wantErr: domain.ErrInvalidUserID},
+		{name: "Negative userID rejected", orderID: validOrderID, userID: -1, eventID: validEventID, quantity: 1, wantErr: domain.ErrInvalidUserID},
+		{name: "Zero eventID (uuid.Nil) rejected", orderID: validOrderID, userID: 1, eventID: uuid.Nil, quantity: 1, wantErr: domain.ErrInvalidEventID},
+		{name: "Zero quantity rejected", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 0, wantErr: domain.ErrInvalidQuantity},
+		{name: "Negative quantity rejected", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: -5, wantErr: domain.ErrInvalidQuantity},
 	}
 
 	for _, tt := range tests {
@@ -38,7 +41,7 @@ func TestNewOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := domain.NewOrder(tt.userID, tt.eventID, tt.quantity)
+			got, err := domain.NewOrder(tt.orderID, tt.userID, tt.eventID, tt.quantity)
 
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)
@@ -48,15 +51,26 @@ func TestNewOrder(t *testing.T) {
 
 			assert.NoError(t, err)
 			if tt.assertSet {
+				assert.Equal(t, tt.orderID, got.ID(), "ID is caller-supplied, must round-trip")
 				assert.Equal(t, tt.userID, got.UserID())
 				assert.Equal(t, tt.eventID, got.EventID())
 				assert.Equal(t, tt.quantity, got.Quantity())
 				assert.Equal(t, domain.OrderStatusPending, got.Status(), "new orders must start pending")
-				assert.NotEqual(t, uuid.Nil, got.ID(), "ID is factory-generated UUID v7, must not be zero")
 				assert.False(t, got.CreatedAt().IsZero(), "CreatedAt is factory-assigned, must not be zero")
 			}
 		})
 	}
+}
+
+// newTestOrder is a convenience helper for tests that don't care about
+// the specific UUID — they just need a valid Order. Centralised so a
+// future factory-shape change doesn't ripple across every transition
+// test below.
+func newTestOrder(t *testing.T, userID int, eventID uuid.UUID, quantity int) domain.Order {
+	t.Helper()
+	o, err := domain.NewOrder(uuid.New(), userID, eventID, quantity)
+	assert.NoError(t, err)
+	return o
 }
 
 // TestOrder_Transitions_HappyPath verifies the three legal state-
@@ -74,8 +88,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 
 	t.Run("MarkConfirmed: Pending → Confirmed", func(t *testing.T) {
 		t.Parallel()
-		original, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		original := newTestOrder(t, 1, uuid.New(), 1)
 		confirmed, err := original.MarkConfirmed()
 		assert.NoError(t, err)
 		assert.Equal(t, domain.OrderStatusConfirmed, confirmed.Status())
@@ -89,8 +102,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 
 	t.Run("MarkFailed: Pending → Failed", func(t *testing.T) {
 		t.Parallel()
-		original, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		original := newTestOrder(t, 1, uuid.New(), 1)
 		failed, err := original.MarkFailed()
 		assert.NoError(t, err)
 		assert.Equal(t, domain.OrderStatusFailed, failed.Status())
@@ -100,8 +112,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 	t.Run("MarkCompensated: Failed → Compensated", func(t *testing.T) {
 		t.Parallel()
 		// Build a Failed order via the legal path Pending→Failed.
-		o, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		o := newTestOrder(t, 1, uuid.New(), 1)
 		failed, err := o.MarkFailed()
 		assert.NoError(t, err)
 		compensated, err := failed.MarkCompensated()
@@ -114,8 +125,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 
 	t.Run("A4 MarkCharging: Pending → Charging", func(t *testing.T) {
 		t.Parallel()
-		original, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		original := newTestOrder(t, 1, uuid.New(), 1)
 		charging, err := original.MarkCharging()
 		assert.NoError(t, err)
 		assert.Equal(t, domain.OrderStatusCharging, charging.Status())
@@ -124,8 +134,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 
 	t.Run("A4 MarkConfirmed: Charging → Confirmed (new canonical path)", func(t *testing.T) {
 		t.Parallel()
-		o, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		o := newTestOrder(t, 1, uuid.New(), 1)
 		charging, err := o.MarkCharging()
 		assert.NoError(t, err)
 		confirmed, err := charging.MarkConfirmed()
@@ -135,8 +144,7 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 
 	t.Run("A4 MarkFailed: Charging → Failed (new canonical path)", func(t *testing.T) {
 		t.Parallel()
-		o, err := domain.NewOrder(1, uuid.New(), 1)
-		assert.NoError(t, err)
+		o := newTestOrder(t, 1, uuid.New(), 1)
 		charging, err := o.MarkCharging()
 		assert.NoError(t, err)
 		failed, err := charging.MarkFailed()
@@ -221,11 +229,14 @@ func TestNewOrder_ErrorClassesDistinct(t *testing.T) {
 	// Sanity check that callers can distinguish error classes via
 	// errors.Is — important because the worker DLQ classification
 	// will branch on this.
+	validOrderID := uuid.New()
 	validEventID := uuid.New()
-	_, errUser := domain.NewOrder(0, validEventID, 1)
-	_, errEvent := domain.NewOrder(1, uuid.Nil, 1)
-	_, errQty := domain.NewOrder(1, validEventID, 0)
+	_, errOrderID := domain.NewOrder(uuid.Nil, 1, validEventID, 1)
+	_, errUser := domain.NewOrder(validOrderID, 0, validEventID, 1)
+	_, errEvent := domain.NewOrder(validOrderID, 1, uuid.Nil, 1)
+	_, errQty := domain.NewOrder(validOrderID, 1, validEventID, 0)
 
+	assert.True(t, errors.Is(errOrderID, domain.ErrInvalidOrderID))
 	assert.True(t, errors.Is(errUser, domain.ErrInvalidUserID))
 	assert.False(t, errors.Is(errUser, domain.ErrInvalidEventID))
 	assert.True(t, errors.Is(errEvent, domain.ErrInvalidEventID))

@@ -86,13 +86,26 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 
 | Method | Path | 說明 |
 |--------|------|------|
-| POST | `/api/v1/book` | 訂票 `{ user_id, event_id, quantity }` |
+| POST | `/api/v1/book` | 訂票 `{ user_id, event_id, quantity }` → 回 202,body 為 `{order_id, status, links.self}` |
+| GET | `/api/v1/orders/:id` | 用 id 輪詢訂單狀態(在短暫的非同步處理視窗會回 404) |
 | GET | `/api/v1/history` | 訂單歷史 `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | 查看活動 |
 | GET | `/metrics` | Prometheus 指標 |
 
 **冪等性**:`POST /api/v1/book` 可帶 `Idempotency-Key: <uuid>` header,以達到 at-most-once 語意。
+
+**訂票回應形狀**(202 Accepted):
+```json
+{
+  "order_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+  "status": "processing",
+  "message": "booking accepted, awaiting confirmation",
+  "links": { "self": "/api/v1/orders/019dd493-47ae-79b1-b954-8e0f14a6a482" }
+}
+```
+
+`order_id` 是 UUIDv7,在 API 邊界鑄造;後續的 lifecycle(DB 寫入 → 付款 → saga)是非同步的。用 `GET /api/v1/orders/:id` 帶 backoff 輪詢,等到最終狀態(`confirmed` / `failed` / `compensated`)。
 
 ## 開發指令
 

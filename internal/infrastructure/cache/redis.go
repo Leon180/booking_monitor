@@ -29,11 +29,12 @@ var (
 )
 
 // argsPool reuses []interface{} slices for Redis Lua script calls.
-// Each DeductInventory call needs 3 args; RevertInventory needs 1.
-// We pool a 3-element slice (the common case) and sub-slice for smaller calls.
+// Each DeductInventory call needs 4 args (count, event_id, user_id,
+// order_id); RevertInventory needs 1. We pool a 4-element slice
+// (the common case) and sub-slice for smaller calls.
 var argsPool = sync.Pool{
 	New: func() interface{} {
-		s := make([]interface{}, 3)
+		s := make([]interface{}, 4)
 		return &s
 	},
 }
@@ -153,19 +154,20 @@ func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uui
 	return r.client.Set(ctx, inventoryKey(eventID), count, r.inventoryTTL).Err()
 }
 
-func (r *redisInventoryRepository) DeductInventory(ctx context.Context, eventID uuid.UUID, userID int, count int) (bool, error) {
+func (r *redisInventoryRepository) DeductInventory(ctx context.Context, orderID uuid.UUID, eventID uuid.UUID, userID int, count int) (bool, error) {
 	key := inventoryKey(eventID)
 	keys := []string{key}
 
 	// Reuse args slice from pool to avoid per-call allocation.
 	// The int→interface{} boxing still escapes, but the slice header doesn't.
-	// eventID is passed as the canonical UUID string so the Lua script
-	// can include it in the produced stream message verbatim.
+	// eventID + orderID are passed as canonical UUID strings so the Lua
+	// script can include them in the produced stream message verbatim.
 	argsPtr := argsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count
 	args[1] = eventID.String()
 	args[2] = userID
+	args[3] = orderID.String()
 	defer argsPool.Put(argsPtr)
 
 	script, ok := r.scripts["deduct"]

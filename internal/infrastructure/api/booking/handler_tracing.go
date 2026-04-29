@@ -43,6 +43,19 @@ func (h *tracingBookingHandler) HandleBook(c *gin.Context) {
 	recordHTTPResult(span, c.Writer.Status())
 }
 
+func (h *tracingBookingHandler) HandleGetOrder(c *gin.Context) {
+	ctx := c.Request.Context()
+	ctx, span := otel.Tracer("api").Start(ctx, "HandleGetOrder",
+		trace.WithAttributes(attribute.String("order_id", c.Param("id"))))
+	defer span.End()
+
+	c.Request = c.Request.WithContext(ctx)
+
+	h.handler.HandleGetOrder(c)
+
+	recordHTTPResult(span, c.Writer.Status())
+}
+
 func (h *tracingBookingHandler) HandleListBookings(c *gin.Context) {
 	ctx := c.Request.Context()
 	ctx, span := otel.Tracer("api").Start(ctx, "HandleListBookings")

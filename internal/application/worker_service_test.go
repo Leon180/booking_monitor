@@ -57,7 +57,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			msg:  &application.QueuedBookingMessage{MessageID: "1-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -88,7 +88,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &application.QueuedBookingMessage{MessageID: "2-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -99,7 +99,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &application.QueuedBookingMessage{MessageID: "3-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -111,7 +111,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &application.QueuedBookingMessage{MessageID: "4-0", EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -129,7 +129,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &application.QueuedBookingMessage{MessageID: "5-0", EventID: validEventID, UserID: 0, Quantity: 1},
+			msg:  &application.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1},
 			setupMocks: func(era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — gomock will fail the test if any
 				// repo call fires, asserting fail-fast.

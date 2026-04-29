@@ -209,11 +209,16 @@ Group IDs and topic names are all sourced from `KafkaConfig` (`KAFKA_PAYMENT_GRO
 Book tickets for an event.
 ```json
 // Request
-{ "user_id": 123, "event_id": 1, "quantity": 1 }
+{ "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
 // Headers: Idempotency-Key: <uuid> (optional, <= 128 chars)
 
-// 200 OK
-{ "message": "booking successful" }
+// 202 Accepted — Redis-side deduct succeeded; the rest is async
+{
+  "order_id": "019dd493-480a-7499-b208-812c930b152e",
+  "status": "processing",
+  "message": "booking accepted, awaiting confirmation",
+  "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
+}
 // 409 Conflict
 { "error": "sold out" }
 // 409 Conflict
@@ -222,7 +227,30 @@ Book tickets for an event.
 { "error": "internal server error" }
 ```
 
+Status is `202 Accepted` — the success path is honest about the async pipeline. Redis-side inventory deduct succeeded (the load-shed gate) and an order intent has been queued; DB persistence + payment + saga are in flight. Clients use `order_id` against `GET /api/v1/orders/:id` for the terminal status. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga. PEL retries reuse the same id; pre-PR-47 the worker minted its own uuid per redelivery and the client's id diverged from the DB's.
+
 Error responses go through `api/booking/errors.go :: mapError`, which matches sentinel errors via `errors.Is` and returns a safe public message. Raw DB / driver errors are logged server-side with correlation IDs but **never** echoed to the client.
+
+### GET /api/v1/orders/:id
+Poll the terminal status of a booking. The id is the UUID v7 returned by `POST /api/v1/book`.
+
+```json
+// 200 OK
+{
+  "id": "019dd493-480a-7499-b208-812c930b152e",
+  "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+  "user_id": 123,
+  "quantity": 1,
+  "status": "confirmed",  // or "pending" / "charging" / "failed" / "compensated"
+  "created_at": "2026-04-29T13:34:14.230Z"
+}
+// 404 Not Found — see "async-processing window" note below
+{ "error": "order not found" }
+// 400 Bad Request — id parameter is not a valid UUID
+{ "error": "invalid order id" }
+```
+
+**404 contract.** The worker persists the order row asynchronously, ~ms after `POST /book` returns 202. During that window `GET /orders/:id` returns 404. Clients should retry with backoff (e.g., 100ms → 250ms → 500ms with a few retries). After the row exists, every subsequent GET returns the latest status. **Auth gap:** the endpoint is unauthenticated today — anyone with the `order_id` can read. JWT + ownership check is deferred to N9.
 
 ### GET /api/v1/history
 Paginated order history.

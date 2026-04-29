@@ -70,7 +70,8 @@ docker-compose up -d  # Full stack (app, nginx, payment_worker, postgres, redis,
 
 ## API Endpoints
 ```
-POST /api/v1/book          # Book tickets (user_id, event_id, quantity)
+POST /api/v1/book          # Book tickets (user_id, event_id, quantity) → 202 with order_id + poll URL
+GET  /api/v1/orders/:id    # Poll order status by id (returns 404 during the brief async-processing window)
 GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
 POST /api/v1/events        # Create event (name, total_tickets)
 GET  /api/v1/events/:id    # View event details
@@ -80,6 +81,8 @@ GET  /readyz               # Readiness probe — 200 only if PG + Redis + Kafka 
 ```
 
 Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypassed nginx rate-limit zones. All callers must use `/api/v1/book`.
+
+**Booking response contract (PR #47).** `POST /api/v1/book` returns 202 Accepted with `{order_id, status: "processing", message, links: {self}}`. The 202 is honest about the async pipeline: Redis-side inventory deduct succeeded (the load-shed gate); DB persistence + payment + saga are in flight. Clients poll `GET /api/v1/orders/:id` for the terminal status — that endpoint may return 404 for ~ms after 202 (async-processing window) and clients should retry with backoff. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker → DB → outbox → saga; PEL retries reuse the same id rather than minting a fresh one per delivery.
 
 `/livez` + `/readyz` follow k8s probe conventions: liveness must NOT depend on downstream services (a Redis blip cannot be allowed to kill every pod), readiness pings real dependencies. The compose `app` service uses `/livez` as its HEALTHCHECK.
 

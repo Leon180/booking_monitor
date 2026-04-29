@@ -22,8 +22,8 @@ func NewBookingServiceMetricsDecorator(next BookingService, metrics BookingMetri
 	return &bookingServiceMetricsDecorator{next: next, metrics: metrics}
 }
 
-func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error {
-	err := d.next.BookTicket(ctx, userID, eventID, quantity)
+func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) (uuid.UUID, error) {
+	orderID, err := d.next.BookTicket(ctx, userID, eventID, quantity)
 
 	switch {
 	case err == nil:
@@ -36,9 +36,13 @@ func (d *bookingServiceMetricsDecorator) BookTicket(ctx context.Context, userID 
 		d.metrics.RecordBookingOutcome("error")
 	}
 
-	return err
+	return orderID, err
 }
 
 func (d *bookingServiceMetricsDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error) {
 	return d.next.GetBookingHistory(ctx, page, pageSize, status)
+}
+
+func (d *bookingServiceMetricsDecorator) GetOrder(ctx context.Context, id uuid.UUID) (domain.Order, error) {
+	return d.next.GetOrder(ctx, id)
 }

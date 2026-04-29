@@ -81,15 +81,31 @@ rule (every layer, but most strictly here), the conventions are:
    established this pattern across all three aggregates (Order,
    Event, OutboxEvent).
 
-8. **IDs are factory-generated, never DB-assigned, never
-   ORM-hook-assigned.** Use `uuid.NewV7()` (RFC 9562) at construction
-   time inside `NewX()` factories. The aggregate is fully complete
-   the moment the factory returns — no repository "fills in"
-   anything. Repos pass IDs through verbatim; INSERT statements
-   write all factory-assigned values explicitly (no `RETURNING id`).
-   `CreatedAt` follows the same rule: factory-assigned via
-   `time.Now()`, not DB-assigned. Rationale: aggregate identity is
-   a domain concern, not a persistence concern (Vaughn Vernon, IDDD).
+8. **IDs are caller-generated and validated by the factory; never
+   DB-assigned, never ORM-hook-assigned.** Use `uuid.NewV7()` (RFC
+   9562) at the call site that owns identity (typically the API
+   boundary or another aggregate factory) and pass it into `NewX()`,
+   which validates `id != uuid.Nil` along with the rest of the
+   invariants. The aggregate is fully complete the moment the
+   factory returns — no repository "fills in" anything. Repos pass
+   IDs through verbatim; INSERT statements write all
+   factory-assigned values explicitly (no `RETURNING id`).
+   `CreatedAt` follows a related rule: factory-assigned via
+   `time.Now()`, not DB-assigned.
+
+   **Why caller-generated, not factory-internal**: the same id has
+   to flow end-to-end across async boundaries — the API handler
+   returns it to the client, the queue carries it to the worker,
+   the worker passes it to the repo, the outbox event references
+   it, saga / payment / reconciler operate on it. If the worker
+   re-mints inside `NewX`, PEL retries produce a fresh id per
+   delivery and diverge from what the client already has in hand
+   (PR #47 fixed this for `domain.Order`).
+
+   Rationale: aggregate identity is a domain concern, not a
+   persistence concern AND not a worker concern — it belongs at
+   the call site that first observes the entity (Vaughn Vernon,
+   IDDD).
 
 ## Reference
 

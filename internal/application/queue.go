@@ -38,6 +38,13 @@ type QueuedBookingMessage struct {
 	// rendering of (topic, partition, offset).
 	MessageID string
 
+	// OrderID is the caller-minted UUIDv7 from the API boundary. Flows
+	// end-to-end so the id the client received at HTTP 202 is the
+	// same id the worker writes to DB, the same id outbox/payment/
+	// saga reference, and — critically — the same id reused across
+	// PEL retries. Pre-PR-47 the worker minted its own uuid per
+	// message and PEL retries diverged from what the client held.
+	OrderID  uuid.UUID
 	UserID   int       // External user reference (this service does not own users)
 	EventID  uuid.UUID // FK to events.id
 	Quantity int

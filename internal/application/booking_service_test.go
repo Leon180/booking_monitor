@@ -36,8 +36,12 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  eventID,
 			quantity: 2,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
-				// Phase 6: buyers set removed from Redis, userID still passed for stream publishing
-				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 2).Return(true, nil)
+				// PR 47: BookingService now mints the orderID upfront and
+				// passes it through to DeductInventory. Match Any() on
+				// the orderID position — we don't pin its value here
+				// because the test asserts the service-side return
+				// value is non-nil/non-zero separately below.
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2).Return(true, nil)
 			},
 			expectedError: nil,
 		},
@@ -48,7 +52,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			quantity: 5,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 5).Return(false, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5).Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
@@ -61,7 +65,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  eventID,
 			quantity: 1,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
-				i.EXPECT().DeductInventory(gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},
@@ -84,7 +88,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			service := application.NewBookingService(mockOrderRepo, mockInventoryRepo)
 
 			// Execute
-			err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)
+			orderID, err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)
 
 			// Assert
 			if tt.expectedError != nil {
@@ -93,8 +97,10 @@ func TestBookingService_BookTicket(t *testing.T) {
 				} else {
 					assert.ErrorIs(t, err, tt.expectedError)
 				}
+				assert.Equal(t, uuid.Nil, orderID, "error path must return zero orderID — no order intent persisted")
 			} else {
 				assert.NoError(t, err)
+				assert.NotEqual(t, uuid.Nil, orderID, "success path must return a minted UUIDv7 orderID")
 			}
 		})
 	}

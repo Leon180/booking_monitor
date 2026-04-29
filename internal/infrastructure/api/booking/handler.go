@@ -17,6 +17,7 @@ package booking
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"booking_monitor/internal/application"
@@ -27,10 +28,19 @@ import (
 	"booking_monitor/internal/log/tag"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
+
+// orderSelfLink is the canonical poll URL for a freshly-accepted
+// booking. Centralised so the handler, DTO, and tests can't drift
+// from a hardcoded route literal in three places. Versioned with the
+// rest of the API surface — bumping `/api/v1` to `/api/v2` only needs
+// this prefix changed.
+const orderSelfLinkPrefix = "/api/v1/orders/"
 
 type BookingHandler interface {
 	HandleBook(c *gin.Context)
+	HandleGetOrder(c *gin.Context)
 	HandleListBookings(c *gin.Context)
 	HandleCreateEvent(c *gin.Context)
 	HandleViewEvent(c *gin.Context)
@@ -98,7 +108,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		}
 	}
 
-	err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
+	orderID, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
 
 	var statusCode int
 	var body string
@@ -120,9 +130,20 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		statusCode = status
 		body = string(errJSON)
 	} else {
-		statusCode = http.StatusOK
-		successJSON, _ := json.Marshal(dto.BookingSuccessResponse{Message: "booking successful"})
-		body = string(successJSON)
+		// 202 Accepted — Redis-side deduct succeeded (the load-shed
+		// gate); the rest of the lifecycle (DB persist, payment
+		// charge, saga) is async. The client polls
+		// `GET /api/v1/orders/:id` for the terminal status.
+		statusCode = http.StatusAccepted
+		acceptedJSON, _ := json.Marshal(dto.BookingAcceptedResponse{
+			OrderID: orderID,
+			Status:  "processing",
+			Message: "booking accepted, awaiting confirmation",
+			Links: dto.BookingLinks{
+				Self: orderSelfLinkPrefix + orderID.String(),
+			},
+		})
+		body = string(acceptedJSON)
 	}
 
 	// Cache the result for idempotency. The response was already
@@ -146,6 +167,52 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	}
 
 	c.Data(statusCode, "application/json", []byte(body))
+}
+
+// HandleGetOrder is the polling endpoint for a freshly-accepted
+// booking. Clients receive an `order_id` from `POST /book` and poll
+// here for the terminal status (confirmed / failed / compensated).
+//
+// 404 contract: the worker persists the order row asynchronously (~ms
+// after the 202 returns). Until then, GET returns 404 — clients
+// should retry with a short backoff. After the row exists, every
+// subsequent GET returns the latest status.
+//
+// No auth today — anyone with the order_id can read. N9 will add
+// JWT + ownership check (the order belongs to its user_id). Documented
+// as a known gap in PROJECT_SPEC §6.
+func (h *bookingHandler) HandleGetOrder(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	rawID := c.Param("id")
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		log.Warn(ctx, "invalid order id parameter",
+			tag.Error(err),
+			log.String("raw_id", rawID),
+		)
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid order id"})
+		return
+	}
+
+	order, err := h.service.GetOrder(ctx, id)
+	if err != nil {
+		if errors.Is(err, domain.ErrOrderNotFound) {
+			// Distinct log level from upstream errors — 404 is the
+			// expected path during the brief post-202 window before
+			// the worker persists.
+			log.Debug(ctx, "order not found (may be in async-processing window)",
+				tag.OrderID(id))
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "order not found"})
+			return
+		}
+		log.Error(ctx, "GetOrder failed", tag.Error(err), tag.OrderID(id))
+		status, public := mapError(err)
+		c.JSON(status, dto.ErrorResponse{Error: public})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.OrderResponseFromDomain(order))
 }
 
 func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
@@ -186,6 +253,7 @@ func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
 // versioning.
 func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler) {
 	r.POST("/book", handler.HandleBook)
+	r.GET("/orders/:id", handler.HandleGetOrder)
 	r.GET("/history", handler.HandleListBookings)
 	r.POST("/events", handler.HandleCreateEvent)
 	r.GET("/events/:id", handler.HandleViewEvent)
