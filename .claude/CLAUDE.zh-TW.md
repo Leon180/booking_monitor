@@ -12,6 +12,7 @@
 | `.claude/CLAUDE.md` | `.claude/CLAUDE.zh-TW.md` |
 | `README.md` | `README.zh-TW.md` |
 | `docs/PROJECT_SPEC.md` | `docs/PROJECT_SPEC.zh-TW.md` |
+| `docs/monitoring.md` | `docs/monitoring.zh-TW.md` |
 
 **規則:**
 1. **絕不**只修改配對檔案的其中一邊。無法翻譯時請先問使用者,不要略過。
@@ -22,6 +23,12 @@
 6. **翻譯風格**:中文版使用台灣繁體中文用語(例:資料庫、介面、物件,非簡中用語)。
 
 **備註**:Claude Code 會以相同的優先權自動載入 `./CLAUDE.md` 與 `./.claude/CLAUDE.md`,因此本檔(`.claude/CLAUDE.md`)會被直接載入,不需要 root stub。只有英文版會被自動載入,`.claude/CLAUDE.zh-TW.md` 純粹是給人看的參考。PostToolUse hook(`.claude/hooks/check_bilingual_docs.sh`)會在編輯時強制執行這份契約。
+
+## ⚠️ 監控文件契約
+
+日常運維者使用的監控指南位於 [docs/monitoring.md](../docs/monitoring.md)(以及配對的 zh-TW 版)。這份文件記錄指標清單、Prometheus / Grafana 工作流、告警目錄,以及把告警故意觸發起來測試的食譜。
+
+第二個 PostToolUse hook(`.claude/hooks/check_monitoring_docs.sh`)會在任何觀測性介面被改動時觸發 — 包含 `internal/infrastructure/observability/metrics.go`、任何 `*_collector.go`、`deploy/prometheus/alerts.yml`、`deploy/prometheus/prometheus.yml`、`deploy/grafana/provisioning/dashboards/*.json` — 並提醒 Claude 在收尾前更新這份指南。新增一個指標卻沒改 §2;新增一條告警卻沒改 §5;hook 會抓到。
 
 ---
 

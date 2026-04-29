@@ -1,0 +1,215 @@
+# Monitoring Guide
+
+> 中文版本: [monitoring.zh-TW.md](monitoring.zh-TW.md)
+
+This guide is the day-to-day operator's reference for **how to observe `booking_monitor` while the stack is running**. It is *not* an architecture spec (see [PROJECT_SPEC.md](PROJECT_SPEC.md) for that) — it answers concrete questions like "is the system healthy right now", "where is this metric defined", and "how do I make this alert fire on purpose for testing".
+
+The three observability surfaces are:
+
+| Surface | URL | What it gives you |
+| :-- | :-- | :-- |
+| **Raw `/metrics`** | http://localhost:80/metrics (via nginx) or http://localhost:8080/metrics (direct) | Prometheus exposition format. Cheap, scriptable, useful for `grep` / `curl` sanity checks. |
+| **Prometheus UI** | http://localhost:9090 | Ad-hoc PromQL exploration, target health, alert state. |
+| **Grafana** | http://localhost:3000 (login `admin` / `admin`) | Pre-provisioned dashboards. The "is anything red right now" surface. |
+
+`/livez` and `/readyz` are also available at http://localhost:80/livez and `/readyz` for Kubernetes-style health probes — see [PROJECT_SPEC §6](PROJECT_SPEC.md) for the protocol contract.
+
+---
+
+## 1. Quick health check (60-second loop)
+
+When you want to know "is the system healthy right now":
+
+```bash
+# 1. Is the app process alive?
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:80/livez            # → 200
+
+# 2. Are all dependencies reachable from the app?
+curl -s http://localhost:80/readyz | jq                                       # → status: ok
+
+# 3. Are there active alerts?
+curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | {name: .labels.alertname, state, value}'
+
+# 4. Is the booking hot-path producing traffic + succeeding?
+curl -s http://localhost:80/metrics | grep -E '^bookings_total\{' | head
+```
+
+If any of those four returns something unexpected, drop into the relevant deeper layer below.
+
+---
+
+## 2. Metric inventory
+
+The authoritative source is `internal/infrastructure/observability/metrics.go` plus the two collectors (`db_pool_collector.go`, `streams_collector.go`). The full annotated list is in [PROJECT_SPEC §7](PROJECT_SPEC.md). Below is a pragmatic grouping by *what question you would ask*.
+
+### Per-request — RED method (Rate / Errors / Duration)
+
+| Question | Metric | Example query |
+| :-- | :-- | :-- |
+| How much traffic? | `http_requests_total{method,path,status}` | `sum by (status) (rate(http_requests_total[1m]))` |
+| How fast? | `http_request_duration_seconds_bucket` | `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))` |
+| What % failed? | same, filter `status=~"5.."` | `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))` |
+
+### Per-resource — USE method (Utilization / Saturation / Errors)
+
+| Resource | Metric prefix | Notes |
+| :-- | :-- | :-- |
+| Go runtime | `go_*`, `process_*` | goroutines, GC pause, heap inuse — registered via `collectors.NewGoCollector` |
+| DB pool | `db_pool_*` | `db_pool_in_use`, `db_pool_idle`, `db_pool_wait_count`, `db_pool_wait_duration_seconds` |
+| Redis cache | `cache_hits_total{cache}`, `cache_misses_total{cache}` | per-cache-name hit/miss |
+| Redis streams | `redis_stream_length{stream}`, `redis_stream_pending_entries{stream,group}`, `redis_stream_consumer_lag_seconds{stream,group}` | scraped at request time by `StreamsCollector` |
+
+### Domain-specific — what the business cares about
+
+| Question | Metric |
+| :-- | :-- |
+| Successful bookings vs sold-out vs duplicate | `bookings_total{status}` |
+| Worker outcomes | `worker_orders_total{status}`, `worker_processing_duration_seconds` |
+| Inventory drift between Redis and DB | `inventory_conflicts_total` |
+| Dead-letter routing | `dlq_messages_total{topic,reason}`, `redis_dlq_routed_total{reason}` |
+| Saga compensation poison messages | `saga_poison_messages_total` |
+| Kafka consumer stuck on transient downstream failures | `kafka_consumer_retry_total{topic,reason}` |
+| Charging stuck-order reconciliation | `recon_stuck_charging_orders` (gauge), `recon_resolved_total{outcome}`, `recon_gateway_errors_total`, `recon_resolve_duration_seconds`, `recon_resolve_age_seconds` |
+| Streams collector itself failing | `redis_stream_collector_errors_total{stream,operation}` |
+| Page funnel | `page_views_total{page}` |
+
+### When labels are pre-initialized
+
+The codebase pre-warms expected label combinations at startup so dashboards don't show "no data" for a metric that genuinely had zero events. You'll see initial rows like `bookings_total{status="success"} 0` on a freshly-started stack. This is intentional — see [observability/metrics.go](../internal/infrastructure/observability/metrics.go) prelude.
+
+---
+
+## 3. Prometheus UI workflow
+
+Open http://localhost:9090.
+
+**Three navs you'll use:**
+
+| Nav | Why |
+| :-- | :-- |
+| **Graph** | Type a PromQL query, hit Execute, switch to Graph tab. The fastest "is X happening" surface. |
+| **Status → Targets** | Verify the app process is being scraped (`UP` next to `app:8080/metrics`). Red here = scrape failing = every other metric is stale. |
+| **Status → Alerts** | All defined alerts plus their current state (Inactive / Pending / Firing). |
+
+**Useful queries to bookmark:**
+
+```promql
+# Booking funnel — successes vs sold-out vs duplicate vs error
+sum by (status) (rate(bookings_total[1m]))
+
+# Worker throughput
+sum by (status) (rate(worker_orders_total[1m]))
+
+# p99 latency by route
+histogram_quantile(0.99,
+  sum by (le, path) (rate(http_request_duration_seconds_bucket[5m]))
+)
+
+# DB pool saturation — sustained > 0 means workers are queued waiting for a connection
+db_pool_wait_count
+
+# Stream backlog — should drain to ~0 on a healthy worker
+redis_stream_length{stream="orders:stream"}
+
+# Stuck-charging reconciler — sustained > 0 = gateway degraded or recon falling behind
+recon_stuck_charging_orders
+```
+
+---
+
+## 4. Grafana workflow
+
+Open http://localhost:3000, login `admin` / `admin`. **Dashboards → Browse → Booking Monitor Dashboard**.
+
+Pre-provisioned panels live in [deploy/grafana/provisioning/dashboards/dashboard.json](../deploy/grafana/provisioning/dashboards/dashboard.json). Provisioning is **read-only** from the UI — changes you make in the browser do not persist across `docker compose down`. To make a permanent change, edit the JSON file and restart Grafana.
+
+The current panels cover:
+
+- Request Rate (RPS)
+- Global Request Latency (p99 / p95 / p50)
+- Conversion Rate (%)
+- Saturation — Goroutines
+- Saturation — Memory Alloc Bytes
+
+**To add a new panel quickly (non-persistent — for exploration only):**
+1. Click **+ → Create dashboard → Add visualization**.
+2. Pick the **Prometheus** data source.
+3. Paste a PromQL query from §3 and adjust the visualization type.
+4. If the panel is worth keeping, copy the panel JSON and merge it into `dashboard.json` so it survives the next `down/up`.
+
+---
+
+## 5. Alerts
+
+Alert definitions live in [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml). State is visible in the Prometheus UI → **Alerts**.
+
+The current alert catalog:
+
+| Alert | Severity | Symptom |
+| :-- | :-- | :-- |
+| `HighErrorRate` | critical | 5xx rate > 5% over 5m |
+| `HighLatency` | warning | p99 > 2s |
+| `InventorySoldOut` | info | A booking attempt returned sold_out |
+| `OrdersStreamBacklogYellow` | info | Stream length > 10K for 2m |
+| `OrdersStreamBacklogOrange` | warning | Stream length > 50K for 2m |
+| `OrdersStreamBacklogRed` | critical | Stream length > 200K for 1m |
+| `OrdersStreamConsumerLag` | warning | Oldest pending entry > 60s for 2m |
+| `OrdersDLQNonEmpty` | warning | DLQ has unreviewed entries for 5m |
+| `RedisStreamCollectorDown` | critical | Streams scrape errors → other stream alerts go silent |
+| `ReconStuckCharging` | warning | `recon_stuck_charging_orders` > 0 for 5m |
+| `ReconFindStuckErrors` | critical | Reconciler sweep query is failing |
+| `ReconGatewayErrors` | warning | Reconciler gateway error rate elevated |
+| `ReconMaxAgeExceeded` | critical | Reconciler force-failed an order — manual review |
+| `KafkaConsumerStuck` | warning | Consumer rebalance retries — downstream dependency degraded |
+
+### Forcing an alert to fire (testing)
+
+To verify the alert plumbing end-to-end, push enough volume into the watched metric to cross the threshold + outlast the `for:` window. Examples:
+
+```bash
+# OrdersStreamBacklogYellow — push > 10K entries onto orders:stream
+docker exec booking_redis redis-cli eval \
+  "for i=1,11000 do redis.call('XADD','orders:stream','*','probe',i) end return 1" 0
+# Wait 2-3 minutes (alert has `for: 2m`), check Prometheus → Alerts.
+
+# OrdersDLQNonEmpty — push one entry onto the DLQ
+docker exec booking_redis redis-cli XADD orders:dlq '*' probe 1
+# Wait 5+ minutes (alert has `for: 5m`).
+
+# RedisStreamCollectorDown — kill Redis briefly
+docker compose stop redis
+# After 2m the alert fires; `docker compose start redis` clears it within one scrape.
+```
+
+After testing, undo: `docker exec booking_redis redis-cli DEL orders:stream orders:dlq` (loses any in-flight production data — only safe in dev).
+
+---
+
+## 6. The pragmatic loop
+
+For day-to-day senior-level usage:
+
+1. **Grafana** — "is anything red right now?"
+2. **Prometheus** — "let me write a query to investigate"
+3. **Raw `/metrics`** — "is this metric being emitted at all?" (PR-time sanity check)
+4. **App logs** (`docker compose logs -f app`) — for context + correlation IDs that the metric alone can't give you
+
+Logs and metrics are linked: every structured log line includes `correlation_id` + (when sampled) `trace_id`/`span_id`. From a Grafana spike you can grab the timestamp, search Jaeger (http://localhost:16686) for traces in that window, and pull the matching `correlation_id` to grep app logs. See [internal/log/](../internal/log/) for the wiring.
+
+---
+
+## 7. When to update this guide
+
+This document is **paired** with the source-of-truth observability code. Any change to the surfaces below requires updating this guide (and its zh-TW counterpart):
+
+| Surface | File(s) |
+| :-- | :-- |
+| Metric registration | [internal/infrastructure/observability/metrics.go](../internal/infrastructure/observability/metrics.go) |
+| Custom collectors | `internal/infrastructure/observability/*_collector.go` |
+| Alert rules | [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml) |
+| Prometheus scrape config | [deploy/prometheus/prometheus.yml](../deploy/prometheus/prometheus.yml) |
+| Grafana dashboards | `deploy/grafana/provisioning/dashboards/*.json` |
+
+A PostToolUse hook ([.claude/hooks/check_monitoring_docs.sh](../.claude/hooks/check_monitoring_docs.sh)) fires whenever any of these files are edited; it injects a reminder so Claude updates this guide before ending the turn.
+
+If you cannot translate, ask the human author rather than skipping the zh-TW update — structural parity matters more than perfect prose.
