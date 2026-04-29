@@ -86,26 +86,50 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/book` | Book tickets `{ user_id, event_id, quantity }` → 202 with `{order_id, status, links.self}` |
-| GET | `/api/v1/orders/:id` | Poll order status by id (returns 404 during the brief async-processing window) |
+| POST | `/api/v1/book` | Submit a booking. Returns **202 Accepted** + an `order_id` to track it (see **Booking flow** below). |
+| GET | `/api/v1/orders/:id` | Look up the latest status of one order by `order_id`. May return 404 in a brief window after `POST /book` (see **Booking flow**). |
 | GET | `/api/v1/history` | Order history `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | Create event `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | View event details |
 | GET | `/metrics` | Prometheus metrics |
 
-**Idempotency**: Include `Idempotency-Key: <uuid>` header on `POST /api/v1/book` for at-most-once semantics.
+### Booking flow
 
-**Booking response shape** (202 Accepted):
-```json
-{
-  "order_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
-  "status": "processing",
-  "message": "booking accepted, awaiting confirmation",
-  "links": { "self": "/api/v1/orders/019dd493-47ae-79b1-b954-8e0f14a6a482" }
-}
+`POST /api/v1/book` is **asynchronous by design**. The 202 (not 200) is honest: at the moment of the response, only the Redis-side inventory deduct has happened — the order hasn't been written to DB, payment hasn't been attempted, the booking isn't actually confirmed yet. The client gets back an `order_id` and is expected to poll for the terminal status.
+
+```
+1. Client → POST /api/v1/book { user_id, event_id, quantity }
+2. Server → 202 Accepted {
+       order_id: "019dd493-47ae-79b1-b954-8e0f14a6a482",
+       status:   "processing",
+       message:  "booking accepted, awaiting confirmation",
+       links:    { self: "/api/v1/orders/019dd493-..." }
+   }
+
+   At this point:
+   - Redis inventory: deducted (the "load-shed gate")
+   - DB orders row:   not yet (worker writes it ~ms later)
+   - Payment:         not attempted yet
+   - Outcome:         not yet known
+
+3. Client → GET /api/v1/orders/<order_id>  (poll with backoff: 100ms → 250ms → 500ms ...)
+
+   Possible responses:
+   - 404  → worker hasn't persisted the row yet. Retry.
+   - 200  → { id, user_id, event_id, quantity, status, created_at }
+            where `status` is one of:
+              "pending"     — DB persisted, awaiting payment
+              "charging"    — payment in progress
+              "confirmed"   — paid + booked       ✓ terminal (success)
+              "failed"      — payment failed; saga will compensate
+              "compensated" — saga has rolled back inventory  ✓ terminal (failure)
 ```
 
-The `order_id` is a UUIDv7 minted at the API boundary; the rest of the lifecycle (DB persist → payment → saga) happens async. Poll `GET /api/v1/orders/:id` with backoff for the terminal status (`confirmed` / `failed` / `compensated`).
+**Why async, not synchronous?** Redis-first acts as a **load-shed gate** — at flash-sale traffic, sold-out attempts get rejected at the Redis layer without ever touching DB. If `POST /book` blocked until terminal status, every request would hold a connection through the entire payment round-trip (seconds), and the throughput ceiling would be the slowest dependency. Industry standard for flash-sale systems (Tmall, KKTIX, Ticketmaster).
+
+**Idempotency**: include `Idempotency-Key: <uuid>` header on `POST /api/v1/book` for at-most-once semantics. A replay returns the original 202 response (same `order_id`) with header `X-Idempotency-Replayed: true`. Cache TTL: 24h.
+
+**The 404 window in practice**: typically <1 second on a healthy worker. Sustained 404s mean the worker is backed up — operators can verify via the `redis_stream_length{stream="orders:stream"}` metric or the `OrdersStreamBacklog*` alerts (see [docs/monitoring.md](docs/monitoring.md)).
 
 ## Development Commands
 
