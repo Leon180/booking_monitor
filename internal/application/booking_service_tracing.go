@@ -8,6 +8,7 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -19,7 +20,7 @@ func NewBookingServiceTracingDecorator(next BookingService) BookingService {
 	return &bookingServiceTracingDecorator{next: next}
 }
 
-func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) error {
+func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) (uuid.UUID, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "BookTicket", trace.WithAttributes(
 		attribute.Int("user_id", userID),
 		attribute.String("event_id", eventID.String()),
@@ -27,11 +28,23 @@ func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID 
 	))
 	defer span.End()
 
-	err := s.next.BookTicket(ctx, userID, eventID, quantity)
+	orderID, err := s.next.BookTicket(ctx, userID, eventID, quantity)
 	if err != nil {
+		// RecordError adds the exception event but doesn't change the
+		// span status. SetStatus(Error) is what flips the span to red
+		// in Jaeger / Grafana Tempo / Datadog APM dashboards. Without
+		// it, error spans look identical to successful ones in the
+		// "% errored" rollups — silent observability gap.
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		// Tag the span with the minted order_id so trace lookups in
+		// Jaeger from a customer-reported order_id resolve back to
+		// this BookTicket span (and from there, the upstream HTTP
+		// span via the trace tree).
+		span.SetAttributes(attribute.String("order_id", orderID.String()))
 	}
-	return err
+	return orderID, err
 }
 
 func (s *bookingServiceTracingDecorator) GetBookingHistory(ctx context.Context, page, pageSize int, status *domain.OrderStatus) ([]domain.Order, int, error) {
@@ -45,6 +58,21 @@ func (s *bookingServiceTracingDecorator) GetBookingHistory(ctx context.Context, 
 	orders, total, err := s.next.GetBookingHistory(ctx, page, pageSize, status)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return orders, total, err
+}
+
+func (s *bookingServiceTracingDecorator) GetOrder(ctx context.Context, id uuid.UUID) (domain.Order, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetOrder", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	order, err := s.next.GetOrder(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return order, err
 }

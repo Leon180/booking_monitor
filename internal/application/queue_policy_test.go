@@ -27,6 +27,7 @@ func TestDefaultOrderRetryPolicy(t *testing.T) {
 		err  error
 		want bool // expected return value (true = retry)
 	}{
+		{name: "ErrInvalidOrderID skips retry", err: domain.ErrInvalidOrderID, want: false},
 		{name: "ErrInvalidUserID skips retry", err: domain.ErrInvalidUserID, want: false},
 		{name: "ErrInvalidEventID skips retry", err: domain.ErrInvalidEventID, want: false},
 		{name: "ErrInvalidQuantity skips retry", err: domain.ErrInvalidQuantity, want: false},

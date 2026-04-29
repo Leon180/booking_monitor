@@ -32,9 +32,15 @@ curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | {name: .label
 
 # 4. 訂票熱路徑有流量嗎?有成功嗎?
 curl -s http://localhost:80/metrics | grep -E '^bookings_total\{' | head
+
+# 5. 從 id 一路追單筆訂單到最終狀態(PR #47)
+ORDER_ID="<從 POST /book 的 response 貼進來>"
+curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
+# → {"id":"...", "status":"confirmed", ...}
+# 在短暫的非同步處理視窗會回 404 — 帶 backoff 重試即可。
 ```
 
-四個任何一個吐出非預期結果,就往下面對應的更深層介面鑽。
+五個任何一個吐出非預期結果,就往下面對應的更深層介面鑽。
 
 ---
 

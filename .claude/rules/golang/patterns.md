@@ -56,15 +56,17 @@ var (
 )
 
 // NewOrder validates invariants and returns a fresh Pending order.
-// ID + CreatedAt are repo-assigned (RETURNING id, created_at), so they
-// stay zero here.
-func NewOrder(userID, eventID, quantity int) (Order, error) {
-    if userID <= 0   { return Order{}, ErrInvalidUserID }
-    if eventID <= 0  { return Order{}, ErrInvalidEventID }
-    if quantity <= 0 { return Order{}, ErrInvalidQuantity }
+// ID is caller-supplied (typically `uuid.NewV7()` at the API
+// boundary) so the same id flows handler → queue → worker → DB.
+// CreatedAt is factory-assigned; never DB-assigned.
+func NewOrder(id uuid.UUID, userID, eventID, quantity int) (Order, error) {
+    if id == uuid.Nil { return Order{}, ErrInvalidOrderID }
+    if userID <= 0    { return Order{}, ErrInvalidUserID }
+    if eventID <= 0   { return Order{}, ErrInvalidEventID }
+    if quantity <= 0  { return Order{}, ErrInvalidQuantity }
     return Order{
-        UserID: userID, EventID: eventID, Quantity: quantity,
-        Status: OrderStatusPending,
+        ID: id, UserID: userID, EventID: eventID, Quantity: quantity,
+        Status: OrderStatusPending, CreatedAt: time.Now(),
     }, nil
 }
 
@@ -103,7 +105,7 @@ func NewOrderCreatedOutbox(payload []byte) OutboxEvent {
 Application-layer call sites become:
 
 ```go
-order, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+order, err := domain.NewOrder(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity)
 if err != nil { return err }   // DLQ via worker classifier
 // ... persist via repo
 

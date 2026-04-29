@@ -32,9 +32,15 @@ curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | {name: .label
 
 # 4. Is the booking hot-path producing traffic + succeeding?
 curl -s http://localhost:80/metrics | grep -E '^bookings_total\{' | head
+
+# 5. Trace one specific order from id → terminal status (PR #47)
+ORDER_ID="<paste from POST /book response>"
+curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
+# → {"id":"...", "status":"confirmed", ...}
+# 404 during the brief async-processing window — retry with backoff.
 ```
 
-If any of those four returns something unexpected, drop into the relevant deeper layer below.
+If any of those five returns something unexpected, drop into the relevant deeper layer below.
 
 ---
 

@@ -86,13 +86,50 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 
 | Method | Path | 說明 |
 |--------|------|------|
-| POST | `/api/v1/book` | 訂票 `{ user_id, event_id, quantity }` |
+| POST | `/api/v1/book` | 提交訂票。回 **202 Accepted** + 一個 `order_id` 用來追蹤訂單(詳見下方「**訂票流程**」)。 |
+| GET | `/api/v1/orders/:id` | 用 `order_id` 查單筆訂單的最新狀態。在 `POST /book` 之後的短暫視窗裡會回 404(詳見「**訂票流程**」)。 |
 | GET | `/api/v1/history` | 訂單歷史 `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | 查看活動 |
 | GET | `/metrics` | Prometheus 指標 |
 
-**冪等性**:`POST /api/v1/book` 可帶 `Idempotency-Key: <uuid>` header,以達到 at-most-once 語意。
+### 訂票流程
+
+`POST /api/v1/book` 在設計上**就是非同步的**。回 202(不是 200)是誠實的:在這個回應的當下,只完成了 Redis 端的庫存扣減 — 訂單還沒寫進資料庫、付款還沒嘗試、訂票其實還沒真正成功。Client 拿到 `order_id` 之後,要自己輪詢最終狀態。
+
+```
+1. Client → POST /api/v1/book { user_id, event_id, quantity }
+2. Server → 202 Accepted {
+       order_id: "019dd493-47ae-79b1-b954-8e0f14a6a482",
+       status:   "processing",
+       message:  "booking accepted, awaiting confirmation",
+       links:    { self: "/api/v1/orders/019dd493-..." }
+   }
+
+   此時:
+   - Redis 庫存:已扣減(這是 load-shed gate)
+   - DB orders 列:還沒寫入(worker ~ms 後才會寫)
+   - 付款:還沒嘗試
+   - 結果:還不知道
+
+3. Client → GET /api/v1/orders/<order_id>  (帶 backoff 輪詢:100ms → 250ms → 500ms ...)
+
+   可能的回應:
+   - 404  → worker 還沒寫進 DB。重試即可。
+   - 200  → { id, user_id, event_id, quantity, status, created_at }
+            其中 `status` 為:
+              "pending"     — DB 已寫入,等待付款
+              "charging"    — 付款進行中
+              "confirmed"   — 付款成功 + 訂票完成    ✓ 終態(成功)
+              "failed"      — 付款失敗,saga 即將回滾
+              "compensated" — saga 已回滾庫存         ✓ 終態(失敗)
+```
+
+**為什麼不直接同步回終態?** Redis-first 是 **load-shed gate** — flash-sale 流量下,售完的請求會在 Redis 層就被擋掉,根本不會碰到資料庫。如果 `POST /book` 同步等到終態,每一個請求都會佔用整個付款 round-trip(數秒)的連線,整體吞吐就被最慢的依賴卡住。Flash-sale 系統的業界標準做法(Tmall、KKTIX、Ticketmaster 都這樣)。
+
+**冪等性**:`POST /api/v1/book` 可以帶 `Idempotency-Key: <uuid>` header,達到 at-most-once 語意。重送時會回原本的 202 回應(同樣的 `order_id`),並加上 `X-Idempotency-Replayed: true` header。Cache TTL:24h。
+
+**404 視窗的實際情況**:健康的 worker 通常 < 1 秒。如果持續 404 表示 worker 已經塞車 — 可以從 `redis_stream_length{stream="orders:stream"}` 指標或 `OrdersStreamBacklog*` 告警觀察(見 [docs/monitoring.zh-TW.md](docs/monitoring.zh-TW.md))。
 
 ## 開發指令
 

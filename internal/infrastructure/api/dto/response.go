@@ -44,11 +44,64 @@ type Meta struct {
 	Size  int `json:"size"`
 }
 
-// BookingSuccessResponse is the wire shape returned by POST /api/v1/book
-// on success. Currently a single message; evolved here so future
-// additions (idempotency status, booking_id, etc.) don't ripple.
-type BookingSuccessResponse struct {
-	Message string `json:"message"`
+// BookingStatus is a typed enum for the `status` field on
+// BookingAcceptedResponse and any future polling responses. Typed
+// rather than raw `string` so a typo at the call site (`"Processing"`
+// with capital P, `"queued"`, etc.) fails at compile time. This
+// matters because the wire field is part of the public API contract;
+// silent drift between the producer and the documented set is
+// exactly the bug the type system can prevent.
+//
+// Today the only value is `BookingStatusProcessing` — `POST /book`
+// can only accept-and-queue. As Pattern A (frontend-collects-card)
+// lands the set will grow (`awaiting_payment`, `expired`, etc.).
+//
+// `OrderResponse.Status` (returned by `GET /orders/:id`) keeps a
+// raw `string` to mirror `domain.OrderStatus`, which has its own
+// terminal-state vocabulary (`pending`, `charging`, `confirmed`,
+// `failed`, `compensated`). The two enums describe different things
+// and live at different layers — don't conflate them.
+type BookingStatus string
+
+const (
+	BookingStatusProcessing BookingStatus = "processing"
+)
+
+// BookingAcceptedResponse is the wire shape returned by POST /api/v1/book
+// on success. The 202 semantics are honest about the async pipeline:
+// the Redis-side inventory deduct succeeded (the "gate"), an order
+// intent has been queued, and the rest of the lifecycle (DB persist,
+// payment charge, saga compensation) is in flight. Clients use the
+// returned `OrderID` against `GET /api/v1/orders/:id` to track the
+// terminal status.
+//
+// Why this shape:
+//   - `OrderID` is the canonical correlation handle. Echoed in the
+//     server logs (correlation_id), tracing span (order_id attr),
+//     and DB orders.id. A customer reporting "my booking is missing"
+//     hands over the order_id and operators have a single string to
+//     pivot from.
+//   - `Status` is the application-layer state at the moment of
+//     response — `processing` means "Redis accepted, worker pipeline
+//     in flight". Kept distinct from HTTP status so a future
+//     synchronous-confirmation flow could return 200 + status:"confirmed".
+//   - `Links.Self` follows the loose HAL/JSON:API convention so
+//     clients can navigate without hard-coding URL templates. Single
+//     link today; structured so adding `links.cancel` etc. later is
+//     additive.
+type BookingAcceptedResponse struct {
+	OrderID uuid.UUID     `json:"order_id"`
+	Status  BookingStatus `json:"status"`
+	Message string        `json:"message"`
+	Links   BookingLinks  `json:"links"`
+}
+
+// BookingLinks holds the polling endpoint for a freshly-accepted
+// booking. Separate type so the wire shape `{"links": {"self": ...}}`
+// is type-safe and so future additions (cancel, receipt) sit
+// alongside without changing the outer response struct.
+type BookingLinks struct {
+	Self string `json:"self"`
 }
 
 // ErrorResponse is the wire shape of every 4xx/5xx response. Centralising

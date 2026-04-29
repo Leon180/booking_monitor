@@ -86,10 +86,11 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// 2. Add a message and claim it (simulate pending). event_id is a
 	// UUID string post-PR-34; user_id stays int (external reference).
 	eventUUID := uuid.New().String()
+	orderUUID := uuid.New().String()
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"user_id": "1", "event_id": eventUUID, "quantity": "1",
+			"order_id": orderUUID, "user_id": "1", "event_id": eventUUID, "quantity": "1",
 		},
 	}).Result()
 
@@ -198,7 +199,7 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"user_id": "1", "event_id": uuid.New().String(), "quantity": "1",
+			"order_id": uuid.New().String(), "user_id": "1", "event_id": uuid.New().String(), "quantity": "1",
 		},
 	})
 
@@ -234,7 +235,7 @@ type fakeInventoryRevert struct{ reverted bool }
 func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
 	panic("SetInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ int, _ int) (bool, error) {
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int) (bool, error) {
 	panic("DeductInventory not expected in this test")
 }
 func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {

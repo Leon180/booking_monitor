@@ -54,7 +54,12 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 	// "malformed_message" instead of "db_error". The Redis-side
 	// inventory revert still happens on the worker's compensation
 	// path (handleFailure -> RevertInventory).
-	newOrder, err := domain.NewOrder(msg.UserID, msg.EventID, msg.Quantity)
+	// Reuse the caller-minted OrderID from the queue message — same id
+	// the API handler returned to the client at HTTP 202. Across PEL
+	// retries this is stable; pre-PR-47 the worker minted a fresh
+	// uuid per redelivery so the client's id and DB's id diverged on
+	// retry.
+	newOrder, err := domain.NewOrder(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity)
 	if err != nil {
 		p.logger.Error(ctx, "Malformed order message",
 			tag.MsgID(msg.MessageID), tag.Error(err))
