@@ -28,6 +28,8 @@ case "$rel_path" in
   "README.zh-TW.md")           paired="README.md" ;;
   "docs/PROJECT_SPEC.md")      paired="docs/PROJECT_SPEC.zh-TW.md" ;;
   "docs/PROJECT_SPEC.zh-TW.md") paired="docs/PROJECT_SPEC.md" ;;
+  "docs/monitoring.md")        paired="docs/monitoring.zh-TW.md" ;;
+  "docs/monitoring.zh-TW.md")  paired="docs/monitoring.md" ;;
   *) exit 0 ;;
 esac
 

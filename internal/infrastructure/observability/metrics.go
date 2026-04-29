@@ -201,6 +201,32 @@ var (
 		[]string{"cache"},
 	)
 
+	// RedisStreamCollectorErrorsTotal increments when the
+	// StreamsCollector's Redis calls (XLEN / XPENDING) fail during
+	// a Prometheus scrape. Without this counter, a sustained Redis
+	// outage causes the stream-length / pending / lag metric series
+	// to silently disappear from /metrics — Prometheus's own
+	// scrape-staleness handling only catches *whole-scrape* failures
+	// (HTTP 5xx/timeout), NOT selective metric omission within a
+	// successful scrape.
+	//
+	// The collector deliberately does NOT propagate per-call errors
+	// up the scrape (emitting partial metrics is preferable to
+	// failing the whole /metrics endpoint), but that means
+	// dashboards alone can't distinguish "stream is empty" from
+	// "Redis is down". This counter closes that gap.
+	//
+	// Pairs with the alert `RedisStreamCollectorDown`
+	// (rate > 0 for 2m → critical) which fires when the collector
+	// itself is degraded.
+	RedisStreamCollectorErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "redis_stream_collector_errors_total",
+			Help: "Streams observability collector Redis-call failures (XLEN/XPENDING) — sustained > 0 = collector degraded, stream-* gauges may be stale",
+		},
+		[]string{"stream", "operation"},
+	)
+
 	// RedisDLQRoutedTotal counts SUCCESSFUL routes to the Redis DLQ
 	// (orders:dlq), labelled by reason so operators can distinguish
 	// malformed-parse failures from malformed-classification failures

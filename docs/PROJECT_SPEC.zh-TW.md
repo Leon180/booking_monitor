@@ -376,6 +376,49 @@ window 是 5 分鐘 lookback(**不是** since deploy 的累積值)— 這個 int
 
 所有預設值都是 heuristic init values — 詳見 config.go 的 header comments。等實際 production-shaped run 產生 `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds` 直方圖之後再依資料調整。
 
+### 6.8 Redis Streams Hardening
+
+booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API → worker)和 `orders:dlq`(等待 operator 檢視的失敗訊息)。本次同時上線三個觀測性 + 保留期相關問題的修正:
+
+**每個 stream 的容量策略** — 故意不對稱:
+
+| Stream | 上限策略 | 原因 |
+| :-- | :-- | :-- |
+| `orders:stream` | **不設上限** | 每筆都是顧客訂單。`MAXLEN` 會默默丟掉最舊的未處理訂單 → 靜默資料遺失 → 災難級。透過分級告警 +(未來)生產者端的反壓來界定有限增長。 |
+| `orders:dlq` | 每次 XADD 帶 **`MINID ~ <NOW − REDIS_DLQ_RETENTION>`**(預設 30d) | DLQ 裡是已經失敗、等待 operator 檢視的訊息。過了保留期窗口後不是被修就是被 write-off;以時間為基礎的淘汰是有界的保留期,不會像 in-flight 訊息那樣被靜默丟掉。可透過 `REDIS_DLQ_RETENTION`(`config.RedisConfig.DLQRetention`)設定;`Validate()` 會拒絕 ≤ 0 的值,因為 0 會在每次 XADD 都把全部 entry 砍掉。未來:在 MINID 把它們淘汰前先封存到 S3。 |
+
+**Streams observability** ([streams_collector.go](../internal/infrastructure/observability/streams_collector.go)) — `prometheus.Collector`,在 scrape 時讀 XLEN + XPENDING summary:
+
+| 指標 | 來源 | 用途 |
+| :-- | :-- | :-- |
+| `redis_stream_length{stream}` | `XLEN`(O(1)) | 熱 stream 應該排空到 ~0;持續 > 0 = 積壓 |
+| `redis_stream_pending_entries{stream,group}` | `XPENDING` summary 計數 | In-flight 工作(已派發但還沒 XACK) |
+| `redis_stream_consumer_lag_seconds{stream,group}` | `NOW() − parse_ms(XPENDING.Lower)` | 最舊 pending 條目的年齡 — Redis Streams 的標準 lag 訊號 |
+
+成本:每個 stream 每次 scrape 兩個 Redis round-trip(XLEN + XPENDING summary)。Prometheus 預設 15s scrape × 2 個 stream = ~0.27 calls/sec。微不足道。
+
+**`orders:stream` 的分級告警**:
+
+| 告警 | 門檻 | severity | 動作 |
+| :-- | :-- | :-- | :-- |
+| `OrdersStreamBacklogYellow` | 長度 > 10K 持續 2m | info | 「在 tier 2 之前先調查」 |
+| `OrdersStreamBacklogOrange` | 長度 > 50K 持續 2m | warning | 「立即 page on-call」 |
+| `OrdersStreamBacklogRed` | 長度 > 200K 持續 1m | critical | 「OOM 即將發生 — 手動 scale 或限流」 |
+| `OrdersStreamConsumerLag` | lag > 60s 持續 2m | warning | 「特定 consumer 卡住(GC、hung syscall)」 |
+| `OrdersDLQNonEmpty` | DLQ 長度 > 0 持續 5m | warning | 「operator 用 XRANGE orders:dlq 檢視」 |
+
+**HTTP 邊界的 request body 大小上限** ([api/middleware/body_size.go](../internal/infrastructure/api/middleware/body_size.go)):
+
+大小驗證放在 HTTP 層,**不在**快取裡(業界慣例 — Stripe / Shopify / GitHub Octokit / AWS API Gateway)。`BodySize(MaxBookingBodyBytes)` 包住 `/api/v1` group:`MaxBookingBodyBytes = 16 KiB`,以 `http.MaxBytesReader` 強制執行(同時擋下宣告的 `Content-Length` 超量、以及 chunked body 在實際讀取時的 overflow)。Oversize 的請求會收到 **413 Payload Too Large**,body 是標準的 `dto.ErrorResponse` 形狀;handler 永遠不會被叫到。
+
+為什麼是 16 KiB 而不是 Stripe 的 1 MB:booking 端點吃的是固定形狀 JSON(實際約 80 bytes)。上限要抓緊 — 寬鬆的上限會放大「合法請求 vs 攻擊請求」的比例。下游的快取層因此可以信任已經驗證過的輸入;`Idempotency-Key` 對應的 value 不可能比產生它的 body 還大。
+
+**延後到後續 PR 處理**:
+
+- **生產者端反壓**:`XLEN > threshold` → booking handler 回 503。把 queue 限定在有界範圍,代價是顯式拒絕。threshold 需要 k6 + worker-killed 負載資料才能調(等 N6 test infra 完成後)。
+- **Redis 8 + DLQ XAdd 用 IDMP**:Redis 8 內建 server-side stream-entry idempotency(`XADD ... IDMP <token>`),消除 worker-retry-after-XACK-failure 造成的重複 DLQ 條目。需要先升級到 Redis 8(目前在 7-alpine)。
+- **booking-side IDMP**:優先序較低,因為 HTTP 層的冪等快取已經能阻擋使用者可見的重複下單。
+
 ---
 
 ## 7. 可觀測性

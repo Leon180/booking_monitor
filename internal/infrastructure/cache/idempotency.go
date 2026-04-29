@@ -77,6 +77,11 @@ func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result
 	if err != nil {
 		return fmt.Errorf("idempotency Set: marshal: %w", err)
 	}
+	// Size validation lives at the HTTP boundary
+	// (api/middleware/body_size.go) NOT here, per industry convention
+	// (Stripe / Shopify / GitHub Octokit). The cache layer trusts
+	// pre-validated input. See PROJECT_SPEC §6.8 for the layering
+	// rationale.
 	if err := r.client.Set(ctx, idempotencyKey(key), data, r.idempotencyTTL).Err(); err != nil {
 		return fmt.Errorf("idempotency Set: redis: %w", err)
 	}

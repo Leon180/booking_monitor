@@ -12,6 +12,7 @@ This project maintains **paired English + Traditional Chinese (zh-TW)** versions
 | `.claude/CLAUDE.md` | `.claude/CLAUDE.zh-TW.md` |
 | `README.md` | `README.zh-TW.md` |
 | `docs/PROJECT_SPEC.md` | `docs/PROJECT_SPEC.zh-TW.md` |
+| `docs/monitoring.md` | `docs/monitoring.zh-TW.md` |
 
 **Rules:**
 1. **Never** edit only one side of a pair. If you cannot translate, ask the user instead of skipping.
@@ -22,6 +23,12 @@ This project maintains **paired English + Traditional Chinese (zh-TW)** versions
 6. **Translation style**: zh-TW should use 台灣繁體中文 conventions (e.g. 資料庫 not 数据库, 介面 not 接口, 物件 not 对象).
 
 **Note**: Claude Code auto-loads both `./CLAUDE.md` and `./.claude/CLAUDE.md` with equal priority, so this file (at `.claude/CLAUDE.md`) is loaded directly — no root stub needed. Only the English version is auto-loaded; `.claude/CLAUDE.zh-TW.md` is human-readable reference. A PostToolUse hook (`.claude/hooks/check_bilingual_docs.sh`) enforces the contract at edit time.
+
+## ⚠️ Monitoring Docs Contract
+
+The day-to-day operator's monitoring guide lives at [docs/monitoring.md](../docs/monitoring.md) (+ paired zh-TW). It documents the metric inventory, Prometheus / Grafana workflow, alert catalog, and recipes to force alerts to fire for testing.
+
+A second PostToolUse hook (`.claude/hooks/check_monitoring_docs.sh`) fires whenever any observability surface is touched — `internal/infrastructure/observability/metrics.go`, any `*_collector.go`, `deploy/prometheus/alerts.yml`, `deploy/prometheus/prometheus.yml`, or `deploy/grafana/provisioning/dashboards/*.json` — and reminds Claude to update the guide before ending the turn. Add a new metric without updating §2; add a new alert without updating §5; the hook will catch it.
 
 ---
 

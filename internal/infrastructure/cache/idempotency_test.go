@@ -82,3 +82,4 @@ func TestRedisIdempotency_TTL(t *testing.T) {
 	ttl := s.TTL(idempotencyKey(key))
 	assert.Equal(t, 5*time.Second, ttl, "Set must apply cfg.Redis.IdempotencyTTL")
 }
+

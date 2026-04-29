@@ -147,6 +147,12 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.Boo
 	ops.RegisterHealthRoutes(r, healthHandler)
 
 	v1 := r.Group(apiV1Prefix)
+	// Body-size cap on the versioned API group. Applied here (not at
+	// the engine root) so future operational endpoints with different
+	// caps can opt out. Industry pattern: size validation at the HTTP
+	// boundary, NOT inside the storage layer (Stripe / Shopify /
+	// GitHub Octokit / AWS API Gateway). See PROJECT_SPEC §6.8.
+	v1.Use(middleware.BodySize(middleware.MaxBookingBodyBytes))
 	booking.RegisterRoutes(v1, handler)
 	// NOTE: the legacy POST /book route (Phase 0) was removed because it
 	// bypassed the nginx `location /api/` rate-limit zone. All callers

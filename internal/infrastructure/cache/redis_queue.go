@@ -47,6 +47,12 @@ const (
 	fieldDLQError      = "error"
 	fieldDLQFailedAt   = "failed_at"
 
+	// DLQ retention is now per-environment via cfg.Redis.DLQRetention
+	// (env var REDIS_DLQ_RETENTION, default 720h = 30d). The MINID
+	// time-based eviction policy (vs MAXLEN count-based) is preserved
+	// — see config.go::RedisConfig.DLQRetention doc + PROJECT_SPEC
+	// §6.8 for why MAXLEN would be wrong on a work-queue stream.
+
 	// DLQ route reasons — Prometheus label values for
 	// `redis_dlq_routed_total{reason=...}`. Kept in sync with the
 	// pre-warm list in `internal/infrastructure/observability/metrics.go`
@@ -72,6 +78,7 @@ type redisOrderQueue struct {
 	failureTimeout           time.Duration
 	pendingBlockTimeout      time.Duration
 	readErrorBackoff         time.Duration
+	dlqRetention             time.Duration
 }
 
 // NewRedisOrderQueue wires the order-stream consumer.
@@ -110,6 +117,7 @@ func NewRedisOrderQueue(
 		failureTimeout:           cfg.Worker.FailureTimeout,
 		pendingBlockTimeout:      cfg.Worker.PendingBlockTimeout,
 		readErrorBackoff:         cfg.Worker.ReadErrorBackoff,
+		dlqRetention:             cfg.Redis.DLQRetention,
 	}
 }
 
@@ -380,9 +388,32 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 		values[k] = v
 	}
 
+	// MinID = "<NOW - dlqRetention>-0" tells Redis to evict any DLQ
+	// entry older than that timestamp on this XADD. Approx=true
+	// asks Redis to use the cheaper macro-node-boundary trim instead
+	// of exact MINID; trade-off is the trim may leave a few extra
+	// entries past the boundary, which is fine for DLQ retention.
+	//
+	// Stream IDs are `<ms-since-epoch>-<seq>`; UnixMilli matches.
+	//
+	// Clamp to 0 if the host clock is so badly drifted that
+	// (now - 30d) goes negative (pre-1970). A negative MinID is
+	// undocumented Redis behavior and may be parsed as 0 (= trim
+	// everything) — clamping to 0 means "trim everything older than
+	// epoch" which is the same intent without the ambiguity. Real
+	// hosts won't hit this, but the cost of the check is one
+	// comparison; the cost of guessing wrong is total DLQ wipe.
+	cutoffMs := time.Now().Add(-q.dlqRetention).UnixMilli()
+	if cutoffMs < 0 {
+		cutoffMs = 0
+	}
+	cutoffID := fmt.Sprintf("%d-0", cutoffMs)
+
 	if addErr := q.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: dlqKey,
 		Values: values,
+		MinID:  cutoffID,
+		Approx: true,
 	}).Err(); addErr != nil {
 		q.metrics.RecordXAddFailure("dlq")
 		q.logger.Error(ctx, "XAdd to DLQ failed",

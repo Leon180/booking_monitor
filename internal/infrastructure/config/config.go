@@ -158,6 +158,22 @@ type RedisConfig struct {
 	// window your callers use; raise for financial reconciliation
 	// flows that retry across days.
 	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
+
+	// DLQRetention is the bounded retention window for the
+	// `orders:dlq` stream. Translated to a Redis Streams MINID
+	// directive on every XADD so entries older than NOW-DLQRetention
+	// are evicted.
+	//
+	// Tunable per-environment because retention is a POLICY decision,
+	// not a defensive invariant:
+	//   * Compliance (PCI / SOX / GDPR) varies by industry
+	//   * Operator may want to extend during incident investigation
+	//   * Different deployments may have different review SLAs
+	//
+	// Default 720h (30d) matches typical operator-investigation SLA.
+	// Future: pair with S3 archival before MINID drops them — see
+	// PROJECT_SPEC §6.8 deferred items.
+	DLQRetention time.Duration `yaml:"dlq_retention" env:"REDIS_DLQ_RETENTION" env-default:"720h"`
 }
 
 // WorkerConfig holds tunables for the order-stream worker loop
@@ -337,6 +353,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.MaxConsecutiveReadErrors <= 0 {
 		missing = append(missing, "redis.max_consecutive_read_errors / REDIS_MAX_CONSECUTIVE_READ_ERRORS (must be >= 1; 0 silently exits on first error)")
+	}
+	if c.Redis.DLQRetention <= 0 {
+		missing = append(missing, "redis.dlq_retention / REDIS_DLQ_RETENTION (must be > 0; 0 would trim entire DLQ on every XADD)")
 	}
 
 	// Recon tunables — same rationale as Worker tunables above. Zero
