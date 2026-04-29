@@ -137,7 +137,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		statusCode = http.StatusAccepted
 		acceptedJSON, _ := json.Marshal(dto.BookingAcceptedResponse{
 			OrderID: orderID,
-			Status:  "processing",
+			Status:  dto.BookingStatusProcessing,
 			Message: "booking accepted, awaiting confirmation",
 			Links: dto.BookingLinks{
 				Self: orderSelfLinkPrefix + orderID.String(),

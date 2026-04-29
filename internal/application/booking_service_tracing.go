@@ -8,6 +8,7 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -29,7 +30,13 @@ func (s *bookingServiceTracingDecorator) BookTicket(ctx context.Context, userID 
 
 	orderID, err := s.next.BookTicket(ctx, userID, eventID, quantity)
 	if err != nil {
+		// RecordError adds the exception event but doesn't change the
+		// span status. SetStatus(Error) is what flips the span to red
+		// in Jaeger / Grafana Tempo / Datadog APM dashboards. Without
+		// it, error spans look identical to successful ones in the
+		// "% errored" rollups — silent observability gap.
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	} else {
 		// Tag the span with the minted order_id so trace lookups in
 		// Jaeger from a customer-reported order_id resolve back to
@@ -51,6 +58,7 @@ func (s *bookingServiceTracingDecorator) GetBookingHistory(ctx context.Context, 
 	orders, total, err := s.next.GetBookingHistory(ctx, page, pageSize, status)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return orders, total, err
 }
@@ -64,6 +72,7 @@ func (s *bookingServiceTracingDecorator) GetOrder(ctx context.Context, id uuid.U
 	order, err := s.next.GetOrder(ctx, id)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return order, err
 }

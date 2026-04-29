@@ -44,6 +44,29 @@ type Meta struct {
 	Size  int `json:"size"`
 }
 
+// BookingStatus is a typed enum for the `status` field on
+// BookingAcceptedResponse and any future polling responses. Typed
+// rather than raw `string` so a typo at the call site (`"Processing"`
+// with capital P, `"queued"`, etc.) fails at compile time. This
+// matters because the wire field is part of the public API contract;
+// silent drift between the producer and the documented set is
+// exactly the bug the type system can prevent.
+//
+// Today the only value is `BookingStatusProcessing` — `POST /book`
+// can only accept-and-queue. As Pattern A (frontend-collects-card)
+// lands the set will grow (`awaiting_payment`, `expired`, etc.).
+//
+// `OrderResponse.Status` (returned by `GET /orders/:id`) keeps a
+// raw `string` to mirror `domain.OrderStatus`, which has its own
+// terminal-state vocabulary (`pending`, `charging`, `confirmed`,
+// `failed`, `compensated`). The two enums describe different things
+// and live at different layers — don't conflate them.
+type BookingStatus string
+
+const (
+	BookingStatusProcessing BookingStatus = "processing"
+)
+
 // BookingAcceptedResponse is the wire shape returned by POST /api/v1/book
 // on success. The 202 semantics are honest about the async pipeline:
 // the Redis-side inventory deduct succeeded (the "gate"), an order
@@ -67,10 +90,10 @@ type Meta struct {
 //     link today; structured so adding `links.cancel` etc. later is
 //     additive.
 type BookingAcceptedResponse struct {
-	OrderID uuid.UUID    `json:"order_id"`
-	Status  string       `json:"status"`
-	Message string       `json:"message"`
-	Links   BookingLinks `json:"links"`
+	OrderID uuid.UUID     `json:"order_id"`
+	Status  BookingStatus `json:"status"`
+	Message string        `json:"message"`
+	Links   BookingLinks  `json:"links"`
 }
 
 // BookingLinks holds the polling endpoint for a freshly-accepted

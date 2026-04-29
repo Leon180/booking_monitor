@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewOrder(t *testing.T) {
@@ -65,11 +66,13 @@ func TestNewOrder(t *testing.T) {
 // newTestOrder is a convenience helper for tests that don't care about
 // the specific UUID — they just need a valid Order. Centralised so a
 // future factory-shape change doesn't ripple across every transition
-// test below.
+// test below. Uses require.NoError so a factory-side regression
+// produces a clear failure here instead of a confusing nil-Order
+// downstream assertion.
 func newTestOrder(t *testing.T, userID int, eventID uuid.UUID, quantity int) domain.Order {
 	t.Helper()
 	o, err := domain.NewOrder(uuid.New(), userID, eventID, quantity)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	return o
 }
 

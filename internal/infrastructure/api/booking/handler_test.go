@@ -135,7 +135,8 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	var got dto.BookingAcceptedResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, wantOrderID, got.OrderID, "response must echo the BookTicket-minted order_id")
-	assert.Equal(t, "processing", got.Status)
+	assert.Equal(t, dto.BookingStatusProcessing, got.Status,
+		"status must be the typed BookingStatusProcessing constant — catches stringly-typed regressions")
 	assert.Contains(t, got.Message, "booking accepted")
 	assert.Equal(t, "/api/v1/orders/"+wantOrderID.String(), got.Links.Self,
 		"links.self must be a valid GET /orders/:id URL")
@@ -143,6 +144,84 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	require.NotNil(t, idem.lastIn, "idempotency Set must be called when key is present")
 	assert.Equal(t, http.StatusAccepted, idem.lastIn.StatusCode,
 		"cached status code must match the wire response — 202, not 200")
+}
+
+// TestHandleBook_IdempotencyReplay verifies the cache-hit path:
+// when the Idempotency-Key has a cached entry, the handler MUST
+// return the cached body verbatim with X-Idempotency-Replayed: true
+// AND the underlying BookTicket service is NOT called.
+//
+// Without this test, the cache-hit branch was untested — a future
+// refactor that accidentally calls BookTicket BEFORE the cache
+// lookup (or after, with a swallowed result) would silently break
+// idempotency without any assertion firing.
+func TestHandleBook_IdempotencyReplay(t *testing.T) {
+	t.Parallel()
+
+	cachedOrderID := uuid.New()
+	cachedBody := `{"order_id":"` + cachedOrderID.String() + `","status":"processing","message":"booking accepted, awaiting confirmation","links":{"self":"/api/v1/orders/` + cachedOrderID.String() + `"}}`
+
+	bookCalled := false
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			bookCalled = true
+			return uuid.Nil, nil
+		},
+	}
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, key string) (*domain.IdempotencyResult, error) {
+			assert.Equal(t, "replay-key", key)
+			return &domain.IdempotencyResult{
+				StatusCode: http.StatusAccepted,
+				Body:       cachedBody,
+			}, nil
+		},
+	}
+
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "replay-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.False(t, bookCalled, "BookTicket MUST NOT be called on idempotency cache hit")
+	assert.Equal(t, http.StatusAccepted, w.Code, "replay must return the cached status code (202)")
+	assert.Equal(t, "true", w.Header().Get("X-Idempotency-Replayed"),
+		"X-Idempotency-Replayed: true header must be set on every replay")
+	assert.JSONEq(t, cachedBody, w.Body.String(),
+		"replay must return the cached body byte-for-byte (modulo JSON whitespace)")
+}
+
+// TestHandleBook_SoldOut pins the 409 sold-out error path. Without
+// it, the status-code change (200 → 202 in PR #47) leaves the error
+// path's status code unverified — a typo in mapError or in the
+// error-path branch could silently turn sold-out responses into
+// 200 OK.
+func TestHandleBook_SoldOut(t *testing.T) {
+	t.Parallel()
+
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			return uuid.Nil, domain.ErrSoldOut
+		},
+	}
+	idem := &stubIdempotencyRepo{}
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code, "sold-out must surface as 409 Conflict")
+	var got dto.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "sold out", got.Error,
+		"public error message must be the sanitized 'sold out' string from mapError")
 }
 
 // TestHandleGetOrder_OK verifies the polling endpoint returns the
