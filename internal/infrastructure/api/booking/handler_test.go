@@ -405,6 +405,81 @@ func TestHandleBook_FinalSetError_ResponseStillSent(t *testing.T) {
 		"the 202 body must reach the client even when cache write failed")
 }
 
+// TestHandleBook_CacheGetError_ProcessesNormally pins the fail-open
+// availability contract: when the idempotency cache GET fails (e.g.
+// Redis outage), the handler MUST log ERROR and proceed to normal
+// processing — NOT short-circuit with a 5xx. Without this test, a
+// future refactor that promotes the Get error to "fail closed" would
+// turn every Redis blip into a booking-endpoint outage; the failure
+// mode is the precise scenario the
+// `idempotency_cache_get_errors_total` counter exists to surface.
+func TestHandleBook_CacheGetError_ProcessesNormally(t *testing.T) {
+	t.Parallel()
+
+	bookCalled := false
+	wantOrderID := uuid.New()
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			bookCalled = true
+			return wantOrderID, nil
+		},
+	}
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, _ string) (*domain.IdempotencyResult, string, error) {
+			return nil, "", errors.New("redis: connection refused")
+		},
+	}
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "outage-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.True(t, bookCalled, "cache-Get error MUST fall through to BookTicket — fail-open availability contract")
+	assert.Equal(t, http.StatusAccepted, w.Code,
+		"cache-Get error MUST NOT block the request — Redis outage shouldn't outage the booking endpoint")
+	assert.Contains(t, w.Body.String(), wantOrderID.String(),
+		"successful response shape must reach the client even with idempotency suspended")
+}
+
+// TestHandleBook_CacheGetError_SkipsSet pins the transient-5xx
+// mitigation: when the cache-GET errored, the subsequent Set MUST be
+// skipped. Otherwise a flaky-then-recovered Redis would cache a
+// transient 5xx response for 24h — same-key retries would then replay
+// the cached failure rather than re-attempting against a healthy
+// dependency. Stripe's "cache 5xx to prevent retry storm" assumes the
+// 5xx represents a stable condition; a transient cache-layer outage
+// violates that assumption.
+func TestHandleBook_CacheGetError_SkipsSet(t *testing.T) {
+	t.Parallel()
+
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, _ string) (*domain.IdempotencyResult, string, error) {
+			return nil, "", errors.New("redis: connection refused")
+		},
+	}
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			return uuid.New(), nil
+		},
+	}
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "outage-key-skip-set")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code, "request must succeed even though cache is down")
+	assert.Nil(t, idem.lastIn,
+		"when cache-Get errored, Set MUST be skipped — caching a response written through a flaky-then-recovered Redis risks pinning transient failures for 24h")
+}
+
 // TestHandleBook_LazyWriteBackError_ReplaysAnyway pins the same
 // fail-open contract for the legacy-migration write-back path. A
 // Redis blip during write-back must not turn an otherwise-successful

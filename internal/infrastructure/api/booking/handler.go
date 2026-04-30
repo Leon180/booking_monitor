@@ -228,7 +228,15 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	// Lazy write-back is documented in docs/PROJECT_SPEC §5; the brief
 	// migration vulnerability window is bounded by the existing 24h
 	// cache TTL.
-	var fp string
+	// `cacheGetFailed` records whether the cache lookup itself errored
+	// (Redis outage / unmarshal). Threaded down to the post-processing
+	// Set decision: caching a fresh response written through a
+	// flaky-then-recovered Redis would pin transient failures for 24h.
+	// See `TestHandleBook_CacheGetError_SkipsSet` for the contract.
+	var (
+		fp             string
+		cacheGetFailed bool
+	)
 	if idempotencyKey != "" {
 		fp = fingerprint(bodyBytes)
 		cached, cachedFP, getErr := h.idempotencyRepo.Get(ctx, idempotencyKey)
@@ -244,7 +252,8 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 				if setErr := h.idempotencyRepo.Set(ctx, idempotencyKey, cached, fp); setErr != nil {
 					log.Warn(ctx, "lazy fingerprint write-back failed; entry will retry on next replay",
 						tag.Error(setErr),
-						log.String("idempotency_key", idempotencyKey))
+						log.String("idempotency_key", idempotencyKey),
+						log.String("idempotency_op", "lazy_writeback"))
 				}
 				replayCached(c, cached)
 				return
@@ -294,6 +303,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		// signal so the WARN/ERROR distinction isn't load-bearing for
 		// alerting.
 		if getErr != nil {
+			cacheGetFailed = true
 			log.Error(ctx, "idempotency cache Get failed; processing as cache-miss (idempotency briefly suspended)",
 				tag.Error(getErr),
 				log.String("idempotency_key", idempotencyKey))
@@ -358,10 +368,18 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	}
 
 	// Cache the result for idempotency replay. Per Stripe's convention
-	// 4xx validation errors are NOT cached — a typo'd body must not
-	// burn the idempotency key for 24h. 2xx (the success path) and 5xx
-	// (server errors clients should retry) ARE cached.
-	if idempotencyKey != "" && shouldCacheStatus(statusCode) {
+	// all 4xx are NOT cached — a typo'd body must not burn the
+	// idempotency key for 24h, AND business 4xx (sold-out, duplicate)
+	// represent transient business state that should not be pinned
+	// for replay. 2xx (the success path) and 5xx (server errors
+	// clients should retry) ARE cached.
+	//
+	// Additional guard (added post-N4 review): when the cache-Get
+	// itself errored upstream, skip the Set. Caching a fresh
+	// response written through a flaky-then-recovered Redis would
+	// pin a possibly-transient state for 24h. See
+	// `TestHandleBook_CacheGetError_SkipsSet` for the contract.
+	if idempotencyKey != "" && shouldCacheStatus(statusCode) && !cacheGetFailed {
 		if setErr := h.idempotencyRepo.Set(ctx, idempotencyKey, &domain.IdempotencyResult{
 			StatusCode: statusCode,
 			Body:       body,
@@ -369,6 +387,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 			log.Warn(ctx, "idempotency cache Set failed (response already sent; next retry will re-process)",
 				tag.Error(setErr),
 				log.String("idempotency_key", idempotencyKey),
+				log.String("idempotency_op", "final_set"),
 				log.Int("body_size_bytes", len(body)),
 			)
 		}

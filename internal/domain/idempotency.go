@@ -47,6 +47,17 @@ type IdempotencyRepository interface {
 	// non-nil result indicates a legacy (pre-N4) entry — the caller
 	// should accept the replay AND write back the new fingerprint via
 	// Set to upgrade the entry in place.
+	//
+	// Implementation contract (load-bearing for the instrumented
+	// decorator and the handler's three-way switch): when err is
+	// non-nil, BOTH result MUST be nil AND fingerprint MUST be empty.
+	// Returning a partial result alongside an error would let the
+	// decorator's early-return-on-error silently discard a valid
+	// cached value, AND cause the handler's switch on cachedFP to
+	// pick a branch using a fingerprint paired with an error rather
+	// than a result. A future tiered-cache implementation (L1 hit +
+	// L2 refresh failure, for example) MUST coalesce to one of the
+	// three states above — never the fourth (non-nil result + err).
 	Get(ctx context.Context, key string) (result *IdempotencyResult, fingerprint string, err error)
 
 	// Set stores result + fingerprint atomically under key. The

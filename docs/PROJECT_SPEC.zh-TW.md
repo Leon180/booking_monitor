@@ -236,7 +236,8 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 | 同 key X + 同 body | Hit, fingerprint 相符 | 重播快取的回應,設 `X-Idempotency-Replayed: true`。Service **不會**被呼叫。 |
 | 同 key X + 不同 body | Hit, fingerprint 不符 | **409 Conflict** — **不重播**(會誤導 client 以為新請求成功)。Client 必須對新 body 用一把新的 key。 |
 | 同 key X(N4 之前快取) | Hit, fingerprint 為空 | 重播 + 把新算出的 fingerprint 懶式寫回去,後續重播才能驗證。每個 key 的遷移視窗在**第一次重播時就關閉**(寫回 upgrade 該 entry);最壞情況才是 24h TTL — 那是針對「整個 24h 內都沒被重播過」的 key。 |
-| 同 key X、原本回 4xx(驗證失敗) | 不快取 | 沿用 Stripe 慣例 — 快取 4xx 會讓一次手誤把 key 燒掉 24h。Client 修正 body 後可以用同樣的 key 重試。 |
+| 同 key X、原本回**任何 4xx** | 不快取 | 沿用 Stripe 慣例。涵蓋兩類:**驗證 4xx**(手誤的 body — 快取會讓 key 被燒掉 24h)以及**業務 4xx**(sold-out 409、duplicate 409 — 這些是會在 24h TTL 內變化的暫態業務狀態;快取住會阻止合法的重試)。2xx + 5xx 才會被快取:5xx 是為了讓 client 不要對已知降級的端點 retry-storm。 |
+| 同 key X、cache GET 上游已經錯了 | Set 跳過 | 縱深防禦(N4 review 後加):一個 flaky-then-recovered 的 Redis 寫入新回應會把可能暫態的狀態 pin 住 24h。fail-open 的可用性路徑(請求繼續處理)保留;只是跳過 cache 寫入,後續重試會打到一個乾淨的 cache。 |
 
 Fingerprint 是把原始 request body bytes 做 hex `SHA-256`。**不做** JSON canonicalization — client 必須送 byte-identical 的重試(這是 Stripe / Shopify / GitHub / AWS 的事實標準)。Idempotency key 必須是 ASCII 可印字元(0x20–0x7E)、最多 128 字元;控制字元會被拒絕,避免下游的日誌解析器被混淆。重播結果(match / mismatch / legacy_match)透過 `idempotency_replays_total{outcome}` counter 暴露(見 [docs/monitoring.zh-TW.md §2](monitoring.zh-TW.md))。
 
