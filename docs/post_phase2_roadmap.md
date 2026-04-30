@@ -14,6 +14,17 @@ Forward-looking sprint plan, written 2026-04-30 immediately after the Phase 2 ch
 Phase 2.5 (cleanup, ~1 wk)
   CP1  cleanup PR (rows 1–9 from action plan)
   CP2  recon Config + Metrics interfaces + saga.Config (architecture row 10)
+  CP2.5 application-port relocations: move `DistributedLock` and `EventPublisher` interfaces from `internal/domain/` to `internal/application/` (their `_only_ consumer is OutboxRelay; both have no domain invariants — pure plumbing ports). `IdempotencyResult` + `IdempotencyRepository` stay in domain (borderline; HTTP-transport semantics are defensible as API-protocol contracts). Wire-format constants like `EventTypeOrderCreated` stay in domain per coding-style rule 5. Small follow-up to CP2 — same architectural-cleanup theme, ~30 LOC + import updates across consumers.
+  CP2.6 `internal/application/` subpackage tidy: the project started subpackaging (`payment/`, `recon/`, `saga/`) in earlier PRs but stopped halfway — booking, worker, and outbox flows still live as ~16 flat files at the top level. Promote each cohesive flow to its own subpackage:
+    - new `application/booking/` (booking_service.go + service_metrics.go + service_tracing.go + booking_metrics.go + tests)
+    - new `application/worker/` (worker_service.go + worker_metrics.go + queue.go + queue_metrics.go + queue_policy.go + message_processor.go + message_processor_metrics.go + tests)
+    - new `application/outbox/` (outbox_relay.go + outbox_relay_tracing.go + tests)
+    - move `saga_compensator.go` → `application/saga/compensator.go` (flat-namespace remnant from before `saga/` existed)
+    - move `db_metrics.go` → `internal/infrastructure/observability/` (it's an adapter wrapping `sql.DB.Stats()`; misplaced at the application layer)
+    - stays flat: `module.go` (top-level fx), `uow.go` (cross-package UnitOfWork), `order_events.go` (wire-format DTOs consumed by payment/saga/recon/worker)
+    - `event_service.go`: subpackage `application/event/` for symmetry, OR keep flat (1 file; borderline). Decide during execution.
+    - `payment_service.go` (top-level interface shim): fold into `application/payment/` near its impl, or rename `payment_port.go` and keep flat. Decide during execution.
+   ~16 file moves + ~15-20 import updates across cmd files + tests. Pure refactor — no behaviour change; tests pass unchanged. Lands BEFORE CP3 so the metrics-file split has fewer cross-package imports to coordinate, and BEFORE Phase 3 so Pattern A's reservation flow extends `application/booking/` cleanly rather than further crowding the flat namespace.
   CP3  observability/metrics.go split + middleware move (row 11)
   CP4  testcontainers integration suite for repositories.go (row 12 = roadmap N8)
   CP5  docs/runbooks/* + alerts runbook_url annotations (row 13 = roadmap N3)

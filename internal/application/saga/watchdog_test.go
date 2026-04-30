@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -15,8 +14,6 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
-	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 )
@@ -37,26 +34,49 @@ func (f *fakeCompensator) HandleOrderFailed(_ context.Context, payload []byte) e
 	return f.err
 }
 
+// recordingSagaMetrics is the test-side `saga.Metrics` implementation —
+// captures every call so assertions can read the recorded counts
+// instead of polling global Prometheus singletons. Lets tests run
+// safely with `t.Parallel()` (CP1's parallel-counter race was
+// reproducible specifically because counter assertions read shared
+// global state) and makes assertion intent explicit at read time
+// (`metrics.resolved["compensated"]` vs `testutil.ToFloat64(observability.X)`).
+type recordingSagaMetrics struct {
+	stuckFailedOrders int
+	resolved          map[string]int
+	findStuckErrors   int
+	resolveDurations  []float64
+	resolveAges       []float64
+}
+
+func newRecordingSagaMetrics() *recordingSagaMetrics {
+	return &recordingSagaMetrics{resolved: make(map[string]int)}
+}
+
+func (m *recordingSagaMetrics) SetStuckFailedOrders(c int)         { m.stuckFailedOrders = c }
+func (m *recordingSagaMetrics) IncResolved(outcome string)         { m.resolved[outcome]++ }
+func (m *recordingSagaMetrics) IncFindStuckErrors()                { m.findStuckErrors++ }
+func (m *recordingSagaMetrics) ObserveResolveDuration(s float64)   { m.resolveDurations = append(m.resolveDurations, s) }
+func (m *recordingSagaMetrics) ObserveResolveAge(s float64)        { m.resolveAges = append(m.resolveAges, s) }
+
 // watchdogHarness builds a Watchdog with config knobs shortened so
 // tests run in milliseconds. Returns the mock repo so per-test setup
-// can drive the scenario. Accepts any SagaCompensator implementation
-// — `fakeCompensator` for single-outcome tests, `perCallCompensator`
-// for mixed-outcome sweeps.
-func watchdogHarness(t *testing.T, comp application.SagaCompensator) (*saga.Watchdog, *mocks.MockOrderRepository) {
+// can drive the scenario, and the recording metrics so assertions can
+// read what the watchdog emitted.
+func watchdogHarness(t *testing.T, comp application.SagaCompensator) (*saga.Watchdog, *mocks.MockOrderRepository, *recordingSagaMetrics) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	repo := mocks.NewMockOrderRepository(ctrl)
+	metrics := newRecordingSagaMetrics()
 
-	cfg := &config.Config{
-		Saga: config.SagaConfig{
-			WatchdogInterval: 50 * time.Millisecond,
-			StuckThreshold:   1 * time.Millisecond,
-			MaxFailedAge:     1 * time.Hour, // tested separately
-			BatchSize:        10,
-		},
+	cfg := saga.Config{
+		WatchdogInterval: 50 * time.Millisecond,
+		StuckThreshold:   1 * time.Millisecond,
+		MaxFailedAge:     1 * time.Hour, // tested separately
+		BatchSize:        10,
 	}
-	w := saga.NewWatchdog(repo, comp, cfg, mlog.NewNop())
-	return w, repo
+	w := saga.NewWatchdog(repo, comp, cfg, metrics, mlog.NewNop())
+	return w, repo, metrics
 }
 
 // reconstructFailedOrder is a helper for tests that need a domain.Order
@@ -72,16 +92,18 @@ func reconstructFailedOrder(t *testing.T, id uuid.UUID) domain.Order {
 // updated to 0, compensator never called, no resolve histograms
 // observed.
 func TestSweep_NoStuckOrders_NoOps(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil)
 
 	require.NoError(t, w.Sweep(context.Background()))
 
 	assert.Equal(t, 0, comp.calls, "compensator MUST NOT be called when no stuck orders found")
-	assert.Equal(t, float64(0), testutil.ToFloat64(observability.SagaStuckFailedOrders),
+	assert.Equal(t, 0, metrics.stuckFailedOrders,
 		"gauge MUST be set to 0 on empty sweep — stale value would mislead operators")
+	assert.Empty(t, metrics.resolved, "no resolutions on empty sweep")
 }
 
 // TestSweep_FindStuckError_ReturnsAndIncrements: when the
@@ -89,20 +111,18 @@ func TestSweep_NoStuckOrders_NoOps(t *testing.T) {
 // AND increments the dedicated error counter so dashboards can
 // distinguish "no orders are stuck" from "watchdog itself is broken".
 func TestSweep_FindStuckError_ReturnsAndIncrements(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	dbErr := errors.New("postgres: connection refused")
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, dbErr)
-
-	before := testutil.ToFloat64(observability.SagaWatchdogFindStuckErrorsTotal)
 
 	err := w.Sweep(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr, "Sweep must wrap the DB error so callers can errors.Is it")
 
-	after := testutil.ToFloat64(observability.SagaWatchdogFindStuckErrorsTotal)
-	assert.Equal(t, before+1, after,
+	assert.Equal(t, 1, metrics.findStuckErrors,
 		"saga_watchdog_find_stuck_errors_total MUST increment on FindStuckFailed failure — operator's only signal that the watchdog is blind")
 	assert.Equal(t, 0, comp.calls, "compensator MUST NOT be called when FindStuckFailed errored")
 }
@@ -111,23 +131,22 @@ func TestSweep_FindStuckError_ReturnsAndIncrements(t *testing.T) {
 // Failed → compensator returns nil → outcome counter incremented +
 // log line emitted. Pins the canonical resolution path.
 func TestSweep_Compensated_HappyPath(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	stuckID := uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return([]domain.StuckFailed{{ID: stuckID, Age: 5 * time.Minute}}, nil)
 	repo.EXPECT().GetByID(gomock.Any(), stuckID).Return(reconstructFailedOrder(t, stuckID), nil)
 
-	before := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensated"))
-
 	require.NoError(t, w.Sweep(context.Background()))
 
 	assert.Equal(t, 1, comp.calls, "compensator MUST be called on the stuck order")
 	assert.NotEmpty(t, comp.payload, "compensator must receive a marshaled OrderFailedEvent payload")
-
-	after := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensated"))
-	assert.Equal(t, before+1, after, "compensated outcome counter MUST increment")
+	assert.Equal(t, 1, metrics.resolved["compensated"], "compensated outcome counter MUST increment")
+	assert.Len(t, metrics.resolveDurations, 1, "resolve duration histogram observation MUST fire once")
+	assert.Len(t, metrics.resolveAges, 1, "resolve age histogram observation MUST fire once")
 }
 
 // TestSweep_AlreadyCompensated_RaceWonByConsumer: between
@@ -137,8 +156,9 @@ func TestSweep_Compensated_HappyPath(t *testing.T) {
 // the compensator (would be a no-op anyway via internal idempotency,
 // but counting separately gives operators a clean signal).
 func TestSweep_AlreadyCompensated_RaceWonByConsumer(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	id := uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -147,14 +167,11 @@ func TestSweep_AlreadyCompensated_RaceWonByConsumer(t *testing.T) {
 	compensated := domain.ReconstructOrder(id, 1, uuid.New(), 1, domain.OrderStatusCompensated, time.Now().Add(-2*time.Hour))
 	repo.EXPECT().GetByID(gomock.Any(), id).Return(compensated, nil)
 
-	before := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("already_compensated"))
-
 	require.NoError(t, w.Sweep(context.Background()))
 
 	assert.Equal(t, 0, comp.calls,
 		"compensator MUST NOT be called when GetByID shows the row is already Compensated — race won by consumer")
-	after := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("already_compensated"))
-	assert.Equal(t, before+1, after,
+	assert.Equal(t, 1, metrics.resolved["already_compensated"],
 		"already_compensated counter MUST increment — distinct from compensated for race-vs-success operator signal")
 }
 
@@ -167,21 +184,19 @@ func TestSweep_AlreadyCompensated_RaceWonByConsumer(t *testing.T) {
 // Use the harness's default MaxFailedAge=1h and feed an Age=2h to
 // trip the branch. Avoids needing a test-only mutator on Watchdog.
 func TestSweep_MaxAgeExceeded_DoesNotForceTransition(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	id := uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return([]domain.StuckFailed{{ID: id, Age: 2 * time.Hour}}, nil) // > MaxFailedAge=1h
 
-	before := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("max_age_exceeded"))
-
 	require.NoError(t, w.Sweep(context.Background()))
 
 	assert.Equal(t, 0, comp.calls,
 		"max-age branch MUST NOT call compensator — auto-transition without inventory verification is unsafe")
-	after := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("max_age_exceeded"))
-	assert.Equal(t, before+1, after, "max_age_exceeded counter MUST increment")
+	assert.Equal(t, 1, metrics.resolved["max_age_exceeded"], "max_age_exceeded counter MUST increment")
 }
 
 // TestSweep_CompensatorError_RetriesNextSweep: compensator returns an
@@ -189,8 +204,9 @@ func TestSweep_MaxAgeExceeded_DoesNotForceTransition(t *testing.T) {
 // continues to the next order (not aborted). Pins the per-order
 // failure containment contract.
 func TestSweep_CompensatorError_RetriesNextSweep(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{err: errors.New("redis: revert blocked")}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	id1, id2 := uuid.New(), uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -201,14 +217,10 @@ func TestSweep_CompensatorError_RetriesNextSweep(t *testing.T) {
 	repo.EXPECT().GetByID(gomock.Any(), id1).Return(reconstructFailedOrder(t, id1), nil)
 	repo.EXPECT().GetByID(gomock.Any(), id2).Return(reconstructFailedOrder(t, id2), nil)
 
-	before := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-
 	require.NoError(t, w.Sweep(context.Background()),
 		"per-order compensator failures MUST NOT abort the whole sweep")
 	assert.Equal(t, 2, comp.calls, "both stuck orders must be attempted, even though the first failed")
-
-	after := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-	assert.Equal(t, before+2, after, "compensator_error counter MUST increment per failed order")
+	assert.Equal(t, 2, metrics.resolved["compensator_error"], "compensator_error counter MUST increment per failed order")
 }
 
 // TestSweep_GetByIDError_DistinctLabel pins the post-review-fixup
@@ -217,26 +229,21 @@ func TestSweep_CompensatorError_RetriesNextSweep(t *testing.T) {
 // runbooks branch on these labels — conflation would direct triage at
 // Redis/compensator code when the real fault is the DB read.
 func TestSweep_GetByIDError_DistinctLabel(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	id := uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return([]domain.StuckFailed{{ID: id, Age: 5 * time.Minute}}, nil)
 	repo.EXPECT().GetByID(gomock.Any(), id).Return(domain.Order{}, errors.New("postgres: read replica unreachable"))
 
-	beforeGet := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("getbyid_error"))
-	beforeComp := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-
 	require.NoError(t, w.Sweep(context.Background()))
 
 	assert.Equal(t, 0, comp.calls,
 		"compensator MUST NOT be called when GetByID errored before reaching it")
-
-	afterGet := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("getbyid_error"))
-	afterComp := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-	assert.Equal(t, beforeGet+1, afterGet, "getbyid_error MUST increment for DB read failures")
-	assert.Equal(t, beforeComp, afterComp, "compensator_error MUST NOT increment when failure is upstream of compensator")
+	assert.Equal(t, 1, metrics.resolved["getbyid_error"], "getbyid_error MUST increment for DB read failures")
+	assert.Equal(t, 0, metrics.resolved["compensator_error"], "compensator_error MUST NOT increment when failure is upstream of compensator")
 }
 
 // TestSweep_MixedOutcomes_PerOrderIsolation pins the per-order failure
@@ -245,11 +252,12 @@ func TestSweep_GetByIDError_DistinctLabel(t *testing.T) {
 // same batch fails. Most likely regression target if someone refactors
 // the loop to bail on first per-order error.
 func TestSweep_MixedOutcomes_PerOrderIsolation(t *testing.T) {
+	t.Parallel()
 	// Per-call compensator: order1 succeeds, order2 fails, order3 succeeds.
 	togglingComp := &perCallCompensator{
 		errs: []error{nil, errors.New("redis: blip on order 2"), nil},
 	}
-	w, repo := watchdogHarness(t, togglingComp)
+	w, repo, metrics := watchdogHarness(t, togglingComp)
 
 	id1, id2, id3 := uuid.New(), uuid.New(), uuid.New()
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -262,17 +270,11 @@ func TestSweep_MixedOutcomes_PerOrderIsolation(t *testing.T) {
 	repo.EXPECT().GetByID(gomock.Any(), id2).Return(reconstructFailedOrder(t, id2), nil)
 	repo.EXPECT().GetByID(gomock.Any(), id3).Return(reconstructFailedOrder(t, id3), nil)
 
-	beforeOK := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensated"))
-	beforeErr := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-
 	require.NoError(t, w.Sweep(context.Background()),
 		"per-order failure must NOT propagate as a sweep-level error")
 	assert.Equal(t, 3, togglingComp.calls, "all three orders must be attempted")
-
-	afterOK := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensated"))
-	afterErr := testutil.ToFloat64(observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error"))
-	assert.Equal(t, beforeOK+2, afterOK, "two successful orders must each increment `compensated`")
-	assert.Equal(t, beforeErr+1, afterErr, "one failed order must increment `compensator_error`")
+	assert.Equal(t, 2, metrics.resolved["compensated"], "two successful orders must each increment `compensated`")
+	assert.Equal(t, 1, metrics.resolved["compensator_error"], "one failed order must increment `compensator_error`")
 }
 
 // perCallCompensator is a stub that returns errs[i] for the i-th call.
@@ -295,8 +297,9 @@ func (p *perCallCompensator) HandleOrderFailed(_ context.Context, _ []byte) erro
 // mid-sweep → loop exits at the next iteration boundary. Tests SIGTERM
 // graceful-shutdown semantics.
 func TestSweep_ContextCancelled_ExitsCleanly(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, _ := watchdogHarness(t, comp)
 
 	// Two stuck orders. Cancel the ctx after the first GetByID; the
 	// loop must exit at the iteration boundary BEFORE the second is
@@ -314,19 +317,25 @@ func TestSweep_ContextCancelled_ExitsCleanly(t *testing.T) {
 			cancel() // cancel after the first GetByID succeeds
 			return reconstructFailedOrder(t, id1), nil
 		})
-	// id2 EXPECTATIONS DELIBERATELY OMITTED: gomock fails the test if
-	// they fire, asserting the loop exited at the boundary.
+	_ = id2 // gomock asserts GetByID(id2) is never called via the missing EXPECT.
 
 	err := w.Sweep(ctx)
 	assert.ErrorIs(t, err, context.Canceled, "ctx-cancelled sweep must surface context.Canceled")
+	// Explicit assertion: only the FIRST order should have been
+	// attempted. gomock's ctrl.Finish would surface a missing-EXPECT
+	// for id2 at cleanup time with a cryptic message; this assertion
+	// makes the loop-boundary contract obvious at the failure site.
+	assert.Equal(t, 1, comp.calls,
+		"loop must exit at the iteration boundary AFTER the first order, BEFORE the second")
 }
 
 // TestSweep_GaugeReflectsLastSweep: gauge is set to len(stuck) on
 // every sweep — point-in-time, not cumulative. Two sweeps with
 // different counts must show the latest, not the sum.
 func TestSweep_GaugeReflectsLastSweep(t *testing.T) {
+	t.Parallel()
 	comp := &fakeCompensator{}
-	w, repo := watchdogHarness(t, comp)
+	w, repo, metrics := watchdogHarness(t, comp)
 
 	// First sweep: 3 stuck orders
 	id1, id2, id3 := uuid.New(), uuid.New(), uuid.New()
@@ -344,9 +353,9 @@ func TestSweep_GaugeReflectsLastSweep(t *testing.T) {
 	}
 
 	require.NoError(t, w.Sweep(context.Background()))
-	assert.Equal(t, float64(3), testutil.ToFloat64(observability.SagaStuckFailedOrders))
+	assert.Equal(t, 3, metrics.stuckFailedOrders, "gauge after first sweep must reflect 3 stuck orders")
 
 	require.NoError(t, w.Sweep(context.Background()))
-	assert.Equal(t, float64(1), testutil.ToFloat64(observability.SagaStuckFailedOrders),
+	assert.Equal(t, 1, metrics.stuckFailedOrders,
 		"gauge must reflect the LATEST sweep, not the sum — point-in-time semantics")
 }
