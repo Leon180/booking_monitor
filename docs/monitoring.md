@@ -79,6 +79,9 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | Streams collector itself failing | `redis_stream_collector_errors_total{stream,operation}` |
 | What happens when a client retries with the same Idempotency-Key (N4) | `idempotency_replays_total{outcome}` — counts every replay attempt by what the server did with it. Three outcomes:<br>• `match` = same key + same body → we replay the previously-cached response (this is idempotency working as designed)<br>• `mismatch` = same key + **different** body → we return 409 Conflict (client bug: they're reusing one key across logically-distinct requests)<br>• `legacy_match` = entry was already in cache from before N4 shipped (no fingerprint stored), so we replay AND lazily write the fresh fingerprint back. **Should taper to 0 within 24h after deploy** (legacy entries expire); if it stays > 0, something is still writing the old wire format — investigate. |
 | How often the idempotency Redis lookup is failing (N4) | `idempotency_cache_get_errors_total` — number of times the idempotency cache GET failed (Redis unreachable, unmarshal error). **Page-worthy.** When this is sustained > 0, the booking endpoint is still accepting requests but **idempotency protection is OFF** — a duplicate request will be processed twice (only the DB UNIQUE constraint catches it at the last layer).<br>**Why we don't just reject requests when Redis is down**: refusing all bookings during a Redis outage = the whole endpoint is down. "Idempotency briefly disabled" is strictly better than "endpoint disabled"; this counter exists so on-call knows we're in that degraded mode.<br>Alert: `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m` → page. |
+| How many orders are stuck in Failed state without compensation (A5) | `saga_stuck_failed_orders` — gauge of orders that have been in Failed state longer than `SAGA_STUCK_THRESHOLD` (default 60s), set by the saga watchdog on every sweep. A non-zero value at any single moment is fine (the watchdog will re-drive the compensator next sweep). **Sustained > 0 for 10m means the compensator is failing repeatedly** — typical causes: Redis revert blocked, DB lock contention, or an unmapped compensator error. Watchdog default sweep interval is 60s, so 10m gives ~10 attempts to clear before paging. |
+| Saga watchdog resolution outcomes (A5) | `saga_watchdog_resolved_total{outcome}` — counts what happened on each watchdog re-drive. **Six outcomes**, each pointing at a distinct runbook so triage starts at the right subsystem:<br>• `compensated` = watchdog successfully re-drove the compensator (Failed → Compensated)<br>• `already_compensated` = race won by the saga consumer between FindStuckFailed and re-drive (benign, no action needed)<br>• `max_age_exceeded` = order older than `SAGA_MAX_FAILED_AGE` (default 24h); watchdog logs + alerts but does NOT auto-transition (unsafe to MarkCompensated without verifying inventory was reverted) — operator investigates manually<br>• `getbyid_error` = `orderRepo.GetByID` failed before reaching the compensator. Operator checks **DB** health, NOT Redis or compensator code<br>• `marshal_error` = `json.Marshal` of synthesized OrderFailedEvent failed. Theoretical for the fixed-shape struct today; isolated label so a future regression is observable<br>• `compensator_error` = `compensator.HandleOrderFailed` returned an error. Operator checks **Redis revert path + DB lock contention**. Will retry next sweep |
+| Saga watchdog DB query failing (A5) | `saga_watchdog_find_stuck_errors_total` — `FindStuckFailed` SQL query failed (DB outage, missing migration 000011 partial index, query timeout). **Page-worthy critical**: when this is non-zero, the watchdog can't see stuck orders at all — `saga_stuck_failed_orders` gauge goes stale and looks "healthy" but is actually blind. Companion alert fires within 2 minutes. |
 | Page funnel | `page_views_total{page}` |
 
 ### When labels are pre-initialized
@@ -168,6 +171,10 @@ The current alert catalog:
 | `ReconFindStuckErrors` | critical | Reconciler sweep query is failing |
 | `ReconGatewayErrors` | warning | Reconciler gateway error rate elevated |
 | `ReconMaxAgeExceeded` | critical | Reconciler force-failed an order — manual review |
+| `SagaStuckFailedOrders` | warning | `saga_stuck_failed_orders > 0 for 10m` — compensator failing repeatedly |
+| `SagaCompensatorErrors` | warning | `rate(saga_watchdog_resolved_total{outcome="compensator_error"}[5m]) > 0 for 2m` — fast-path companion; catches a 100%-failing compensator before the gauge alert's 10m window elapses |
+| `SagaWatchdogFindStuckErrors` | critical | Watchdog sweep query failing — gauge goes blind |
+| `SagaMaxFailedAgeExceeded` | critical | Stuck Failed orders >24h — manual review needed (watchdog will NOT auto-transition) |
 | `KafkaConsumerStuck` | warning | Consumer rebalance retries — downstream dependency degraded |
 
 ### Forcing an alert to fire (testing)
@@ -187,6 +194,15 @@ docker exec booking_redis redis-cli XADD orders:dlq '*' probe 1
 # RedisStreamCollectorDown — kill Redis briefly
 docker compose stop redis
 # After 2m the alert fires; `docker compose start redis` clears it within one scrape.
+
+# SagaStuckFailedOrders — backdate a Failed order so it crosses SAGA_STUCK_THRESHOLD.
+# Direct UPDATE rather than waiting for the natural Failed→Compensated stall, since
+# the saga consumer would otherwise compensate within ms.
+docker exec booking_db psql -U user -d booking -c \
+  "UPDATE orders SET status='failed', updated_at = NOW() - INTERVAL '5 minutes' WHERE id = '<some-existing-order-uuid>';"
+# Watchdog default sweep is 60s + alert `for: 10m`, so wait ~11m and check Prometheus → Alerts.
+# Cleanup: UPDATE the row back to its prior status, OR let the watchdog re-drive the compensator
+# (it will move Failed → Compensated since the row has no actual reverted-Redis-key tracked).
 ```
 
 After testing, undo: `docker exec booking_redis redis-cli DEL orders:stream orders:dlq` (loses any in-flight production data — only safe in dev).

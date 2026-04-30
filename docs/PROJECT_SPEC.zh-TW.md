@@ -422,6 +422,42 @@ window 是 5 分鐘 lookback(**不是** since deploy 的累積值)— 這個 int
 
 所有預設值都是 heuristic init values — 詳見 config.go 的 header comments。等實際 production-shaped run 產生 `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds` 直方圖之後再依資料調整。
 
+### 6.7.1 Saga Watchdog (A5)
+
+Saga watchdog 是 reconciler 的**對稱姊妹** — 同樣的 loop 形狀、同樣的 `--once`/loop 模式、同樣的 partial-index 策略 — 但處理的是不同的失敗面。
+
+| Sweeper | 偵測什麼 | 解決路徑 | 索引 predicate |
+| :-- | :-- | :-- | :-- |
+| Reconciler(A4,[internal/application/recon](../internal/application/recon)) | 卡在 `Charging` 的訂單(worker 在 Charge 中途掛掉) | 查 payment gateway,轉成 Confirmed/Failed | `idx_orders_status_updated_at_partial WHERE status IN ('charging','pending')`(000010) |
+| **Saga watchdog(A5,[internal/application/saga](../internal/application/saga))** | 卡在 `Failed` 的訂單(saga consumer 在 handler 中途掛掉、DLQ 吞掉了 event) | 重新觸發(idempotent 的)compensator | 同一個 partial index,**predicate 加上 `'failed'`**(000011) |
+
+**為什麼重新觸發 compensator 而不是重新發到 Kafka:**
+
+- 直接呼叫省掉每筆 stuck order 的 Kafka round-trip + offset commit。
+- Compensator 的 idempotency 檢查(在 UoW closure 裡的 `order.Status() == OrderStatusCompensated`)能處理「watchdog 的 FindStuckFailed 跟重新觸發中間,saga consumer 自己跑完了」的競爭情境。
+- 重發 Kafka 需要重建原本的 `event_id` + `correlation_id`;做得到但徒增複雜度,行為上沒有額外好處。
+
+**Force-fail 策略的差異:**
+
+- Reconciler 的 max-age 分支**會**自動 force-fail:gateway 已經告訴我們扣款狀態,我們有 ground truth 可以動作。
+- Watchdog 的 max-age 分支**不會**自動轉狀態。沒驗證 Redis 庫存是否真的回復就把 Failed → Compensated 不安全(會留下 phantom-revert 狀態機污染)。Watchdog 只記 ERROR 日誌 + 觸發 `saga_watchdog_resolved_total{outcome="max_age_exceeded"}` + 觸發 `SagaMaxFailedAgeExceeded` 告警 — 由 operator 透過 `order_status_history` 人工調查。
+
+**可調參數(env 變數)**:
+
+| Env var | 預設 | 用途 |
+| :-- | :-- | :-- |
+| `SAGA_WATCHDOG_INTERVAL` | 60s | Loop 頻率(比 recon 的 120s 緊一點 — compensator 是本地呼叫、快) |
+| `SAGA_STUCK_THRESHOLD` | 60s | watchdog 認為 Failed 訂單「卡住」的最短年齡 |
+| `SAGA_MAX_FAILED_AGE` | 24h | 人工檢視的 give-up cutoff |
+| `SAGA_BATCH_SIZE` | 100 | 每次 sweep 處理的訂單數 |
+
+`Config.Validate()` 拒絕任何非正值,也拒絕 `MaxFailedAge ≤ StuckThreshold` 的設定(否則第一次 sweep 看到的每筆訂單都會被 force-flag) — 跟 `ReconConfig` 同樣的 cross-field guard pattern。
+
+**Run mode**(`booking-cli saga-watchdog`):
+
+- 預設 loop:ticker 驅動,跑到收到 SIGTERM 為止。適合 docker-compose / Deployment 部署。
+- `--once`:跑一次 sweep 就退出。適合 k8s CronJob 部署,排程由編排器處理。
+
 ### 6.8 Redis Streams Hardening
 
 booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API → worker)和 `orders:dlq`(等待 operator 檢視的失敗訊息)。本次同時上線三個觀測性 + 保留期相關問題的修正:

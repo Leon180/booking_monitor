@@ -41,6 +41,12 @@ func validBase() *config.Config {
 			MaxChargingAge:    24 * time.Hour,
 			BatchSize:         100,
 		},
+		Saga: config.SagaConfig{
+			WatchdogInterval: 60 * time.Second,
+			StuckThreshold:   60 * time.Second,
+			MaxFailedAge:     24 * time.Hour,
+			BatchSize:        100,
+		},
 	}
 }
 

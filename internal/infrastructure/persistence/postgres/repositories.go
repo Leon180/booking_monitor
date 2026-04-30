@@ -385,6 +385,61 @@ func (r *postgresOrderRepository) FindStuckCharging(
 	return out, nil
 }
 
+// FindStuckFailed returns Failed-state orders older than minAge, up
+// to limit rows. Backs the saga watchdog subcommand's sweep (A5).
+//
+// Same query shape as FindStuckCharging — the partial index from
+// migration 000011 covers `status IN ('charging', 'pending', 'failed')`
+// so both the reconciler and the watchdog share one index.
+//
+// "Stuck Failed" means: an order was MarkFailed'd by the payment
+// service but the saga compensator never moved it to Compensated —
+// usually because the saga consumer crashed mid-handler, the DLQ
+// route swallowed the event, or a Kafka rebalance lost the offset.
+// The watchdog detects these and re-drives the existing (idempotent)
+// compensator to clear the row.
+//
+// No FOR UPDATE for the same reason as FindStuckCharging — the
+// downstream compensator carries its own row-level lock through the
+// UoW transaction; holding a SELECT lock across the compensator
+// would block the saga consumer needlessly.
+func (r *postgresOrderRepository) FindStuckFailed(
+	ctx context.Context, minAge time.Duration, limit int,
+) ([]domain.StuckFailed, error) {
+	const sqlStmt = `
+		SELECT id, EXTRACT(EPOCH FROM (NOW() - updated_at))
+		  FROM orders
+		 WHERE status = 'failed'
+		   AND updated_at < NOW() - $1::interval
+		 ORDER BY updated_at ASC
+		 LIMIT $2`
+
+	intervalLit := fmt.Sprintf("%f seconds", minAge.Seconds())
+
+	rows, err := r.exec.QueryContext(ctx, sqlStmt, intervalLit, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orderRepository.FindStuckFailed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.StuckFailed
+	for rows.Next() {
+		var id uuid.UUID
+		var ageSeconds float64
+		if err := rows.Scan(&id, &ageSeconds); err != nil {
+			return nil, fmt.Errorf("orderRepository.FindStuckFailed scan: %w", err)
+		}
+		out = append(out, domain.StuckFailed{
+			ID:  id,
+			Age: time.Duration(ageSeconds * float64(time.Second)),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orderRepository.FindStuckFailed rows: %w", err)
+	}
+	return out, nil
+}
+
 // MarkCharging atomically transitions Pending → Charging. The intent
 // log entry — written before the payment service calls the gateway
 // so a separate recon process can resolve stuck-mid-flight orders
