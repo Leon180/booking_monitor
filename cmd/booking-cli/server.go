@@ -19,6 +19,7 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/bootstrap"
+	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/middleware"
@@ -74,6 +75,7 @@ func installServer(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
 	handler booking.BookingHandler,
+	idempotencyRepo domain.IdempotencyRepository,
 	healthHandler *ops.HealthHandler,
 	logger *mlog.Logger,
 	cfg *config.Config,
@@ -86,7 +88,7 @@ func installServer(
 		return fmt.Errorf("installServer: %w", err)
 	}
 
-	engine, err := buildGinEngine(cfg, logger, handler, healthHandler)
+	engine, err := buildGinEngine(cfg, logger, handler, idempotencyRepo, healthHandler)
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
@@ -127,7 +129,7 @@ func installServer(
 // owns the route topology and benefits from compile-time type checks.
 // `api.Module` remains the single fx import for runtime wiring; the
 // type imports here are a separate concern from fx graph composition.
-func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.BookingHandler, healthHandler *ops.HealthHandler) (*gin.Engine, error) {
+func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.BookingHandler, idempotencyRepo domain.IdempotencyRepository, healthHandler *ops.HealthHandler) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -153,7 +155,7 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.Boo
 	// boundary, NOT inside the storage layer (Stripe / Shopify /
 	// GitHub Octokit / AWS API Gateway). See PROJECT_SPEC §6.8.
 	v1.Use(middleware.BodySize(middleware.MaxBookingBodyBytes))
-	booking.RegisterRoutes(v1, handler)
+	booking.RegisterRoutes(v1, handler, idempotencyRepo)
 	// NOTE: the legacy POST /book route (Phase 0) was removed because it
 	// bypassed the nginx `location /api/` rate-limit zone. All callers
 	// must use /api/v1/book. Closes action-list item H9.

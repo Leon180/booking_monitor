@@ -77,6 +77,8 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | Kafka consumer 因下游短暫故障卡住 | `kafka_consumer_retry_total{topic,reason}` |
 | 卡在 Charging 的訂單對帳 | `recon_stuck_charging_orders`(gauge)、`recon_resolved_total{outcome}`、`recon_gateway_errors_total`、`recon_resolve_duration_seconds`、`recon_resolve_age_seconds` |
 | Streams collector 自己掛了 | `redis_stream_collector_errors_total{stream,operation}` |
+| 同一個 Idempotency-Key 被重送時的處理結果(N4) | `idempotency_replays_total{outcome}` — 每次 client 帶**重複**的 Idempotency-Key 來時,server 怎麼處理。三種結果:<br>• `match` = 同 key + 同 body → 我們直接回傳之前快取的回應(這是冪等正常運作)<br>• `mismatch` = 同 key + **不同** body → 我們回 409 Conflict(client 程式有問題:把同一把 key 用在意義不一樣的請求上)<br>• `legacy_match` = 在 N4 上線之前就已經寫進快取的舊條目(沒帶 fingerprint),仍然回傳但順便補寫 fingerprint。**部署後 24 小時內應該降到 0**(舊快取會自然過期);如果一直 > 0,表示有東西還在寫舊格式 — 要查為什麼。 |
+| Idempotency 查 Redis 失敗的次數(N4) | `idempotency_cache_get_errors_total` — idempotency 在查 Redis 時失敗了幾次(Redis 連線斷、回傳資料壞掉)。**這條值得 page on-call**。意思:當這條持續 > 0,booking 端點還在收單,但**冪等保護是關掉的** — 同一個請求重送會被處理兩次(僅剩 DB 的 UNIQUE 限制在最底層擋)。<br>**為什麼還繼續服務不直接拒絕?** 因為 Redis 一斷就拒絕所有訂票請求 = 整個端點掛掉,「冪等保護暫時失效」比「服務整個掛」好;這個 counter 就是讓 on-call 知道目前處在那個狀態。<br>告警設定:`rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m` → page。 |
 | Page funnel | `page_views_total{page}` |
 
 ### 為什麼 label 在啟動時就有值

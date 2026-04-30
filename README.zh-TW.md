@@ -127,7 +127,7 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 
 **為什麼不直接同步回終態?** Redis-first 是 **load-shed gate** — flash-sale 流量下,售完的請求會在 Redis 層就被擋掉,根本不會碰到資料庫。如果 `POST /book` 同步等到終態,每一個請求都會佔用整個付款 round-trip(數秒)的連線,整體吞吐就被最慢的依賴卡住。Flash-sale 系統的業界標準做法(Tmall、KKTIX、Ticketmaster 都這樣)。
 
-**冪等性**:`POST /api/v1/book` 可以帶 `Idempotency-Key: <uuid>` header,達到 at-most-once 語意。重送時會回原本的 202 回應(同樣的 `order_id`),並加上 `X-Idempotency-Replayed: true` header。Cache TTL:24h。
+**冪等性**:`POST /api/v1/book` 可以帶 `Idempotency-Key: <ASCII 可印字元、≤128 字元>` header,達到 at-most-once 語意。重送時會回原本的 202 回應(同樣的 `order_id`),並加上 `X-Idempotency-Replayed: true` header。Cache TTL:24h。**Stripe 風格的 fingerprint 檢查(N4)**:同 key 但 body **不同** 時會回 **409 Conflict** 而不是重播 — 避免 client 弄錯(同一個 key 用在不同語意的請求上)後靜默拿到錯誤的回應。4xx 驗證錯誤 **不會** 被快取,所以一次手誤打錯 body 不會把 key 燒掉 24h。完整契約表見 [docs/PROJECT_SPEC.zh-TW.md §5](docs/PROJECT_SPEC.zh-TW.md)。
 
 **404 視窗的實際情況**:健康的 worker 通常 < 1 秒。如果持續 404 表示 worker 已經塞車 — 可以從 `redis_stream_length{stream="orders:stream"}` 指標或 `OrdersStreamBacklog*` 告警觀察(見 [docs/monitoring.zh-TW.md](docs/monitoring.zh-TW.md))。
 

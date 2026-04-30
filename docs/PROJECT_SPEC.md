@@ -47,7 +47,7 @@ or Postgres writes.
 
 | # | Component | Input | Storage touched | Effect | Failure behaviour |
 |---|-----------|-------|-----------------|--------|-------------------|
-| 1 | Gin API handler (`/api/v1/book`) | User request | Redis (idempotency key, 24h TTL) | `Idempotency-Key` header, if present, is looked up first — a hit replays the cached 2xx/4xx/5xx body verbatim and skips the rest | Missing/duplicate body → 400 `"invalid request body"`; `mapError` sanitizes any downstream leak |
+| 1 | Gin API handler (`/api/v1/book`) | User request | Redis (idempotency key, 24h TTL) | `Idempotency-Key` header, if present, is looked up first — a hit checks the request fingerprint (SHA-256 of body) against the cached entry: match → replay verbatim, mismatch → 409 Conflict, absent fingerprint → replay + lazy write-back (legacy entry). Only 2xx + 5xx responses get cached on the way out (4xx validation errors are NOT cached — Stripe convention). See §5 for the full contract table. | Missing/duplicate body → 400 `"invalid request body"`; `mapError` sanitizes any downstream leak |
 | 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis via `deduct.lua` (atomic) | `DECRBY event:{id}:qty` → if `>= 0` also `XADD orders:stream` → return 200; if `< 0` `INCRBY` revert and return 409 `sold out` | API returns immediately after Redis — the order is **not yet persisted**, just queued |
 | 3 | `WorkerService` → `MessageProcessor.Process` (consumer group on `orders:stream`) | Stream message | PostgreSQL (single UoW transaction) | `DecrementTicket` (DB row-level double-check, guards against Redis/DB drift) → `orderRepo.Create` (UNIQUE partial index catches duplicate purchase) → `outboxRepo.Create(event_type="order.created")` — **all three in one tx** | `DecrementTicket` rejects → revert Redis + ACK (inventory conflict metric); `orderRepo.Create` hits `ErrUserAlreadyBought` → revert Redis + ACK (duplicate metric); other errors → no ACK, `processWithRetry` 3×, then DLQ (`orders:dlq`) + Redis revert |
 | 4 | `OutboxRelay` (background goroutine, single leader elected via Postgres advisory lock 1001) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL (read + update) → Kafka topic `order.created` | Polls every 500ms (partial index `events_outbox_pending_idx` covers this), publishes up to 100 events per tick, then `UPDATE processed_at = NOW()`. Publish failure → skip `MarkProcessed` so the next tick retries. MarkProcessed failure after a successful publish → event will be re-published on next tick, consumers MUST be idempotent | Leader crash → advisory lock auto-releases (session-bound) → a standby acquires it on its next tick |
@@ -210,7 +210,7 @@ Book tickets for an event.
 ```json
 // Request
 { "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
-// Headers: Idempotency-Key: <uuid> (optional, <= 128 chars)
+// Headers: Idempotency-Key: <ASCII-printable, <= 128 chars> (optional)
 
 // 202 Accepted — Redis-side deduct succeeded; the rest is async
 {
@@ -219,15 +219,33 @@ Book tickets for an event.
   "message": "booking accepted, awaiting confirmation",
   "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
 }
-// 409 Conflict
+// 409 Conflict — sold out
 { "error": "sold out" }
-// 409 Conflict
+// 409 Conflict — duplicate purchase
 { "error": "user already bought ticket" }
+// 409 Conflict — Idempotency-Key reused with a different request body (N4)
+{ "error": "Idempotency-Key reused with a different request body" }
+// 400 Bad Request — Idempotency-Key fails ASCII-printable / length check
+{ "error": "Idempotency-Key must be ASCII-printable and at most 128 characters" }
 // 500 Internal Server Error (sanitized)
 { "error": "internal server error" }
 ```
 
 Status is `202 Accepted` — the success path is honest about the async pipeline. Redis-side inventory deduct succeeded (the load-shed gate) and an order intent has been queued; DB persistence + payment + saga are in flight. Clients use `order_id` against `GET /api/v1/orders/:id` for the terminal status. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga. PEL retries reuse the same id; pre-PR-47 the worker minted its own uuid per redelivery and the client's id diverged from the DB's.
+
+**Idempotency-Key contract (N4)** — Stripe-style fingerprint validation:
+
+| Scenario | Cache state | Server response |
+| :-- | :-- | :-- |
+| First request with key X | Miss | Process normally; cache `(response, sha256(body))` for 24h |
+| Same key X + same body | Hit, fingerprint matches | Replay cached response verbatim, set `X-Idempotency-Replayed: true`. Service NOT invoked. |
+| Same key X + different body | Hit, fingerprint differs | **409 Conflict** — does NOT replay (would mislead client). Client must use a fresh key for the new request. |
+| Same key X (cached pre-N4) | Hit, empty fingerprint | Replay + lazily write back the new fingerprint so subsequent replays validate. Per-key migration window closes on the FIRST replay (the write-back upgrades the entry in place); worst case is 24h TTL for keys that never see a replay. |
+| Same key X, returned **any 4xx** | Not cached | Stripe convention. Covers BOTH validation 4xx (typo'd body — caching would burn the key for 24h) AND business 4xx (sold-out 409, duplicate 409 — transient business state that may resolve before the 24h TTL; pinning prevents legitimate retries). |
+| Same key X, returned **any 5xx** | **Not cached** (deviation from Stripe) | Stripe caches 5xx to prevent clients retry-storming a degraded gateway, assuming the 5xx represents stable degraded state. Our 5xx are mostly transient (Redis blip, DB hiccup) or programmer-error (unmapped error type) — pinning them for 24h is worse customer experience than letting clients retry against a recovered server. nginx rate-limiting at the edge handles the retry-storm concern. **Only 2xx is cached** — the only response shape that represents stable, reproducible terminal outcome safe to replay. |
+| Same key X, cache GET errored upstream | Set is skipped | Defence-in-depth: a fresh response written through a flaky-then-recovered Redis would pin a possibly-transient state. Fail-open availability path (process the request) is preserved; only the cache write is skipped so client retries hit a clean cache. |
+
+The fingerprint is hex-encoded `SHA-256` of the raw request body bytes. No JSON canonicalization — clients must send byte-identical retries (the de facto contract across Stripe / Shopify / GitHub / AWS). Idempotency keys must be ASCII-printable (0x20–0x7E) up to 128 chars; control characters are rejected to prevent log-parser confusion downstream. The replay outcome (match / mismatch / legacy_match) is exposed via the `idempotency_replays_total{outcome}` counter (see [docs/monitoring.md §2](monitoring.md)).
 
 Error responses go through `api/booking/errors.go :: mapError`, which matches sentinel errors via `errors.Is` and returns a safe public message. Raw DB / driver errors are logged server-side with correlation IDs but **never** echoed to the client.
 

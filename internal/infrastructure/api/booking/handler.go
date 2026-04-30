@@ -18,11 +18,13 @@ package booking
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
+	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/observability"
 	"booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -31,12 +33,30 @@ import (
 	"github.com/google/uuid"
 )
 
-// orderSelfLink is the canonical poll URL for a freshly-accepted
+// orderSelfLinkPrefix is the canonical poll URL for a freshly-accepted
 // booking. Centralised so the handler, DTO, and tests can't drift
 // from a hardcoded route literal in three places. Versioned with the
 // rest of the API surface — bumping `/api/v1` to `/api/v2` only needs
 // this prefix changed.
 const orderSelfLinkPrefix = "/api/v1/orders/"
+
+// mustMarshal panics on json.Marshal error. Reserved for fixed-shape
+// DTO structs whose fields are all directly-marshalable types — the
+// marshal cannot fail in practice, but the panic surfaces an
+// impossible-condition violation loudly if a future field addition
+// introduces a non-serialisable type (custom MarshalJSON that errors,
+// pointer cycle, channel/func type). Without this guard, a `_` discard
+// would commit an empty body to the HTTP response silently.
+//
+// Production wires `gin.Recovery()` middleware ahead of any handler
+// (see cmd/booking-cli/server.go); a panic here surfaces as a 500.
+func mustMarshal(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("impossible: marshal %T: %v", v, err))
+	}
+	return b
+}
 
 type BookingHandler interface {
 	HandleBook(c *gin.Context)
@@ -47,13 +67,17 @@ type BookingHandler interface {
 }
 
 type bookingHandler struct {
-	service         application.BookingService
-	eventService    application.EventService
-	idempotencyRepo domain.IdempotencyRepository
+	service      application.BookingService
+	eventService application.EventService
 }
 
-func NewBookingHandler(service application.BookingService, eventService application.EventService, idempotencyRepo domain.IdempotencyRepository) BookingHandler {
-	return &bookingHandler{service: service, eventService: eventService, idempotencyRepo: idempotencyRepo}
+// NewBookingHandler constructs the booking handler. The idempotency
+// concern is handled by `middleware.Idempotency` (registered ahead of
+// the handler in server.go), so the handler itself no longer
+// depends on `domain.IdempotencyRepository` — its surface is purely
+// business-logic dependencies.
+func NewBookingHandler(service application.BookingService, eventService application.EventService) BookingHandler {
+	return &bookingHandler{service: service, eventService: eventService}
 }
 
 func (h *bookingHandler) HandleListBookings(c *gin.Context) {
@@ -84,6 +108,22 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.ListBookingsResponseFromDomain(orders, total, params.Page, params.Size))
 }
 
+// HandleBook is the booking-specific handler — pure business logic.
+//
+// Idempotency-Key validation, body fingerprinting, cache lookup,
+// replay, 409-on-mismatch, and conditional cache-write are ALL handled
+// by `middleware.Idempotency` registered ahead of this handler in
+// `RegisterRoutes`. The handler is invoked exactly once per fresh
+// request (cache replays short-circuit before reaching here) and
+// concerns itself only with: parse body → call service → render
+// response. The middleware captures the response body via
+// gin.ResponseWriter wrapping so the cache-write decision happens
+// after this handler returns, transparently.
+//
+// Note: even though body_size middleware wraps the raw body with
+// MaxBytesReader and the idempotency middleware re-feeds the buffer
+// via bytes.NewReader, ShouldBindJSON below works on the re-fed
+// in-memory buffer — no double-read concerns.
 func (h *bookingHandler) HandleBook(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -94,79 +134,37 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	// Idempotency key check
-	idempotencyKey := c.GetHeader("Idempotency-Key")
-	if len(idempotencyKey) > 128 {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Idempotency-Key must be 128 characters or fewer"})
-		return
-	}
-	if idempotencyKey != "" {
-		if cached, err := h.idempotencyRepo.Get(ctx, idempotencyKey); err == nil && cached != nil {
-			c.Header("X-Idempotency-Replayed", "true")
-			c.Data(cached.StatusCode, "application/json", []byte(cached.Body))
-			return
-		}
-	}
-
 	orderID, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
-
-	var statusCode int
-	var body string
 	if err != nil {
-		// Log the raw error with full context server-side, then translate to
-		// a sanitized public message via mapError so we never leak DB errors.
+		// Log the raw error with full context server-side, then
+		// translate to a sanitized public message via mapError so
+		// we never leak DB errors.
 		log.Error(ctx, "BookTicket failed",
 			tag.Error(err),
 			tag.UserID(req.UserID),
 			tag.EventID(req.EventID),
 			tag.Quantity(req.Quantity),
 		)
-
 		status, publicMsg := mapError(err)
-		// Marshal via the DTO so the wire shape is centralised — every
-		// error response the API emits goes through dto.ErrorResponse.
-		// The marshal cannot fail for this fixed-shape struct.
-		errJSON, _ := json.Marshal(dto.ErrorResponse{Error: publicMsg})
-		statusCode = status
-		body = string(errJSON)
-	} else {
-		// 202 Accepted — Redis-side deduct succeeded (the load-shed
-		// gate); the rest of the lifecycle (DB persist, payment
-		// charge, saga) is async. The client polls
-		// `GET /api/v1/orders/:id` for the terminal status.
-		statusCode = http.StatusAccepted
-		acceptedJSON, _ := json.Marshal(dto.BookingAcceptedResponse{
-			OrderID: orderID,
-			Status:  dto.BookingStatusProcessing,
-			Message: "booking accepted, awaiting confirmation",
-			Links: dto.BookingLinks{
-				Self: orderSelfLinkPrefix + orderID.String(),
-			},
-		})
-		body = string(acceptedJSON)
+		// Marshal via mustMarshal so an impossible non-marshalable
+		// future field surfaces as a panic (caught by gin.Recovery)
+		// rather than a silent empty body.
+		c.Data(status, "application/json", mustMarshal(dto.ErrorResponse{Error: publicMsg}))
+		return
 	}
 
-	// Cache the result for idempotency. The response was already
-	// generated; a Set failure here just means the next retry
-	// re-processes (still safe — same fingerprint, same
-	// computation). Don't fail the in-flight request, but DO
-	// surface the error so operators can correlate metric spikes
-	// (`cache_idempotency_oversize_total`, Redis errors) with
-	// specific keys at debug time.
-	if idempotencyKey != "" {
-		if setErr := h.idempotencyRepo.Set(ctx, idempotencyKey, &domain.IdempotencyResult{
-			StatusCode: statusCode,
-			Body:       body,
-		}); setErr != nil {
-			log.Warn(ctx, "idempotency cache Set failed (response already sent; next retry will re-process)",
-				tag.Error(setErr),
-				log.String("idempotency_key", idempotencyKey),
-				log.Int("body_size_bytes", len(body)),
-			)
-		}
-	}
-
-	c.Data(statusCode, "application/json", []byte(body))
+	// 202 Accepted — Redis-side deduct succeeded (the load-shed
+	// gate); the rest of the lifecycle (DB persist, payment charge,
+	// saga) is async. The client polls `GET /api/v1/orders/:id` for
+	// the terminal status.
+	c.Data(http.StatusAccepted, "application/json", mustMarshal(dto.BookingAcceptedResponse{
+		OrderID: orderID,
+		Status:  dto.BookingStatusProcessing,
+		Message: "booking accepted, awaiting confirmation",
+		Links: dto.BookingLinks{
+			Self: orderSelfLinkPrefix + orderID.String(),
+		},
+	}))
 }
 
 // HandleGetOrder is the polling endpoint for a freshly-accepted
@@ -251,8 +249,15 @@ func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
 // live in the ops subpackage and register at the engine root, NOT
 // under this group — k8s probe targets must not move with API
 // versioning.
-func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler) {
-	r.POST("/book", handler.HandleBook)
+//
+// The idempotency middleware is attached PER-ROUTE rather than to
+// the whole group: only state-changing endpoints (POST /book today;
+// future POST /cancel, POST /refund, etc.) need it. Idempotent reads
+// (GET /history, GET /events/:id, GET /orders/:id) and event setup
+// (POST /events — admin-side, low collision risk) skip the cache
+// lookup entirely.
+func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler, idempotencyRepo domain.IdempotencyRepository) {
+	r.POST("/book", middleware.Idempotency(idempotencyRepo), handler.HandleBook)
 	r.GET("/orders/:id", handler.HandleGetOrder)
 	r.GET("/history", handler.HandleListBookings)
 	r.POST("/events", handler.HandleCreateEvent)

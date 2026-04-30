@@ -201,6 +201,54 @@ var (
 		[]string{"cache"},
 	)
 
+	// IdempotencyCacheGetErrorsTotal counts infrastructure failures on
+	// the idempotency cache GET path (Redis down, unmarshal fail).
+	// Distinct from cache_hits/misses on purpose: an infra error must
+	// NOT inflate the miss rate, but it also must NOT vanish from
+	// observability — a sustained non-zero rate means idempotency
+	// guarantees are SUSPENDED for incoming requests during the
+	// outage (the handler fails open to preserve availability;
+	// duplicate-charge protection downgrades to whatever DB-level
+	// uniqueness constraints exist).
+	//
+	// Page-worthy: rate > 0 sustained for 1m means a Redis outage
+	// affecting a financial-correctness control. The companion
+	// runbook in monitoring.md explains operator response.
+	IdempotencyCacheGetErrorsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "idempotency_cache_get_errors_total",
+			Help: "Total number of idempotency cache GET infra failures (Redis down, unmarshal). Sustained non-zero means idempotency protection is suspended.",
+		},
+	)
+
+	// IdempotencyReplaysTotal tracks the outcome of every Idempotency-
+	// Key cache HIT (added in N4 / PR-fingerprint). The `outcome`
+	// label values are intentionally narrow:
+	//
+	//   - "match"        — same key + same body → cached response replayed
+	//   - "mismatch"     — same key + different body → 409 Conflict
+	//                      (Stripe-style; client error, but worth
+	//                      tracking because a sustained mismatch rate
+	//                      means a misbehaving client is reusing keys
+	//                      across logically-distinct requests)
+	//   - "legacy_match" — cached entry has no fingerprint (pre-N4
+	//                      data); replayed + fingerprint written back
+	//                      lazily. Should taper to ~0 within the 24h
+	//                      cache TTL after N4 deploys; sustained
+	//                      non-zero means something is keeping the
+	//                      pre-N4 wire format alive
+	//
+	// This is a programmer-error / migration-progress signal, NOT a
+	// page-worthy metric — no alert wired today. Operators can dashboard
+	// the rate by outcome to spot client misuse or migration stalls.
+	IdempotencyReplaysTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "idempotency_replays_total",
+			Help: "Total number of Idempotency-Key cache hits, labelled by outcome (match / mismatch / legacy_match)",
+		},
+		[]string{"outcome"},
+	)
+
 	// RedisStreamCollectorErrorsTotal increments when the
 	// StreamsCollector's Redis calls (XLEN / XPENDING) fail during
 	// a Prometheus scrape. Without this counter, a sustained Redis
@@ -296,6 +344,14 @@ func init() {
 	for _, cache := range []string{"idempotency"} {
 		CacheHitsTotal.WithLabelValues(cache)
 		CacheMissesTotal.WithLabelValues(cache)
+	}
+	// Pre-warm idempotency replay outcomes (N4) so all three series
+	// exist in /metrics from boot. "legacy_match" should taper to ~0
+	// within the 24h cache TTL after deploy — sustained non-zero
+	// signals stuck migration; explicit pre-warm gives operators that
+	// signal even before the first cache hit lands.
+	for _, outcome := range []string{"match", "mismatch", "legacy_match"} {
+		IdempotencyReplaysTotal.WithLabelValues(outcome)
 	}
 
 	// Pre-warm reconciler counter labels so the series exist in

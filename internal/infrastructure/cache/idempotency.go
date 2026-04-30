@@ -39,39 +39,57 @@ func idempotencyKey(key string) string {
 // `statusCode`) without touching the domain, or migrate to a
 // different serialiser (msgpack, protobuf) without touching the
 // domain.
+//
+// Fingerprint (added in N4) carries the hex SHA-256 of the request
+// body that produced this cached response — enables Stripe-style
+// same-key/different-body 409 detection. `omitempty` on the JSON tag
+// preserves backward-compat with pre-N4 entries: legacy values that
+// have no `fingerprint` field unmarshal to an empty string, which the
+// handler treats as "match, replay" + lazy write-back. Without
+// `omitempty`, every old entry would round-trip as `"fingerprint":""`
+// and we'd lose the ability to distinguish "explicitly empty" from
+// "absent" — relevant if a future feature treats them differently.
 type idempotencyRecord struct {
-	StatusCode int    `json:"status_code"`
-	Body       string `json:"body"`
+	StatusCode  int    `json:"status_code"`
+	Body        string `json:"body"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
-// Get returns the cached entry, (nil, nil) on cache miss
-// (`redis.Nil`), or a wrapped error on infrastructure failure. Hit /
-// miss counting is the decorator's job (instrumented_idempotency.go);
-// keeping it out of here means storage tests don't mutate the global
-// Prometheus registry as a side effect.
-func (r *redisIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, error) {
+// Get returns (result, fingerprint, error). On cache miss — `redis.Nil`
+// from GET — returns (nil, "", nil). On infrastructure failure
+// returns a wrapped error. Hit / miss counting is the decorator's job
+// (instrumented_idempotency.go); keeping it out of here means storage
+// tests don't mutate the global Prometheus registry as a side effect.
+//
+// An empty fingerprint with a non-nil result is the LEGACY-ENTRY
+// signal: the cache record predates N4 (pre-fingerprint, pre-2026-04-30
+// roughly) and was stored without the `fingerprint` field. The handler
+// treats this as "replay and write back" — see handler.go for the
+// migration logic.
+func (r *redisIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, string, error) {
 	val, err := r.client.Get(ctx, idempotencyKey(key)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return nil, nil // Cache miss — not found
+			return nil, "", nil // Cache miss — not found
 		}
-		return nil, fmt.Errorf("idempotency Get: redis: %w", err)
+		return nil, "", fmt.Errorf("idempotency Get: redis: %w", err)
 	}
 
 	var rec idempotencyRecord
 	if err := json.Unmarshal([]byte(val), &rec); err != nil {
-		return nil, fmt.Errorf("idempotency Get: unmarshal: %w", err)
+		return nil, "", fmt.Errorf("idempotency Get: unmarshal: %w", err)
 	}
 	return &domain.IdempotencyResult{
 		StatusCode: rec.StatusCode,
 		Body:       rec.Body,
-	}, nil
+	}, rec.Fingerprint, nil
 }
 
-func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult) error {
+func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error {
 	rec := idempotencyRecord{
-		StatusCode: result.StatusCode,
-		Body:       result.Body,
+		StatusCode:  result.StatusCode,
+		Body:        result.Body,
+		Fingerprint: fingerprint,
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
