@@ -8,7 +8,25 @@ origin: booking_monitor
 
 A repeatable framework for whole-project audit, distinct from per-PR review. Per-PR review checks the change; checkpoint review checks the **whole** state at the moment of pause.
 
-## When to Activate
+## Dimension 0 — Necessity validation (BEFORE planning a PR)
+
+This dimension runs **before** the other 8, at PR-planning time, NOT at checkpoint time. Skipping it produces "code shipped because it was on the roadmap" rather than "code shipped because production needed it." A5 (saga watchdog) merged with this gap retroactively visible — the PR was correct but planning didn't validate necessity. Future PRs use this checklist.
+
+Before any non-trivial PR:
+
+| # | Question | If "no" / "unsure", do this BEFORE writing code |
+| :-- | :-- | :-- |
+| 1 | Is the gap this PR closes **observable in production today**? (metric value, log line, incident) | Add the metric / alert that WOULD detect it. Defer code until the signal fires. |
+| 2 | What's the **simplest version** that would close the same gap? (alert-only, doc-only, smaller scope) | Ship the simpler version first. Re-evaluate after it lands. |
+| 3 | Is there a **planned future PR** that would close the same gap? | Distinguish: complementary (both worth shipping), duplicative (drop one), or "this is the bridge until that lands" (ship with explicit sunset criteria). |
+
+Recording the answers in the PR body forces honest framing. Examples:
+
+- "Production shows `dlq_messages_total{topic="order.failed.dlq"} > 0` for 24h → real bleeding → ship full fix."
+- "No production data shows this gap. Adding alert + 2-week observation period before writing handler code."
+- "DLQ worker is on the roadmap. This watchdog is the defense-in-depth layer; will mostly produce `already_compensated` once DLQ worker ships."
+
+## When to Activate (post-PR audit)
 
 Trigger a checkpoint when ANY of these is true:
 
