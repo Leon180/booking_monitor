@@ -8,7 +8,7 @@ The full framework lives in [`.claude/skills/project-review-checkpoint/SKILL.md`
 
 | Date | Trigger | Phase | PRs covered | Report | Outcome |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| _(none yet)_ | _Phase 2 boundary after A5_ | — | — | _scheduled_ | — |
+| 2026-04-30 | Phase 2 boundary | 2 | #45..#49 | [20260430-phase2-review.md](20260430-phase2-review.md) | Grade A−. 1 verified correctness gap (recon max-age inventory leak) + 4 ops Criticals (no runbooks, no Alertmanager, dark worker metrics, doc contradiction). Cleanup PR scoped from action plan rows 1–9; larger items split to separate PRs. |
 
 ## Triggers
 

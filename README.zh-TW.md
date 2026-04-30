@@ -17,21 +17,28 @@ Client -> Nginx (限流) -> Gin API -> Redis Lua (原子扣減)
 **設計風格**:Domain-Driven Design + Clean Architecture(Modular Monolith)
 
 ```
-cmd/booking-cli/          # CLI 進入點(server, stress, payment 指令)
+cmd/booking-cli/          # CLI 進入點:server / stress / payment / recon / saga-watchdog 子指令
 internal/
-  domain/                 # Entities(Event, Order)與 repository 介面
-  application/            # Services: BookingService, WorkerService, OutboxRelay, SagaCompensator
+  domain/                 # Entities(Event、Order、OutboxEvent)、value type(StuckCharging、StuckFailed)、repository 介面
+  application/            # BookingService、WorkerService、OutboxRelay
+    payment/              # PaymentService — Kafka order.created consumer、gateway 編排
+    recon/                # Reconciler(A4)— 掃描卡在 `charging` 的訂單,呼叫 gateway 收尾
+    saga/                 # SagaCompensator + Watchdog(A5)— order.failed consumer + DB 端 sweep
   infrastructure/
-    api/                  # Gin HTTP handlers + middleware
-    cache/                # Redis: inventory、streams、idempotency、Lua scripts
-    persistence/postgres/ # Repositories、UoW、advisory lock
+    api/
+      booking/            # POST /book、GET /orders、GET /history、POST /events、GET /events/:id
+      ops/                # /livez、/readyz、/metrics
+      middleware/         # Idempotency(N4)、correlation_id、metrics
+      dto/                # Wire-format request/response 結構
+    cache/                # Redis:inventory、streams、idempotency、Lua scripts(deduct.lua、revert.lua)
+    persistence/postgres/ # Repositories、UoW、advisory lock、row mapper
     messaging/            # Kafka publisher + consumers
-    observability/        # Prometheus metrics、OTEL tracing
-    payment/              # Mock 付款閘道
-    config/               # YAML config + 環境變數 override
+    observability/        # Prometheus metrics、OTEL tracing、DB pool collector
+    payment/              # Mock 付款閘道(成功率可設定)
+    config/               # YAML config + 環境變數 override(cleanenv)
   log/                    # 結構化日誌(Zap)— context 傳遞、typed tag、執行期 level
-  bootstrap/              # logger 與其他基礎設施的 fx 綁定
-deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、Grafana 設定
+  bootstrap/              # logger + tracer + DI 基礎元件的 fx 綁定
+deploy/                   # Postgres migrations(11 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
 ```
 
 ## 特色
@@ -40,7 +47,7 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 - **非同步處理**:Redis Streams consumer group,含 PEL 恢復機制
 - **Transactional Outbox**:訂單與事件同一筆交易,再由 OutboxRelay 發布至 Kafka
 - **Saga 補償**:冪等地回滾付款失敗(DB + Redis)
-- **三層冪等性**:API(header)、Worker(DB 索引)、Saga(Redis SETNX)
+- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `Charge`)
 - **限流**:Nginx(100 req/s/IP,burst 200)
 - **領導者選舉**:以 PostgreSQL advisory lock 確保只有 1 個 OutboxRelay 實例在跑
 - **完整可觀測性**:Prometheus metrics、Grafana dashboards、Jaeger tracing、Zap logging
@@ -48,7 +55,7 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 
 ## 先決條件
 
-- Go 1.24+
+- Go 1.25+(透過 `go.mod` 的 `toolchain go1.25.9` 釘版)
 - Docker 與 Docker Compose
 - `golangci-lint`(執行 lint 用)
 - `golang-migrate`(執行 DB migration 用)
@@ -92,6 +99,8 @@ deploy/                   # Postgres migrations、Redis、Nginx、Prometheus、G
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | 查看活動 |
 | GET | `/metrics` | Prometheus 指標 |
+| GET | `/livez` | Liveness 探針 — process 還活著就一律回 200(不依賴下游) |
+| GET | `/readyz` | Readiness 探針 — PG + Redis + Kafka 都在 1s 內回應才回 200,否則回 503 並附逐 dep 的 JSON |
 
 ### 訂票流程
 
@@ -153,7 +162,7 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 | 工具 | URL | 用途 |
 |------|-----|------|
 | Prometheus | `http://localhost:9090` | 指標抓取 |
-| Grafana | `http://localhost:3000`(admin/admin) | 6 格儀表板(RPS、延遲、轉換率、公平性、飽和度) |
+| Grafana | `http://localhost:3000`(admin/admin) | 6 格儀表板(RPS、p99/p95/p50 延遲、轉換率、goroutines、記憶體) |
 | Jaeger | `http://localhost:16686` | 分散式追蹤 |
 
 **關鍵指標**:`bookings_total`, `http_request_duration_seconds`, `worker_orders_total`, `inventory_conflicts_total`, `page_views_total`
@@ -164,7 +173,8 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 |------|------|------|
 | app | 8080 | Booking API server |
 | nginx | 80 | Reverse proxy + 限流 |
-| payment_worker | - | Kafka 付款 consumer |
+| payment_worker | - | Kafka 付款 consumer(`booking-cli payment`) |
+| recon | - | 卡單收尾的 Reconciler 子指令(`booking-cli recon`) |
 | postgres | 5433 | PostgreSQL 資料庫 |
 | redis | 6379 | 快取 + streams |
 | kafka | 9092 | 事件串流 |
@@ -187,6 +197,8 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 
 ## 效能
 
+架構演進的歷史快照(早期 phase — 用來呈現演進敘事,不是當前數字):
+
 | 架構設定 | RPS | P99 延遲 |
 |---------|-----|----------|
 | 純 Postgres | ~4,000 | ~500ms |
@@ -194,13 +206,17 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 | + Kafka outbox | ~9,000 | ~100ms |
 | + Saga 補償 | ~8,500 | ~120ms |
 
+**當前 baseline**(PR #45 之後、GC 已調過、c=500 VUs、60s、500k 票池、直連 `app:8080`):**~54,000 RPS / p95 ~12.6ms**([20260428_225152_compare_c500_a4_charging_intent](docs/benchmarks/20260428_225152_compare_c500_a4_charging_intent/comparison.md))。上方的早期數字是 PR #14/#15 GC 調整(`GOGC=400`、`GOMEMLIMIT=256MiB`、Lua args 的 sync.Pool)落地之前的歷史紀錄。所有逐次比對報告都在 [docs/benchmarks/](docs/benchmarks/);apples-to-apples 標準設定見 [CLAUDE.md「Benchmark 慣例」](.claude/CLAUDE.md)。
+
 ## 文件
 
 - [Project Specification](docs/PROJECT_SPEC.zh-TW.md) — 完整系統規格(中文)
 - [Project Specification (EN)](docs/PROJECT_SPEC.md) — 完整系統規格(英文)
-- [Scaling Roadmap](docs/scaling_roadmap.md) — Stage 1-4 演進計劃
-- [Architecture (Current)](docs/architecture/current_monolith.md) — Phase 7.7 圖
+- [Post-Phase-2 Roadmap](docs/post_phase2_roadmap.md) — **目前的 sprint plan + Pattern A demo 順序**(「下一步要做什麼」的權威來源)
+- [Project Review Checkpoints](docs/checkpoints/) — 各個 phase 邊界的全專案審計報告
+- [Scaling Roadmap](docs/scaling_roadmap.md) — 歷史性的 Stage 1-4 架構演進敘事
+- [Architecture (Current)](docs/architecture/current_monolith.md) — 目前架構的 Mermaid 圖
 - [Architecture (Future)](docs/architecture/future_robust_monolith.md) — 目標架構
 - [ADR-001: Queue Selection](docs/adr/0001_async_queue_selection.md) — Redis Streams vs Kafka 決策
-- [Phase 2 Review](docs/reviews/phase2_review.md) — Redis 整合 review
-- [Benchmarks](docs/benchmarks/) — 15 份效能報告
+- [Phase 2 Review](docs/reviews/phase2_review.md) — 早期 phase 的 Redis 整合 review
+- [Benchmarks](docs/benchmarks/) — 歷次效能比對報告

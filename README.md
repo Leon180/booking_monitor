@@ -17,21 +17,28 @@ Client -> Nginx (rate limit) -> Gin API -> Redis Lua (atomic deduct)
 **Design**: Domain-Driven Design + Clean Architecture (Modular Monolith)
 
 ```
-cmd/booking-cli/          # CLI entry point (server, stress, payment commands)
+cmd/booking-cli/          # CLI entry: server, stress, payment, recon, saga-watchdog subcommands
 internal/
-  domain/                 # Entities (Event, Order), repository interfaces
-  application/            # Services: BookingService, WorkerService, OutboxRelay, SagaCompensator
+  domain/                 # Entities (Event, Order, OutboxEvent), value types (StuckCharging, StuckFailed), repository interfaces
+  application/            # BookingService, WorkerService, OutboxRelay
+    payment/              # PaymentService — Kafka order.created consumer, gateway orchestration
+    recon/                # Reconciler (A4) — sweeps stuck `charging` orders, queries gateway, resolves
+    saga/                 # SagaCompensator + Watchdog (A5) — order.failed consumer + DB-side sweep
   infrastructure/
-    api/                  # Gin HTTP handlers + middleware
-    cache/                # Redis: inventory, streams, idempotency, Lua scripts
-    persistence/postgres/ # Repositories, UoW, advisory locks
+    api/
+      booking/            # POST /book, GET /orders, GET /history, POST /events, GET /events/:id
+      ops/                # /livez, /readyz, /metrics
+      middleware/         # Idempotency (N4), correlation_id, metrics
+      dto/                # Wire-format request/response shapes
+    cache/                # Redis: inventory, streams, idempotency, Lua scripts (deduct.lua, revert.lua)
+    persistence/postgres/ # Repositories, UoW, advisory locks, row mappers
     messaging/            # Kafka publisher + consumers
-    observability/        # Prometheus metrics, OTEL tracing
-    payment/              # Mock payment gateway
-    config/               # YAML config + env overrides
+    observability/        # Prometheus metrics, OTEL tracing, DB-pool collector
+    payment/              # Mock payment gateway with configurable success rate
+    config/               # YAML config + env overrides (cleanenv)
   log/                    # Structured logging (Zap) — context propagation, typed tags, runtime level
-  bootstrap/              # fx wiring for logger and other infra primitives
-deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafana configs
+  bootstrap/              # fx wiring for logger + tracer + DI primitives
+deploy/                   # Postgres migrations (11), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
 ```
 
 ## Features
@@ -40,7 +47,7 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 - **Async Processing**: Redis Streams with consumer groups and PEL recovery
 - **Transactional Outbox**: Atomic order + event persistence, Kafka publishing
 - **Saga Compensation**: Idempotent payment failure rollback (DB + Redis)
-- **Idempotency**: 3 levels - API (header), worker (DB constraint), saga (Redis SETNX)
+- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `Charge`)
 - **Rate Limiting**: Nginx (100 req/s/IP, burst 200)
 - **Leader Election**: PostgreSQL advisory locks for single OutboxRelay instance
 - **Full Observability**: Prometheus metrics, Grafana dashboards, Jaeger tracing, Zap logging
@@ -48,7 +55,7 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.25+ (toolchain pinned via `go.mod` `toolchain go1.25.9`)
 - Docker & Docker Compose
 - `golangci-lint` (for linting)
 - `golang-migrate` (for database migrations)
@@ -92,6 +99,8 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 | POST | `/api/v1/events` | Create event `{ name, total_tickets }` |
 | GET | `/api/v1/events/:id` | View event details |
 | GET | `/metrics` | Prometheus metrics |
+| GET | `/livez` | Liveness probe — always 200 if process is up (no downstream deps) |
+| GET | `/readyz` | Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 + per-dep JSON otherwise |
 
 ### Booking flow
 
@@ -153,7 +162,7 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # Query order history
 | Tool | URL | Purpose |
 |------|-----|---------|
 | Prometheus | `http://localhost:9090` | Metrics scraping |
-| Grafana | `http://localhost:3000` (admin/admin) | 6-panel dashboard (RPS, latency, conversion, fairness, saturation) |
+| Grafana | `http://localhost:3000` (admin/admin) | 6-panel dashboard (RPS, p99/p95/p50 latency, conversion, goroutines, memory) |
 | Jaeger | `http://localhost:16686` | Distributed tracing |
 
 **Key Metrics**: `bookings_total`, `http_request_duration_seconds`, `worker_orders_total`, `inventory_conflicts_total`, `page_views_total`
@@ -164,7 +173,8 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # Query order history
 |---------|------|-------------|
 | app | 8080 | Booking API server |
 | nginx | 80 | Reverse proxy + rate limiter |
-| payment_worker | - | Kafka consumer for payments |
+| payment_worker | - | Kafka consumer for payments (`booking-cli payment`) |
+| recon | - | Reconciler subcommand for stuck `charging` orders (`booking-cli recon`) |
 | postgres | 5433 | PostgreSQL database |
 | redis | 6379 | Cache + streams |
 | kafka | 9092 | Event streaming |
@@ -187,6 +197,8 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # Query order history
 
 ## Performance
 
+Architecture-evolution snapshot (early phases — for narrative, not current numbers):
+
 | Configuration | RPS | P99 Latency |
 |---------------|-----|-------------|
 | Postgres only | ~4,000 | ~500ms |
@@ -194,12 +206,16 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # Query order history
 | + Kafka outbox | ~9,000 | ~100ms |
 | + Saga compensation | ~8,500 | ~120ms |
 
+**Current baseline** (post-PR #45, GC-tuned, c=500 VUs, 60s, 500k ticket pool, direct `app:8080`): **~54,000 RPS / p95 ~12.6ms** ([20260428_225152_compare_c500_a4_charging_intent](docs/benchmarks/20260428_225152_compare_c500_a4_charging_intent/comparison.md)). The early-phase numbers above predate the GC tuning landed in PRs #14/#15 (`GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Lua args). All run-to-run reports live in [docs/benchmarks/](docs/benchmarks/); see [CLAUDE.md "Benchmark Conventions"](.claude/CLAUDE.md) for the apples-to-apples standard config.
+
 ## Documentation
 
 - [Project Specification](docs/PROJECT_SPEC.md) - Comprehensive system spec
-- [Scaling Roadmap](docs/scaling_roadmap.md) - Stage 1-4 evolution plan
-- [Architecture (Current)](docs/architecture/current_monolith.md) - Phase 7.7 diagram
+- [Post-Phase-2 Roadmap](docs/post_phase2_roadmap.md) - **Active sprint plan + Pattern A demo sequence** (canonical for "what's next")
+- [Project Review Checkpoints](docs/checkpoints/) - Whole-project audit reports at phase boundaries
+- [Scaling Roadmap](docs/scaling_roadmap.md) - Historical Stage 1-4 architecture evolution narrative
+- [Architecture (Current)](docs/architecture/current_monolith.md) - Mermaid diagram
 - [Architecture (Future)](docs/architecture/future_robust_monolith.md) - Target architecture
 - [ADR-001: Queue Selection](docs/adr/0001_async_queue_selection.md) - Redis Streams vs Kafka
-- [Phase 2 Review](docs/reviews/phase2_review.md) - Redis integration review
-- [Benchmarks](docs/benchmarks/) - 15 timestamped performance reports
+- [Phase 2 Review](docs/reviews/phase2_review.md) - Early-phase Redis integration review
+- [Benchmarks](docs/benchmarks/) - timestamped performance reports
