@@ -22,17 +22,36 @@ Phase 2.5 (cleanup, ~1 wk)
   CP8  header-bearing N4 benchmark (row 17)
   CP9  Grafana dashboard panels for recon / saga / DLQ / DB pool / cache (row 18)
 
-Phase 3 (demo readiness, ~3–5 wk) — Pattern A
-  D1  schema migration: add orders.reserved_until + orders.payment_intent_id; new orders status `awaiting_payment`
-  D2  domain state machine: pending → awaiting_payment → paid | expired | failed
-  D3  POST /api/v1/book becomes a reservation (TTL 10–15 min); response includes payment_intent metadata
-  D4  POST /api/v1/orders/:id/pay creates the PaymentIntent against the gateway adapter (Stripe-like)
-  D5  POST /webhook/payment receives async outcome; webhook signature verification; idempotent against payment_intent_id
-  D6  reservation expiry sweeper (mirrors A5 watchdog shape): scan `awaiting_payment` past `reserved_until`, transition → expired, revert Redis inventory via revert.lua
-  D7  payment_worker stops being a saga consumer for the happy path. Saga compensator scope narrows to {expired, payment_failed}.
-  D8  frontend (out of repo, optional for portfolio): Stripe Elements integration in a thin Next.js demo app under `web/` to make the demo recordable
-  D9  load-test refresh: k6 scenario script for the new two-step flow; baseline capture
-  D10 demo recording: 3-minute video walkthrough of (a) reservation, (b) intent creation, (c) webhook outcome, (d) expiry sweep, (e) Grafana dashboards lighting up
+Phase 3 (demo readiness, ~9–13 wk total) — Pattern A + live mission control + 4-version comparison
+
+  3a. Pattern A core (~3–5 wk)
+  D1   schema migration: add orders.reserved_until + orders.payment_intent_id; new status `awaiting_payment`
+  D2   domain state machine: pending → awaiting_payment → paid | expired | failed
+  D3   POST /api/v1/book becomes a reservation (TTL 10–15 min); response includes payment_intent metadata
+  D4   POST /api/v1/orders/:id/pay creates the PaymentIntent against the gateway adapter (Stripe-like)
+  D5   POST /webhook/payment receives async outcome; webhook signature verification; idempotent against payment_intent_id
+  D6   reservation expiry sweeper (mirrors A5 watchdog shape): scan `awaiting_payment` past `reserved_until`, transition → expired, revert Redis inventory via revert.lua
+  D7   payment_worker stops being a saga consumer for the happy path. Saga compensator scope narrows to {expired, payment_failed}.
+
+  3b. Demo polish (~6–8 wk; D12 runs in parallel with 3a)
+  D8   frontend bootstrap: `web/` workspace (Next.js + Stripe Elements + MockStripeAdapter for credential-free demo)
+  D9   load-test refresh: k6 scenario script for the two-step flow; baseline capture
+  D10  demo recording: ~5-minute video walkthrough (now richer because D11/D13 are in scope) — mission-control view of normal flow → push spike load → watch Stage 1 collapse → same load on Stage 4 → reservation/payment/webhook flow → expiry sweep → saga compensation example
+
+  D11  live mission-control dashboard (~1–2 wk)
+       Backend: `GET /api/v1/admin/stream` (SSE). Polls own `/metrics` every 250ms, diffs, pushes deltas to all subscribers + initial-snapshot on connect. Gated on `ENABLE_ADMIN_DEMO=true` (separate from `ENABLE_PPROF`; off in prod).
+       Frontend (in `web/` workspace from D8): live counters (inventory remaining, orders by status, stream depth, DLQ count, watchdog/recon recent activity, p99 sliding window) + **animated pipeline diagram** built with React Flow — orders rendered as dots flowing Redis → worker → DB → outbox → Kafka → payment → confirmed/failed. The animation IS the demo's killer visual.
+
+  D12  4-version multi-cmd comparison harness (~4 wk; can start in parallel with 3a)
+       Same `internal/` packages, different fx wirings under separate `cmd/` entries — Clean Architecture as the answer:
+       - `cmd/booking-cli-stage1/` — API → Postgres `SELECT FOR UPDATE`. No Redis, no Kafka, no async, no saga. Pure synchronous baseline. Estimated 30 LOC main.go.
+       - `cmd/booking-cli-stage2/` — API → Redis Lua atomic deduct → SYNCHRONOUS DB write. Inventory in Redis but no async buffering.
+       - `cmd/booking-cli-stage3/` — API → Redis Lua → `orders:stream` → worker → DB. Async + worker pool, but no event-driven downstream (no Kafka outbox, no payment service, no saga).
+       - `cmd/booking-cli-stage4/` — current `cmd/booking-cli/` as canonical Stage 4. No rename; just add the version label.
+       Each binary registers Prometheus default labels with constant `version_tag={stage1..stage4}` so Grafana can split by version. Each implements only `POST /api/v1/book` for the comparison; full feature set stays on Stage 4. `docker-compose` gets a `comparison` profile spinning up all four on ports 8081–8084. Shared Postgres + Redis instances with namespace isolation (per-stage Postgres database, per-stage Redis DB index). k6 takes `--target=http://localhost:8081` argument; results stored under `docs/benchmarks/comparisons/<timestamp>/{stage1,stage2,stage3,stage4}/`.
+
+  D13  frontend comparison view (~1–2 wk; depends on D12)
+       Reads benchmark archive JSON from `docs/benchmarks/comparisons/`. Side-by-side time-series charts (RPS over time, p99 latency, error rate, conversion) with Recharts/Chart.js. Annotated callouts: "Stage 1 collapses at 4K RPS due to PG row-lock contention", "Stage 2 stops scaling at 11K RPS because synchronous DB write becomes the bottleneck", etc. Optional `Run benchmark now` button: POSTs to `/api/v1/admin/benchmark?stage=N&duration=60s` → backend triggers k6 against the selected stage → streams progress via the same SSE channel as D11.
 
 Phase 4 (production-hardening, ~2–3 wk) — only after Pattern A demo lands
   P1  Redis HA (A9) — Sentinel + FailoverClient
@@ -61,29 +80,38 @@ Rows 1–9 from the checkpoint action plan, grouped logically:
 
 CP1 is intentionally narrower than "everything-Critical" because rows 10–14 each warrant their own reviewable PR (architecture refactor, testcontainers, runbooks, Alertmanager).
 
-## Demo plan — Pattern A in detail
+## Demo plan — full narrative
 
-The demo should show the project doing **what real flash-sale e-commerce does**, not just a proof-of-concept. Pattern A is the shape Stripe Checkout, KKTIX, Ticketmaster all use.
+The demo tells **two interleaved stories**: (1) architectural evolution under load (Stages 1→4 — why each layer exists), and (2) real-world e-commerce shape (Pattern A — reservation + webhook). Both are necessary because each answers a different interview question. The mission-control dashboard is the visual common ground that ties them together.
 
-### User-visible flow (3-minute demo script)
+### User-visible flow (~5-minute demo script)
 
-1. **Reservation**: client `POST /api/v1/book` → server returns 202 with `order_id`, `reserved_until`, `payment_intent_client_secret`. Redis inventory deducted; order in `awaiting_payment` state.
-2. **Payment collection** (frontend): Stripe Elements card form mounted with `client_secret`. User submits card. Stripe.js confirms PaymentIntent client-side; never touches our server.
-3. **Webhook outcome**: Stripe POSTs `payment_intent.succeeded` (or `.payment_failed`) to `/webhook/payment`. Server verifies signature, looks up order by `payment_intent_id`, transitions `awaiting_payment → paid` or `→ failed`. Saga handles `failed`.
-4. **Expiry path** (separate sub-demo): client never pays. Reservation sweeper (mirrors A5 watchdog) scans `awaiting_payment` past `reserved_until`, transitions to `expired`, reverts Redis inventory via existing `revert.lua`. Inventory becomes available again to other users.
-5. **Observability**: Grafana dashboard updates live during the demo — `awaiting_payment_orders` gauge spikes then drops, webhook latency histogram, expiry-sweep counter. (Requires CP9 to be done first.)
+**Act 1 — "why each layer exists" (D11 + D12 + D13)**
 
-### Why Pattern A (recap from backlog §13.1)
+1. **Open the live mission-control dashboard.** Pipeline diagram shows the full Stage 4 system idle, all queues empty.
+2. **Switch the dashboard's `version_tag` filter to Stage 1.** Visual changes: the diagram dims out Redis / streams / Kafka / payment-worker / saga, leaving only `API → Postgres`.
+3. **Push button: "Apply 5K RPS load to Stage 1".** Watch the dashboard: RPS rises briefly, then p99 hockey-sticks, conversion rate craters as request timeouts pile up. Stage 1 is at its row-lock-contention ceiling.
+4. **Same load against Stage 4.** Dashboard renders smoothly: ~50K RPS sustained, p99 stays in the millisecond range, queue depth stays low because the worker keeps draining.
+5. **Side-by-side comparison view (D13).** Recharts overlay: Stage 1 vs Stage 4 RPS-over-time + p99-over-time, with the annotated collapse points. The comparison archive lives in `docs/benchmarks/comparisons/`.
 
-- Stripe + Ticketmaster + KKTIX are the demo-target audiences. Pattern A matches their architecture exactly.
-- Solves the deeper `OrderStatusFailed` semantic gap (business decline vs service failure) — webhook payload classifies; user retries with new card; only service-side failures hit the saga.
-- Real demo recordable end-to-end with mock-gateway-or-Stripe-test-mode without exposing real money.
-- Senior interview talking point: "I refactored the payment integration twice — first an internal-saga model for the engineering exercise, then a webhook-receiver model when I matured the product." Shows architectural growth.
+**Act 2 — "what real e-commerce does" (Pattern A)**
+
+6. **Switch back to Stage 4. Open the booking page.** Click "Reserve". Frontend posts to `/api/v1/book` → 202 with `client_secret` + `reserved_until` countdown. Mission-control dashboard shows the order entering `awaiting_payment` state; inventory remaining ticks down; reservation TTL countdown is rendered alongside.
+7. **Stripe Elements payment form** (mounted with `client_secret`). Submit card. Stripe.js confirms client-side. Backend `/webhook/payment` receives `payment_intent.succeeded`, verifies signature, transitions `awaiting_payment → paid`. Dashboard updates in real-time.
+8. **Expiry sub-demo.** Reserve, then DON'T pay. Wait the TTL out. Reservation sweeper sweeps; dashboard shows `awaiting_payment_orders` decrementing, `expired_orders` incrementing, inventory ticking back UP because `revert.lua` ran. The same ticket can be re-reserved by another user.
+9. **Saga compensation example.** Trigger a failure-mode (mock gateway 5xx). Webhook receives `payment_intent.payment_failed`. Saga compensator runs. Dashboard's saga lane lights up.
+
+### Why this combined demo
+
+- Stages 1–4 with mission-control video answers **"why this architecture, not just one Postgres?"** — most candidates can list patterns, few can show them collapse vs scale on the same dashboard.
+- Pattern A answers **"why is this real-world e-commerce, not a CRUD toy?"** — Stripe / Ticketmaster / KKTIX architecture parity. Plus it solves the deeper business-vs-service-failure semantic gap noted in `architectural_backlog.md §13`.
+- The interview talking point becomes "I built each layer separately, then composed them into the production-realistic shape, and you can watch each version's failure mode on the dashboard." Both depth and product sense.
 
 ### Out-of-repo decisions
 
-- **Frontend**: Add a thin `web/` workspace (Next.js + Stripe Elements). Optional for the README portfolio but required for the demo video. Keep in repo to keep the demo reproducible.
-- **Stripe vs MockGateway**: ship with `MockStripeAdapter` (signed-webhook simulator) so the demo runs without Stripe credentials. Document the adapter swap in §6.x of PROJECT_SPEC. Real-Stripe instructions in a separate `docs/runbooks/stripe-integration.md` (CP5).
+- **Frontend** (`web/` workspace, Next.js): contains both the customer flow (Stripe Elements payment form) AND the mission-control dashboard + comparison view. Keep in repo so the demo is reproducible — clone repo, run `make demo-up`, recording-ready.
+- **Stripe vs MockGateway**: ship with `MockStripeAdapter` (signed-webhook simulator) so the demo runs without Stripe credentials. Document the adapter swap in `docs/PROJECT_SPEC.md` §6.x. Real-Stripe operator instructions in `docs/runbooks/stripe-integration.md` (CP5).
+- **Admin endpoint gating**: `ENABLE_ADMIN_DEMO=true` env var gates `/api/v1/admin/stream` and `/api/v1/admin/benchmark`. Off in any non-demo environment. Separate from `ENABLE_PPROF` so each surface can be turned on independently.
 
 ## Deferred / explicitly NOT in this roadmap
 
