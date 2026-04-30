@@ -470,6 +470,19 @@ The saga watchdog is the **symmetric counterpart** of the reconciler — same lo
 - Default loop: ticker-driven, runs until SIGTERM. Suits docker-compose / Deployment hosting.
 - `--once`: single sweep then exit. Suits k8s CronJob hosting where the orchestrator handles the schedule.
 
+**Scope clarification — what A5 does NOT address:**
+
+A5 ensures the **auto-compensate path completes reliably**. It does NOT address the deeper design question of **whether auto-compensation is the correct response to every payment failure.** Today's `OrderStatusFailed` is a single bucket conflating two semantically distinct cases:
+
+| Failure type | Triggered by | Today's handling | What it should probably be |
+| :-- | :-- | :-- | :-- |
+| **Business failure** | Card declined, insufficient funds, 3DS rejected | Auto-compensate (revert inventory, MarkCompensated). No user notification. No retry path on the same order. | Surface to user with reason; let them retry with a different payment method against the same reserved inventory. |
+| **Service failure** | Gateway 5xx, network timeout, our service buggy | Auto-compensate as above — **without verifying whether the gateway actually charged the customer** | Verify gateway state (call `gateway.GetStatus`) before reverting. If indeterminate, quarantine for operator review (potential phantom-charge risk). |
+
+`OrderFailedEvent` carries the failure reason in `Reason` (set to `err.Error()` from the gateway call) but the reason is **never persisted to the orders table** — the saga compensator consumes the event payload and discards the reason. So the DB has no memory of WHY a given order is `compensated`; investigation requires Kafka log replay.
+
+A5 is correct within the current single-bucket model. The semantic refactor (persist `failed_reason`, differentiate handling, surface to user) is multi-week product work tracked in [`architectural_backlog.md §13`](../architectural_backlog.md). When that lands, A5's contract narrows to "service-failure-side recovery only" without changing its code.
+
 ### 6.8 Redis Streams Hardening
 
 The booking pipeline uses two Redis Streams: `orders:stream` (hot work queue, API → worker) and `orders:dlq` (failed messages awaiting operator review). Three observability + retention concerns landed together:

@@ -458,6 +458,19 @@ Saga watchdog 是 reconciler 的**對稱姊妹** — 同樣的 loop 形狀、同
 - 預設 loop:ticker 驅動,跑到收到 SIGTERM 為止。適合 docker-compose / Deployment 部署。
 - `--once`:跑一次 sweep 就退出。適合 k8s CronJob 部署,排程由編排器處理。
 
+**範圍釐清 — A5 不處理什麼:**
+
+A5 確保**自動補償流程能可靠地完成**。它**不處理**更深一層的設計問題:**自動補償是不是對每一種付款失敗都是正確回應?** 現在的 `OrderStatusFailed` 是個混合桶,把兩種語意不同的情況綁在一起:
+
+| 失敗類型 | 觸發原因 | 目前處理方式 | 比較合理的處理方式 |
+| :-- | :-- | :-- | :-- |
+| **業務失敗** | 信用卡被拒、餘額不足、3DS 驗證未通過 | 自動補償(回復庫存,MarkCompensated)。沒通知使用者,同個訂單不能重試。 | 把失敗原因告訴使用者;允許他用另一張卡對**同一個保留庫存**重試。 |
+| **服務失敗** | Gateway 5xx、網路 timeout、我們自己服務有 bug | 跟業務失敗同樣自動補償 — **沒驗證 gateway 實際上有沒有扣款** | 補償前先驗證 gateway 狀態(呼叫 `gateway.GetStatus`)。如果結果不確定,隔離起來給 operator 人工檢視(避免 phantom-charge 風險)。 |
+
+`OrderFailedEvent` 在 `Reason` 欄位帶了失敗原因(把 gateway 呼叫拿到的 `err.Error()` 塞進去)— 但這個 reason **從來沒被寫進 orders 資料表** — saga compensator 消費完 event payload 就丟了。所以資料庫裡完全沒記載某張 `compensated` 訂單**為什麼**會變成這樣;要查只能去翻 Kafka 日誌。
+
+A5 在現在這個「單一桶」的模型裡是對的。語意重構(把 `failed_reason` 寫進去、依不同原因走不同路徑、把業務失敗推給使用者)是好幾週的產品工作,記在 [`architectural_backlog.md §13`](../architectural_backlog.md)。等那個工作落地,A5 的契約就會收斂成「只處理服務失敗端的恢復」 — 不需要改 A5 的程式碼。
+
 ### 6.8 Redis Streams Hardening
 
 booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API → worker)和 `orders:dlq`(等待 operator 檢視的失敗訊息)。本次同時上線三個觀測性 + 保留期相關問題的修正:
