@@ -48,6 +48,14 @@ func runRecon(cmd *cobra.Command, _ []string) {
 			// from recon code) — fx.As scopes the injection to
 			// just the read-side port.
 			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentStatusReader))),
+			// Translate the wire-format infrastructure config into the
+			// application-layer recon.Config + provide the Prometheus-
+			// backed Metrics adapter. Closes the layer-violation
+			// finding A1 (Phase 2 checkpoint): recon.NewReconciler now
+			// depends only on application/domain types, not on
+			// infrastructure/{config,observability}.
+			bootstrap.NewReconConfig,
+			bootstrap.NewPrometheusReconMetrics,
 			recon.NewReconciler,
 		),
 		fx.Invoke(func(lc fx.Lifecycle, sd fx.Shutdowner, r *recon.Reconciler, l *mlog.Logger, c *config.Config) error {
@@ -89,7 +97,12 @@ func installRecon(
 				go runSweepOnce(runCtx, reconciler, logger, shutdowner)
 				return nil
 			}
-			go runSweepLoop(runCtx, reconciler, logger, cfg.Recon.SweepInterval)
+			// Read the loop interval off the Reconciler itself rather
+			// than re-deriving it from the infrastructure cfg here —
+			// keeps the source-of-truth for "this Reconciler's tunables"
+			// in one place (the application-layer recon.Config that
+			// NewReconciler consumed).
+			go runSweepLoop(runCtx, reconciler, logger, reconciler.SweepInterval())
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {

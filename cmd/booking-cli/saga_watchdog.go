@@ -52,6 +52,14 @@ func runSagaWatchdog(cmd *cobra.Command, _ []string) {
 			cacheinfra.NewRedisClient,
 			cacheinfra.NewRedisInventoryRepository,
 			application.NewSagaCompensator,
+			// Translate the wire-format infrastructure config into the
+			// application-layer saga.Config + provide the Prometheus-
+			// backed Metrics adapter. Closes the layer-violation
+			// finding A1 (Phase 2 checkpoint): saga.NewWatchdog now
+			// depends only on application/domain types, not on
+			// infrastructure/{config,observability}.
+			bootstrap.NewSagaConfig,
+			bootstrap.NewPrometheusSagaMetrics,
 			saga.NewWatchdog,
 		),
 		fx.Invoke(func(lc fx.Lifecycle, sd fx.Shutdowner, w *saga.Watchdog, l *mlog.Logger, c *config.Config) error {
@@ -86,7 +94,10 @@ func installSagaWatchdog(
 				go runSagaWatchdogOnce(runCtx, watchdog, logger, shutdowner)
 				return nil
 			}
-			go runSagaWatchdogLoop(runCtx, watchdog, logger, cfg.Saga.WatchdogInterval)
+			// Read the loop interval off the Watchdog itself, mirroring
+			// the recon side's `reconciler.SweepInterval()` shape.
+			// Single source-of-truth per sweeper for tunables.
+			go runSagaWatchdogLoop(runCtx, watchdog, logger, watchdog.WatchdogInterval())
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {

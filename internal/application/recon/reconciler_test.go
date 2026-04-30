@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -16,8 +15,6 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/recon"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
-	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 )
@@ -38,15 +35,46 @@ func (f *fakeStatusReader) GetStatus(_ context.Context, id uuid.UUID) (domain.Ch
 	return f.statuses[id], f.errors[id]
 }
 
-// reconHarness bundles the four mocks the Reconciler needs. Lets each
-// test set up its own EXPECT calls without re-constructing mocks +
-// reconciler boilerplate inline. Also returns the UoW so the failure-path
-// tests can wire MarkFailed + Outbox.Create expectations through Do.
+// recordingReconMetrics is the test-side `recon.Metrics` implementation —
+// captures every call so assertions read the recorded counts instead
+// of polling global Prometheus singletons. Lets tests run safely with
+// `t.Parallel()` (CP1's parallel-counter race was reproducible
+// specifically because counter assertions read shared global state)
+// and makes assertion intent explicit at read time
+// (`metrics.resolved["charged"]` vs `testutil.ToFloat64(observability.X)`).
+type recordingReconMetrics struct {
+	stuckChargingOrders int
+	resolved            map[string]int
+	findStuckErrors     int
+	gatewayErrors       int
+	markErrors          int
+	resolveDurations    []float64
+	resolveAges         []float64
+	gatewayDurations    []float64
+}
+
+func newRecordingReconMetrics() *recordingReconMetrics {
+	return &recordingReconMetrics{resolved: make(map[string]int)}
+}
+
+func (m *recordingReconMetrics) SetStuckChargingOrders(c int)      { m.stuckChargingOrders = c }
+func (m *recordingReconMetrics) IncFindStuckErrors()               { m.findStuckErrors++ }
+func (m *recordingReconMetrics) IncGatewayErrors()                 { m.gatewayErrors++ }
+func (m *recordingReconMetrics) IncResolved(outcome string)        { m.resolved[outcome]++ }
+func (m *recordingReconMetrics) IncMarkErrors()                    { m.markErrors++ }
+func (m *recordingReconMetrics) ObserveResolveDuration(s float64)  { m.resolveDurations = append(m.resolveDurations, s) }
+func (m *recordingReconMetrics) ObserveResolveAge(s float64)       { m.resolveAges = append(m.resolveAges, s) }
+func (m *recordingReconMetrics) ObserveGatewayDuration(s float64)  { m.gatewayDurations = append(m.gatewayDurations, s) }
+
+// reconHarness bundles the four mocks the Reconciler needs plus the
+// recording metrics fake. Lets each test set up its own EXPECT calls
+// without re-constructing mocks + reconciler boilerplate inline.
 type reconHarness struct {
-	r      *recon.Reconciler
-	repo   *mocks.MockOrderRepository
-	uow    *mocks.MockUnitOfWork
-	outbox *mocks.MockOutboxRepository
+	r       *recon.Reconciler
+	repo    *mocks.MockOrderRepository
+	uow     *mocks.MockUnitOfWork
+	outbox  *mocks.MockOutboxRepository
+	metrics *recordingReconMetrics
 }
 
 func newReconHarness(t *testing.T, gw domain.PaymentStatusReader, maxAge time.Duration) *reconHarness {
@@ -55,18 +83,17 @@ func newReconHarness(t *testing.T, gw domain.PaymentStatusReader, maxAge time.Du
 	repo := mocks.NewMockOrderRepository(ctrl)
 	uow := mocks.NewMockUnitOfWork(ctrl)
 	outbox := mocks.NewMockOutboxRepository(ctrl)
+	metrics := newRecordingReconMetrics()
 
-	cfg := &config.Config{
-		Recon: config.ReconConfig{
-			SweepInterval:     50 * time.Millisecond,
-			ChargingThreshold: 1 * time.Millisecond, // anything older counts
-			GatewayTimeout:    100 * time.Millisecond,
-			MaxChargingAge:    maxAge,
-			BatchSize:         10,
-		},
+	cfg := recon.Config{
+		SweepInterval:     50 * time.Millisecond,
+		ChargingThreshold: 1 * time.Millisecond, // anything older counts
+		GatewayTimeout:    100 * time.Millisecond,
+		MaxChargingAge:    maxAge,
+		BatchSize:         10,
 	}
-	r := recon.NewReconciler(repo, gw, uow, cfg, mlog.NewNop())
-	return &reconHarness{r: r, repo: repo, uow: uow, outbox: outbox}
+	r := recon.NewReconciler(repo, gw, uow, cfg, metrics, mlog.NewNop())
+	return &reconHarness{r: r, repo: repo, uow: uow, outbox: outbox, metrics: metrics}
 }
 
 // makeChargingOrder reconstructs a domain.Order in the OrderStatusCharging
@@ -140,23 +167,12 @@ func TestSweep_NoStuckOrders_NoOps(t *testing.T) {
 	require.NoError(t, h.r.Sweep(context.Background()))
 }
 
-// Counter-asserting tests below run SERIALLY (no t.Parallel()) because
-// they read + assert on global Prometheus counters
-// (ReconFindStuckErrorsTotal / ReconMarkErrorsTotal). With t.Parallel()
-// two tests asserting `before+1 == after` against the same counter
-// race: each reads `before` independently, both increment, and the
-// later `after` read sees +2 vs the captured `before`. The Mark*-side
-// counter is now contested between
-// TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric and
-// TestFailOrder_OutboxCreateError_EmitsMarkErrorMetric (DEF-CRIT path
-// added the second contender). Serial execution is the simplest fix;
-// these tests are fast enough that parallelism gain is negligible.
-//
-// TestSweep_FindStuckChargingError_Propagates also runs serial because
-// it INCREMENTS ReconFindStuckErrorsTotal as a side effect, which would
-// race the assertion in
-// TestSweep_FindStuckChargingDBError_EmitsFindStuckErrorMetric.
+// CP2 retired the global-Prometheus assertion path: every counter
+// assertion now reads a per-harness recordingReconMetrics fake, so
+// tests can safely run in parallel without the before/after race that
+// bit CP1.
 func TestSweep_FindStuckChargingError_Propagates(t *testing.T) {
+	t.Parallel()
 
 	h := newReconHarness(t, &fakeStatusReader{}, 1*time.Hour)
 	h.repo.EXPECT().
@@ -309,8 +325,7 @@ func TestSweep_MaxAgeExceeded_FailsOrderAndEmitsOutbox(t *testing.T) {
 // outbox-create failure would leave the saga compensator un-triggered
 // AND no operator signal.
 func TestFailOrder_OutboxCreateError_EmitsMarkErrorMetric(t *testing.T) {
-	// no t.Parallel — see the serialization comment on
-	// TestSweep_FindStuckChargingError_Propagates above.
+	t.Parallel()
 
 	id := uuid.New()
 	order := makeChargingOrder(t, id)
@@ -324,11 +339,9 @@ func TestFailOrder_OutboxCreateError_EmitsMarkErrorMetric(t *testing.T) {
 		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
 	expectFailOrder(t, h, id, order, nil, errors.New("outbox dead"), nil)
 
-	before := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
 	require.NoError(t, h.r.Sweep(context.Background()),
 		"per-order outbox/Mark errors must NOT propagate as Sweep error")
-	after := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
-	assert.Equal(t, before+1, after,
+	assert.Equal(t, 1, h.metrics.markErrors,
 		"recon_mark_errors_total must increment when the failOrder UoW fails")
 }
 
@@ -340,8 +353,7 @@ func TestFailOrder_OutboxCreateError_EmitsMarkErrorMetric(t *testing.T) {
 // path would only surface in logs, and a regression that suppressed
 // the counter would go unnoticed.
 func TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric(t *testing.T) {
-	// no t.Parallel — see the serialization comment on
-	// TestSweep_FindStuckChargingError_Propagates above.
+	t.Parallel()
 
 	id := uuid.New()
 	gw := &fakeStatusReader{
@@ -357,11 +369,9 @@ func TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric(t *testing.T) {
 	// return nil (per-order errors don't abort the sweep).
 	h.repo.EXPECT().MarkConfirmed(gomock.Any(), id).Return(errors.New("connection reset by peer"))
 
-	before := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
 	require.NoError(t, h.r.Sweep(context.Background()),
 		"per-order DB errors must NOT propagate as Sweep error")
-	after := testutil.ToFloat64(observability.ReconMarkErrorsTotal)
-	assert.Equal(t, before+1, after,
+	assert.Equal(t, 1, h.metrics.markErrors,
 		"recon_mark_errors_total must increment exactly once per non-ErrInvalidTransition Mark* failure")
 }
 
@@ -370,19 +380,16 @@ func TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric(t *testing.T) {
 // a forgotten migration / DB outage would show nothing on dashboards
 // EXCEPT a stale gauge.
 func TestSweep_FindStuckChargingDBError_EmitsFindStuckErrorMetric(t *testing.T) {
-	// no t.Parallel — see the serialization comment on
-	// TestSweep_FindStuckChargingError_Propagates above.
+	t.Parallel()
 
 	h := newReconHarness(t, &fakeStatusReader{}, 1*time.Hour)
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil, errors.New("relation \"orders\" does not exist"))
 
-	before := testutil.ToFloat64(observability.ReconFindStuckErrorsTotal)
 	err := h.r.Sweep(context.Background())
 	require.Error(t, err, "FindStuckCharging error MUST propagate as Sweep error")
-	after := testutil.ToFloat64(observability.ReconFindStuckErrorsTotal)
-	assert.Equal(t, before+1, after,
+	assert.Equal(t, 1, h.metrics.findStuckErrors,
 		"recon_find_stuck_errors_total must increment exactly once per FindStuckCharging failure")
 }
 

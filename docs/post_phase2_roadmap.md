@@ -14,6 +14,7 @@ Forward-looking sprint plan, written 2026-04-30 immediately after the Phase 2 ch
 Phase 2.5 (cleanup, ~1 wk)
   CP1  cleanup PR (rows 1–9 from action plan)
   CP2  recon Config + Metrics interfaces + saga.Config (architecture row 10)
+  CP2.5 application-port relocations: move `DistributedLock` and `EventPublisher` interfaces from `internal/domain/` to `internal/application/` (their `_only_ consumer is OutboxRelay; both have no domain invariants — pure plumbing ports). `IdempotencyResult` + `IdempotencyRepository` stay in domain (borderline; HTTP-transport semantics are defensible as API-protocol contracts). Wire-format constants like `EventTypeOrderCreated` stay in domain per coding-style rule 5. Small follow-up to CP2 — same architectural-cleanup theme, ~30 LOC + import updates across consumers.
   CP3  observability/metrics.go split + middleware move (row 11)
   CP4  testcontainers integration suite for repositories.go (row 12 = roadmap N8)
   CP5  docs/runbooks/* + alerts runbook_url annotations (row 13 = roadmap N3)

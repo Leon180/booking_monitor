@@ -46,37 +46,55 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
-	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
 // Watchdog holds the dependencies + tunables. Built once at process
-// start and reused across every sweep cycle.
+// start and reused across every sweep cycle. Depends only on domain
+// ports + application-layer types — no `infrastructure/config` or
+// `infrastructure/observability` imports (closes the layer-violation
+// finding A1 from the Phase 2 checkpoint).
 type Watchdog struct {
 	orders      domain.OrderRepository
 	compensator application.SagaCompensator
-	cfg         config.SagaConfig
+	cfg         Config
+	metrics     Metrics
 	log         *mlog.Logger
 }
 
-// NewWatchdog is the fx-friendly constructor. Decorates the logger
-// with `component=saga_watchdog` so every log line is filterable in
-// Loki/Grafana without per-call ceremony.
+// NewWatchdog is the constructor. The bootstrap layer (or each cmd
+// entry) is responsible for translating the YAML/env-tagged
+// `infrastructure/config.SagaConfig` into a `saga.Config` and for
+// providing a Metrics implementation (Prometheus-backed in
+// production, NopMetrics or a fake in tests).
+//
+// `cfg.Validate()` is the caller's responsibility — startup must
+// surface invalid configuration as a fatal, not silently run with
+// broken tunables.
+//
+// Decorates the logger with `component=saga_watchdog` so every log
+// line is filterable in Loki/Grafana without per-call ceremony.
 func NewWatchdog(
 	orders domain.OrderRepository,
 	compensator application.SagaCompensator,
-	cfg *config.Config,
+	cfg Config,
+	metrics Metrics,
 	logger *mlog.Logger,
 ) *Watchdog {
 	return &Watchdog{
 		orders:      orders,
 		compensator: compensator,
-		cfg:         cfg.Saga,
+		cfg:         cfg,
+		metrics:     metrics,
 		log:         logger.With(mlog.String("component", "saga_watchdog")),
 	}
 }
+
+// WatchdogInterval exposes the loop cadence so the cmd-side ticker
+// can read it without duplicating the config-translation step.
+// Mirrors `recon.Reconciler.SweepInterval()`. Read-only.
+func (w *Watchdog) WatchdogInterval() time.Duration { return w.cfg.WatchdogInterval }
 
 // Sweep runs ONE watchdog cycle: scan for stuck-Failed orders,
 // resolve each via the compensator, return. Both run modes (loop and
@@ -98,13 +116,13 @@ func (w *Watchdog) Sweep(ctx context.Context) error {
 		// Increment dedicated counter so dashboards / alerts can
 		// distinguish "orders are stuck" (gauge > 0) from "watchdog
 		// itself is broken" (gauge stale, this counter rising).
-		observability.SagaWatchdogFindStuckErrorsTotal.Inc()
+		w.metrics.IncFindStuckErrors()
 		return fmt.Errorf("saga watchdog Sweep: find stuck: %w", err)
 	}
 
 	// Update gauge so dashboards reflect "as of last sweep" backlog.
 	// Set to len(stuck) NOT cumulative — gauge semantics are point-in-time.
-	observability.SagaStuckFailedOrders.Set(float64(len(stuck)))
+	w.metrics.SetStuckFailedOrders(len(stuck))
 
 	if len(stuck) == 0 {
 		w.log.Debug(ctx, "saga watchdog sweep: no stuck orders")
@@ -160,8 +178,8 @@ func (w *Watchdog) Sweep(ctx context.Context) error {
 func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 	start := time.Now()
 	defer func() {
-		observability.SagaWatchdogResolveDurationSeconds.Observe(time.Since(start).Seconds())
-		observability.SagaWatchdogResolveAgeSeconds.Observe(s.Age.Seconds())
+		w.metrics.ObserveResolveDuration(time.Since(start).Seconds())
+		w.metrics.ObserveResolveAge(s.Age.Seconds())
 	}()
 
 	// 1. Max-age give-up. Unlike the reconciler's force-fail path,
@@ -175,7 +193,7 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 			mlog.Duration("age", s.Age),
 			mlog.Duration("max_age", w.cfg.MaxFailedAge),
 		)
-		observability.SagaWatchdogResolvedTotal.WithLabelValues("max_age_exceeded").Inc()
+		w.metrics.IncResolved("max_age_exceeded")
 		return
 	}
 
@@ -193,7 +211,7 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 	if err != nil {
 		w.log.Warn(parent, "saga watchdog: GetByID failed; if DB recovers next sweep retries, sustained DB outage will fail FindStuckFailed first",
 			tag.OrderID(s.ID), tag.Error(err))
-		observability.SagaWatchdogResolvedTotal.WithLabelValues("getbyid_error").Inc()
+		w.metrics.IncResolved("getbyid_error")
 		return
 	}
 
@@ -203,7 +221,7 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 	// (its internal idempotency would also handle this, but counting
 	// the race separately gives operators a benign-vs-real signal).
 	if order.Status() == domain.OrderStatusCompensated {
-		observability.SagaWatchdogResolvedTotal.WithLabelValues("already_compensated").Inc()
+		w.metrics.IncResolved("already_compensated")
 		w.log.Info(parent, "saga watchdog: order already compensated (race won by saga consumer)",
 			tag.OrderID(s.ID))
 		return
@@ -231,7 +249,7 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 		// is visible without conflating with real compensator failures.
 		w.log.Error(parent, "saga watchdog: marshal OrderFailedEvent failed",
 			tag.OrderID(s.ID), tag.Error(err))
-		observability.SagaWatchdogResolvedTotal.WithLabelValues("marshal_error").Inc()
+		w.metrics.IncResolved("marshal_error")
 		return
 	}
 
@@ -242,11 +260,11 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 		// safe to redo.
 		w.log.Warn(parent, "saga watchdog: compensator failed, will retry next sweep",
 			tag.OrderID(s.ID), tag.Error(err))
-		observability.SagaWatchdogResolvedTotal.WithLabelValues("compensator_error").Inc()
+		w.metrics.IncResolved("compensator_error")
 		return
 	}
 
-	observability.SagaWatchdogResolvedTotal.WithLabelValues("compensated").Inc()
+	w.metrics.IncResolved("compensated")
 	w.log.Info(parent, "saga watchdog: resolved failed→compensated",
 		tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 }

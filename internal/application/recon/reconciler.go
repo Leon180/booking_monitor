@@ -38,8 +38,6 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
-	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
@@ -56,13 +54,22 @@ type Reconciler struct {
 	orders  domain.OrderRepository
 	gateway domain.PaymentStatusReader
 	uow     application.UnitOfWork
-	cfg     config.ReconConfig
+	cfg     Config
+	metrics Metrics
 	log     *mlog.Logger
 }
 
-// NewReconciler is the fx-friendly constructor. Decorates the logger
-// with `component=recon` so every log line is filterable in
-// Loki/Grafana without per-call ceremony.
+// NewReconciler is the constructor. The bootstrap layer (or each cmd
+// entry) is responsible for translating the YAML/env-tagged
+// `infrastructure/config.ReconConfig` into a `recon.Config` and for
+// providing a Metrics implementation (Prometheus-backed in production,
+// NopMetrics or a fake in tests). Application code does NOT import
+// `infrastructure/config` or `infrastructure/observability` — that's
+// the layer-violation finding A1 from the Phase 2 checkpoint.
+//
+// `cfg.Validate()` is the caller's responsibility — startup must
+// surface invalid configuration as a fatal, not silently run with
+// broken tunables.
 //
 // `uow` is required because the failure-path resolutions (Declined /
 // NotFound / max-age) MUST emit `order.failed` to the outbox in the
@@ -70,21 +77,30 @@ type Reconciler struct {
 // never sees the order and the Redis inventory deduct is leaked.
 // Bare orders.MarkFailed (the prior shape) was the DEF-CRIT finding
 // from the Phase 2 checkpoint review.
+//
+// Decorates the logger with `component=recon` so every log line is
+// filterable in Loki/Grafana without per-call ceremony.
 func NewReconciler(
 	orders domain.OrderRepository,
 	gateway domain.PaymentStatusReader,
 	uow application.UnitOfWork,
-	cfg *config.Config,
+	cfg Config,
+	metrics Metrics,
 	logger *mlog.Logger,
 ) *Reconciler {
 	return &Reconciler{
 		orders:  orders,
 		gateway: gateway,
 		uow:     uow,
-		cfg:     cfg.Recon,
+		cfg:     cfg,
+		metrics: metrics,
 		log:     logger.With(mlog.String("component", "recon")),
 	}
 }
+
+// SweepInterval exposes the loop cadence so the cmd-side ticker can
+// read it without duplicating the config-translation step. Read-only.
+func (r *Reconciler) SweepInterval() time.Duration { return r.cfg.SweepInterval }
 
 // Sweep runs ONE reconciliation cycle: scan for stuck-Charging orders,
 // resolve each, return. Both run modes (loop and --once) call this
@@ -109,13 +125,13 @@ func (r *Reconciler) Sweep(ctx context.Context) error {
 		// itself is broken" (gauge stale, this counter rising).
 		// Without this, a missing-migration / DB-outage scenario
 		// shows nothing on dashboards except a stale gauge.
-		observability.ReconFindStuckErrorsTotal.Inc()
+		r.metrics.IncFindStuckErrors()
 		return fmt.Errorf("recon Sweep: find stuck: %w", err)
 	}
 
 	// Update gauge so dashboards reflect "as of last sweep" backlog.
 	// Set to len(stuck) NOT cumulative; gauge semantics are point-in-time.
-	observability.ReconStuckChargingOrders.Set(float64(len(stuck)))
+	r.metrics.SetStuckChargingOrders(len(stuck))
 
 	if len(stuck) == 0 {
 		r.log.Debug(ctx, "recon sweep: no stuck orders")
@@ -166,8 +182,8 @@ func (r *Reconciler) Sweep(ctx context.Context) error {
 func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 	start := time.Now()
 	defer func() {
-		observability.ReconResolveDurationSeconds.Observe(time.Since(start).Seconds())
-		observability.ReconResolveAgeSeconds.Observe(s.Age.Seconds())
+		r.metrics.ObserveResolveDuration(time.Since(start).Seconds())
+		r.metrics.ObserveResolveAge(s.Age.Seconds())
 	}()
 
 	// 1. Max-age give-up. Force-fail the order so the persistent
@@ -186,7 +202,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			r.handleMarkErr(parent, s.ID, "max_age_exceeded", err)
 			return
 		}
-		observability.ReconResolvedTotal.WithLabelValues("max_age_exceeded").Inc()
+		r.metrics.IncResolved("max_age_exceeded")
 		return
 	}
 
@@ -205,7 +221,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 
 	gwStart := time.Now()
 	status, err := r.gateway.GetStatus(gwCtx, s.ID)
-	observability.ReconGatewayDurationSeconds.Observe(time.Since(gwStart).Seconds())
+	r.metrics.ObserveGatewayDuration(time.Since(gwStart).Seconds())
 
 	if err != nil {
 		// Distinguish the (Unknown, err) infrastructure-failure case
@@ -215,7 +231,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 		// rate is alertable.
 		r.log.Warn(parent, "recon: gateway GetStatus failed, will retry next sweep",
 			tag.OrderID(s.ID), tag.Error(err))
-		observability.ReconGatewayErrorsTotal.Inc()
+		r.metrics.IncGatewayErrors()
 		return
 	}
 
@@ -226,7 +242,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			r.handleMarkErr(parent, s.ID, "charged", err)
 			return
 		}
-		observability.ReconResolvedTotal.WithLabelValues("charged").Inc()
+		r.metrics.IncResolved("charged")
 		r.log.Info(parent, "recon: resolved charging→confirmed",
 			tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 
@@ -235,7 +251,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			r.handleMarkErr(parent, s.ID, "declined", err)
 			return
 		}
-		observability.ReconResolvedTotal.WithLabelValues("declined").Inc()
+		r.metrics.IncResolved("declined")
 		r.log.Info(parent, "recon: resolved charging→failed (declined)",
 			tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 
@@ -247,7 +263,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			r.handleMarkErr(parent, s.ID, "not_found", err)
 			return
 		}
-		observability.ReconResolvedTotal.WithLabelValues("not_found").Inc()
+		r.metrics.IncResolved("not_found")
 		r.log.Info(parent, "recon: resolved charging→failed (gateway has no record)",
 			tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 
@@ -256,7 +272,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 		// zero-value-is-Unknown design means returns the same way).
 		// Skip + count + retry next sweep. Persistent Unknown is
 		// caught by the max-age branch above on a future cycle.
-		observability.ReconResolvedTotal.WithLabelValues("unknown").Inc()
+		r.metrics.IncResolved("unknown")
 		r.log.Info(parent, "recon: gateway returned Unknown, skipping",
 			tag.OrderID(s.ID), tag.Status(string(status)),
 			mlog.Duration("age", s.Age))
@@ -330,7 +346,7 @@ func (r *Reconciler) failOrder(ctx context.Context, id uuid.UUID, reason string)
 // being treated as an error.
 func (r *Reconciler) handleMarkErr(ctx context.Context, id uuid.UUID, outcome string, err error) {
 	if errors.Is(err, domain.ErrInvalidTransition) {
-		observability.ReconResolvedTotal.WithLabelValues("transition_lost").Inc()
+		r.metrics.IncResolved("transition_lost")
 		r.log.Info(ctx, "recon: lost transition race (worker committed first, benign)",
 			tag.OrderID(id),
 			mlog.String("intended_outcome", outcome), tag.Error(err))
@@ -344,7 +360,7 @@ func (r *Reconciler) handleMarkErr(ctx context.Context, id uuid.UUID, outcome st
 	// outbox-create failures (DEF-CRIT fix added the outbox write
 	// inside the same UoW); operators can disambiguate via the wrapped
 	// error message preserved by tag.Error(err).
-	observability.ReconMarkErrorsTotal.Inc()
+	r.metrics.IncMarkErrors()
 	r.log.Error(ctx, "recon: Mark* or outbox emit failed during resolve",
 		tag.OrderID(id),
 		mlog.String("intended_outcome", outcome), tag.Error(err))
