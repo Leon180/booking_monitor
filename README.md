@@ -127,7 +127,7 @@ deploy/                   # Postgres migrations, Redis, Nginx, Prometheus, Grafa
 
 **Why async, not synchronous?** Redis-first acts as a **load-shed gate** — at flash-sale traffic, sold-out attempts get rejected at the Redis layer without ever touching DB. If `POST /book` blocked until terminal status, every request would hold a connection through the entire payment round-trip (seconds), and the throughput ceiling would be the slowest dependency. Industry standard for flash-sale systems (Tmall, KKTIX, Ticketmaster).
 
-**Idempotency**: include `Idempotency-Key: <uuid>` header on `POST /api/v1/book` for at-most-once semantics. A replay returns the original 202 response (same `order_id`) with header `X-Idempotency-Replayed: true`. Cache TTL: 24h.
+**Idempotency**: include `Idempotency-Key: <ASCII-printable, ≤128 chars>` header on `POST /api/v1/book` for at-most-once semantics. A replay returns the original 202 response (same `order_id`) with header `X-Idempotency-Replayed: true`. Cache TTL: 24h. **Stripe-style fingerprint check (N4)**: same key with a *different* body returns **409 Conflict** instead of replaying — this prevents a client mistake (reusing a key across logically-distinct requests) from silently returning the wrong response. 4xx validation errors are NOT cached, so a typo'd body doesn't burn the key for 24h. See [docs/PROJECT_SPEC.md §5](docs/PROJECT_SPEC.md) for the full contract table.
 
 **The 404 window in practice**: typically <1 second on a healthy worker. Sustained 404s mean the worker is backed up — operators can verify via the `redis_stream_length{stream="orders:stream"}` metric or the `OrdersStreamBacklog*` alerts (see [docs/monitoring.md](docs/monitoring.md)).
 

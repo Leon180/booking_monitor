@@ -42,32 +42,39 @@ func NewInstrumentedIdempotencyRepository(inner domain.IdempotencyRepository) do
 
 // Get records hit/miss based on the inner repo's return value:
 //
-//	(result, nil) → hit   — found a cached entry
-//	(nil, nil)    → miss  — lookup succeeded, no entry
-//	(nil, err)    → NEITHER — infra failure (Redis down, unmarshal
-//	                          fail). Counting these as "miss" would
-//	                          inflate the miss rate during outages
-//	                          and drown the real signal; counting
-//	                          them as "hit" is obviously wrong. The
-//	                          right surface for infra failures is
-//	                          a separate error counter, scheduled
-//	                          for N3 (per-alert runbooks + SLO).
-func (i *instrumentedIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, error) {
-	res, err := i.inner.Get(ctx, key)
+//	(result, fp,  nil) → hit    — found a cached entry
+//	(nil,    "",  nil) → miss   — lookup succeeded, no entry
+//	(_,      _,   err) → ERROR  — infra failure (Redis down, unmarshal
+//	                              fail). Counting these as "miss" would
+//	                              inflate the miss rate during outages
+//	                              and drown the real signal; counting
+//	                              them as "hit" is obviously wrong.
+//	                              Instead, increment the dedicated
+//	                              `idempotency_cache_get_errors_total`
+//	                              counter so a Redis outage produces a
+//	                              loud Prometheus signal — without it,
+//	                              an outage would look like "traffic
+//	                              dropped" on the hit-rate dashboard.
+//
+// The fingerprint is passed through verbatim — the decorator is
+// observability-only and does not interpret the cache contract.
+func (i *instrumentedIdempotencyRepository) Get(ctx context.Context, key string) (*domain.IdempotencyResult, string, error) {
+	res, fp, err := i.inner.Get(ctx, key)
 	if err != nil {
-		return res, err
+		observability.IdempotencyCacheGetErrorsTotal.Inc()
+		return res, fp, err
 	}
 	if res == nil {
 		observability.CacheMissesTotal.WithLabelValues(cacheLabelIdempotency).Inc()
 	} else {
 		observability.CacheHitsTotal.WithLabelValues(cacheLabelIdempotency).Inc()
 	}
-	return res, err
+	return res, fp, err
 }
 
 // Set is a transparent pass-through. There's no hit/miss to record
 // on a write, and no separate "set succeeded" counter today; if one
 // is added later it lives here, not in the storage repo.
-func (i *instrumentedIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult) error {
-	return i.inner.Set(ctx, key, result)
+func (i *instrumentedIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error {
+	return i.inner.Set(ctx, key, result, fingerprint)
 }

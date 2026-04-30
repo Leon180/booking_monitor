@@ -43,7 +43,7 @@ Happy path 與 failure path 都從同一個 `POST /api/v1/book` 呼叫開始,在
 
 | # | 元件 | 輸入 | 動到的儲存層 | 效果 | 失敗行為 |
 |---|------|------|-------------|------|---------|
-| 1 | Gin API handler(`/api/v1/book`) | 使用者請求 | Redis(idempotency key,24 小時 TTL) | 先查 `Idempotency-Key` header,命中就把之前快取的 2xx/4xx/5xx body 原封不動回傳,跳過後續步驟 | Body 缺漏/格式錯 → 400 `"invalid request body"`;`mapError` 會把任何下游錯誤 sanitize |
+| 1 | Gin API handler(`/api/v1/book`) | 使用者請求 | Redis(idempotency key,24 小時 TTL) | 先查 `Idempotency-Key` header,命中時把 request fingerprint(body 的 SHA-256)拿去跟快取的 entry 比對:相符 → 原封不動回傳;不符 → 409 Conflict;沒有 fingerprint(legacy entry)→ 回傳 + 懶式寫回 fingerprint。寫入快取時只有 2xx + 5xx 會被快取(4xx 驗證錯誤不快取 — 沿用 Stripe 慣例)。完整契約表見 §5。 | Body 缺漏/格式錯 → 400 `"invalid request body"`;`mapError` 會把任何下游錯誤 sanitize |
 | 2 | `BookingService.BookTicket` | `user_id, event_id, quantity` | Redis 透過 `deduct.lua`(原子性) | `DECRBY event:{id}:qty`:`>= 0` 就順便 `XADD orders:stream` 並回 200;`< 0` 就 `INCRBY` 還原,回 409 `sold out` | API 在 Redis 一成功就 return — 訂單**還沒真正寫入 DB**,只是進了 queue |
 | 3 | `WorkerService` → `MessageProcessor.Process`(`orders:stream` 上的 consumer group) | Stream 訊息 | PostgreSQL(單一 UoW 交易) | `DecrementTicket`(DB 上的 row-level 二次驗證,抓 Redis/DB drift)→ `orderRepo.Create`(UNIQUE 部分索引擋重複購票)→ `outboxRepo.Create(event_type="order.created")` — **三步在同一個交易裡** | `DecrementTicket` 拒絕 → 還原 Redis + ACK(記錄 inventory conflict metric);`orderRepo.Create` 遇到 `ErrUserAlreadyBought` → 還原 Redis + ACK(記錄 duplicate);其他錯誤 → 不 ACK,`processWithRetry` 跑 3 次,之後進 DLQ(`orders:dlq`)並還原 Redis |
 | 4 | `OutboxRelay`(背景 goroutine,透過 Postgres advisory lock 1001 選出唯一 leader) | `events_outbox WHERE processed_at IS NULL` | PostgreSQL(讀 + 更新)→ Kafka topic `order.created` | 每 500ms 輪詢一次(部分索引 `events_outbox_pending_idx` 涵蓋此 query),每個 tick 最多發 100 筆,發完再 `UPDATE processed_at = NOW()`。Publish 失敗 → 跳過 `MarkProcessed`,下一個 tick 重發。Publish 成功但 `MarkProcessed` 失敗 → 下一個 tick 會再發一次,consumer **必須**做到 idempotent | Leader crash → advisory lock 自動釋放(session-bound)→ 某個 standby 下一個 tick 接手 |
@@ -205,7 +205,7 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 ```json
 // Request
 { "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
-// Headers: Idempotency-Key: <uuid>(選填,<= 128 字元)
+// Headers: Idempotency-Key: <ASCII 可印字元、<= 128 字元>(選填)
 
 // 202 Accepted — Redis 端扣減成功;後續流程是非同步的
 {
@@ -214,15 +214,31 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
   "message": "booking accepted, awaiting confirmation",
   "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
 }
-// 409 Conflict
+// 409 Conflict — 售完
 { "error": "sold out" }
-// 409 Conflict
+// 409 Conflict — 重複下單
 { "error": "user already bought ticket" }
+// 409 Conflict — Idempotency-Key 與不同的 request body 一起被重送(N4)
+{ "error": "Idempotency-Key reused with a different request body" }
+// 400 Bad Request — Idempotency-Key 不符 ASCII 可印字元 / 長度上限
+{ "error": "Idempotency-Key must be ASCII-printable and at most 128 characters" }
 // 500 Internal Server Error(已 sanitize)
 { "error": "internal server error" }
 ```
 
 成功時回的是 `202 Accepted` — 對非同步管線是誠實的。Redis 端的庫存扣減成功了(load-shed gate),訂單意圖已經進佇列;DB 持久化 + 付款 + saga 還在進行中。Client 用 `order_id` 對 `GET /api/v1/orders/:id` 輪詢最終狀態。`order_id` 是 UUIDv7,在 API 邊界由 `BookingService.BookTicket` 鑄造,然後沿 Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga 一路串到底。PEL 重送會復用同一個 id;PR-47 之前 worker 在每次重送都鑄一個新 uuid,client 拿到的 id 會跟 DB 的 id 對不起來。
+
+**Idempotency-Key 契約(N4)** — Stripe 風格的 fingerprint 驗證:
+
+| 情境 | 快取狀態 | Server 回應 |
+| :-- | :-- | :-- |
+| 第一次帶 key X 的請求 | Miss | 正常處理;把 `(response, sha256(body))` 寫入 24h 快取 |
+| 同 key X + 同 body | Hit, fingerprint 相符 | 重播快取的回應,設 `X-Idempotency-Replayed: true`。Service **不會**被呼叫。 |
+| 同 key X + 不同 body | Hit, fingerprint 不符 | **409 Conflict** — **不重播**(會誤導 client 以為新請求成功)。Client 必須對新 body 用一把新的 key。 |
+| 同 key X(N4 之前快取) | Hit, fingerprint 為空 | 重播 + 把新算出的 fingerprint 懶式寫回去,後續重播才能驗證。每個 key 的遷移視窗在**第一次重播時就關閉**(寫回 upgrade 該 entry);最壞情況才是 24h TTL — 那是針對「整個 24h 內都沒被重播過」的 key。 |
+| 同 key X、原本回 4xx(驗證失敗) | 不快取 | 沿用 Stripe 慣例 — 快取 4xx 會讓一次手誤把 key 燒掉 24h。Client 修正 body 後可以用同樣的 key 重試。 |
+
+Fingerprint 是把原始 request body bytes 做 hex `SHA-256`。**不做** JSON canonicalization — client 必須送 byte-identical 的重試(這是 Stripe / Shopify / GitHub / AWS 的事實標準)。Idempotency key 必須是 ASCII 可印字元(0x20–0x7E)、最多 128 字元;控制字元會被拒絕,避免下游的日誌解析器被混淆。重播結果(match / mismatch / legacy_match)透過 `idempotency_replays_total{outcome}` counter 暴露(見 [docs/monitoring.zh-TW.md §2](monitoring.zh-TW.md))。
 
 錯誤回應都會通過 `api/booking/errors.go :: mapError`:透過 `errors.Is` 比對 sentinel 錯誤後,回傳一個安全的公開訊息。原始的 DB / driver 錯誤只會記錄在伺服器端(帶 correlation ID),**絕不**回給 client。
 

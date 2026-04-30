@@ -77,6 +77,8 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | Kafka consumer 因下游短暫故障卡住 | `kafka_consumer_retry_total{topic,reason}` |
 | 卡在 Charging 的訂單對帳 | `recon_stuck_charging_orders`(gauge)、`recon_resolved_total{outcome}`、`recon_gateway_errors_total`、`recon_resolve_duration_seconds`、`recon_resolve_age_seconds` |
 | Streams collector 自己掛了 | `redis_stream_collector_errors_total{stream,operation}` |
+| Idempotency-Key 重播結果(N4) | `idempotency_replays_total{outcome}` — labels:`match`(重播)、`mismatch`(409 Conflict — 同 key 不同 body,programmer-error 訊號)、`legacy_match`(N4 之前的快取條目;部署後 24h 內應該收斂到 ~0) |
+| Idempotency 快取斷線訊號(N4) | `idempotency_cache_get_errors_total` — idempotency 查詢時 Redis 斷線 / unmarshal 失敗。**值得 page**:持續 > 0 表示 booking 端點正在以「冪等保護已暫停」的狀態處理請求(handler 設計上 fail-open — duplicate-charge 防護降級到 DB 端的 uniqueness constraint)。對應告警:`rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m`。 |
 | Page funnel | `page_views_total{page}` |
 
 ### 為什麼 label 在啟動時就有值

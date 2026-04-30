@@ -77,6 +77,8 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | Kafka consumer stuck on transient downstream failures | `kafka_consumer_retry_total{topic,reason}` |
 | Charging stuck-order reconciliation | `recon_stuck_charging_orders` (gauge), `recon_resolved_total{outcome}`, `recon_gateway_errors_total`, `recon_resolve_duration_seconds`, `recon_resolve_age_seconds` |
 | Streams collector itself failing | `redis_stream_collector_errors_total{stream,operation}` |
+| Idempotency-Key replay outcomes (N4) | `idempotency_replays_total{outcome}` — labels: `match` (replay), `mismatch` (409 Conflict — same key + different body, programmer-error signal), `legacy_match` (pre-N4 cached entry; should taper to ~0 within 24h post-deploy) |
+| Idempotency cache outage signal (N4) | `idempotency_cache_get_errors_total` — Redis-down / unmarshal-failure on the idempotency lookup. **Page-worthy**: sustained > 0 means the booking endpoint is processing requests with idempotency protection SUSPENDED (handler fails open by design — duplicate-charge defence downgrades to whatever DB-level uniqueness exists). Companion alert: `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m`. |
 | Page funnel | `page_views_total{page}` |
 
 ### When labels are pre-initialized

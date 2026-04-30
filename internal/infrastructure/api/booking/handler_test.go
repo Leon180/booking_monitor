@@ -2,6 +2,8 @@ package booking_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -75,24 +77,28 @@ func (stubEventService) GetEvent(_ context.Context, _ uuid.UUID) (domain.Event, 
 // cache hits or misses. The Set side records last-write so tests can
 // verify the new response shape lands in the cache.
 type stubIdempotencyRepo struct {
-	getFn  func(ctx context.Context, key string) (*domain.IdempotencyResult, error)
-	setFn  func(ctx context.Context, key string, result *domain.IdempotencyResult) error
-	lastIn *domain.IdempotencyResult
+	getFn   func(ctx context.Context, key string) (*domain.IdempotencyResult, string, error)
+	setFn   func(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error
+	lastIn  *domain.IdempotencyResult
+	lastFP  string // fingerprint passed on the most recent Set
+	lastKey string // key passed on the most recent Set
 }
 
-func (s *stubIdempotencyRepo) Get(ctx context.Context, key string) (*domain.IdempotencyResult, error) {
+func (s *stubIdempotencyRepo) Get(ctx context.Context, key string) (*domain.IdempotencyResult, string, error) {
 	if s.getFn == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	return s.getFn(ctx, key)
 }
 
-func (s *stubIdempotencyRepo) Set(ctx context.Context, key string, r *domain.IdempotencyResult) error {
+func (s *stubIdempotencyRepo) Set(ctx context.Context, key string, r *domain.IdempotencyResult, fp string) error {
 	s.lastIn = r
+	s.lastFP = fp
+	s.lastKey = key
 	if s.setFn == nil {
 		return nil
 	}
-	return s.setFn(ctx, key, r)
+	return s.setFn(ctx, key, r, fp)
 }
 
 func newRouter(svc application.BookingService, idem domain.IdempotencyRepository) *gin.Engine {
@@ -146,20 +152,30 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 		"cached status code must match the wire response — 202, not 200")
 }
 
-// TestHandleBook_IdempotencyReplay verifies the cache-hit path:
-// when the Idempotency-Key has a cached entry, the handler MUST
-// return the cached body verbatim with X-Idempotency-Replayed: true
-// AND the underlying BookTicket service is NOT called.
+// fingerprintFor mirrors the handler's hex-SHA256-of-raw-bytes
+// fingerprinting so tests can pre-compute the value the handler
+// would store. Centralised so a future hash algorithm change ripples
+// through this single helper rather than every test fixture.
+func fingerprintFor(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestHandleBook_IdempotencyReplay covers the same-key + same-body
+// path: cached entry exists, fingerprint matches the incoming body,
+// handler returns the cached body verbatim with
+// X-Idempotency-Replayed: true and BookTicket is NOT called.
 //
-// Without this test, the cache-hit branch was untested — a future
-// refactor that accidentally calls BookTicket BEFORE the cache
-// lookup (or after, with a swallowed result) would silently break
-// idempotency without any assertion firing.
+// N4 made fingerprint matching part of this contract — the test now
+// pins both the cached-entry replay AND the fingerprint comparison
+// returning a match.
 func TestHandleBook_IdempotencyReplay(t *testing.T) {
 	t.Parallel()
 
 	cachedOrderID := uuid.New()
 	cachedBody := `{"order_id":"` + cachedOrderID.String() + `","status":"processing","message":"booking accepted, awaiting confirmation","links":{"self":"/api/v1/orders/` + cachedOrderID.String() + `"}}`
+	requestBody := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	matchingFP := fingerprintFor(requestBody)
 
 	bookCalled := false
 	svc := &stubBookingService{
@@ -169,30 +185,305 @@ func TestHandleBook_IdempotencyReplay(t *testing.T) {
 		},
 	}
 	idem := &stubIdempotencyRepo{
-		getFn: func(_ context.Context, key string) (*domain.IdempotencyResult, error) {
+		getFn: func(_ context.Context, key string) (*domain.IdempotencyResult, string, error) {
 			assert.Equal(t, "replay-key", key)
 			return &domain.IdempotencyResult{
 				StatusCode: http.StatusAccepted,
 				Body:       cachedBody,
-			}, nil
+			}, matchingFP, nil
 		},
 	}
 
 	r := newRouter(svc, idem)
 
-	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(requestBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "replay-key")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	assert.False(t, bookCalled, "BookTicket MUST NOT be called on idempotency cache hit")
+	assert.False(t, bookCalled, "BookTicket MUST NOT be called on idempotency cache hit + fingerprint match")
 	assert.Equal(t, http.StatusAccepted, w.Code, "replay must return the cached status code (202)")
 	assert.Equal(t, "true", w.Header().Get("X-Idempotency-Replayed"),
 		"X-Idempotency-Replayed: true header must be set on every replay")
 	assert.JSONEq(t, cachedBody, w.Body.String(),
 		"replay must return the cached body byte-for-byte (modulo JSON whitespace)")
+}
+
+// TestHandleBook_IdempotencyMismatch — Stripe's contract: same key +
+// different body returns 409 Conflict and does NOT replay the cached
+// response. Critical: returning the cached response in this case
+// would let a client think their NEW request succeeded when in fact
+// the original (different) request's response was returned.
+func TestHandleBook_IdempotencyMismatch(t *testing.T) {
+	t.Parallel()
+
+	bookCalled := false
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			bookCalled = true
+			return uuid.Nil, nil
+		},
+	}
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, _ string) (*domain.IdempotencyResult, string, error) {
+			// Cached entry has a fingerprint for the ORIGINAL body —
+			// the incoming body has a different one. The fingerprint
+			// here is for some unrelated body; the handler will compute
+			// a different value over the incoming body and detect the
+			// mismatch.
+			return &domain.IdempotencyResult{
+				StatusCode: http.StatusAccepted,
+				Body:       `{"order_id":"original","status":"processing"}`,
+			}, fingerprintFor(`{"user_id":1,"event_id":"different","quantity":1}`), nil
+		},
+	}
+	r := newRouter(svc, idem)
+
+	// New body — fingerprint differs from cached entry
+	newBody := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":99}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(newBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "shared-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.False(t, bookCalled, "BookTicket MUST NOT be called when fingerprint mismatch detected")
+	assert.Equal(t, http.StatusConflict, w.Code,
+		"same-key/different-body must return 409 Conflict (Stripe convention)")
+	assert.Empty(t, w.Header().Get("X-Idempotency-Replayed"),
+		"mismatch response is NOT a replay; the header must NOT be set")
+	assert.Contains(t, w.Body.String(), "Idempotency-Key reused with a different request body",
+		"public error message must explain the mismatch without leaking internals")
+}
+
+// TestHandleBook_LegacyEntryReplaysAndWritesBack covers the lazy-
+// migration path: a pre-N4 cached entry has no fingerprint
+// (stored before fingerprinting was introduced). The handler MUST
+// replay (so existing clients don't see a regression at deploy time)
+// AND write the new fingerprint back to Set so subsequent replays
+// validate properly. Without the writeback, the migration window is
+// 24h (cache TTL); with it, the window closes within milliseconds of
+// the first replay.
+func TestHandleBook_LegacyEntryReplaysAndWritesBack(t *testing.T) {
+	t.Parallel()
+
+	cachedBody := `{"order_id":"legacy","status":"processing"}`
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, _ string) (*domain.IdempotencyResult, string, error) {
+			// Empty fingerprint = legacy entry signal
+			return &domain.IdempotencyResult{
+				StatusCode: http.StatusAccepted,
+				Body:       cachedBody,
+			}, "", nil
+		},
+	}
+	bookCalled := false
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			bookCalled = true
+			return uuid.Nil, nil
+		},
+	}
+	r := newRouter(svc, idem)
+
+	requestBody := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(requestBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "legacy-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.False(t, bookCalled, "legacy replay MUST NOT call BookTicket — same as a normal replay")
+	assert.Equal(t, http.StatusAccepted, w.Code)
+	assert.Equal(t, "true", w.Header().Get("X-Idempotency-Replayed"))
+
+	// Write-back assertion: handler must call Set with the freshly-
+	// computed fingerprint so the next replay can validate.
+	assert.Equal(t, "legacy-key", idem.lastKey,
+		"handler must write back to the same key during lazy migration")
+	assert.Equal(t, fingerprintFor(requestBody), idem.lastFP,
+		"write-back fingerprint must be the SHA-256 of the incoming body — NOT the (empty) cached value")
+	require.NotNil(t, idem.lastIn, "Set must be called with the cached result preserved")
+	assert.Equal(t, cachedBody, idem.lastIn.Body, "write-back preserves the cached body verbatim")
+}
+
+// TestHandleBook_4xxNotCached pins the Stripe-style "do NOT cache 4xx
+// validation errors" rule. Without it, a typo'd body would burn the
+// idempotency key for 24h — a client correcting the typo and retrying
+// with the same key would get the cached 400 forever instead of
+// being able to legitimately complete the booking.
+func TestHandleBook_4xxNotCached(t *testing.T) {
+	t.Parallel()
+
+	idem := &stubIdempotencyRepo{}
+	r := newRouter(&stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			t.Fatal("unparseable body should never reach the service")
+			return uuid.Nil, nil
+		},
+	}, idem)
+
+	// Malformed JSON — handler returns 400 from ShouldBindJSON
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(`{not-json`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "typo-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Nil(t, idem.lastIn,
+		"4xx validation errors MUST NOT be cached — caching them burns the idempotency key for 24h")
+}
+
+// TestHandleBook_5xxIsCached pins the symmetric counterpart of the
+// 4xx-not-cached rule: 5xx server errors ARE cached. Stripe's
+// rationale — clients should NOT keep retrying a key that already
+// produced a server error during the 24h window; the cached 5xx
+// signals "this idempotent operation is in a degraded state, please
+// stop hammering". Without this test, a future change to
+// shouldCacheStatus that accidentally widens the exclusion (e.g.
+// `status >= 500` flipped to `status > 500`) would silently leak.
+func TestHandleBook_5xxIsCached(t *testing.T) {
+	t.Parallel()
+
+	idem := &stubIdempotencyRepo{}
+	// Return an unmapped error so mapError translates to 500.
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			return uuid.Nil, errors.New("internal: db connection refused")
+		},
+	}
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "key-5xx")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	require.NotNil(t, idem.lastIn,
+		"5xx responses MUST be cached — Stripe convention; signals the client to stop retrying for 24h")
+	assert.Equal(t, http.StatusInternalServerError, idem.lastIn.StatusCode,
+		"the cached entry must carry the same 500 status the client received")
+	assert.Equal(t, fingerprintFor(body), idem.lastFP,
+		"5xx caching must store the request fingerprint so a same-body retry replays the same 500")
+}
+
+// TestHandleBook_FinalSetError_ResponseStillSent pins the contract
+// that a Redis write failure on the final cache.Set MUST NOT fail the
+// already-committed HTTP response. The handler logs WARN and falls
+// through to c.Data — verified here so a future refactor that
+// promotes the Set error to fail-loud doesn't regress the contract.
+func TestHandleBook_FinalSetError_ResponseStillSent(t *testing.T) {
+	t.Parallel()
+
+	idem := &stubIdempotencyRepo{
+		setFn: func(_ context.Context, _ string, _ *domain.IdempotencyResult, _ string) error {
+			return errors.New("redis: write failed")
+		},
+	}
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			return uuid.New(), nil
+		},
+	}
+	r := newRouter(svc, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "set-error-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code,
+		"cache Set failure MUST NOT fail the request — response was already computed")
+	assert.Contains(t, w.Body.String(), "order_id",
+		"the 202 body must reach the client even when cache write failed")
+}
+
+// TestHandleBook_LazyWriteBackError_ReplaysAnyway pins the same
+// fail-open contract for the legacy-migration write-back path. A
+// Redis blip during write-back must not turn an otherwise-successful
+// replay into an error response — the cached body is still valid.
+func TestHandleBook_LazyWriteBackError_ReplaysAnyway(t *testing.T) {
+	t.Parallel()
+
+	cachedBody := `{"order_id":"legacy","status":"processing"}`
+	idem := &stubIdempotencyRepo{
+		getFn: func(_ context.Context, _ string) (*domain.IdempotencyResult, string, error) {
+			return &domain.IdempotencyResult{
+				StatusCode: http.StatusAccepted,
+				Body:       cachedBody,
+			}, "", nil // empty fp = legacy entry
+		},
+		setFn: func(_ context.Context, _ string, _ *domain.IdempotencyResult, _ string) error {
+			return errors.New("redis: write-back failed")
+		},
+	}
+	r := newRouter(&stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+			t.Fatal("legacy replay must NOT call BookTicket")
+			return uuid.Nil, nil
+		},
+	}, idem)
+
+	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "legacy-flaky-redis")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code,
+		"write-back failure MUST NOT block the replay — cached body is still valid")
+	assert.JSONEq(t, cachedBody, w.Body.String())
+	assert.Equal(t, "true", w.Header().Get("X-Idempotency-Replayed"))
+}
+
+// TestHandleBook_InvalidIdempotencyKey covers the Idempotency-Key
+// character validation gap closed in N4. Pre-N4 the only check was
+// length; control characters could embed and confuse downstream log
+// parsers, terminal output, etc. The handler now rejects any key
+// containing bytes outside ASCII printable range (0x20-0x7E).
+func TestHandleBook_InvalidIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"control character (NUL)", "valid\x00prefix"},
+		{"newline", "key-with-\nnewline"},
+		{"non-ASCII (em dash)", "key—with-emdash"},
+		{"too long (>128 chars)", strings.Repeat("a", 129)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newRouter(&stubBookingService{
+				bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
+					t.Fatal("invalid Idempotency-Key must short-circuit before service call")
+					return uuid.Nil, nil
+				},
+			}, &stubIdempotencyRepo{})
+
+			body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Idempotency-Key", tt.key)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "Idempotency-Key")
+		})
+	}
 }
 
 // TestHandleBook_SoldOut pins the 409 sold-out error path. Without
