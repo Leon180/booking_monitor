@@ -183,6 +183,21 @@ func (d *orderRepositoryTracingDecorator) FindStuckCharging(ctx context.Context,
 	return stuck, err
 }
 
+func (d *orderRepositoryTracingDecorator) FindStuckFailed(ctx context.Context, minAge time.Duration, limit int) ([]domain.StuckFailed, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "FindStuckFailed", trace.WithAttributes(
+		attribute.String("min_age", minAge.String()),
+		attribute.Int("limit", limit),
+	))
+	defer span.End()
+
+	stuck, err := d.next.FindStuckFailed(ctx, minAge, limit)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.SetAttributes(attribute.Int("found", len(stuck)))
+	return stuck, err
+}
+
 func (d *orderRepositoryTracingDecorator) MarkCharging(ctx context.Context, id uuid.UUID) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderCharging", trace.WithAttributes(
 		attribute.String("order_id", id.String()),

@@ -17,6 +17,7 @@ type Config struct {
 	Postgres PostgresConfig `yaml:"postgres"`
 	Kafka    KafkaConfig    `yaml:"kafka"`
 	Recon    ReconConfig    `yaml:"recon"`
+	Saga     SagaConfig     `yaml:"saga"`
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the
@@ -93,6 +94,55 @@ type ReconConfig struct {
 	// SweepInterval so the next tick can fire on schedule. Bump if
 	// production data shows persistent backlog growth.
 	BatchSize int `yaml:"batch_size" env:"RECON_BATCH_SIZE" env-default:"100"`
+}
+
+// SagaConfig holds the tunables for the `saga-watchdog` subcommand
+// (A5) — the sweeper that re-drives stuck-Failed orders through the
+// existing (idempotent) compensator. Same shape as ReconConfig but
+// distinct so the two sweepers can tune independently:
+//
+//   - The reconciler queries an EXTERNAL gateway (slow, rate-limited);
+//     its tunables reflect gateway latency budget.
+//   - The watchdog re-invokes the local compensator (fast, in-process);
+//     its tunables can be tighter without affecting external systems.
+//
+// All defaults are heuristic — same caveat as ReconConfig: tune after
+// production data accumulates on `saga_watchdog_resolve_age_seconds`.
+type SagaConfig struct {
+	// WatchdogInterval — how often the watchdog loop fires. Tighter
+	// than the reconciler (60s vs 120s) because the compensator call
+	// is local + fast; we'd rather catch stuck-Failed states quickly
+	// to keep saga compensations close to real-time customer
+	// expectations.
+	WatchdogInterval time.Duration `yaml:"watchdog_interval" env:"SAGA_WATCHDOG_INTERVAL" env-default:"60s"`
+
+	// StuckThreshold — minimum age a Failed row must have before the
+	// watchdog considers it stuck. Set above the typical
+	// Failed→Compensated saga round-trip so we never race the legitimate
+	// in-flight compensator.
+	//
+	// Typical saga compensation is sub-second (Redis revert + DB
+	// MarkCompensated); 60s gives 60× headroom and keeps the watchdog
+	// conservative. Lower if production shows compensations completing
+	// well under the threshold consistently.
+	StuckThreshold time.Duration `yaml:"stuck_threshold" env:"SAGA_STUCK_THRESHOLD" env-default:"60s"`
+
+	// MaxFailedAge — give-up cutoff. A Failed row older than this is
+	// logged at ERROR + counted under
+	// `saga_watchdog_resolved_total{outcome="max_age_exceeded"}` but
+	// NOT auto-transitioned (unlike the reconciler's force-fail
+	// path) — moving Failed → Compensated without verifying inventory
+	// was actually reverted is unsafe. Persistent max-age-exceeded
+	// fires the operator alert for manual review.
+	//
+	// 24h matches the reconciler's MaxChargingAge for symmetry.
+	MaxFailedAge time.Duration `yaml:"max_failed_age" env:"SAGA_MAX_FAILED_AGE" env-default:"24h"`
+
+	// BatchSize — max orders to resolve per sweep cycle. 100 mirrors
+	// recon. The compensator is faster than gateway.GetStatus, so
+	// 100 orders/sweep at <50ms each = ~5s, well within
+	// WatchdogInterval. Bump if backlog grows.
+	BatchSize int `yaml:"batch_size" env:"SAGA_BATCH_SIZE" env-default:"100"`
 }
 
 type AppConfig struct {
@@ -391,6 +441,30 @@ func (c *Config) Validate() error {
 		missing = append(missing, fmt.Sprintf(
 			"recon.max_charging_age (%s) must be > recon.charging_threshold (%s); otherwise every order recon sees is immediately force-failed",
 			c.Recon.MaxChargingAge, c.Recon.ChargingThreshold,
+		))
+	}
+
+	// Saga watchdog (A5) — same guard logic as Recon. Each duration > 0
+	// because 0 means "every sweep is a no-op" silently, and the
+	// max-age/threshold cross-field invariant prevents force-flagging
+	// every visible order on the first sweep.
+	if c.Saga.WatchdogInterval <= 0 {
+		missing = append(missing, "saga.watchdog_interval / SAGA_WATCHDOG_INTERVAL (must be > 0)")
+	}
+	if c.Saga.StuckThreshold <= 0 {
+		missing = append(missing, "saga.stuck_threshold / SAGA_STUCK_THRESHOLD (must be > 0)")
+	}
+	if c.Saga.MaxFailedAge <= 0 {
+		missing = append(missing, "saga.max_failed_age / SAGA_MAX_FAILED_AGE (must be > 0)")
+	}
+	if c.Saga.BatchSize <= 0 {
+		missing = append(missing, "saga.batch_size / SAGA_BATCH_SIZE (must be >= 1; 0 makes every sweep a silent no-op)")
+	}
+	if c.Saga.MaxFailedAge > 0 && c.Saga.StuckThreshold > 0 &&
+		c.Saga.MaxFailedAge <= c.Saga.StuckThreshold {
+		missing = append(missing, fmt.Sprintf(
+			"saga.max_failed_age (%s) must be > saga.stuck_threshold (%s); otherwise every order the watchdog sees is immediately flagged max_age_exceeded",
+			c.Saga.MaxFailedAge, c.Saga.StuckThreshold,
 		))
 	}
 

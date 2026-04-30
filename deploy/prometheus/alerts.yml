@@ -214,6 +214,76 @@ groups:
           summary: "Reconciler force-failed stuck order(s) — manual review needed"
           description: "{{ $value }} order(s) exceeded RECON_MAX_CHARGING_AGE in the last hour and were force-failed. Investigate via order_status_history (from_status=charging, to_status=failed) — the customer was never confirmed as charged."
 
+      - alert: SagaStuckFailedOrders
+        # A5 watchdog companion. Fires when orders sit in Failed state
+        # for too long without compensation. The watchdog itself
+        # re-drives the (idempotent) compensator on every sweep, so a
+        # sustained `saga_stuck_failed_orders > 0 for 10m` means the
+        # compensator is FAILING repeatedly (Redis revert blocked, DB
+        # locked, etc.) — not just "we haven't swept yet". 10m is the
+        # `for` window because the watchdog default interval is 60s;
+        # 10m gives ~10 sweep attempts to clear the backlog before
+        # paging.
+        expr: saga_stuck_failed_orders > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga compensator falling behind — {{ $value }} orders stuck Failed"
+          description: "saga_stuck_failed_orders has been > 0 for 10m (current: {{ $value }}). The watchdog has been re-driving the compensator every sweep without clearing the backlog — typical causes: Redis revert blocked (saga:reverted:* key contention), DB lock on orders table, or the compensator is throwing an unmapped error. Check saga_watchdog_resolved_total{outcome='compensator_error'} for the failure rate."
+
+      - alert: SagaCompensatorErrors
+        # Fast-path companion to SagaStuckFailedOrders. The gauge-based
+        # alert needs 10m of sustained backlog to fire; this alert
+        # catches a compensator that fails 100% from sweep one before
+        # the gauge has accumulated enough age. Mirrors the
+        # SagaWatchdogFindStuckErrors / RedisStreamCollectorDown
+        # pattern: rate > 0 with `for: 2m` hysteresis to absorb a
+        # single transient blip while paging on sustained failure.
+        #
+        # Triage hint embedded in the description: distinct labels
+        # (compensator_error vs getbyid_error vs marshal_error) point
+        # operators at the correct subsystem.
+        expr: rate(saga_watchdog_resolved_total{outcome="compensator_error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saga compensator returning errors during watchdog re-drive"
+          description: "saga_watchdog_resolved_total{outcome='compensator_error'} averaging {{ $value }} errors/sec over 5m. The compensator's Redis revert or DB MarkCompensated is failing repeatedly. Check Redis health (saga:reverted:* key contention) and DB lock state on the orders table. Distinct from getbyid_error (DB read upstream of compensator) and marshal_error (regression in OrderFailedEvent shape)."
+
+      - alert: SagaWatchdogFindStuckErrors
+        # Fires when the watchdog's per-sweep FindStuckFailed query
+        # itself errors (DB outage, missing index from a forgotten
+        # migration, query timeout). Without this, a sustained sweep-
+        # query failure shows nothing on dashboards EXCEPT a stale
+        # `saga_stuck_failed_orders` gauge — operators can't
+        # distinguish "no orders are stuck" from "watchdog itself is
+        # broken".
+        expr: rate(saga_watchdog_find_stuck_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga watchdog sweep query is failing"
+          description: "FindStuckFailed has been failing for 2m+ at {{ $value }} errors/sec. Watchdog cannot detect stuck-Failed orders. Check DB connectivity, migration status (000011 must be applied for the partial index), and query timeouts."
+
+      - alert: SagaMaxFailedAgeExceeded
+        # Fires when the watchdog flags an order older than
+        # SAGA_MAX_FAILED_AGE (default 24h). Unlike recon's max-age
+        # which auto-force-fails, this watchdog branch DOES NOT
+        # transition the row — it logs + counts + alerts because moving
+        # Failed → Compensated without verifying inventory was reverted
+        # is unsafe. Operators investigate manually via
+        # order_status_history for the affected order ids.
+        expr: increase(saga_watchdog_resolved_total{outcome="max_age_exceeded"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saga watchdog flagged stuck Failed orders >24h old — manual review needed"
+          description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (status='failed') and decide manually whether to revert inventory + MarkCompensated."
+
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages
         # uncommitted for rebalance retry — the "stuck but not dead"

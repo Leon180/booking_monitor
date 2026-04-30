@@ -100,6 +100,24 @@ type StuckCharging struct {
 	Age time.Duration
 }
 
+// StuckFailed is the row shape returned by
+// `OrderRepository.FindStuckFailed` — the saga watchdog's input
+// vocabulary (A5). Structurally identical to StuckCharging but kept
+// as a distinct type so the watchdog and reconciler can't accidentally
+// pass each other's results: a row that's stuck-Charging requires a
+// gateway probe; a row that's stuck-Failed requires a compensator
+// re-drive. Conflating them via a shared type would invite the wrong
+// resolution path on a future refactor.
+//
+// The query is the same shape as FindStuckCharging — `WHERE status =
+// 'failed' AND updated_at < NOW() - threshold ORDER BY updated_at ASC
+// LIMIT batch` — so both reuse the partial index from migration 000011
+// (widened from charging+pending to charging+pending+failed).
+type StuckFailed struct {
+	ID  uuid.UUID
+	Age time.Duration
+}
+
 // Order is the domain aggregate. All fields are unexported; reads
 // happen through accessor methods (Wild Workouts pattern, no Get
 // prefix), writes happen through the NewOrder factory or the
@@ -275,6 +293,18 @@ type OrderRepository interface {
 	// full row would force a JOIN with order_status_history or a
 	// follow-up GetByID per stuck order — neither pays off.
 	FindStuckCharging(ctx context.Context, minAge time.Duration, limit int) ([]StuckCharging, error)
+
+	// FindStuckFailed returns orders that have been in the Failed state
+	// for at least `minAge`, up to `limit` rows. Used by the saga
+	// watchdog subcommand (A5) to identify orders whose compensation
+	// path stalled — typically because the saga consumer crashed
+	// after MarkFailed but before MarkCompensated, or because the DLQ
+	// route swallowed an event.
+	//
+	// Same row shape (id, age) as FindStuckCharging for the same
+	// reason — the watchdog re-drives the existing compensator,
+	// which only needs the id to fetch + idempotency-check the order.
+	FindStuckFailed(ctx context.Context, minAge time.Duration, limit int) ([]StuckFailed, error)
 
 	// MarkCharging / MarkConfirmed / MarkFailed / MarkCompensated are
 	// the typed state-transition methods that replace the previous

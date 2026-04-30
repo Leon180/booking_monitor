@@ -434,6 +434,55 @@ Until then the dual-source path is intentional, not legacy.
 
 All defaults are heuristic init values — see config.go header comments for the per-knob rationale + tuning guidance. Adjust after the first production-shaped run produces histograms for `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds`.
 
+### 6.7.1 Saga Watchdog (A5)
+
+The saga watchdog is the **symmetric counterpart** of the reconciler — same loop shape, same `--once`/loop modes, same partial-index strategy — but resolving a different failure surface.
+
+| Sweeper | Detects | Resolution path | Index predicate |
+| :-- | :-- | :-- | :-- |
+| Reconciler (A4, [internal/application/recon](../internal/application/recon)) | Orders stuck in `Charging` (worker crashed mid-Charge) | Query the payment gateway, transition to Confirmed/Failed | `idx_orders_status_updated_at_partial WHERE status IN ('charging','pending')` (000010) |
+| **Saga watchdog (A5, [internal/application/saga](../internal/application/saga))** | Orders stuck in `Failed` (saga consumer crashed mid-handler, DLQ swallowed event) | Re-invoke the (idempotent) compensator | Same partial index, **widened to include `'failed'`** (000011) |
+
+**Why re-drive the compensator vs republishing to Kafka:**
+
+- Direct call eliminates a Kafka round-trip + offset commit per stuck order.
+- The compensator's idempotency check (`order.Status() == OrderStatusCompensated` inside its UoW closure) handles the race where the saga consumer succeeds between our `FindStuckFailed` query and the re-drive.
+- Republishing would require reconstructing the original `event_id` + `correlation_id`; possible but adds complexity for no behaviour gain.
+
+**Force-fail policy difference:**
+
+- Reconciler's max-age branch **does** auto-force-fail: the gateway already told us the charge state, so we have ground truth to act on.
+- Watchdog's max-age branch does **NOT** auto-transition. Moving Failed → Compensated without verifying the Redis inventory was actually reverted is unsafe (would leave a phantom-revert state). Watchdog logs ERROR + emits `saga_watchdog_resolved_total{outcome="max_age_exceeded"}` + fires `SagaMaxFailedAgeExceeded` alert — operator investigates manually via `order_status_history`.
+
+**Tunables (env vars)**:
+
+| Env var | Default | Purpose |
+| :-- | :-- | :-- |
+| `SAGA_WATCHDOG_INTERVAL` | 60s | Loop cadence (tighter than recon's 120s — compensator is local + fast) |
+| `SAGA_STUCK_THRESHOLD` | 60s | Min age before the watchdog considers a Failed order "stuck" |
+| `SAGA_MAX_FAILED_AGE` | 24h | Manual-review give-up cutoff |
+| `SAGA_BATCH_SIZE` | 100 | Orders processed per sweep |
+
+`Config.Validate()` rejects any non-positive value AND rejects `MaxFailedAge ≤ StuckThreshold` (would force-flag every order on the first sweep) — same cross-field guard pattern as `ReconConfig`.
+
+**Run modes** (`booking-cli saga-watchdog`):
+
+- Default loop: ticker-driven, runs until SIGTERM. Suits docker-compose / Deployment hosting.
+- `--once`: single sweep then exit. Suits k8s CronJob hosting where the orchestrator handles the schedule.
+
+**Scope clarification — what A5 does NOT address:**
+
+A5 ensures the **auto-compensate path completes reliably**. It does NOT address the deeper design question of **whether auto-compensation is the correct response to every payment failure.** Today's `OrderStatusFailed` is a single bucket conflating two semantically distinct cases:
+
+| Failure type | Triggered by | Today's handling | What it should probably be |
+| :-- | :-- | :-- | :-- |
+| **Business failure** | Card declined, insufficient funds, 3DS rejected | Auto-compensate (revert inventory, MarkCompensated). No user notification. No retry path on the same order. | Surface to user with reason; let them retry with a different payment method against the same reserved inventory. |
+| **Service failure** | Gateway 5xx, network timeout, our service buggy | Auto-compensate as above — **without verifying whether the gateway actually charged the customer** | Verify gateway state (call `gateway.GetStatus`) before reverting. If indeterminate, quarantine for operator review (potential phantom-charge risk). |
+
+`OrderFailedEvent` carries the failure reason in `Reason` (set to `err.Error()` from the gateway call) but the reason is **never persisted to the orders table** — the saga compensator consumes the event payload and discards the reason. So the DB has no memory of WHY a given order is `compensated`; investigation requires Kafka log replay.
+
+A5 is correct within the current single-bucket model. The semantic refactor (persist `failed_reason`, differentiate handling, surface to user) is multi-week product work tracked in [`architectural_backlog.md §13`](../architectural_backlog.md). When that lands, A5's contract narrows to "service-failure-side recovery only" without changing its code.
+
 ### 6.8 Redis Streams Hardening
 
 The booking pipeline uses two Redis Streams: `orders:stream` (hot work queue, API → worker) and `orders:dlq` (failed messages awaiting operator review). Three observability + retention concerns landed together:

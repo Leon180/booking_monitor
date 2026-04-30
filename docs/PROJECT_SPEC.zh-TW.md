@@ -422,6 +422,55 @@ window 是 5 分鐘 lookback(**不是** since deploy 的累積值)— 這個 int
 
 所有預設值都是 heuristic init values — 詳見 config.go 的 header comments。等實際 production-shaped run 產生 `recon_resolve_age_seconds` + `recon_gateway_get_status_duration_seconds` 直方圖之後再依資料調整。
 
+### 6.7.1 Saga Watchdog (A5)
+
+Saga watchdog 是 reconciler 的**對稱姊妹** — 同樣的 loop 形狀、同樣的 `--once`/loop 模式、同樣的 partial-index 策略 — 但處理的是不同的失敗面。
+
+| Sweeper | 偵測什麼 | 解決路徑 | 索引 predicate |
+| :-- | :-- | :-- | :-- |
+| Reconciler(A4,[internal/application/recon](../internal/application/recon)) | 卡在 `Charging` 的訂單(worker 在 Charge 中途掛掉) | 查 payment gateway,轉成 Confirmed/Failed | `idx_orders_status_updated_at_partial WHERE status IN ('charging','pending')`(000010) |
+| **Saga watchdog(A5,[internal/application/saga](../internal/application/saga))** | 卡在 `Failed` 的訂單(saga consumer 在 handler 中途掛掉、DLQ 吞掉了 event) | 重新觸發(idempotent 的)compensator | 同一個 partial index,**predicate 加上 `'failed'`**(000011) |
+
+**為什麼重新觸發 compensator 而不是重新發到 Kafka:**
+
+- 直接呼叫省掉每筆 stuck order 的 Kafka round-trip + offset commit。
+- Compensator 的 idempotency 檢查(在 UoW closure 裡的 `order.Status() == OrderStatusCompensated`)能處理「watchdog 的 FindStuckFailed 跟重新觸發中間,saga consumer 自己跑完了」的競爭情境。
+- 重發 Kafka 需要重建原本的 `event_id` + `correlation_id`;做得到但徒增複雜度,行為上沒有額外好處。
+
+**Force-fail 策略的差異:**
+
+- Reconciler 的 max-age 分支**會**自動 force-fail:gateway 已經告訴我們扣款狀態,我們有 ground truth 可以動作。
+- Watchdog 的 max-age 分支**不會**自動轉狀態。沒驗證 Redis 庫存是否真的回復就把 Failed → Compensated 不安全(會留下 phantom-revert 狀態機污染)。Watchdog 只記 ERROR 日誌 + 觸發 `saga_watchdog_resolved_total{outcome="max_age_exceeded"}` + 觸發 `SagaMaxFailedAgeExceeded` 告警 — 由 operator 透過 `order_status_history` 人工調查。
+
+**可調參數(env 變數)**:
+
+| Env var | 預設 | 用途 |
+| :-- | :-- | :-- |
+| `SAGA_WATCHDOG_INTERVAL` | 60s | Loop 頻率(比 recon 的 120s 緊一點 — compensator 是本地呼叫、快) |
+| `SAGA_STUCK_THRESHOLD` | 60s | watchdog 認為 Failed 訂單「卡住」的最短年齡 |
+| `SAGA_MAX_FAILED_AGE` | 24h | 人工檢視的 give-up cutoff |
+| `SAGA_BATCH_SIZE` | 100 | 每次 sweep 處理的訂單數 |
+
+`Config.Validate()` 拒絕任何非正值,也拒絕 `MaxFailedAge ≤ StuckThreshold` 的設定(否則第一次 sweep 看到的每筆訂單都會被 force-flag) — 跟 `ReconConfig` 同樣的 cross-field guard pattern。
+
+**Run mode**(`booking-cli saga-watchdog`):
+
+- 預設 loop:ticker 驅動,跑到收到 SIGTERM 為止。適合 docker-compose / Deployment 部署。
+- `--once`:跑一次 sweep 就退出。適合 k8s CronJob 部署,排程由編排器處理。
+
+**範圍釐清 — A5 不處理什麼:**
+
+A5 確保**自動補償流程能可靠地完成**。它**不處理**更深一層的設計問題:**自動補償是不是對每一種付款失敗都是正確回應?** 現在的 `OrderStatusFailed` 是個混合桶,把兩種語意不同的情況綁在一起:
+
+| 失敗類型 | 觸發原因 | 目前處理方式 | 比較合理的處理方式 |
+| :-- | :-- | :-- | :-- |
+| **業務失敗** | 信用卡被拒、餘額不足、3DS 驗證未通過 | 自動補償(回復庫存,MarkCompensated)。沒通知使用者,同個訂單不能重試。 | 把失敗原因告訴使用者;允許他用另一張卡對**同一個保留庫存**重試。 |
+| **服務失敗** | Gateway 5xx、網路 timeout、我們自己服務有 bug | 跟業務失敗同樣自動補償 — **沒驗證 gateway 實際上有沒有扣款** | 補償前先驗證 gateway 狀態(呼叫 `gateway.GetStatus`)。如果結果不確定,隔離起來給 operator 人工檢視(避免 phantom-charge 風險)。 |
+
+`OrderFailedEvent` 在 `Reason` 欄位帶了失敗原因(把 gateway 呼叫拿到的 `err.Error()` 塞進去)— 但這個 reason **從來沒被寫進 orders 資料表** — saga compensator 消費完 event payload 就丟了。所以資料庫裡完全沒記載某張 `compensated` 訂單**為什麼**會變成這樣;要查只能去翻 Kafka 日誌。
+
+A5 在現在這個「單一桶」的模型裡是對的。語意重構(把 `failed_reason` 寫進去、依不同原因走不同路徑、把業務失敗推給使用者)是好幾週的產品工作,記在 [`architectural_backlog.md §13`](../architectural_backlog.md)。等那個工作落地,A5 的契約就會收斂成「只處理服務失敗端的恢復」 — 不需要改 A5 的程式碼。
+
 ### 6.8 Redis Streams Hardening
 
 booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API → worker)和 `orders:dlq`(等待 operator 檢視的失敗訊息)。本次同時上線三個觀測性 + 保留期相關問題的修正:

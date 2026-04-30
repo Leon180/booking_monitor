@@ -53,6 +53,15 @@ func main() {
 	// Default (loop) is suitable for docker-compose / Deployment hosts.
 	reconCmd.Flags().Bool("once", false, "Run a single sweep then exit (for k8s CronJob hosting)")
 
+	sagaWatchdogCmd := &cobra.Command{
+		Use:   "saga-watchdog",
+		Short: "Run the saga watchdog (sweeps stuck-Failed orders, re-drives the compensator)",
+		Run:   runSagaWatchdog,
+	}
+	// Same --once / loop semantics as recon — symmetry simplifies the
+	// operator mental model.
+	sagaWatchdogCmd.Flags().Bool("once", false, "Run a single sweep then exit (for k8s CronJob hosting)")
+
 	stressCmd := &cobra.Command{Use: "stress", Short: "Run stress test", Run: runStress}
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
@@ -60,7 +69,7 @@ func main() {
 	stressCmd.Flags().String("event-id", "", "Event UUID (v7) to book against — required, obtain via POST /api/v1/events")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd)
+	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd, sagaWatchdogCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

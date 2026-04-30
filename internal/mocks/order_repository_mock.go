@@ -73,6 +73,21 @@ func (mr *MockOrderRepositoryMockRecorder) FindStuckCharging(ctx, minAge, limit 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStuckCharging", reflect.TypeOf((*MockOrderRepository)(nil).FindStuckCharging), ctx, minAge, limit)
 }
 
+// FindStuckFailed mocks base method.
+func (m *MockOrderRepository) FindStuckFailed(ctx context.Context, minAge time.Duration, limit int) ([]domain.StuckFailed, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindStuckFailed", ctx, minAge, limit)
+	ret0, _ := ret[0].([]domain.StuckFailed)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindStuckFailed indicates an expected call of FindStuckFailed.
+func (mr *MockOrderRepositoryMockRecorder) FindStuckFailed(ctx, minAge, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStuckFailed", reflect.TypeOf((*MockOrderRepository)(nil).FindStuckFailed), ctx, minAge, limit)
+}
+
 // GetByID mocks base method.
 func (m *MockOrderRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.Order, error) {
 	m.ctrl.T.Helper()
