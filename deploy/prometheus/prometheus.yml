@@ -64,3 +64,30 @@ scrape_configs:
     # dropped spans, etc. in the same Prometheus/Grafana stack.
     static_configs:
       - targets: ['jaeger:14269']
+
+  # The three worker subcommands run as separate compose services
+  # (`payment_worker`, `recon`, `saga_watchdog`) — each binary has its
+  # own Prometheus default registry, so their metrics MUST be scraped
+  # at the per-process listener (port 9091, configured by
+  # WORKER_METRICS_ADDR). Without these jobs:
+  #   - recon_*           (recon process)
+  #   - saga_watchdog_*   (saga_watchdog process)
+  #   - kafka_consumer_retry_total / saga_poison_messages_total
+  #     (payment_worker process — payment-side consumer)
+  # are registered but never scraped, so the corresponding alerts
+  # (ReconStuckCharging, SagaStuckFailedOrders, KafkaConsumerStuck,
+  # ReconMarkErrors, etc.) cannot fire. Phase 2 checkpoint O3.
+  - job_name: 'payment-worker'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['payment_worker:9091']
+
+  - job_name: 'recon'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['recon:9091']
+
+  - job_name: 'saga-watchdog'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['saga_watchdog:9091']

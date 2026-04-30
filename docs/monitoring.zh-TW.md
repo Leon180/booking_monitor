@@ -183,7 +183,7 @@ recon_stuck_charging_orders
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 持續 5m — saga 補償時 revert.lua 失敗,Redis 庫存沒被還原 |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 持續 5m — 訂票 hot path 間歇性無法 enqueue |
 
-> **Worker process 的 metric 抓取缺口(延後處理)。** 上面的 `recon_*`、`saga_watchdog_*`、`kafka_consumer_retry_total`,以及 saga 的 `db_*` / `redis_*` 失敗計數器,都是註冊在 `booking-cli recon`、`booking-cli saga-watchdog`、`booking-cli payment` 這些 *worker* process 內。這些 process 目前並沒有對外開 `/metrics` HTTP listener,所以 `deploy/prometheus/prometheus.yml` 裡只列了 `app:8080` 的 scrape 設定抓不到這些指標。表格中相關的告警(例:`ReconStuckCharging`、`SagaStuckFailedOrders`、`KafkaConsumerStuck`)**在目前的 docker-compose 環境下不會 fire**,要等到每個 worker binary 都加上 metrics listener、prometheus.yml 補上對應 scrape job 才會有作用。Phase 2 checkpoint O3;後續會用獨立 PR 處理。
+> **Worker process 的 metric 抓取 — 已由 O3 後續 PR 補齊。** 上面的 `recon_*`、`saga_watchdog_*`、`kafka_consumer_retry_total`,以及 saga 的 `db_*` / `redis_*` 失敗計數器,都是註冊在 `booking-cli {recon,saga-watchdog,payment}` 這些 worker process 各自的 default Prometheus registry 裡。現在每一個 binary 都會在 `:9091` 開一個 metrics-only HTTP listener(可透過 `WORKER_METRICS_ADDR` 環境變數設定;設為空字串就關掉,適用於 `--once` CronJob 模式),`prometheus.yml` 也補上對應的 scrape job(`payment-worker`、`recon`、`saga-watchdog`)。要確認可以在 Prometheus → Graph 用 `up{job=~"payment-worker|recon|saga-watchdog"} == 1` 驗證;listener 同時也提供 `/healthz`,compose 的 `HEALTHCHECK` 直接用同一個 port 即可。新的 `saga_watchdog` compose service 跑的是 default-loop 模式;`--once` 模式保留給 k8s CronJob 場景,讓 cluster scheduler 控制節奏。
 
 ### 故意把告警觸發起來(測試)
 
