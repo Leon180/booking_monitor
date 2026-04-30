@@ -29,12 +29,14 @@ package recon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
@@ -53,6 +55,7 @@ import (
 type Reconciler struct {
 	orders  domain.OrderRepository
 	gateway domain.PaymentStatusReader
+	uow     application.UnitOfWork
 	cfg     config.ReconConfig
 	log     *mlog.Logger
 }
@@ -60,15 +63,24 @@ type Reconciler struct {
 // NewReconciler is the fx-friendly constructor. Decorates the logger
 // with `component=recon` so every log line is filterable in
 // Loki/Grafana without per-call ceremony.
+//
+// `uow` is required because the failure-path resolutions (Declined /
+// NotFound / max-age) MUST emit `order.failed` to the outbox in the
+// same transaction as MarkFailed — otherwise the saga compensator
+// never sees the order and the Redis inventory deduct is leaked.
+// Bare orders.MarkFailed (the prior shape) was the DEF-CRIT finding
+// from the Phase 2 checkpoint review.
 func NewReconciler(
 	orders domain.OrderRepository,
 	gateway domain.PaymentStatusReader,
+	uow application.UnitOfWork,
 	cfg *config.Config,
 	logger *mlog.Logger,
 ) *Reconciler {
 	return &Reconciler{
 		orders:  orders,
 		gateway: gateway,
+		uow:     uow,
 		cfg:     cfg.Recon,
 		log:     logger.With(mlog.String("component", "recon")),
 	}
@@ -170,7 +182,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			mlog.Duration("age", s.Age),
 			mlog.Duration("max_age", r.cfg.MaxChargingAge),
 		)
-		if err := r.orders.MarkFailed(parent, s.ID); err != nil {
+		if err := r.failOrder(parent, s.ID, "recon: max_age_exceeded"); err != nil {
 			r.handleMarkErr(parent, s.ID, "max_age_exceeded", err)
 			return
 		}
@@ -219,7 +231,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 
 	case domain.ChargeStatusDeclined:
-		if err := r.orders.MarkFailed(parent, s.ID); err != nil {
+		if err := r.failOrder(parent, s.ID, "recon: gateway returned declined"); err != nil {
 			r.handleMarkErr(parent, s.ID, "declined", err)
 			return
 		}
@@ -231,7 +243,7 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 		// Gateway has no record = the worker crashed AFTER MarkCharging
 		// committed but BEFORE Charge was called. Safe to fail the
 		// order (the customer was never charged).
-		if err := r.orders.MarkFailed(parent, s.ID); err != nil {
+		if err := r.failOrder(parent, s.ID, "recon: gateway has no charge record"); err != nil {
 			r.handleMarkErr(parent, s.ID, "not_found", err)
 			return
 		}
@@ -249,6 +261,64 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			tag.OrderID(s.ID), tag.Status(string(status)),
 			mlog.Duration("age", s.Age))
 	}
+}
+
+// failOrder is the failure-resolution helper used by all three
+// Charging→Failed branches (max_age, declined, not_found). It runs
+// `GetByID` (to obtain the EventID/UserID/Quantity needed for the
+// saga payload), then a UoW that atomically writes `MarkFailed`
+// + `events_outbox(order.failed)`. The outbox write is what triggers
+// the saga compensator to revert Redis inventory — without it, the
+// inventory deduct from booking time is leaked permanently. This
+// closes DEF-CRIT from the Phase 2 checkpoint.
+//
+// Mirrors PaymentService.ProcessOrder's failure path
+// (internal/application/payment/service.go) — same UoW shape, same
+// event factory, same saga downstream. Recon-side reasons are
+// recorded in the OrderFailedEvent.Reason so a saga consumer can
+// distinguish a worker-side decline from a recon-driven force-fail.
+//
+// Returns the wrapped error from either GetByID (rare; the row was
+// just observed in FindStuckCharging) or the UoW closure. Caller
+// (resolve) classifies via handleMarkErr.
+func (r *Reconciler) failOrder(ctx context.Context, id uuid.UUID, reason string) error {
+	order, err := r.orders.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("recon failOrder GetByID id=%s: %w", id, err)
+	}
+
+	return r.uow.Do(ctx, func(repos *application.Repositories) error {
+		// MarkFailed's bare error return is intentional — handleMarkErr
+		// uses errors.Is(err, ErrInvalidTransition) to detect the
+		// worker-won-the-race signal, which `fmt.Errorf(... %w ...)`
+		// would still preserve but bare is faster + matches the rest of
+		// the file. The `order` value is reused below from the
+		// pre-tx GetByID; that read is stale but the fields we map
+		// (EventID, UserID, Quantity) are write-once post-creation, so
+		// staleness is correctness-safe. Adding a mutable field to
+		// Order in the future would invalidate this — keep the mapping
+		// in NewOrderFailedEventFromOrder honest.
+		if err := repos.Order.MarkFailed(ctx, id); err != nil {
+			return err
+		}
+		failedEvent := application.NewOrderFailedEventFromOrder(order, reason)
+		payload, err := json.Marshal(failedEvent)
+		if err != nil {
+			return fmt.Errorf("marshal OrderFailedEvent: %w", err)
+		}
+		outboxEvent, err := domain.NewOrderFailedOutbox(payload)
+		if err != nil {
+			return fmt.Errorf("construct outbox event: %w", err)
+		}
+		// Wrap with context so the handleMarkErr log line distinguishes
+		// "outbox create failed" from "Mark* failed". `errors.Is`
+		// against ErrInvalidTransition still works through the wrap if
+		// a future Outbox.Create surfaces that sentinel.
+		if _, err := repos.Outbox.Create(ctx, outboxEvent); err != nil {
+			return fmt.Errorf("outbox create order.failed: %w", err)
+		}
+		return nil
+	})
 }
 
 // handleMarkErr is the shared error-classification path for
@@ -269,9 +339,13 @@ func (r *Reconciler) handleMarkErr(ctx context.Context, id uuid.UUID, outcome st
 	// Real DB failure path — emit a counter so dashboards / alerts can
 	// see sustained DB issues during the resolve path. Without this
 	// counter, a sustained DB outage during recon would only surface
-	// in logs, and no alert can fire on log lines.
+	// in logs, and no alert can fire on log lines. The "Mark* or outbox
+	// emit" wording acknowledges that this counter now also catches
+	// outbox-create failures (DEF-CRIT fix added the outbox write
+	// inside the same UoW); operators can disambiguate via the wrapped
+	// error message preserved by tag.Error(err).
 	observability.ReconMarkErrorsTotal.Inc()
-	r.log.Error(ctx, "recon: mark transition failed",
+	r.log.Error(ctx, "recon: Mark* or outbox emit failed during resolve",
 		tag.OrderID(id),
 		mlog.String("intended_outcome", outcome), tag.Error(err))
 }

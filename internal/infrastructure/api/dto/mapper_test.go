@@ -97,6 +97,15 @@ func TestListBookingsQueryParams_StatusFilter(t *testing.T) {
 		{name: "Nil status returns nil filter", raw: nil, expected: nil},
 		{name: "Pending filter", raw: ptr("pending"), expected: orderStatusPtr(domain.OrderStatusPending)},
 		{name: "Confirmed filter", raw: ptr("confirmed"), expected: orderStatusPtr(domain.OrderStatusConfirmed)},
+		{name: "Charging filter", raw: ptr("charging"), expected: orderStatusPtr(domain.OrderStatusCharging)},
+		{name: "Failed filter", raw: ptr("failed"), expected: orderStatusPtr(domain.OrderStatusFailed)},
+		{name: "Compensated filter", raw: ptr("compensated"), expected: orderStatusPtr(domain.OrderStatusCompensated)},
+		// S2 — invalid status values fall back to nil (no filter) instead
+		// of being passed through to SQL. Defense-in-depth even though
+		// the SQL layer parameterises the value.
+		{name: "Unknown status returns nil filter", raw: ptr("expired"), expected: nil},
+		{name: "Empty string returns nil filter", raw: ptr(""), expected: nil},
+		{name: "Garbage string returns nil filter", raw: ptr("'; DROP TABLE orders;--"), expected: nil},
 	}
 
 	for _, tt := range tests {

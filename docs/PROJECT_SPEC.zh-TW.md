@@ -386,12 +386,14 @@ Failed   ──MarkCompensated→ Compensated (terminal)
 
 | Outcome | 觸發條件 | 動作 |
 | :-- | :-- | :-- |
-| `charged` | Gateway 回 `ChargeStatusCharged` | MarkConfirmed |
-| `declined` | Gateway 回 `ChargeStatusDeclined` | MarkFailed |
-| `not_found` | Gateway 沒有此筆紀錄(worker 在 Charge call 之前掛掉) | MarkFailed(顧客未被扣款) |
+| `charged` | Gateway 回 `ChargeStatusCharged` | MarkConfirmed(終態成功 — 不需要 outbox 通知) |
+| `declined` | Gateway 回 `ChargeStatusDeclined` | `failOrder`:GetByID → UoW {MarkFailed + outbox `order.failed`} → 由 saga 補償器把 Redis 庫存還原 |
+| `not_found` | Gateway 沒有此筆紀錄(worker 在 Charge call 之前掛掉) | `failOrder`(與 declined 走同一條路徑;reason 欄位讓 triage 時能分辨) |
 | `unknown` | Gateway 回了無法分類的 verdict | Skip,下次 sweep 再試 |
-| `max_age_exceeded` | 訂單年齡 > `RECON_MAX_CHARGING_AGE`(預設 24h) | 強制 MarkFailed;告警觸發;人工 review |
+| `max_age_exceeded` | 訂單年齡 > `RECON_MAX_CHARGING_AGE`(預設 24h) | `failOrder` + `ReconMaxAgeExceeded` 告警觸發;人工 review |
 | `transition_lost` | Mark* 回 `ErrInvalidTransition`(worker 贏了競賽) | 冪等成功;有計數但只記 Info log |
+
+**每一條 Failed transition 都會發 outbox(Phase 2 checkpoint 的 DEF-CRIT 修正)**:對帳器驅動的所有 `Charging → Failed` 轉換都走同一個 `failOrder`,在同一個 UoW 內把 `MarkFailed` 跟 `events_outbox.Create("order.failed")` 寫入。沒有這個 outbox 寫入的話,saga 補償器永遠看不到這筆訂單,訂票時 Redis 扣下去的庫存會永久洩漏出去,在持續性的 gateway 不穩下,RPS 跟庫存的不變式就會慢慢漂移。實作形狀直接照搬 `PaymentService.ProcessOrder` 的失敗路徑 — 一樣的 UoW、一樣的事件 factory(`NewOrderFailedEventFromOrder`)、一樣的下游 consumer。`Reason` 字串(`recon: gateway returned declined` / `recon: gateway has no charge record` / `recon: max_age_exceeded`)讓 saga consumer 或 runbook 作者能在 wire-format 層級分辨這是 worker 端 decline 還是對帳器強制 fail 出來的。
 
 另一個 counter `recon_gateway_errors_total` 專門記基礎設施失敗(網路、gateway 5xx、ctx timeout)— 與 `unknown` verdict 在 operationally 是不同訊號。
 

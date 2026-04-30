@@ -96,6 +96,16 @@ func (h *bookingHandler) HandleListBookings(c *gin.Context) {
 	if params.Size < 1 {
 		params.Size = 10
 	}
+	// Ceiling on Size — prevents `?size=1000000` from triggering a full
+	// table scan + multi-MB allocation in one request, which bypasses
+	// nginx rate-limit (one request can do the damage). 100 chosen as a
+	// generous upper bound for legitimate paginated UI use; raise via
+	// configuration when a real consumer needs more. Closes Phase 2
+	// checkpoint S1.
+	const maxBookingHistoryPageSize = 100
+	if params.Size > maxBookingHistoryPageSize {
+		params.Size = maxBookingHistoryPageSize
+	}
 
 	orders, total, err := h.service.GetBookingHistory(ctx, params.Page, params.Size, params.StatusFilter())
 	if err != nil {

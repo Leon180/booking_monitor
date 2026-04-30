@@ -213,12 +213,14 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 	// compensator's Redis revert is idempotent via SETNX on
 	// `saga:reverted:<order_id>`; the DB MarkCompensated is idempotent
 	// via the OrderStatusCompensated check inside its UoW closure.
-	event := application.NewOrderFailedEvent(application.OrderCreatedEvent{
-		OrderID:  order.ID(),
-		EventID:  order.EventID(),
-		UserID:   order.UserID(),
-		Quantity: order.Quantity(),
-	}, "saga_watchdog: re-driven from stuck Failed state")
+	//
+	// Uses NewOrderFailedEventFromOrder (the order-aware factory)
+	// rather than NewOrderFailedEvent + a partial throwaway
+	// OrderCreatedEvent. The previous shape zero-initialised the
+	// Version field (and Amount/Status/CreatedAt), producing a
+	// wire-format schema violation: consumers branching on Version
+	// would see v0 instead of OrderEventVersion.
+	event := application.NewOrderFailedEventFromOrder(order, "saga_watchdog: re-driven from stuck Failed state")
 
 	payload, err := json.Marshal(event)
 	if err != nil {

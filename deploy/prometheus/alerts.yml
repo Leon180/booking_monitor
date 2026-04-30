@@ -18,14 +18,19 @@ groups:
           description: "Error rate above 5% over 5m (current: {{ $value }})"
 
       - alert: HighLatency
+        # 5m rate window with 2m `for` (mirrors HighErrorRate hysteresis,
+        # closes Phase 2 checkpoint O8). Previously a 1m window with 1m
+        # `for` flapped on every brief GC pause / single slow request
+        # batch. Histogram quantile over 5m is the same shape Prometheus
+        # docs recommend for SLO-style alerts.
         expr: |
-          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) > 2.0
-        for: 1m
+          histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2.0
+        for: 2m
         labels:
           severity: warning
         annotations:
           summary: "High Latency detected"
-          description: "p99 Latency is above 2s (current: {{ $value }}s)"
+          description: "p99 Latency is above 2s for 2m+ (current: {{ $value }}s)"
 
       - alert: InventorySoldOut
         # Uses `bookings_total{status="sold_out"}`, the real metric
@@ -283,6 +288,95 @@ groups:
         annotations:
           summary: "Saga watchdog flagged stuck Failed orders >24h old — manual review needed"
           description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (status='failed') and decide manually whether to revert inventory + MarkCompensated."
+
+      - alert: IdempotencyCacheGetErrors
+        # Fires when the idempotency-cache GET path errors persistently.
+        # Documented as "page-worthy" in metrics.go and monitoring.md
+        # because sustained non-zero means the duplicate-charge protection
+        # is suspended: clients retrying with the same Idempotency-Key
+        # cannot replay the cached result, and the handler falls through
+        # to the booking pipeline a second time. Closes Phase 2 checkpoint
+        # O4 — the alert was documented but missing from this catalog.
+        expr: rate(idempotency_cache_get_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Idempotency cache GET path returning errors"
+          description: "idempotency_cache_get_errors_total averaging {{ $value }} errors/sec over 5m. Duplicate-charge protection is suspended for affected requests — operators must investigate Redis health immediately. See docs/monitoring.md §2 for the metric's contract."
+
+      - alert: ReconMarkErrors
+        # Fires when MarkConfirmed / MarkFailed inside the reconciler's
+        # resolve path returns a non-ErrInvalidTransition error — i.e., a
+        # real DB failure (not the benign worker-won-the-race signal).
+        # Sustained non-zero means orders that the reconciler has
+        # classified are NOT actually transitioning, so the
+        # recon_stuck_charging_orders gauge will keep climbing without an
+        # obvious culprit. Closes Phase 2 checkpoint O5.
+        expr: rate(recon_mark_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconciler MarkConfirmed/MarkFailed errors persisting"
+          description: "recon_mark_errors_total averaging {{ $value }} errors/sec over 5m. Recon classified orders as Charged/Declined/NotFound but the DB transition itself is failing — orders remain in Charging and the gauge will keep climbing. Check DB connectivity and lock state on the orders table."
+
+      - alert: DBRollbackFailures
+        # Fires when a UoW transaction's Rollback itself fails — the
+        # "operational red flag" case documented in metrics.go. Per the
+        # docstring, this should be effectively zero in production; a
+        # sustained rate signals a database driver / connection-state bug
+        # that warrants immediate investigation. Closes Phase 2 checkpoint
+        # O6 (1 of 4).
+        expr: rate(db_rollback_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB transaction rollback failing"
+          description: "db_rollback_failures_total averaging {{ $value }} errors/sec over 5m. UoW Rollback should be effectively zero — a sustained rate means a driver / connection-pool bug is corrupting transaction state. Check DB logs and pgx/database/sql release notes for known issues."
+
+      - alert: RedisXAckFailures
+        # Fires when XACK on the orders stream consistently fails.
+        # XACK failures mean processed messages are being re-delivered
+        # forever (PEL grows unbounded), causing duplicate work even
+        # though our consumers are idempotent. Documented "operational
+        # red flag" in metrics.go. Closes Phase 2 checkpoint O6 (2 of 4).
+        expr: rate(redis_xack_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis XACK failures on orders stream"
+          description: "redis_xack_failures_total averaging {{ $value }} errors/sec over 5m. Processed orders are not being acknowledged — the PEL will grow unbounded and consumers will redo work on rebalance. Check Redis connectivity, AOF state, and stream `orders:stream` consumer-group status (XINFO GROUPS)."
+
+      - alert: RedisRevertFailures
+        # Fires when revert.lua execution fails during saga compensation.
+        # Sustained non-zero means inventory is stuck deducted in Redis
+        # for failed orders even though their saga marker may have
+        # advanced — a real consistency drift between Redis hot inventory
+        # and the DB source of truth. Closes Phase 2 checkpoint O6 (3 of 4).
+        expr: rate(redis_revert_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis revert.lua failing in saga compensation"
+          description: "redis_revert_failures_total averaging {{ $value }} errors/sec over 5m. Compensation is failing to revert Redis inventory — drift vs DB will accumulate. Check Redis Lua execution logs (revert.lua), AOF state, and connectivity from the saga consumer."
+
+      - alert: RedisXAddFailures
+        # Fires when XADD on the orders stream fails. Most XADD failures
+        # surface elsewhere (the booking handler returns 5xx, sold_out
+        # alert may also light up), but a sustained low-rate of XADD
+        # failures is a signal of intermittent Redis trouble that other
+        # alerts may miss. Closes Phase 2 checkpoint O6 (4 of 4).
+        expr: rate(redis_xadd_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis XADD failures on orders stream"
+          description: "redis_xadd_failures_total averaging {{ $value }} errors/sec over 5m. The booking hot path is intermittently failing to enqueue orders into Redis Streams. User-visible 5xx rate may also be elevated. Check Redis health and AOF state."
 
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages

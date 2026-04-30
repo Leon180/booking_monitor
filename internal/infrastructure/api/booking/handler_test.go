@@ -229,3 +229,30 @@ func TestHandleGetOrder_InvalidUUID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid order id")
 }
+
+// TestHandleListBookings_SizeIsCapped guards against `?size=BIG`
+// causing a full-table scan + huge slice allocation in one request
+// (S1 from the Phase 2 checkpoint). The test asserts the service is
+// invoked with the capped value (100) regardless of how large the
+// query string asks for. Without this test, a refactor that removed
+// the cap would silently re-open the resource-exhaustion vector.
+func TestHandleListBookings_SizeIsCapped(t *testing.T) {
+	t.Parallel()
+
+	const cap = 100
+	var observedSize int
+	svc := &stubBookingService{
+		historyFn: func(_ context.Context, _, size int, _ *domain.OrderStatus) ([]domain.Order, int, error) {
+			observedSize = size
+			return []domain.Order{}, 0, nil
+		},
+	}
+	r := newRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/history?page=1&size=1000000", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, cap, observedSize, "page size MUST be capped at %d to prevent unbounded scans", cap)
+}
