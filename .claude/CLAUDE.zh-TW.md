@@ -143,8 +143,22 @@ GitHub Actions 設定檔在 [`.github/workflows/ci.yml`](../.github/workflows/ci
 
 **現有工具**:`make benchmark-compare VUS=500 DURATION=60s` 會跑 `scripts/benchmark_compare.sh`,自動建立目錄與 raw 輸出;`comparison.md` 再由人撰寫,引用已存下的 raw 檔。k6-on-Docker laptop 的 run-to-run 變異通常落在 3-5%,低於這個區間的 delta 是 noise 不是信號。
 
-## 目前狀態(截至 2026-04-24)
-已完成 15 個階段。Phase 13(4/11)透過 PR #7/#8/#9/#12/#13 修復了 66 項 review findings;Phase 14(4/12–13)在 PR #14/#15 完成 GC 優化 — pprof harness、sampler 調優、`GOGC=400`、`GOMEMLIMIT=256MiB`、Redis Lua args 的 sync.Pool、合併版 middleware(每個 request 僅 1 次 `context.WithValue` + 1 次 `c.Request.WithContext`)。Phase 15(4/23–24)在 PR #18 完成 logger 架構重構 — `pkg/logger/` → `internal/log/`,新增 ctx-aware emit 方法(`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`)會自動注入 `correlation_id` 與 OTEL `trace_id`/`span_id`,在 pprof listener 上掛載 `/admin/loglevel` runtime level 端點,並提供 `internal/log/tag/` 型別化欄位建構子。Phase 15 後(4/24)於 PR #21/#22/#23 做 review cleanup:對 `cmd/booking-cli/main.go` 做嚴格 review,修復 P0 的 stress URL、payment worker 補 tracer init、pprof 改綁 loopback + 加 timeout、goroutine 失敗時透過 `fx.Shutdowner` 升級關機、function 拆分,並把 pprof / trusted-proxies / db-ping 調整項搬到 `config.Config`(`KAFKA_BROKERS` 與 `TRUSTED_PROXIES` 改為 cleanenv 的 `[]string` + `env-separator`,順便修掉一個 multi-broker 靜默失效的 bug)。完整規格見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
+## 目前狀態(截至 2026-04-30,Phase 2 checkpoint 已完成)
+
+已完成 15 個階段 + Phase 2 reliability sprint。Reliability 弧線涵蓋:
+- **PR #36(A1)** — DLQ classifier(malformed 訊息跳過重試預算);**PR #36(A2)** — 付款閘道的 idempotency 契約。
+- **PR #38/#39(A3)** — Order 顯式狀態機(typed transition,不再有 `UpdateStatus(any)`)。
+- **PR #40(C1)** — `order_status_history` 審計表 + 以 CTE 原子寫入轉換紀錄。
+- **PR #41(N1)** — k8s 風格 `/livez` + `/readyz` 探針 + `db_pool_*` / Go runtime / cache hit-miss 指標。
+- **PR #42(N2)** — GitHub Actions CI:四個 job 並行(test+race / golangci-lint v2 / govulncheck / docker build)。
+- **PR #43/#44** — `cmd/main.go` 拆出 bootstrap package;`api/` 拆成 `api/{booking,middleware,ops,dto}` 子套件。
+- **PR #45(A4)** — Charging 兩階段意圖紀錄 + reconciler 子指令(`booking-cli recon`)。
+- **PR #46** — Streams 觀測性 + DLQ MINID 保留 + idempotency value cap。
+- **PR #47** — `POST /book` 回應格式(`order_id` + status + self link)+ `GET /api/v1/orders/:id`。
+- **PR #48(N4)** — Stripe 風格 idempotency-key fingerprint 驗證(body fingerprint → 不符回 409 + legacy entry 懶式遷移)。
+- **PR #49(A5)** — Saga watchdog + 專案 review checkpoint 框架(`.claude/skills/project-review-checkpoint/`)。
+
+**Phase 2 邊界**(2026-04-30):第一次專案 review checkpoint 跑了 8 個維度的並行 agent 審計;報告在 [`docs/checkpoints/20260430-phase2-review.md`](../docs/checkpoints/20260430-phase2-review.md)。評分 A−。發現一個被驗證過的正確性破口(reconciler max-age force-fail 會洩漏 Redis 庫存)+ 四個運維面 Critical + 9 個 Important findings → cleanup PR scope 取自 action plan 第 1–9 列。完整歷史見 [../docs/PROJECT_SPEC.zh-TW.md](../docs/PROJECT_SPEC.zh-TW.md)。
 
 ## Logging 使用慣例(PR #18 之後)
 - **Pattern A — 長生命週期元件**:透過 constructor 注入 `*log.Logger`,在建構時一次性用 `With()` 加上 `component=<subsystem>` 標籤(例:`worker_service`、`outbox_relay`、`saga_compensator`)。呼叫 `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware 方法會自動注入 correlation/trace ids。
@@ -185,6 +199,19 @@ GitHub Actions 設定檔在 [`.github/workflows/ci.yml`](../.github/workflows/ci
 - `WORKER_PENDING_BLOCK_TIMEOUT`(預設 `100ms`)/ `WORKER_READ_ERROR_BACKOFF`(預設 `1s`)— 啟動時 PEL 掃描的 block 時長 + 讀取錯誤的 retry 間隔
 - `REDIS_INVENTORY_TTL`(預設 `720h`)/ `REDIS_IDEMPOTENCY_TTL`(預設 `24h`)— Redis 快取 key 的存活期;以前是寫死的 const
 - `REDIS_MAX_CONSECUTIVE_READ_ERRORS`(預設 `30`)— Redis 持續異常時 worker 退出讓 k8s 重啟的容忍度
+
+**Reconciler — A4(PR #45 之後)** — 驅動 `booking-cli recon` 子指令
+- `RECON_SWEEP_INTERVAL`(預設 `30s`)— reconciler 多久掃描一次卡在 `charging` 狀態的訂單
+- `RECON_CHARGING_THRESHOLD`(預設 `30s`)— 訂單在這個年齡之前不算「卡住」,不會去打 gateway
+- `RECON_GATEWAY_TIMEOUT`(預設 `2s`)— 一次 sweep 中每筆 `gateway.GetStatus` 查詢的超時預算
+- `RECON_MAX_CHARGING_AGE`(預設 `24h`)— 超過這個年齡 reconciler 會強制 force-fail(目前有遺漏 outbox 發佈的破口 — 詳見 `docs/checkpoints/20260430-phase2-review.md` DEF-CRIT)
+- `RECON_BATCH_SIZE`(預設 `100`)— 每個 sweep tick 處理的訂單數
+
+**Saga watchdog — A5(PR #49 之後)** — 驅動 `booking-cli saga-watchdog` 子指令
+- `SAGA_WATCHDOG_INTERVAL`(預設 `60s`)— 掃描卡在 `failed` 狀態訂單的頻率
+- `SAGA_STUCK_THRESHOLD`(預設 `60s`)— `failed` 訂單在這個年齡之前不算「卡住」,不會重新驅動補償
+- `SAGA_MAX_FAILED_AGE`(預設 `24h`)— 超過這個年齡 watchdog 不再重新驅動補償,改記錄 `max_age_exceeded`(需要人工檢視 — 自動 transition 會有 phantom-revert 風險)
+- `SAGA_BATCH_SIZE`(預設 `100`)— 每個 sweep tick 處理的訂單數。`Validate()` 會拒絕 `MaxFailedAge ≤ StuckThreshold`(跨欄位守門員)
 
 ## `.claude/` 下的可用工具
 

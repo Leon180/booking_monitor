@@ -143,8 +143,22 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 
 **Existing tooling**: `make benchmark-compare VUS=500 DURATION=60s` runs `scripts/benchmark_compare.sh` which produces the directory + raw outputs automatically; `comparison.md` is then hand-written referencing the captured raw files. Run-to-run variance for k6-on-Docker laptop is typically 3-5%; deltas below that are noise, not signal.
 
-## Current State (as of 2026-04-24)
-15 phases completed. Phase 13 (Apr 11) landed 66 remediation findings across PRs #7/#8/#9/#12/#13. Phase 14 (Apr 12–13) landed GC optimization in PRs #14/#15 — pprof harness, sampler tuning, `GOGC=400`, `GOMEMLIMIT=256MiB`, sync.Pool for Redis Lua args, combined middleware (1 `context.WithValue` + 1 `c.Request.WithContext` per request). Phase 15 (Apr 23–24) landed the logger architecture refactor in PR #18 — `pkg/logger/` → `internal/log/` with ctx-aware emit methods (`Debug/Info/Warn/Error/Fatal(ctx, msg, fields...)`) that auto-inject `correlation_id` + OTEL `trace_id`/`span_id`, `/admin/loglevel` runtime level endpoint on the pprof listener, and the typed `internal/log/tag/` field constructors. Post-Phase-15 (Apr 24) review cleanup in PRs #21/#22/#23: strict review of `cmd/booking-cli/main.go` landed the P0 stress URL fix, payment-worker tracer init, pprof loopback binding + timeouts, `fx.Shutdowner` escalation for failing goroutines, function decomposition, and promotion of pprof + trusted-proxy + db-ping tunables into `config.Config` (with `KAFKA_BROKERS` + `TRUSTED_PROXIES` switching to cleanenv `[]string` + `env-separator`, eliminating a silent multi-broker bug). See [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md) for full details.
+## Current State (as of 2026-04-30, post Phase 2 checkpoint)
+
+15 phases + Phase 2 reliability sprint completed. The reliability arc covered:
+- **PR #36 (A1)** — DLQ classifier (malformed messages skip retry budget); **PR #36 (A2)** — Payment gateway idempotency contract.
+- **PRs #38/#39 (A3)** — Order explicit state machine (typed transitions, no `UpdateStatus(any)`).
+- **PR #40 (C1)** — `order_status_history` audit table + atomic CTE-based transition logging.
+- **PR #41 (N1)** — k8s-style `/livez` + `/readyz` probes + `db_pool_*` / Go-runtime / cache hit-miss metrics.
+- **PR #42 (N2)** — GitHub Actions CI: 4-job pipeline (test+race / golangci-lint v2 / govulncheck / docker build).
+- **PRs #43/#44** — `cmd/main.go` split into bootstrap package; `api/` split into `api/{booking,middleware,ops,dto}` subpackages.
+- **PR #45 (A4)** — Charging two-phase intent log + reconciler subcommand (`booking-cli recon`).
+- **PR #46** — Streams observability + DLQ MINID retention + idempotency value cap.
+- **PR #47** — `POST /book` response shape (`order_id` + status + self link) + `GET /api/v1/orders/:id`.
+- **PR #48 (N4)** — Stripe-style idempotency-key fingerprint validation (body fingerprint → 409 on mismatch + lazy migration of legacy entries).
+- **PR #49 (A5)** — Saga watchdog + project-review checkpoint framework (`.claude/skills/project-review-checkpoint/`).
+
+**Phase 2 boundary** (2026-04-30): first project-review checkpoint ran 8-dimension parallel-agent audit; report at [`docs/checkpoints/20260430-phase2-review.md`](../docs/checkpoints/20260430-phase2-review.md). Grade A−. One verified correctness gap (reconciler max-age force-fail leaks Redis inventory) + four ops Criticals + 9 Important findings → cleanup PR scoped from action plan rows 1–9. See full history in [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md).
 
 ## Logging Conventions (post-PR #18)
 - **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
@@ -184,6 +198,19 @@ See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most
 - `WORKER_PENDING_BLOCK_TIMEOUT` (default `100ms`) / `WORKER_READ_ERROR_BACKOFF` (default `1s`) — startup PEL sweep block + read-error retry sleep
 - `REDIS_INVENTORY_TTL` (default `720h`) / `REDIS_IDEMPOTENCY_TTL` (default `24h`) — Redis cache key lifetimes; previously hardcoded as const
 - `REDIS_MAX_CONSECUTIVE_READ_ERRORS` (default `30`) — broken-Redis tolerance before the worker exits
+
+**Reconciler — A4 (post-PR #45)** — drives `booking-cli recon` subcommand
+- `RECON_SWEEP_INTERVAL` (default `30s`) — how often the reconciler scans for stuck-`charging` orders
+- `RECON_CHARGING_THRESHOLD` (default `30s`) — minimum age before an order is considered "stuck charging" and worth a gateway probe
+- `RECON_GATEWAY_TIMEOUT` (default `2s`) — per-call budget for `gateway.GetStatus` lookups during a sweep
+- `RECON_MAX_CHARGING_AGE` (default `24h`) — past this age the reconciler force-fails (currently misses outbox emit — see `docs/checkpoints/20260430-phase2-review.md` DEF-CRIT)
+- `RECON_BATCH_SIZE` (default `100`) — orders processed per sweep tick
+
+**Saga watchdog — A5 (post-PR #49)** — drives `booking-cli saga-watchdog` subcommand
+- `SAGA_WATCHDOG_INTERVAL` (default `60s`) — sweep cadence for stuck-`failed` orders
+- `SAGA_STUCK_THRESHOLD` (default `60s`) — minimum age before a `failed` order is considered stuck and worth re-driving the compensator
+- `SAGA_MAX_FAILED_AGE` (default `24h`) — past this age the watchdog stops re-driving and emits `max_age_exceeded` (operator review required — phantom-revert risk if auto-transitioned)
+- `SAGA_BATCH_SIZE` (default `100`) — orders processed per sweep tick. `Validate()` rejects `MaxFailedAge ≤ StuckThreshold` (cross-field guard)
 
 ## Available Tooling under `.claude/`
 
