@@ -98,21 +98,23 @@ ID, EventType, Payload (JSON), Status, ProcessedAt
 Types: order.created, order.failed
 ```
 
-### Domain Interfaces
+### Ports(application service 消費的介面)
 
-| Interface | 用途 | 實作 |
-|-----------|------|------|
-| EventRepository | Event CRUD + GetByIDForUpdate + DecrementTicket / IncrementTicket + Delete(給 CreateEvent 補償使用) | PostgreSQL |
-| OrderRepository | Order CRUD + 狀態更新 | PostgreSQL |
-| OutboxRepository | Outbox CRUD + ListPending/MarkProcessed | PostgreSQL |
-| InventoryRepository | 熱庫存扣減/回滾 | Redis(Lua scripts) |
-| OrderQueue | 非同步訂單串流(Enqueue/Dequeue/Ack) | Redis Streams |
-| IdempotencyRepository | 請求去重(24 小時 TTL) | Redis |
-| EventPublisher | 發布領域事件 | Kafka |
-| PaymentService | 處理付款事件(遇到無效輸入回傳 `ErrInvalidPaymentEvent`,讓 consumer 能 dead-letter) | 應用層服務 |
-| PaymentGateway | 扣款 | Mock(可設定成功率) |
-| DistributedLock | 領導者選舉 | PostgreSQL advisory locks |
-| UnitOfWork | 交易管理 | PostgreSQL |
+| Interface | Package | 用途 | 實作 |
+|-----------|---------|------|------|
+| EventRepository | domain | Event CRUD + GetByIDForUpdate + DecrementTicket / IncrementTicket + Delete(給 CreateEvent 補償使用) | PostgreSQL |
+| OrderRepository | domain | Order CRUD + 狀態更新 | PostgreSQL |
+| OutboxRepository | domain | Outbox CRUD + ListPending/MarkProcessed | PostgreSQL |
+| InventoryRepository | domain | 熱庫存扣減/回滾 | Redis(Lua scripts) |
+| OrderQueue | domain | 非同步訂單串流(Enqueue/Dequeue/Ack) | Redis Streams |
+| IdempotencyRepository | domain | 請求去重(24 小時 TTL) | Redis |
+| PaymentGateway | domain | 扣款 | Mock(可設定成功率) |
+| EventPublisher | application | 發布到外部訊息匯流排 | Kafka |
+| DistributedLock | application | 領導者選舉 | PostgreSQL advisory locks |
+| PaymentService | application | 處理付款事件(遇到無效輸入回傳 `ErrInvalidPaymentEvent`,讓 consumer 能 dead-letter) | 應用層服務 |
+| UnitOfWork | application | 交易管理 | PostgreSQL |
+
+`domain` 與 `application` 套件的拆分是逐 port 來看的:`domain` 側的介面帶有領域語意(`OrderRepository` 認得 Order、`PaymentGateway` 認得扣款);`application` 側的介面則是純粹的 plumbing port(`EventPublisher.Publish(topic, payload)`、`DistributedLock.TryLock(id)`),任何基礎設施 adapter 都能滿足。wire-format 的常數如 `EventTypeOrderCreated` 仍然留在 `domain`(coding-style 規則 5)— 只有「傳輸」port 搬家了。
 
 `EventRepository.GetByID` 只做一般讀取;另外有一個獨立的 `GetByIDForUpdate` 會帶 `FOR UPDATE` row lock,必須在 UoW 管理的交易內呼叫。舊的 `DeductInventory` 方法在 remediation 階段已從介面移除(沒有 production 呼叫點)。
 
@@ -709,10 +711,10 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `internal/domain/repositories.go` | Repository 介面 |
 | `internal/domain/inventory.go` | InventoryRepository 介面 |
 | `internal/domain/queue.go` | OrderQueue 介面 |
-| `internal/domain/messaging.go` | EventPublisher 介面 |
+| `internal/application/messaging.go` | EventPublisher 介面(CP2.5 從 domain 搬過來 — 純粹的傳輸 port,沒有領域語意) |
 | `internal/domain/payment.go` | PaymentGateway 介面(真正的領域 port — 外部整合邊界) |
 | `internal/application/payment_service.go` | PaymentService 介面 + ErrInvalidPaymentEvent(PR #38 從 domain 搬過來 — 接受 `*OrderCreatedEvent`,屬於應用層的 wire DTO) |
-| `internal/domain/lock.go` | DistributedLock 介面 |
+| `internal/application/lock.go` | DistributedLock 介面(CP2.5 從 domain 搬過來 — 純粹的領導者選舉 port,沒有領域語意) |
 | `internal/domain/idempotency.go` | IdempotencyRepository 介面 |
 | `internal/domain/uow.go` | UnitOfWork 介面 |
 

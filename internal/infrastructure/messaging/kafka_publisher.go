@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"booking_monitor/internal/domain"
+	"booking_monitor/internal/application"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -23,7 +23,7 @@ type kafkaPublisher struct {
 }
 
 // NewKafkaPublisher creates a new Kafka-backed EventPublisher.
-func NewKafkaPublisher(cfg MessagingConfig) domain.EventPublisher {
+func NewKafkaPublisher(cfg MessagingConfig) application.EventPublisher {
 	timeout := cfg.WriteTimeout
 	if timeout == 0 {
 		timeout = 5 * time.Second

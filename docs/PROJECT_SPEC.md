@@ -102,21 +102,23 @@ ID, EventType, Payload (JSON), Status, ProcessedAt
 Types: order.created, order.failed
 ```
 
-### Domain Interfaces
+### Ports (interfaces consumed by application services)
 
-| Interface | Purpose | Implementation |
-|-----------|---------|----------------|
-| EventRepository | Event CRUD + GetByIDForUpdate + DecrementTicket / IncrementTicket + Delete (for CreateEvent compensation) | PostgreSQL |
-| OrderRepository | Order CRUD + status updates | PostgreSQL |
-| OutboxRepository | Outbox CRUD + ListPending/MarkProcessed | PostgreSQL |
-| InventoryRepository | Hot inventory deduction/reversion | Redis (Lua scripts) |
-| OrderQueue | Async order stream (Enqueue/Dequeue/Ack) | Redis Streams |
-| IdempotencyRepository | Request deduplication (24h TTL) | Redis |
-| EventPublisher | Publish domain events | Kafka |
-| PaymentService | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Application-layer service |
-| PaymentGateway | Charge payments | Mock (configurable success rate) |
-| DistributedLock | Leader election | PostgreSQL advisory locks |
-| UnitOfWork | Transaction management | PostgreSQL |
+| Interface | Package | Purpose | Implementation |
+|-----------|---------|---------|----------------|
+| EventRepository | domain | Event CRUD + GetByIDForUpdate + DecrementTicket / IncrementTicket + Delete (for CreateEvent compensation) | PostgreSQL |
+| OrderRepository | domain | Order CRUD + status updates | PostgreSQL |
+| OutboxRepository | domain | Outbox CRUD + ListPending/MarkProcessed | PostgreSQL |
+| InventoryRepository | domain | Hot inventory deduction/reversion | Redis (Lua scripts) |
+| OrderQueue | domain | Async order stream (Enqueue/Dequeue/Ack) | Redis Streams |
+| IdempotencyRepository | domain | Request deduplication (24h TTL) | Redis |
+| PaymentGateway | domain | Charge payments | Mock (configurable success rate) |
+| EventPublisher | application | Publish to an external message bus | Kafka |
+| DistributedLock | application | Leader election | PostgreSQL advisory locks |
+| PaymentService | application | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Application-layer service |
+| UnitOfWork | application | Transaction management | PostgreSQL |
+
+The split between `domain` and `application` packages is per-port: domain-side interfaces carry domain semantics (an `OrderRepository` knows about Orders; a `PaymentGateway` knows about charges); application-side interfaces are pure plumbing ports (`EventPublisher.Publish(topic, payload)`, `DistributedLock.TryLock(id)`) that any infrastructure adapter can satisfy. Wire-format constants like `EventTypeOrderCreated` correctly stay in domain (per coding-style rule 5) — only the *transport* port moved.
 
 `EventRepository.GetByID` performs a plain read; the explicit `GetByIDForUpdate` variant takes a `FOR UPDATE` row lock and MUST be called inside a UoW-managed transaction. The previously-deprecated `DeductInventory` method on `EventRepository` was removed in the remediation pass (no production callers).
 
@@ -721,10 +723,10 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/domain/repositories.go` | Repository interfaces |
 | `internal/domain/inventory.go` | InventoryRepository interface |
 | `internal/domain/queue.go` | OrderQueue interface |
-| `internal/domain/messaging.go` | EventPublisher interface |
+| `internal/application/messaging.go` | EventPublisher interface (moved from domain in CP2.5 — pure transport port, no domain semantics) |
 | `internal/domain/payment.go` | PaymentGateway interface (true domain port — external integration boundary) |
 | `internal/application/payment_service.go` | PaymentService interface + ErrInvalidPaymentEvent (moved from domain in PR #38 — accepts `*OrderCreatedEvent`, an application-layer wire DTO) |
-| `internal/domain/lock.go` | DistributedLock interface |
+| `internal/application/lock.go` | DistributedLock interface (moved from domain in CP2.5 — pure leader-election port, no domain semantics) |
 | `internal/domain/idempotency.go` | IdempotencyRepository interface |
 | `internal/domain/uow.go` | UnitOfWork interface |
 

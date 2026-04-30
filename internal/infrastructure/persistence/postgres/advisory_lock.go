@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"sync"
 
-	"booking_monitor/internal/domain"
+	"booking_monitor/internal/application"
 )
 
 type pgAdvisoryLock struct {
@@ -17,7 +17,7 @@ type pgAdvisoryLock struct {
 // NewPostgresDistributedLock creates a DistributedLock backed by Postgres
 // session-level advisory locks. It internally manages a dedicated *sql.Conn
 // to ensure the lock is held across connection pools safely.
-func NewPostgresDistributedLock(db *sql.DB) domain.DistributedLock {
+func NewPostgresDistributedLock(db *sql.DB) application.DistributedLock {
 	return &pgAdvisoryLock{db: db}
 }
 

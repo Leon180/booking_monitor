@@ -22,13 +22,13 @@ const (
 // It runs as a background goroutine managed by the Fx lifecycle.
 type OutboxRelay struct {
 	outboxRepo domain.OutboxRepository
-	publisher  domain.EventPublisher
+	publisher  EventPublisher
 	batchSize  int
-	mutex      domain.DistributedLock
+	mutex      DistributedLock
 	log        *mlog.Logger
 }
 
-func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher domain.EventPublisher, batchSize int, mutex domain.DistributedLock, logger *mlog.Logger) *OutboxRelay {
+func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher EventPublisher, batchSize int, mutex DistributedLock, logger *mlog.Logger) *OutboxRelay {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
