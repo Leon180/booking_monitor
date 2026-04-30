@@ -107,3 +107,23 @@ func NewOrderFailedEvent(from OrderCreatedEvent, reason string) OrderFailedEvent
 		Version:  OrderEventVersion,
 	}
 }
+
+// NewOrderFailedEventFromOrder is the recon / saga-watchdog entry
+// point: callers that already loaded a domain.Order (via GetByID or
+// FindStuckCharging / FindStuckFailed) should use this instead of
+// synthesising a throwaway OrderCreatedEvent. Maps directly off the
+// aggregate so wire fields like Version are filled correctly — the
+// previous shape (NewOrderFailedEvent(OrderCreatedEvent{...partial},
+// reason)) zeroed Version and other fields, producing a wire-format
+// schema violation.
+func NewOrderFailedEventFromOrder(o domain.Order, reason string) OrderFailedEvent {
+	return OrderFailedEvent{
+		EventID:  o.EventID(),
+		OrderID:  o.ID(),
+		UserID:   o.UserID(),
+		Quantity: o.Quantity(),
+		FailedAt: time.Now(),
+		Reason:   reason,
+		Version:  OrderEventVersion,
+	}
+}

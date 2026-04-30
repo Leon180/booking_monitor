@@ -159,7 +159,7 @@ The current alert catalog:
 | Alert | Severity | Symptom |
 | :-- | :-- | :-- |
 | `HighErrorRate` | critical | 5xx rate > 5% over 5m |
-| `HighLatency` | warning | p99 > 2s |
+| `HighLatency` | warning | p99 > 2s for 2m+ (5m rate window — anti-flap; was 1m/1m before Phase 2 cleanup) |
 | `InventorySoldOut` | info | A booking attempt returned sold_out |
 | `OrdersStreamBacklogYellow` | info | Stream length > 10K for 2m |
 | `OrdersStreamBacklogOrange` | warning | Stream length > 50K for 2m |
@@ -171,11 +171,19 @@ The current alert catalog:
 | `ReconFindStuckErrors` | critical | Reconciler sweep query is failing |
 | `ReconGatewayErrors` | warning | Reconciler gateway error rate elevated |
 | `ReconMaxAgeExceeded` | critical | Reconciler force-failed an order — manual review |
+| `ReconMarkErrors` | warning | `recon_mark_errors_total` rate > 0 for 5m — DB transitions failing during resolve |
 | `SagaStuckFailedOrders` | warning | `saga_stuck_failed_orders > 0 for 10m` — compensator failing repeatedly |
 | `SagaCompensatorErrors` | warning | `rate(saga_watchdog_resolved_total{outcome="compensator_error"}[5m]) > 0 for 2m` — fast-path companion; catches a 100%-failing compensator before the gauge alert's 10m window elapses |
 | `SagaWatchdogFindStuckErrors` | critical | Watchdog sweep query failing — gauge goes blind |
 | `SagaMaxFailedAgeExceeded` | critical | Stuck Failed orders >24h — manual review needed (watchdog will NOT auto-transition) |
 | `KafkaConsumerStuck` | warning | Consumer rebalance retries — downstream dependency degraded |
+| `IdempotencyCacheGetErrors` | warning | `idempotency_cache_get_errors_total` rate > 0 for 1m — duplicate-charge protection suspended |
+| `DBRollbackFailures` | warning | `db_rollback_failures_total` rate > 0 for 5m — UoW rollback failing (driver / connection-state bug) |
+| `RedisXAckFailures` | warning | `redis_xack_failures_total` rate > 0 for 5m — PEL grows unbounded; consumers redo work on rebalance |
+| `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
+| `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 for 5m — booking hot path intermittently failing to enqueue |
+
+> **Worker-process metric scrape gap (deferred follow-up).** The `recon_*`, `saga_watchdog_*`, `kafka_consumer_retry_total`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli recon`, `booking-cli saga-watchdog`, and `booking-cli payment` *worker* processes. Those processes don't currently expose a `/metrics` HTTP listener, so Prometheus's `app:8080`-only scrape config in `deploy/prometheus/prometheus.yml` cannot pull them. The associated alerts above (e.g. `ReconStuckCharging`, `SagaStuckFailedOrders`, `KafkaConsumerStuck`) **will not fire in the docker-compose stack today** until each worker binary is given a metrics listener and a corresponding scrape job is added. Phase 2 checkpoint O3; tracked as a standalone follow-up PR.
 
 ### Forcing an alert to fire (testing)
 

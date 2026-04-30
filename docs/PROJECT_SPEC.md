@@ -398,12 +398,14 @@ Failed   ──MarkCompensated→ Compensated (terminal)
 
 | Outcome | Trigger | Action |
 | :-- | :-- | :-- |
-| `charged` | Gateway returns `ChargeStatusCharged` | MarkConfirmed |
-| `declined` | Gateway returns `ChargeStatusDeclined` | MarkFailed |
-| `not_found` | Gateway has no record (worker crashed before Charge call) | MarkFailed (customer never charged) |
+| `charged` | Gateway returns `ChargeStatusCharged` | MarkConfirmed (terminal success — no outbox emission needed) |
+| `declined` | Gateway returns `ChargeStatusDeclined` | `failOrder`: GetByID → UoW {MarkFailed + outbox `order.failed`} → saga compensator reverts Redis inventory |
+| `not_found` | Gateway has no record (worker crashed before Charge call) | `failOrder` (same path as declined; reason field distinguishes for triage) |
 | `unknown` | Gateway returned an unclassifiable verdict | Skip; retry next sweep |
-| `max_age_exceeded` | Order age > `RECON_MAX_CHARGING_AGE` (default 24h) | Force MarkFailed; alert fires; manual review |
+| `max_age_exceeded` | Order age > `RECON_MAX_CHARGING_AGE` (default 24h) | `failOrder` + `ReconMaxAgeExceeded` alert fires; manual review |
 | `transition_lost` | Mark* returned `ErrInvalidTransition` (worker won the race) | Idempotent success; counted but logged at Info |
+
+**Outbox emit on every Failed transition (DEF-CRIT fix from Phase 2 checkpoint)**: every reconciler-driven `Charging → Failed` transition goes through `failOrder`, which runs `MarkFailed` and `events_outbox.Create("order.failed")` in the same UoW. Without the outbox write, the saga compensator never sees the order, the Redis inventory deduct from booking time is leaked permanently, and the visible RPS-vs-stock invariant drifts under sustained gateway instability. Mirrors the `PaymentService.ProcessOrder` failure path verbatim — same UoW shape, same event factory (`NewOrderFailedEventFromOrder`), same downstream consumer. The `Reason` string (`recon: gateway returned declined` / `recon: gateway has no charge record` / `recon: max_age_exceeded`) lets a saga consumer or runbook author distinguish a worker-side decline from a recon-driven force-fail at the wire format level.
 
 Distinct counter `recon_gateway_errors_total` for infrastructure failures (network, gateway 5xx, ctx timeout) — qualitatively different from the `unknown` verdict.
 

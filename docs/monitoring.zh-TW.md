@@ -159,7 +159,7 @@ recon_stuck_charging_orders
 | 告警 | severity | 症狀 |
 | :-- | :-- | :-- |
 | `HighErrorRate` | critical | 5xx 比率 > 5% 持續 5m |
-| `HighLatency` | warning | p99 > 2s |
+| `HighLatency` | warning | p99 > 2s 持續 2m+(5m rate 視窗 — 抗抖動;Phase 2 cleanup 之前是 1m/1m) |
 | `InventorySoldOut` | info | 有訂票嘗試回 sold_out |
 | `OrdersStreamBacklogYellow` | info | Stream 長度 > 10K 持續 2m |
 | `OrdersStreamBacklogOrange` | warning | Stream 長度 > 50K 持續 2m |
@@ -171,11 +171,19 @@ recon_stuck_charging_orders
 | `ReconFindStuckErrors` | critical | 對帳器 sweep 查詢失敗中 |
 | `ReconGatewayErrors` | warning | 對帳器 gateway 錯誤率升高 |
 | `ReconMaxAgeExceeded` | critical | 對帳器強制把訂單標 failed — 需人工檢視 |
+| `ReconMarkErrors` | warning | `recon_mark_errors_total` rate > 0 持續 5m — 對帳器在 resolve 階段做 DB transition 失敗 |
 | `SagaStuckFailedOrders` | warning | `saga_stuck_failed_orders > 0 for 10m` — compensator 一直在失敗 |
 | `SagaCompensatorErrors` | warning | `rate(saga_watchdog_resolved_total{outcome="compensator_error"}[5m]) > 0 for 2m` — 快速路徑配對告警;在 gauge 告警的 10m 視窗到之前就抓到 100% 失敗的 compensator |
 | `SagaWatchdogFindStuckErrors` | critical | Watchdog sweep 查詢失敗 — gauge 看起來健康但其實是瞎的 |
 | `SagaMaxFailedAgeExceeded` | critical | 卡在 Failed 超過 24h — 需要人工調查(watchdog **不會**自動轉狀態) |
 | `KafkaConsumerStuck` | warning | Consumer rebalance retry — 下游依賴退化中 |
+| `IdempotencyCacheGetErrors` | warning | `idempotency_cache_get_errors_total` rate > 0 持續 1m — 重複扣款防護被暫停了 |
+| `DBRollbackFailures` | warning | `db_rollback_failures_total` rate > 0 持續 5m — UoW Rollback 失敗(driver / connection-state bug) |
+| `RedisXAckFailures` | warning | `redis_xack_failures_total` rate > 0 持續 5m — PEL 會無限增長;rebalance 後 consumer 會重做工作 |
+| `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 持續 5m — saga 補償時 revert.lua 失敗,Redis 庫存沒被還原 |
+| `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 持續 5m — 訂票 hot path 間歇性無法 enqueue |
+
+> **Worker process 的 metric 抓取缺口(延後處理)。** 上面的 `recon_*`、`saga_watchdog_*`、`kafka_consumer_retry_total`,以及 saga 的 `db_*` / `redis_*` 失敗計數器,都是註冊在 `booking-cli recon`、`booking-cli saga-watchdog`、`booking-cli payment` 這些 *worker* process 內。這些 process 目前並沒有對外開 `/metrics` HTTP listener,所以 `deploy/prometheus/prometheus.yml` 裡只列了 `app:8080` 的 scrape 設定抓不到這些指標。表格中相關的告警(例:`ReconStuckCharging`、`SagaStuckFailedOrders`、`KafkaConsumerStuck`)**在目前的 docker-compose 環境下不會 fire**,要等到每個 worker binary 都加上 metrics listener、prometheus.yml 補上對應 scrape job 才會有作用。Phase 2 checkpoint O3;後續會用獨立 PR 處理。
 
 ### 故意把告警觸發起來(測試)
 

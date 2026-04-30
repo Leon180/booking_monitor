@@ -46,13 +46,28 @@ type ListBookingsQueryParams struct {
 }
 
 // StatusFilter returns the typed *domain.OrderStatus corresponding to
-// the raw string filter, or nil when no filter was provided. Lives
-// here (not in the handler) so the conversion lives close to the
-// query-string definition.
+// the raw string filter, or nil when no filter was provided OR the
+// filter value is not a recognised OrderStatus.
+//
+// Treating an unrecognised value as "no filter" (rather than returning
+// an error) keeps the query string forgiving: clients passing
+// `?status=expired` don't get a 400 just for not knowing the
+// vocabulary. The repo layer would already silently return zero rows
+// for an unrecognised filter, but feeding an unvalidated string
+// through to SQL is the defense-in-depth gap that S2 closes (Phase 2
+// checkpoint Important finding).
+//
+// If a stricter contract is needed later (e.g., explicit 400 on
+// invalid status), a sibling `StatusFilterStrict` method can return
+// (status, error). Keeping today's lenient default avoids breaking
+// existing clients.
 func (q ListBookingsQueryParams) StatusFilter() *domain.OrderStatus {
 	if q.Status == nil {
 		return nil
 	}
 	s := domain.OrderStatus(*q.Status)
+	if !s.IsValid() {
+		return nil
+	}
 	return &s
 }

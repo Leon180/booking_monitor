@@ -84,6 +84,30 @@ const (
 	OrderStatusCompensated OrderStatus = "compensated"
 )
 
+// IsValid reports whether s is one of the recognised order-status values.
+// Used at API boundaries (e.g., GET /api/v1/history?status=...) to
+// reject typo'd or out-of-vocabulary filter values up front instead of
+// letting the SQL layer silently return zero rows. Defense-in-depth
+// against future refactors that might let an unvalidated string flow
+// into a code path beyond a parameterised SELECT.
+//
+// MUST stay in sync with the OrderStatus constant block above. Adding
+// a new status without listing it here makes API filter requests for
+// the new value silently no-op (StatusFilter() returns nil → repo gets
+// no filter → all-orders response). Go offers no compile-time
+// exhaustiveness check for typed strings; a future `exhaustive` linter
+// addition (zero code change since `default: return false` already
+// satisfies `default-signifies-exhaustive: true`) would close the
+// gap automatically.
+func (s OrderStatus) IsValid() bool {
+	switch s {
+	case OrderStatusConfirmed, OrderStatusPending, OrderStatusCharging,
+		OrderStatusFailed, OrderStatusCompensated:
+		return true
+	}
+	return false
+}
+
 // StuckCharging is the row shape returned by
 // `OrderRepository.FindStuckCharging` — the reconciler's input
 // vocabulary. Lives in domain because the reconciler is an
