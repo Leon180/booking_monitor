@@ -89,6 +89,14 @@ func installRecon(
 		return fmt.Errorf("installRecon: %w", err)
 	}
 
+	// Worker metrics listener (Phase 2 checkpoint O3). Without this
+	// recon_resolved_total / recon_stuck_charging_orders / recon_*_errors_total
+	// would stay dark — registered into the recon process's default
+	// registry but unreachable to Prometheus.
+	if err := bootstrap.InstallMetricsListener(lc, cfg, logger); err != nil {
+		return fmt.Errorf("installRecon: metrics listener: %w", err)
+	}
+
 	runCtx, cancel := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{

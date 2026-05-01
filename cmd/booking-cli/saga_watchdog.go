@@ -86,6 +86,15 @@ func installSagaWatchdog(
 		return fmt.Errorf("installSagaWatchdog: %w", err)
 	}
 
+	// Worker metrics listener (Phase 2 checkpoint O3). Watchdog
+	// metrics (saga_stuck_failed_orders, saga_watchdog_resolved_total,
+	// saga_watchdog_find_stuck_errors_total) are useful primarily in
+	// loop mode — the --once mode exits before Prometheus typically
+	// scrapes. The listener is harmless either way.
+	if err := bootstrap.InstallMetricsListener(lc, cfg, logger); err != nil {
+		return fmt.Errorf("installSagaWatchdog: metrics listener: %w", err)
+	}
+
 	runCtx, cancel := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{

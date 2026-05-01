@@ -51,6 +51,7 @@ func runPaymentWorker(_ *cobra.Command, _ []string) {
 func installPaymentWorker(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
+	cfg *config.Config,
 	consumer *messaging.KafkaConsumer,
 	service application.PaymentService,
 	logger *mlog.Logger,
@@ -58,6 +59,14 @@ func installPaymentWorker(
 	tp, err := initTracer()
 	if err != nil {
 		return fmt.Errorf("installPaymentWorker: %w", err)
+	}
+
+	// Worker metrics listener (Phase 2 checkpoint O3). Without this
+	// the kafka_consumer_retry_total + payment-side counters never
+	// reach Prometheus. Listener is independent of the consumer
+	// goroutine — its failure does NOT escalate via shutdowner.
+	if err := bootstrap.InstallMetricsListener(lc, cfg, logger); err != nil {
+		return fmt.Errorf("installPaymentWorker: metrics listener: %w", err)
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())

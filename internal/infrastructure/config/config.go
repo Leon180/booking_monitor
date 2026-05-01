@@ -272,6 +272,29 @@ type WorkerConfig struct {
 	// retries (NOGROUP / connection drop). Bounds how fast the
 	// outer loop re-attempts under persistent breakage.
 	ReadErrorBackoff time.Duration `yaml:"read_error_backoff" env:"WORKER_READ_ERROR_BACKOFF" env-default:"1s"`
+
+	// MetricsAddr is the bind address for the worker subcommand's
+	// metrics-only HTTP listener (Prometheus `/metrics` +
+	// `/healthz`). Empty disables — useful for tests and `--once`
+	// CronJob hosting where the process exits before Prometheus
+	// could scrape it.
+	//
+	// The application server (`booking-cli server`) does NOT use
+	// this — it serves /metrics on its main Gin engine at
+	// `cfg.Server.Port`. Worker subcommands (`payment`, `recon`,
+	// `saga-watchdog`) have no Gin engine, so a dedicated listener
+	// is the cheapest way to expose their per-process Prometheus
+	// registry to the scraper. Closes Phase 2 checkpoint O3:
+	// before this, recon_*, saga_watchdog_*, and
+	// kafka_consumer_retry_total were registered into worker
+	// processes' default registries but never scraped.
+	//
+	// Default `:9091` matches the convention of "9090 = Prometheus,
+	// 9091 = first scrape target." Bind on all interfaces because
+	// the in-cluster scraper reaches the worker via Docker DNS;
+	// override to a specific interface (e.g. `127.0.0.1:9091`) for
+	// host-network deployments where the port shouldn't be public.
+	MetricsAddr string `yaml:"metrics_addr" env:"WORKER_METRICS_ADDR" env-default:":9091"`
 }
 
 type PostgresConfig struct {
