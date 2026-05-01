@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"booking_monitor/internal/application"
+	bookingapp "booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/dto"
@@ -31,12 +31,12 @@ func init() { gin.SetMode(gin.TestMode) }
 // Lives in booking_test (not the production binary) so its panics on
 // nil callbacks are test-time-only failures.
 type stubBookingService struct {
-	bookFn    func(ctx context.Context, userID int, eventID uuid.UUID, qty int) (uuid.UUID, error)
+	bookFn    func(ctx context.Context, userID int, eventID uuid.UUID, qty int) (domain.Order, error)
 	getFn     func(ctx context.Context, id uuid.UUID) (domain.Order, error)
 	historyFn func(ctx context.Context, page, size int, status *domain.OrderStatus) ([]domain.Order, int, error)
 }
 
-func (s *stubBookingService) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, qty int) (uuid.UUID, error) {
+func (s *stubBookingService) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, qty int) (domain.Order, error) {
 	if s.bookFn == nil {
 		panic("BookTicket called without bookFn")
 	}
@@ -82,7 +82,7 @@ func (noopIdempotencyRepo) Set(_ context.Context, _ string, _ *domain.Idempotenc
 	return nil
 }
 
-func newRouter(svc application.BookingService) *gin.Engine {
+func newRouter(svc bookingapp.Service) *gin.Engine {
 	h := booking.NewBookingHandler(svc, stubEventService{})
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -100,10 +100,12 @@ func newRouter(svc application.BookingService) *gin.Engine {
 func TestHandleBook_AcceptedShape(t *testing.T) {
 	t.Parallel()
 
-	wantOrderID := uuid.New()
+	wantOrderID := uuid.Must(uuid.NewV7())
+	wantEventID := uuid.New()
+	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusPending, time.Now())
 	svc := &stubBookingService{
-		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
-			return wantOrderID, nil
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
+			return wantOrder, nil
 		},
 	}
 	r := newRouter(svc)
@@ -132,8 +134,8 @@ func TestHandleBook_SoldOut(t *testing.T) {
 	t.Parallel()
 
 	svc := &stubBookingService{
-		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (uuid.UUID, error) {
-			return uuid.Nil, domain.ErrSoldOut
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
+			return domain.Order{}, domain.ErrSoldOut
 		},
 	}
 	r := newRouter(svc)

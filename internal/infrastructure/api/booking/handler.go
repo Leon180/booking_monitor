@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"booking_monitor/internal/application"
+	bookingapp "booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
 	"booking_monitor/internal/infrastructure/api/middleware"
@@ -67,7 +68,7 @@ type BookingHandler interface {
 }
 
 type bookingHandler struct {
-	service      application.BookingService
+	service      bookingapp.Service
 	eventService application.EventService
 }
 
@@ -76,7 +77,7 @@ type bookingHandler struct {
 // the handler in server.go), so the handler itself no longer
 // depends on `domain.IdempotencyRepository` — its surface is purely
 // business-logic dependencies.
-func NewBookingHandler(service application.BookingService, eventService application.EventService) BookingHandler {
+func NewBookingHandler(service bookingapp.Service, eventService application.EventService) BookingHandler {
 	return &bookingHandler{service: service, eventService: eventService}
 }
 
@@ -144,7 +145,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	orderID, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
+	order, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
 	if err != nil {
 		// Log the raw error with full context server-side, then
 		// translate to a sanitized public message via mapError so
@@ -168,11 +169,11 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 	// saga) is async. The client polls `GET /api/v1/orders/:id` for
 	// the terminal status.
 	c.Data(http.StatusAccepted, "application/json", mustMarshal(dto.BookingAcceptedResponse{
-		OrderID: orderID,
+		OrderID: order.ID(),
 		Status:  dto.BookingStatusProcessing,
 		Message: "booking accepted, awaiting confirmation",
 		Links: dto.BookingLinks{
-			Self: orderSelfLinkPrefix + orderID.String(),
+			Self: orderSelfLinkPrefix + order.ID().String(),
 		},
 	}))
 }

@@ -5,17 +5,18 @@ import (
 
 	"go.uber.org/fx"
 
+	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 )
 
 var Module = fx.Module("application",
-	// BookingService is provided as a fully-decorated chain:
+	// booking.Service is provided as a fully-decorated chain:
 	//   base -> tracing -> metrics
 	// We use fx.Provide with an inline constructor rather than
-	// fx.Provide(NewBookingService) + fx.Decorate, because fx.Decorate
+	// fx.Provide(booking.NewService) + fx.Decorate, because fx.Decorate
 	// is module-scoped from fx v1.17+ — it only applies to consumers
-	// inside the same fx.Module. Our api.Module consumes BookingService
+	// inside the same fx.Module. Our api.Module consumes booking.Service
 	// from outside, so it would receive the base (undecorated)
 	// instance and skip every metric / trace. Inlining the wrap at
 	// the provide site sidesteps the scoping issue entirely.
@@ -23,11 +24,11 @@ var Module = fx.Module("application",
 		func(
 			orderRepo domain.OrderRepository,
 			inventoryRepo domain.InventoryRepository,
-			metrics BookingMetrics,
-		) BookingService {
-			base := NewBookingService(orderRepo, inventoryRepo)
-			return NewBookingServiceMetricsDecorator(
-				NewBookingServiceTracingDecorator(base),
+			metrics booking.Metrics,
+		) booking.Service {
+			base := booking.NewService(orderRepo, inventoryRepo)
+			return booking.NewMetricsDecorator(
+				booking.NewTracingDecorator(base),
 				metrics,
 			)
 		},
