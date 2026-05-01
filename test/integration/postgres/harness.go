@@ -120,7 +120,15 @@ func StartPostgres(ctx context.Context, t *testing.T) *Harness {
 	if err != nil {
 		t.Fatalf("StartPostgres: sql.Open: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		// Close errors are non-fatal but worth logging — a leaked
+		// connection during cleanup is the kind of thing that
+		// silently degrades a CI host's docker daemon over a long
+		// run.
+		if err := db.Close(); err != nil {
+			t.Logf("StartPostgres: db.Close: %v (non-fatal)", err)
+		}
+	})
 
 	// PingContext with retry — testcontainers-go's wait strategy
 	// already verifies "ready to accept connections" but the *sql.DB
@@ -166,9 +174,18 @@ func pingWithRetry(ctx context.Context, db *sql.DB, attempts int, delay time.Dur
 
 // applyMigrations reads every *.up.sql in dir, sorts them by filename
 // (which preserves the 000001_, 000002_, ... prefix ordering), and
-// executes each as a single SQL statement against db. This bypasses
-// the migration version table on purpose — testcontainer DBs are
-// transient, so version tracking would be cargo-cult.
+// executes each via the PostgreSQL simple query protocol — lib/pq
+// sends the full file contents as a single ExecContext call, and
+// Postgres executes ALL semicolon-separated statements within it
+// (migration 000008 has 7 statements, 000009 has 3, etc.). This
+// bypasses the migration version table on purpose: testcontainer
+// DBs are transient, so version tracking would be cargo-cult.
+//
+// CRITICAL DEPENDENCY ON lib/pq's simple protocol: a switch to pgx
+// v5 (extended/prepared protocol by default) would silently apply
+// only the FIRST statement per file, leaving indexes / constraints
+// missing. The harness_test.go smoke test asserts on a sample of
+// indexes from the multi-statement migrations as a tripwire.
 //
 // We deliberately do NOT shell out to the `migrate` CLI: that would
 // require `migrate` to be installed in the test environment (works on
@@ -219,6 +236,16 @@ func applyMigrations(ctx context.Context, db *sql.DB, dir string) error {
 // use UUIDs — but kept defensive in case a future table adopts SERIAL).
 //
 // Schema migrations are NOT undone — only data is cleared.
+//
+// MAINTENANCE NOTE: the table list below is a manually maintained
+// allowlist. When CP4b adds tests for new aggregates, OR when a
+// future migration introduces a new mutable table, this list MUST
+// be extended — otherwise data leaks silently between tests
+// (passing tests for the wrong reason). A schema-driven
+// `pg_tables`-derived TRUNCATE was considered and rejected: pulling
+// the table list at runtime would also truncate any audit /
+// schema_migrations tables a future tool installs, which we may
+// want to preserve.
 func (h *Harness) Reset(t *testing.T) {
 	t.Helper()
 	const stmt = `TRUNCATE TABLE order_status_history, orders, events_outbox, events RESTART IDENTITY CASCADE`

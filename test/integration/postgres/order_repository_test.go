@@ -42,11 +42,22 @@ import (
 // Reset is called between tests to clear data without reapplying the
 // schema.
 
-// repoHarness boots one Postgres container shared across all subtests
-// of a parent test. Returns a Reset-aware helper that gives each
-// subtest a clean data slate. The repo is typed as domain.OrderRepository
-// because postgres.NewPostgresOrderRepository returns an unexported
-// concrete type — the interface is the public surface.
+// repoHarness boots a fresh Postgres container PER CALL (not once per
+// suite — see CP4a design notes). Each top-level Test* function
+// invokes this helper independently and gets its own container.
+// Within a parent test, sub-tests reuse the same Harness and rely on
+// h.Reset(t) between iterations to clear data without rebooting (~2s
+// container boot vs <100ms truncate).
+//
+// CONCURRENCY CAVEAT: do NOT call t.Parallel() inside sub-tests that
+// share a single Harness — Reset would race the other sub-test's
+// Create. Top-level tests are isolated by construction (separate
+// containers).
+//
+// The repo is typed as domain.OrderRepository — the production
+// constructor returns an unexported concrete type, but the
+// integration suite uses the interface intentionally to keep the
+// tests honest about the public surface.
 func repoHarness(t *testing.T) (*pgintegration.Harness, domain.OrderRepository) {
 	t.Helper()
 	h := pgintegration.StartPostgres(context.Background(), t)
@@ -127,10 +138,15 @@ func TestOrderRepository_PartialUniqueIndex_AllowsReBuyAfterFailed(t *testing.T)
 	require.NoError(t, err)
 
 	// Second attempt for same user+event WHILE first is pending →
-	// must violate the partial unique index.
+	// must violate the partial unique index. assert.ErrorIs against
+	// domain.ErrUserAlreadyBought (the wrapped sentinel for pq error
+	// 23505) — a generic require.Error would also accept FK or
+	// connection errors and pass for the wrong reason.
 	second := newOrder(t, eventID, 1, 1)
 	_, err = repo.Create(ctx, second)
-	require.Error(t, err, "duplicate active order must violate uq_orders_user_event")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrUserAlreadyBought,
+		"duplicate active order must surface ErrUserAlreadyBought (pq 23505 → domain sentinel), not any generic error")
 
 	// Move first to Failed. Pending → Failed is a legal direct edge
 	// in transitionStatus (no Charging required).
@@ -142,6 +158,46 @@ func TestOrderRepository_PartialUniqueIndex_AllowsReBuyAfterFailed(t *testing.T)
 	third := newOrder(t, eventID, 1, 1)
 	_, err = repo.Create(ctx, third)
 	require.NoError(t, err, "user must be able to re-buy after a failed order")
+}
+
+// TestOrderRepository_PartialUniqueIndex_BlocksReBuyAfterCompensated
+// pins the CURRENT behavior of the partial unique index `WHERE
+// status != 'failed'`: a Compensated order BLOCKS re-buy (because
+// 'compensated' satisfies `status != 'failed'`). This is reviewable
+// as a possible spec gap — see TODO below.
+//
+// TODO(spec-gap): the multi-agent review of CP4a flagged that this
+// behavior is unspecified in PROJECT_SPEC. The defensible argument
+// for ALLOWING re-buy after Compensated: the saga compensator just
+// reverted the user's inventory + refunded their payment; expecting
+// them to be able to retry is intuitive. The defensible argument
+// AGAINST: Compensated is terminal, the workflow expects operator
+// review for the underlying failure. Pick one and document it; until
+// then, this test pins the actual behavior so a refactor can't
+// silently flip it.
+func TestOrderRepository_PartialUniqueIndex_BlocksReBuyAfterCompensated(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	first := newOrder(t, eventID, 1, 1)
+	_, err := repo.Create(ctx, first)
+	require.NoError(t, err)
+
+	// Walk first → Failed → Compensated.
+	require.NoError(t, repo.MarkFailed(ctx, first.ID()))
+	require.NoError(t, repo.MarkCompensated(ctx, first.ID()))
+
+	// Second attempt with same user+event. The partial unique
+	// index predicate `WHERE status != 'failed'` does NOT exclude
+	// 'compensated', so this fails with ErrUserAlreadyBought.
+	second := newOrder(t, eventID, 1, 1)
+	_, err = repo.Create(ctx, second)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrUserAlreadyBought,
+		"current behavior: Compensated blocks re-buy (predicate is `status != 'failed'`, not `status NOT IN ('failed', 'compensated')`). If product decides to allow re-buy, change the index AND update this test.")
 }
 
 // TestOrderRepository_StateMachine_LegalTransitions exercises the
@@ -258,7 +314,11 @@ func TestOrderRepository_StateMachine_HistoryRecorded(t *testing.T) {
 		 WHERE order_id = $1
 		 ORDER BY occurred_at ASC, id ASC`, o.ID())
 	require.NoError(t, err)
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Logf("rows.Close: %v (non-fatal)", err)
+		}
+	}()
 
 	type entry struct{ from, to string }
 	var entries []entry
@@ -308,15 +368,19 @@ func TestOrderRepository_ListOrders_PaginationAndFilter(t *testing.T) {
 		assert.Len(t, got, 5)
 	})
 
-	t.Run("status=confirmed returns 2", func(t *testing.T) {
+	t.Run("status=confirmed returns the 2 confirmed orders by id", func(t *testing.T) {
 		s := domain.OrderStatusConfirmed
 		got, total, err := repo.ListOrders(ctx, 100, 0, &s)
 		require.NoError(t, err)
 		assert.Equal(t, 2, total, "filtered total must reflect status filter")
-		assert.Len(t, got, 2)
-		for _, o := range got {
+		require.Len(t, got, 2)
+		gotIDs := make([]uuid.UUID, len(got))
+		for i, o := range got {
+			gotIDs[i] = o.ID()
 			assert.Equal(t, domain.OrderStatusConfirmed, o.Status())
 		}
+		assert.ElementsMatch(t, confirmedIDs, gotIDs,
+			"status filter must return EXACTLY the confirmed orders by id, not just any 2 with status='confirmed'")
 	})
 
 	t.Run("limit + offset paginate", func(t *testing.T) {
@@ -324,16 +388,36 @@ func TestOrderRepository_ListOrders_PaginationAndFilter(t *testing.T) {
 		page1, total, err := repo.ListOrders(ctx, 2, 0, nil)
 		require.NoError(t, err)
 		assert.Equal(t, 5, total, "total must report grand-total, not page size")
-		assert.Len(t, page1, 2)
+		require.Len(t, page1, 2)
 
 		// offset=4 → 1 row remaining
 		page3, _, err := repo.ListOrders(ctx, 2, 4, nil)
 		require.NoError(t, err)
-		assert.Len(t, page3, 1)
-	})
+		require.Len(t, page3, 1)
 
-	_ = pendingIDs
-	_ = confirmedIDs
+		// Pagination identity assertion: every order returned across
+		// the three pages must come from the seeded set, with no
+		// duplicates. Catches an ORDER BY regression that returned
+		// the same row twice + missed another, which a count-only
+		// assertion would miss.
+		page2, _, err := repo.ListOrders(ctx, 2, 2, nil)
+		require.NoError(t, err)
+		require.Len(t, page2, 2)
+
+		all := append(append(append([]uuid.UUID{}, idsOf(page1)...), idsOf(page2)...), idsOf(page3)...)
+		seeded := append(append([]uuid.UUID{}, pendingIDs...), confirmedIDs...)
+		assert.ElementsMatch(t, seeded, all,
+			"pages 1+2+3 unioned must equal the 5 seeded ids — catches duplicate-row / missing-row pagination regressions")
+	})
+}
+
+// idsOf is a small helper for the pagination identity assertion.
+func idsOf(orders []domain.Order) []uuid.UUID {
+	out := make([]uuid.UUID, len(orders))
+	for i, o := range orders {
+		out[i] = o.ID()
+	}
+	return out
 }
 
 // TestOrderRepository_FindStuckCharging: order in Charging older than

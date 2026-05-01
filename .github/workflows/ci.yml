@@ -139,8 +139,19 @@ jobs:
     name: test-integration (testcontainers)
     runs-on: ubuntu-latest
     # Docker pull + container boot per test → 5min budget covers the
-    # full suite plus retries. Bump if the suite grows past ~50 tests
-    # (current is 11 — CP4a baseline).
+    # full suite plus retries.
+    #
+    # Sizing: current CP4a baseline is 13 tests / ~14s wall-clock.
+    # CP4b is expected to add ~20 EventRepository + Outbox + UoW
+    # tests; CP4c adds ~10 migration round-trip tests. Projected
+    # total ~43 tests at the same per-test container pattern → ~1
+    # minute. The 5-minute test timeout has 5x headroom; the 10-min
+    # job timeout has 10x. Revisit when:
+    #   - per-test runtime exceeds 30s, OR
+    #   - total exceeds 3 minutes
+    # At that point, refactor to one-container-per-package via
+    # TestMain — boot cost amortises to ~2s regardless of test count
+    # at the cost of explicit Reset discipline between tests.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

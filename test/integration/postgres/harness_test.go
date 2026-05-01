@@ -57,6 +57,48 @@ func TestHarness_Boot(t *testing.T) {
 		assert.Contains(t, indexDef, "pending")
 		assert.Contains(t, indexDef, "failed")
 	})
+
+	// Tripwire for the lib/pq-multi-statement assumption (see
+	// applyMigrations comment in harness.go). Migration 000009 has
+	// THREE statements: CREATE TABLE order_status_history + two
+	// CREATE INDEX statements. If a future driver switch silently
+	// applied only the first, the table would exist but the
+	// indexes wouldn't. Verifying both indexes from 000009
+	// catches that class of regression.
+	wantIndexes := []struct {
+		table  string
+		index  string
+		source string
+	}{
+		// Migration 000007 has 1 statement (CREATE INDEX CONCURRENTLY);
+		// kept here for symmetric coverage of the partial outbox
+		// index. CONCURRENTLY would fail if applyMigrations wrapped
+		// each file in BEGIN/COMMIT (the migrate CLI's default) —
+		// db.ExecContext does NOT open a transaction so this works.
+		{"events_outbox", "events_outbox_pending_idx", "000007"},
+		// Migration 000009 — the multi-statement-per-file canary.
+		// File contains CREATE TABLE + 2 CREATE INDEX statements.
+		// Verifying both indexes catches a regression where the
+		// multi-statement protocol breaks and only the first
+		// statement applies.
+		{"order_status_history", "idx_order_status_history_order_id_occurred", "000009"},
+		{"order_status_history", "idx_order_status_history_occurred", "000009"},
+	}
+	for _, wi := range wantIndexes {
+		t.Run("index_post_"+wi.source+"_"+wi.index, func(t *testing.T) {
+			var exists bool
+			err := h.DB.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_indexes
+					WHERE schemaname = 'public'
+					  AND tablename = $1 AND indexname = $2
+				)`, wi.table, wi.index).Scan(&exists)
+			require.NoError(t, err)
+			assert.True(t, exists,
+				"index %q on %q from migration %s must exist — its absence indicates lib/pq's simple-protocol multi-statement support broke",
+				wi.index, wi.table, wi.source)
+		})
+	}
 }
 
 // TestHarness_Reset verifies that Reset clears row data without
