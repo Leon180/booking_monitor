@@ -2,9 +2,9 @@
 # Bilingual docs sync reminder.
 #
 # Fires after Edit/Write on one of the paired English/Chinese docs and injects
-# a system reminder so Claude updates the other side before ending the turn.
+# a system reminder so the agent updates the other side before ending the turn.
 #
-# See CLAUDE.md > Bilingual Documentation Contract.
+# See AGENTS.md (or .claude/CLAUDE.md) > Bilingual Documentation Contract.
 
 set -euo pipefail
 
@@ -24,21 +24,20 @@ input="$(cat)"
 file_path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')"
 [ -z "$file_path" ] && exit 0
 
-# Resolve repo-relative path. CLAUDE_PROJECT_DIR is set by Claude Code;
-# fall back to PWD when the hook is invoked outside Claude (e.g. CI
-# script, manual test).
-repo_root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+# Resolve repo-relative path. CODEX_PROJECT_DIR is set by Codex; fall back to
+# CLAUDE_PROJECT_DIR or PWD if unset.
+repo_root="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
 rel_path="${file_path#"$repo_root"/}"
 
-# If the strip didn't take (e.g. CLAUDE_PROJECT_DIR was unset AND
-# pwd wasn't the repo root), `rel_path` will still be the absolute
-# path. Without this guard the case statement below silently falls
-# through to the catch-all and no reminder fires — the exact
-# silent-failure mode the bilingual contract is meant to prevent.
-# Surface this loudly so the operator sees the misconfiguration
-# instead of silently drifting docs.
+# If the strip didn't take (e.g. neither env var set AND pwd wasn't
+# the repo root), `rel_path` will still be the absolute path.
+# Without this guard the case statement below silently falls through
+# to the catch-all and no reminder fires — the exact silent-failure
+# mode the bilingual contract is meant to prevent. Surface this
+# loudly so the operator sees the misconfiguration instead of
+# silently drifting docs.
 if [[ "$rel_path" == /* ]]; then
-  echo "check_bilingual_docs: could not resolve repo-relative path for '${file_path}' (CLAUDE_PROJECT_DIR='${CLAUDE_PROJECT_DIR:-unset}', pwd='$(pwd)') — bilingual sync reminder DISABLED for this edit" >&2
+  echo "check_bilingual_docs: could not resolve repo-relative path for '${file_path}' (CODEX_PROJECT_DIR='${CODEX_PROJECT_DIR:-unset}', CLAUDE_PROJECT_DIR='${CLAUDE_PROJECT_DIR:-unset}', pwd='$(pwd)') — bilingual sync reminder DISABLED for this edit" >&2
   exit 1
 fi
 
@@ -59,8 +58,8 @@ case "$rel_path" in
 esac
 
 # Inject a system reminder back into the conversation via PostToolUse
-# additionalContext. Claude will see this right after the tool result.
-reminder="⚠️ Bilingual docs contract: you just edited '${rel_path}'. Its paired file '${paired}' MUST be updated in the same response to keep both versions structurally identical (same sections, same tables, same ordering). Code/commands/filenames stay in English in both versions — only prose is translated. Use Taiwan Traditional Chinese conventions (資料庫/介面/物件) in the zh-TW file. Do NOT end your turn until both files are updated. See CLAUDE.md > Bilingual Documentation Contract for the full rule."
+# additionalContext. The agent will see this right after the tool result.
+reminder="⚠️ Bilingual docs contract: you just edited '${rel_path}'. Its paired file '${paired}' MUST be updated in the same response to keep both versions structurally identical (same sections, same tables, same ordering). Code/commands/filenames stay in English in both versions — only prose is translated. Use Taiwan Traditional Chinese conventions (資料庫/介面/物件) in the zh-TW file. Do NOT end your turn until both files are updated. See AGENTS.md (or .claude/CLAUDE.md) > Bilingual Documentation Contract for the full rule."
 
 jq -n --arg ctx "$reminder" '{
   hookSpecificOutput: {

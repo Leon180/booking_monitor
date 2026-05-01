@@ -1,10 +1,12 @@
-# Booking Monitor - Claude Code Instructions
+# Booking Monitor - Codex Instructions
 
-> 中文版本: [CLAUDE.zh-TW.md](CLAUDE.zh-TW.md)
+> 中文版本: [AGENTS.zh-TW.md](AGENTS.zh-TW.md)
+
+> **Tooling note.** This file is the Codex-facing parallel of [`.claude/CLAUDE.md`](.claude/CLAUDE.md). Both files cover the same project rules; they exist separately because Codex reads `AGENTS.md` at the repo root while Claude Code reads `.claude/CLAUDE.md`. When the project rules change, update BOTH files (and their zh-TW pairs) — the bilingual contract below treats them as a 4-file unit.
 
 ## ⚠️ Bilingual Documentation Contract (MANDATORY)
 
-This project maintains **paired English + Traditional Chinese (zh-TW)** versions of three documents. These files are considered a **single logical unit**. When editing ANY of them, you MUST update both language versions in the **same response**, keeping them structurally identical (same sections, same tables, same ordering).
+This project maintains **paired English + Traditional Chinese (zh-TW)** versions of multiple documents. These files are considered a **single logical unit**. When editing ANY of them, you MUST update both language versions in the **same response**, keeping them structurally identical (same sections, same tables, same ordering).
 
 **Paired files (relative to repo root):**
 | English | Chinese |
@@ -23,13 +25,13 @@ This project maintains **paired English + Traditional Chinese (zh-TW)** versions
 5. **When the user asks to update one of these files**, acknowledge that the paired file will also be updated, then do both edits before marking the task complete.
 6. **Translation style**: zh-TW should use 台灣繁體中文 conventions (e.g. 資料庫 not 数据库, 介面 not 接口, 物件 not 对象).
 
-**Note**: Claude Code auto-loads both `./CLAUDE.md` and `./.claude/CLAUDE.md` with equal priority, so this file (at `.claude/CLAUDE.md`) is loaded directly — no root stub needed. Only the English version is auto-loaded; `.claude/CLAUDE.zh-TW.md` is human-readable reference. A PostToolUse hook (`.claude/hooks/check_bilingual_docs.sh`) enforces the contract at edit time.
+**Tool-discovery note.** Codex's auto-loaded entry point is `AGENTS.md` at the repo root. Claude Code auto-loads `.claude/CLAUDE.md`. The two files are intentionally near-duplicates so each tool sees the canonical rule set without crossing tool boundaries; see the cross-pair contract above. PostToolUse hooks at [`.codex/hooks/check_bilingual_docs.sh`](.codex/hooks/check_bilingual_docs.sh) and [`.claude/hooks/check_bilingual_docs.sh`](.claude/hooks/check_bilingual_docs.sh) enforce the contract at edit time.
 
 ## ⚠️ Monitoring Docs Contract
 
-The day-to-day operator's monitoring guide lives at [docs/monitoring.md](../docs/monitoring.md) (+ paired zh-TW). It documents the metric inventory, Prometheus / Grafana workflow, alert catalog, and recipes to force alerts to fire for testing.
+The day-to-day operator's monitoring guide lives at [docs/monitoring.md](docs/monitoring.md) (+ paired zh-TW). It documents the metric inventory, Prometheus / Grafana workflow, alert catalog, and recipes to force alerts to fire for testing.
 
-A second PostToolUse hook (`.claude/hooks/check_monitoring_docs.sh`) fires whenever any observability surface is touched — `internal/infrastructure/observability/metrics.go`, any `*_collector.go`, `deploy/prometheus/alerts.yml`, `deploy/prometheus/prometheus.yml`, or `deploy/grafana/provisioning/dashboards/*.json` — and reminds Claude to update the guide before ending the turn. Add a new metric without updating §2; add a new alert without updating §5; the hook will catch it.
+A second PostToolUse hook ([`.codex/hooks/check_monitoring_docs.sh`](.codex/hooks/check_monitoring_docs.sh) under Codex; `.claude/hooks/check_monitoring_docs.sh` under Claude Code) fires whenever any observability surface is touched — any `internal/infrastructure/observability/metrics_*.go`, any `*_collector.go`, `deploy/prometheus/alerts.yml`, `deploy/prometheus/prometheus.yml`, or `deploy/grafana/provisioning/dashboards/*.json` — and reminds the agent to update the guide before ending the turn. Add a new metric without updating §2; add a new alert without updating §5; the hook will catch it.
 
 ---
 
@@ -91,8 +93,8 @@ Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypass
 
 ## Database
 - PostgreSQL on port 5433 (user/password/booking)
-- 3 tables: `events`, `orders`, `events_outbox`
-- 7 migrations in `deploy/postgres/migrations/` (000007 added in PR #12: partial index on `events_outbox(id) WHERE processed_at IS NULL`)
+- 4 tables: `events`, `orders`, `events_outbox`, `order_status_history` (audit log added in PR #40 / migration 000009)
+- 11 migrations in `deploy/postgres/migrations/` — PKs migrated SERIAL → UUIDv7 in 000008 (PR #34); 000010/000011 added the partial index on `orders(status, updated_at) WHERE status IN ('charging','pending','failed')` that powers reconciler + saga-watchdog sweeps. See [docs/PROJECT_SPEC.md §4](docs/PROJECT_SPEC.md) for full migration history.
 
 ## Kafka Topics
 - `order.created` — consumed by payment service (group `payment-service-group`)
@@ -104,12 +106,13 @@ Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_
 
 ## CI
 
-GitHub Actions at [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push to `main` and every PR. Four jobs in parallel:
+GitHub Actions at [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and every PR. Five jobs in parallel:
 
 | Job | What | Why |
 | :-- | :-- | :-- |
 | `test (race)` | `go vet` + `go test -race -coverprofile ./internal/...` | Race detector loves CI — non-determinism only surfaces in volume. Coverage uploaded as artifact (no gate). |
-| `lint (golangci-lint)` | `golangci-lint run` against [`.golangci.yml`](../.golangci.yml) | Conservative set: errcheck, govet, ineffassign, staticcheck, gosec, revive. Style linters (gocyclo, funlen, lll) deliberately deferred until correctness baseline is clean. |
+| `test-integration (testcontainers)` | `go test -tags=integration -race ./test/integration/...` against a fresh `postgres:15-alpine` per test | CP4-era persistence-layer integration suite (40 tests / ~38s). Catches SQL-level regressions row-mapper unit tests can't reach. |
+| `lint (golangci-lint)` | `golangci-lint run` against [`.golangci.yml`](.golangci.yml) | Conservative set: errcheck, govet, ineffassign, staticcheck, gosec, revive. Style linters (gocyclo, funlen, lll) deliberately deferred until correctness baseline is clean. |
 | `govulncheck (supply chain)` | `govulncheck ./...` | Maps known CVEs to actual call paths — only fails when a vulnerable symbol is reachable from our code, not on every transitive import. |
 | `docker build` | Multi-stage Dockerfile build (no push) | Catches image-stage breakage that `make build` doesn't. |
 
@@ -161,9 +164,9 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 - **PR #46** — Streams observability + DLQ MINID retention + idempotency value cap.
 - **PR #47** — `POST /book` response shape (`order_id` + status + self link) + `GET /api/v1/orders/:id`.
 - **PR #48 (N4)** — Stripe-style idempotency-key fingerprint validation (body fingerprint → 409 on mismatch + lazy migration of legacy entries).
-- **PR #49 (A5)** — Saga watchdog + project-review checkpoint framework (`.claude/skills/project-review-checkpoint/`).
+- **PR #49 (A5)** — Saga watchdog + project-review checkpoint framework (`.agents/skills/project-review-checkpoint/`, mirrored at `.claude/skills/project-review-checkpoint/`).
 
-**Phase 2 boundary** (2026-04-30): first project-review checkpoint ran 8-dimension parallel-agent audit; report at [`docs/checkpoints/20260430-phase2-review.md`](../docs/checkpoints/20260430-phase2-review.md). Grade A−. One verified correctness gap (reconciler max-age force-fail leaks Redis inventory) + four ops Criticals + 9 Important findings → cleanup PR scoped from action plan rows 1–9. See full history in [../docs/PROJECT_SPEC.md](../docs/PROJECT_SPEC.md).
+**Phase 2 boundary** (2026-04-30): first project-review checkpoint ran 8-dimension parallel-agent audit; report at [`docs/checkpoints/20260430-phase2-review.md`](docs/checkpoints/20260430-phase2-review.md). Grade A−. One verified correctness gap (reconciler max-age force-fail leaks Redis inventory) + four ops Criticals + 9 Important findings → cleanup PR scoped from action plan rows 1–9. See full history in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
 
 ## Logging Conventions (post-PR #18)
 - **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
@@ -179,7 +182,7 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 - Real payment gateway integration
 
 ## Key Env Vars
-See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most-used knobs:
+See [docs/PROJECT_SPEC.md § 7](docs/PROJECT_SPEC.md) for the full list. Most-used knobs:
 
 **Runtime / GC / Tracing**
 - `GOGC` (default `400` in `.env`, `100` fallback in docker-compose) — higher = less frequent GC
@@ -217,20 +220,31 @@ See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most
 - `SAGA_MAX_FAILED_AGE` (default `24h`) — past this age the watchdog stops re-driving and emits `max_age_exceeded` (operator review required — phantom-revert risk if auto-transitioned)
 - `SAGA_BATCH_SIZE` (default `100`) — orders processed per sweep tick. `Validate()` rejects `MaxFailedAge ≤ StuckThreshold` (cross-field guard)
 
-## Available Tooling under `.claude/`
+## Available Tooling
 
-Claude Code auto-discovers assets placed under `.claude/agents/` and `.claude/skills/`. These are adopted from [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) (MIT) — see [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md).
+The project ships parallel skill / agent / hook directories so the same project rules are discoverable by both Codex and Claude Code:
 
-### Subagents (`.claude/agents/`)
+| Concern | Codex path | Claude Code path |
+| :-- | :-- | :-- |
+| Skills | `.agents/skills/` | `.claude/skills/` |
+| Subagents | `.codex/agents/*.toml` | `.claude/agents/*.md` |
+| Hooks | `.codex/hooks/` | `.claude/hooks/` |
+| Hook config | `.codex/hooks.json` | `.claude/settings.json` |
+
+The two skill directories carry the same content; when adding or updating a skill, mirror it into both. The same applies to subagents and hooks. Adopted from [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) (MIT) — see [.claude/ATTRIBUTIONS.md](.claude/ATTRIBUTIONS.md).
+
+### Subagents (`.codex/agents/` / `.claude/agents/`)
 - **go-reviewer** — TRIGGER: any `*.go` file modified in a PR. Checks security (SQL/command injection, race conditions, `InsecureSkipVerify`), error handling (wrapping, `errors.Is/As`), concurrency (goroutine leaks, channel deadlocks), and code quality.
 - **go-build-resolver** — TRIGGER: `go build` or `go test` fails. Diagnoses import cycles, version mismatches, module errors.
-- **silent-failure-hunter** — TRIGGER: reviewing code that returns or swallows errors, especially Kafka consumers ([internal/infrastructure/messaging/](../internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox/relay.go](../internal/application/outbox/relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
+- **silent-failure-hunter** — TRIGGER: reviewing code that returns or swallows errors, especially Kafka consumers ([internal/infrastructure/messaging/](internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox/relay.go](internal/application/outbox/relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
 
-### Skills (`.claude/skills/`)
+### Skills (`.agents/skills/` / `.claude/skills/`)
 - **golang-patterns** — TRIGGER: writing new Go code. Go idioms: small interfaces, error wrapping, context propagation.
 - **golang-testing** — TRIGGER: adding tests. Table-driven tests, `testify` / `go.uber.org/mock`, race detection, coverage.
 - **postgres-patterns** — TRIGGER: touching `internal/infrastructure/persistence/postgres/` or migrations. Transactions, advisory locks, indexes, connection pooling.
+- **idempotency-patterns** — TRIGGER: touching `Idempotency-Key` plumbing or fingerprint logic.
 - **tdd-workflow** — TRIGGER: starting a new feature/bugfix. Red-green-refactor loop, operationalizing the TDD mandate in the global coding style.
+- **project-review-checkpoint** — TRIGGER: phase boundary or every ~10 PRs. The 8-dimension whole-project audit framework.
 
-### Rules (`.claude/rules/golang/`)
-Extends the user's global `~/.claude/rules/common/` with Go-specific standards: `coding-style.md`, `hooks.md`, `patterns.md`, `security.md`, `testing.md`.
+### Rules
+The user's global `~/.claude/rules/common/` is extended by `.claude/rules/golang/{coding-style,hooks,patterns,security,testing}.md` for Go-specific standards. Codex consumes the same content via the project-local skills above.
