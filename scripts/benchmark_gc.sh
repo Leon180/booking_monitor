@@ -169,7 +169,7 @@ cat > "$REPORT_DIR/report.md" << REPORT
 | Setting | Value |
 | :--- | :--- |
 | Script | \`k6_comparison.js\` |
-| Ticket pool | 5,000,000 (never sells out at 60s × 40-50k RPS; bumped from 500k on 2026-05-02) |
+| Ticket pool | 500,000 (realistic flash-sale scale; pool depletes partway through, accepted_bookings/s reports the booking hot path separately) |
 | user_id range | 1 – 9,999,999 |
 | Quantity | 1 per request |
 | VUs | ${VUS} |

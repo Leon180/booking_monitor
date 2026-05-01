@@ -6,10 +6,12 @@
 # Usage: ./scripts/benchmark_compare.sh [VUS] [DURATION]
 #
 # Both runs use k6_comparison.js:
-#   - 5,000,000 tickets (sized so the 60s/500-VU window does not deplete
-#                        the pool — measures the accepted booking hot path,
-#                        not the 409 sold-out fast path. Bumped from 500,000
-#                        on 2026-05-02 per the senior-review checkpoint.)
+#   - 500,000 tickets (realistic flash-sale-event scale — the
+#                      regime the system is designed to simulate;
+#                      pool depletes partway through, headline
+#                      metrics report total RPS + accepted_bookings/s
+#                      SEPARATELY so the cheap-409-path bias on the
+#                      total is honest rather than hidden.)
 #   - user_id range: 1–9,999,999 (minimises duplicate 409s)
 #   - quantity: 1 per request
 #
@@ -35,7 +37,7 @@ SUMMARY="$REPORT_DIR/comparison.md"
 echo "============================================"
 echo "  Comparison Benchmark: VUS=$VUS DURATION=$DURATION"
 echo "  Report: $REPORT_DIR"
-echo "  Script: k6_comparison.js (5M tickets)"
+echo "  Script: k6_comparison.js (500k tickets — flash-sale scale)"
 echo "============================================"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ cat > "$SUMMARY" << EOF
 | Setting | Value |
 | :--- | :--- |
 | Script | \`k6_comparison.js\` |
-| Ticket pool | 5,000,000 (never sells out at 60s × 40-50k RPS) |
+| Ticket pool | 500,000 (realistic flash-sale scale; sells out partway through 60s) |
 | user_id range | 1 – 9,999,999 |
 | Quantity | 1 per request |
 | VUs | ${VUS} |

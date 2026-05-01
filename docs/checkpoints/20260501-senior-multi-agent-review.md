@@ -166,7 +166,7 @@ The strongest story is the reliability arc: UUIDv7 order identity through the as
 
 **Cleanup split landed in two PRs.**
 
-- **Ops/perf cleanup** (this PR / branch `chore/codex-review-followup-ops-perf`, 2026-05-02) — addresses Critical #1 (alert delivery: webhook-logger sidecar replaces null receiver), #2 (runbook SQL column names + the `SagaMaxFailedAgeExceeded` query semantic was further corrected to target `orders` not `order_status_history`), #5 (benchmark pool 500k → 5M); plus Important #7 (TargetDown scrape-failure alert + dashboard panel + runbook with planned-maintenance silence guidance).
+- **Ops/perf cleanup** (this PR / branch `chore/codex-review-followup-ops-perf`, 2026-05-02) — addresses Critical #1 (alert delivery: webhook-logger sidecar replaces null receiver), #2 (runbook SQL column names + the `SagaMaxFailedAgeExceeded` query semantic was further corrected to target `orders` not `order_status_history`), #5 (benchmark methodology — added `accepted_bookings` k6 counter so reports separate total RPS from accepted-booking RPS; ticket pool kept at 500k as the realistic flash-sale shape rather than inflated to a non-scarcity number); plus Important #7 (TargetDown scrape-failure alert + dashboard panel + runbook with planned-maintenance silence guidance).
 
 - **Docs/API cleanup** (deferred next PR) — Critical #3 (AGENTS bilingual contract restoration), Critical #4 (PROJECT_SPEC schema doc refresh), and the `GET /events/:id` stub-or-implement decision. The Codex-produced AGENTS / `.agents/` / `.codex/` artifacts are stashed off-branch waiting on that PR.
 
