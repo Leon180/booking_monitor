@@ -167,6 +167,14 @@ func TestRun_CtxCancelledBeforeTick(t *testing.T) {
 // TestRun_TryLockError_ContinuesWithoutPanic: TryLock returns an error
 // → loop logs + continues without panicking. wasLeader stays false →
 // Unlock MUST NOT be called on exit.
+//
+// MinTimes(2) is load-bearing: a regression that swapped `continue`
+// for `return` (or `break`) inside the error branch would still call
+// TryLock once, then exit. Requiring ≥2 calls catches that — the test
+// becomes a real verification of "loops" not just "doesn't panic."
+//
+// Driven via a signal channel rather than time.Sleep so the test is
+// deterministic on slow CI runners.
 func TestRun_TryLockError_ContinuesWithoutPanic(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -175,8 +183,15 @@ func TestRun_TryLockError_ContinuesWithoutPanic(t *testing.T) {
 	mockPub := mocks.NewMockEventPublisher(ctrl)
 	mockLock := mocks.NewMockDistributedLock(ctrl)
 
-	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Any()).
-		Return(false, errors.New("postgres: connection refused")).MinTimes(1)
+	var lockCount atomic.Int32
+	twoCallsSignal := make(chan struct{})
+	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
+		DoAndReturn(func(_ context.Context, _ int64) (bool, error) {
+			if lockCount.Add(1) == 2 {
+				close(twoCallsSignal)
+			}
+			return false, errors.New("postgres: connection refused")
+		}).MinTimes(2)
 	// Unlock NOT expected.
 
 	relay := outbox.NewRelay(mockRepo, mockPub, 10, mockLock, mlog.NewNop())
@@ -191,7 +206,12 @@ func TestRun_TryLockError_ContinuesWithoutPanic(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(runLoopWaitForTick)
+	select {
+	case <-twoCallsSignal:
+	case <-time.After(2 * runLoopWaitForTick):
+		cancel()
+		t.Fatalf("loop did not iterate twice (got %d TryLock calls) — regression suspected: continue → return", lockCount.Load())
+	}
 	cancel()
 
 	select {
@@ -204,6 +224,10 @@ func TestRun_TryLockError_ContinuesWithoutPanic(t *testing.T) {
 // TestRun_StandbyReplica_BatchFnNotCalled: TryLock returns false (this
 // replica lost leader election). batchFn MUST NOT be called; wasLeader
 // stays false; Unlock MUST NOT be called on exit.
+//
+// MinTimes(2) + signal channel for the same reason as the
+// TryLockError test — verifies the loop continues, not just that
+// it didn't panic.
 func TestRun_StandbyReplica_BatchFnNotCalled(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
@@ -212,7 +236,15 @@ func TestRun_StandbyReplica_BatchFnNotCalled(t *testing.T) {
 	mockPub := mocks.NewMockEventPublisher(ctrl)
 	mockLock := mocks.NewMockDistributedLock(ctrl)
 
-	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(false, nil).MinTimes(1)
+	var lockCount atomic.Int32
+	twoCallsSignal := make(chan struct{})
+	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
+		DoAndReturn(func(_ context.Context, _ int64) (bool, error) {
+			if lockCount.Add(1) == 2 {
+				close(twoCallsSignal)
+			}
+			return false, nil
+		}).MinTimes(2)
 	// Unlock NOT expected — never the leader.
 
 	relay := outbox.NewRelay(mockRepo, mockPub, 10, mockLock, mlog.NewNop())
@@ -227,7 +259,12 @@ func TestRun_StandbyReplica_BatchFnNotCalled(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(runLoopWaitForTick)
+	select {
+	case <-twoCallsSignal:
+	case <-time.After(2 * runLoopWaitForTick):
+		cancel()
+		t.Fatalf("loop did not iterate twice (got %d TryLock calls) — regression suspected: continue → return", lockCount.Load())
+	}
 	cancel()
 
 	select {
@@ -250,10 +287,11 @@ func TestRun_LeaderRunsBatchAndUnlocksOnExit(t *testing.T) {
 	mockPub := mocks.NewMockEventPublisher(ctrl)
 	mockLock := mocks.NewMockDistributedLock(ctrl)
 
-	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil).MinTimes(1)
+	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
+		Return(true, nil).MinTimes(1)
 	// Unlock MUST be called exactly once (via the defer on Run exit).
 	unlockSignal := make(chan struct{})
-	mockLock.EXPECT().Unlock(gomock.Any(), gomock.Any()).
+	mockLock.EXPECT().Unlock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
 		DoAndReturn(func(_ context.Context, _ int64) error {
 			close(unlockSignal)
 			return nil
@@ -315,8 +353,10 @@ func TestRun_LeaderBatchFnError_LoopContinues(t *testing.T) {
 	mockPub := mocks.NewMockEventPublisher(ctrl)
 	mockLock := mocks.NewMockDistributedLock(ctrl)
 
-	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil).MinTimes(1)
-	mockLock.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+	mockLock.EXPECT().TryLock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
+		Return(true, nil).MinTimes(1)
+	mockLock.EXPECT().Unlock(gomock.Any(), gomock.Eq(outbox.OutboxLockIDForTest)).
+		Return(nil).Times(1)
 
 	relay := outbox.NewRelay(mockRepo, mockPub, 10, mockLock, mlog.NewNop())
 

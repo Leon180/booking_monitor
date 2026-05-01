@@ -21,3 +21,11 @@ func (r *Relay) ProcessBatchForTest(ctx context.Context) {
 func (r *Relay) RunWithBatchHookForTest(ctx context.Context, batchFn func(context.Context) error) {
 	r.runWithBatchHook(ctx, batchFn)
 }
+
+// OutboxLockIDForTest mirrors the unexported outboxLockID constant so
+// tests can assert TryLock / Unlock are called with the EXACT advisory
+// lock id, not gomock.Any(). The lock id is a correctness invariant —
+// all Relay replicas must compete for the same lock or two could both
+// become leader and double-publish outbox events. Asserting on this
+// value catches arg-swap / typo regressions that gomock.Any() hides.
+const OutboxLockIDForTest = outboxLockID

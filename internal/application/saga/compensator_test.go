@@ -55,9 +55,25 @@ func reconstructOrder(t *testing.T, id uuid.UUID, eventID uuid.UUID, status doma
 // runUowThrough is a helper that returns a gomock action which invokes
 // the closure fn that production code passes to UoW.Do. Tests then drive
 // the inner repos via the harness's mock objects.
+//
+// LIMITATION — what this simulator does NOT verify:
+//
+//  1. Commit / rollback semantics. Production PostgresUnitOfWork commits
+//     on nil and rolls back on error; this helper just returns whatever
+//     fn returns. A regression that mutated state OUTSIDE the closure
+//     and relied on rollback to undo it would not be caught here.
+//     Rollback correctness is a PostgresUnitOfWork integration concern
+//     (covered by the future CP4 testcontainers suite).
+//
+//  2. Outbox interactions. The compensator's current closure does not
+//     touch repos.Outbox, so we explicitly set it to nil. If a future
+//     change adds an outbox emit inside the compensator (paralleling
+//     the recon force-fail's outbox emit fix in PR #45), that code
+//     will nil-panic the moment a test runs — that's intentional, it's
+//     a loud signal to update this helper.
 func runUowThrough(orderRepo domain.OrderRepository, eventRepo domain.EventRepository) func(_ context.Context, fn func(*application.Repositories) error) error {
 	return func(_ context.Context, fn func(*application.Repositories) error) error {
-		return fn(&application.Repositories{Order: orderRepo, Event: eventRepo})
+		return fn(&application.Repositories{Order: orderRepo, Event: eventRepo, Outbox: nil})
 	}
 }
 

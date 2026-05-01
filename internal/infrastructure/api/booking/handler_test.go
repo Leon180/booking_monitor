@@ -60,8 +60,15 @@ func (s *stubBookingService) GetBookingHistory(ctx context.Context, page, size i
 // stubEventService mirrors stubBookingService — controllable via per-test
 // fn fields so each handler test pins one path. Tests that don't touch
 // the event surface leave createFn nil; if HandleCreateEvent fires on
-// such a test, the fallback returns a panic-style error to surface the
+// such a test, the fallback returns a sentinel error to surface the
 // missing setup.
+//
+// Why no GetEvent method here: event.Service today only declares
+// CreateEvent (HandleViewEvent is a stub that returns gin.H without
+// hitting the service — see docs/checkpoints/20260430-phase2-review.md
+// item A4). Adding a no-op GetEvent stub here would silently absorb a
+// future event.Service interface expansion — the compile error is the
+// useful signal.
 type stubEventService struct {
 	createFn func(ctx context.Context, name string, totalTickets int) (domain.Event, error)
 }
@@ -71,9 +78,6 @@ func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTi
 		return domain.Event{}, errors.New("CreateEvent called without createFn")
 	}
 	return s.createFn(ctx, name, totalTickets)
-}
-func (s *stubEventService) GetEvent(_ context.Context, _ uuid.UUID) (domain.Event, error) {
-	return domain.Event{}, errors.New("not used in this test")
 }
 
 // noopIdempotencyRepo is the zero-behaviour repo passed to the route
@@ -351,6 +355,9 @@ func TestHandleCreateEvent_HappyPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, wantID, got.ID, "response must echo the service-minted event id")
 	assert.Equal(t, "Concert", got.Name)
+	assert.Equal(t, 100, got.TotalTickets,
+		"DTO must echo total_tickets — guards against a name/totalTickets arg-swap regression at the service call site")
+	assert.Equal(t, 100, got.AvailableTickets, "fresh event must have AvailableTickets == TotalTickets")
 }
 
 // TestHandleCreateEvent_InvalidBody: malformed JSON → 400 from the
@@ -398,9 +405,9 @@ func TestHandleCreateEvent_ServiceError(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	body502 := w.Body.String()
-	assert.Contains(t, body502, "internal server error")
-	assert.NotContains(t, body502, "postgres",
+	respBody := w.Body.String()
+	assert.Contains(t, respBody, "internal server error")
+	assert.NotContains(t, respBody, "postgres",
 		"public error must NOT leak driver / SQL text")
 }
 
