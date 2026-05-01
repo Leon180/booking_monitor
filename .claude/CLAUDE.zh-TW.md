@@ -137,7 +137,7 @@ GitHub Actions 設定檔在 [`.github/workflows/ci.yml`](../.github/workflows/ci
 - Script:`scripts/k6_comparison.js`
 - VUs:500
 - Duration:60s
-- 票池:500,000(讓整個 run 都不會 sold-out — 測純容量)
+- 票池:5,000,000(以 60s 視窗 + 持續 40-50k RPS 計算,讓票池在整個 run 都不會耗盡 — 測純容量,而非 409 sold-out 的 fast path。2026-05-02 由 500,000 提升,起因是 senior-review checkpoint 指出原本的票池中途就賣完,讓 headline RPS 被便宜路徑灌水。)
 - 目標:`http://app:8080/api/v1`(直連,繞過 nginx 限流)
 - 兩個 run 都在同一台主機、等價的 Docker 環境
 

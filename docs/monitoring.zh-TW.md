@@ -173,6 +173,9 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 - Stream/DLQ 失敗率 — `redis_xack_failures_total` / `redis_xadd_failures_total{stream}` / `redis_revert_failures_total`
 - Stream collector 錯誤依 stream + operation — `redis_stream_collector_errors_total`
 
+**Row:Meta — scrape 健康度(TargetDown)**
+- Scrape target 上/下線 — `up`(每個 `{job, instance}`,1 = 健康、0 = 掛掉)。與 `TargetDown` 告警搭配;持續為 0 代表依賴該 job 指標的所有 rate 告警都已經無聲沉默。
+
 **快速加一個新 panel(暫時的 — 只用來探索):**
 1. 點 **+ → Create dashboard → Add visualization**。
 2. 選 **Prometheus** 資料來源。
@@ -185,7 +188,9 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 
 告警定義在 [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml)。狀態在 Prometheus UI → **Alerts**,以及 Alertmanager UI(http://localhost:9093,負責 silence / inhibit / 通知紀錄)。
 
-**Alertmanager 接線(CP6)。** Prometheus 把 firing 的告警推到 Alertmanager(設定檔:[deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml))。Alertmanager 負責去重、依 `alertname + severity` 分組、依 severity 設定不同的 repeat 節奏(critical:30 m;warning:4 h;info:24 h)、以及 inhibition(例如 `RedisStreamCollectorDown` 會壓制所有其他 stream-backlog 告警,因為計量本來就已經是 stale)。預設的投遞目標是 `null` — 告警在 Alertmanager 內會去重 / 分組 / 可以 silence,但不會往外推。Slack 投遞是 opt-in 的:把 `alertmanager.yml` 中所有 `null` receiver 換成 `slack` receiver,然後把 Incoming Webhook URL 貼進 `api_url`。
+**Alertmanager 接線(CP6,2026-05-02 更新預設投遞)。** Prometheus 把 firing 的告警推到 Alertmanager(設定檔:[deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml))。Alertmanager 負責去重、依 `alertname + severity` 分組、依 severity 設定不同的 repeat 節奏(critical:30 m;warning:4 h;info:24 h)、以及 inhibition(例如 `RedisStreamCollectorDown` 會壓制所有其他 stream-backlog 告警,因為計量本來就已經是 stale)。
+
+**預設投遞(自 2026-05-02 起):webhook-logger sidecar。** 告警會被 POST 到 `booking_alert_logger`(一個 `mendhak/http-https-echo` container),它會把 payload 印到 stdout。操作員透過 `docker logs booking_alert_logger -f` 就能看到 firing 的告警。這取代了原本的 `null` receiver 預設 — senior-review checkpoint 指出舊預設讓告警根本沒離開 Alertmanager。Slack 投遞仍然是 opt-in:把 `deploy/alertmanager/alertmanager.slack.yml.example` 複製成 `alertmanager.yml`、把 Incoming Webhook URL 貼進 `api_url`,然後 `docker compose restart alertmanager`。
 
 **Runbook annotation(CP5)。** 每個告警都帶一條 `runbook_url` annotation,指向 [docs/runbooks/README.md](runbooks/README.md) 內的某個 section。Alertmanager 會透過 `alertmanager.yml` 中的 template 把該 URL 渲染進 Slack 通知。操作員的工作流:告警觸發 → 通知到達 → 點 runbook → 同一份文件內看到對應的 dashboard panel 與具體的處置步驟。
 
@@ -217,6 +222,7 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 | `RedisXAckFailures` | warning | `redis_xack_failures_total` rate > 0 持續 5m — PEL 會無限增長;rebalance 後 consumer 會重做工作 |
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 持續 5m — saga 補償時 revert.lua 失敗,Redis 庫存沒被還原 |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 持續 5m — 訂票 hot path 間歇性無法 enqueue |
+| `TargetDown` | critical | `up == 0` 對任一個 (job, instance) 持續 2m+ — meta 告警;依該 job 指標的所有 rate 告警在 scrape 恢復前都已經無聲沉默 |
 
 > **Worker process 的 metric 抓取 — 已由 O3 後續 PR 補齊。** 上面的 `recon_*`、`saga_watchdog_*`、`kafka_consumer_retry_total`,以及 saga 的 `db_*` / `redis_*` 失敗計數器,都是註冊在 `booking-cli {recon,saga-watchdog,payment}` 這些 worker process 各自的 default Prometheus registry 裡。現在每一個 binary 都會在 `:9091` 開一個 metrics-only HTTP listener(可透過 `WORKER_METRICS_ADDR` 環境變數設定;設為空字串就關掉,適用於 `--once` CronJob 模式),`prometheus.yml` 也補上對應的 scrape job(`payment-worker`、`recon`、`saga-watchdog`)。要確認可以在 Prometheus → Graph 用 `up{job=~"payment-worker|recon|saga-watchdog"} == 1` 驗證;listener 同時也提供 `/healthz`,compose 的 `HEALTHCHECK` 直接用同一個 port 即可。新的 `saga_watchdog` compose service 跑的是 default-loop 模式;`--once` 模式保留給 k8s CronJob 場景,讓 cluster scheduler 控制節奏。
 
@@ -246,6 +252,11 @@ docker exec booking_db psql -U user -d booking -c \
 # Watchdog 預設 60s sweep 一次 + 告警 `for: 10m`,所以等 ~11m 後去 Prometheus → Alerts 確認。
 # 清理:把該列 UPDATE 回原本狀態,或讓 watchdog 自己重新觸發 compensator
 #(它會把 Failed → Compensated,因為這筆資料沒有真正的 reverted Redis key 紀錄)。
+
+# TargetDown — 把某個 worker 停掉,等 2m+,看 Prometheus → Alerts → TargetDown 觸發。
+docker stop booking_payment_worker
+# 等 2m+(告警 `for: 2m`)。
+# 清理:docker start booking_payment_worker → up 在一個 scrape(15s)內就會回到 1。
 ```
 
 測試完還原:`docker exec booking_redis redis-cli DEL orders:stream orders:dlq`(會把進行中的 production 資料一起殺掉 — 只能在開發環境做)。

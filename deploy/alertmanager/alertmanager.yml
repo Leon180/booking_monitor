@@ -7,22 +7,37 @@
 # email / generic webhook). Without it, an operator only sees alerts
 # in the Prometheus UI's Alerts tab — no push notification.
 #
-# Default delivery: a `null` receiver — alerts still group / dedupe /
-# silence inside Alertmanager (visible in the Alertmanager UI on
-# port 9093) but nothing leaves the box. This keeps the dev / CI
-# stack functional without requiring a real webhook secret.
+# Default delivery (CHANGED 2026-05-02): a webhook receiver pointing
+# at a sidecar that logs every payload to stdout. This means alerts
+# DO leave Alertmanager by default — operators can see them via
+# `docker logs booking_alert_logger`. Previously the default was a
+# `null` receiver which dedupe / group / silence inside the AM UI but
+# never pushed outbound; the senior-review checkpoint
+# (docs/checkpoints/20260501-senior-multi-agent-review.md, Critical
+# #1) flagged this as a real operability gap because production-bound
+# compose stacks inherited the dev-only no-op as their de-facto
+# delivery config.
 #
-# To wire Slack delivery:
+# To wire Slack delivery (replaces or complements the webhook-logger):
 #   1. Create an Incoming Webhook in Slack (App Directory → Incoming
 #      Webhooks). The URL has the shape
 #      https://hooks.slack.com/services/T.../B.../...
-#   2. Replace the `null` receiver below with the `slack` receiver
-#      (also defined below, currently unused).
+#   2. Copy alertmanager.slack.yml.example over this file (or merge
+#      the slack receiver block from it).
 #   3. Paste the webhook URL into the `slack_configs[0].api_url`
 #      field. Alertmanager does NOT expand env vars in this YAML;
 #      either edit the file in place or pre-process via envsubst /
 #      gomplate before mounting.
 #   4. `docker compose restart alertmanager prometheus`.
+#
+# Why webhook-logger and not just a publishing-disabled receiver:
+# Alertmanager has no built-in "log to stdout" receiver. The webhook
+# receiver type is the canonical AM delivery escape hatch — points at
+# any HTTP service that accepts the AM webhook payload. Our sidecar
+# is a 1-line `mendhak/http-https-echo` image that prints the payload
+# to its container logs. Cheap, self-contained, no real secrets
+# required; visible alerts in dev without standing up a real Slack
+# workspace.
 
 global:
   # resolve_timeout: how long Alertmanager waits without seeing a
@@ -31,17 +46,16 @@ global:
   # during scrape blips.
   resolve_timeout: 5m
 
-# templates: leave empty by default. Slack text is rendered inline
+# templates: leave empty by default. Webhook + slack text rendered
 # with the default templates (annotation summary + description). Add
-# a template file here if/when alert text needs custom Slack
-# block-kit formatting.
+# a template file here if/when alert text needs custom formatting.
 templates: []
 
 route:
   # Top-level (catch-all) route. All alerts hit here first. Default
-  # `null` receiver delivers nowhere — alerts still appear in the
-  # Alertmanager UI on port 9093 for development / demo.
-  receiver: 'null'
+  # is the webhook-logger sidecar; alerts visible via
+  # `docker logs booking_alert_logger`.
+  receiver: webhook-logger
 
   # group_by — Alertmanager batches alerts that share these label
   # values into a single notification. Grouping by `alertname` +
@@ -72,12 +86,13 @@ route:
   repeat_interval: 4h
 
   # Routes table — branch on labels for severity-specific delivery.
-  # All severities go to `null` today; the structure is here so a
-  # future PagerDuty integration only changes the receiver names.
+  # All severities currently route to webhook-logger; future Slack /
+  # PagerDuty differentiation only changes the receiver names per
+  # branch.
   routes:
     - matchers:
         - severity = "critical"
-      receiver: 'null'
+      receiver: webhook-logger
       # Critical alerts cut group_wait so on-call sees them faster.
       group_wait: 10s
       # And shorter repeat so unresolved criticals nag every 30m
@@ -87,12 +102,12 @@ route:
 
     - matchers:
         - severity = "warning"
-      receiver: 'null'
+      receiver: webhook-logger
       continue: false
 
     - matchers:
         - severity = "info"
-      receiver: 'null'
+      receiver: webhook-logger
       # Info alerts (e.g. InventorySoldOut) are dashboard-worthy but
       # don't deserve a 4-hourly repeat.
       repeat_interval: 24h
@@ -115,15 +130,15 @@ inhibit_rules:
     equal: []
 
 receivers:
-  # `null` — the dev/demo default. Alerts route here, get grouped /
-  # deduped / silence-able from the Alertmanager UI, but nothing
-  # pushes outbound. Keeps the dev stack functional without a real
-  # delivery target.
+  # `webhook-logger` — the dev/demo default since 2026-05-02. Posts
+  # the Alertmanager webhook payload to a sidecar service
+  # (`booking_alert_logger`) that prints the body to stdout. Operators
+  # see fired alerts via `docker logs booking_alert_logger -f`.
   #
-  # To enable Slack delivery, copy alertmanager.slack.yml.example over
-  # this file (or merge the slack receiver block from it) and replace
-  # the placeholder webhook URL. Alertmanager validates ALL receivers
-  # at config-load time, so an unused receiver with an invalid URL
-  # will refuse to start — that's why slack lives in the .example
-  # rather than commented out here.
-  - name: 'null'
+  # `send_resolved: true` so the operator also sees recovery events,
+  # not just initial fires. Without this, a flapping alert produces
+  # one "firing" log per cycle and silently goes quiet on resolve.
+  - name: webhook-logger
+    webhook_configs:
+      - url: 'http://alert_logger:8080/'
+        send_resolved: true

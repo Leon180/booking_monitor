@@ -26,9 +26,23 @@ export const options = {
 const BASE_URL = 'http://app:8080/api/v1';
 
 export function setup() {
+    // total_tickets sized so the pool does NOT deplete during the
+    // standard 60s / 500-VU window. Sustained RPS in this stack is
+    // 40-50k; over 60s that's 2.4M-3.0M iterations. 5,000,000
+    // tickets gives ~2x headroom so the benchmark measures the
+    // accepted-booking hot path (POST /api/v1/book → 202) rather
+    // than the cheap sold-out fast path (409 short-circuit).
+    //
+    // Pre-2026-05-02 runs used 500,000 which depleted within ~10s
+    // and produced headline RPS heavily weighted on the 409 path —
+    // see docs/checkpoints/20260501-senior-multi-agent-review.md
+    // critical #5. Historical comparisons against runs from before
+    // the bump should note this is no longer apples-to-apples for
+    // headline RPS, though p95 / RED-shape metrics remain
+    // comparable for the accepted path.
     const payload = JSON.stringify({
         name: `Comparison Benchmark ${Date.now()}`,
-        total_tickets: 500000,
+        total_tickets: 5000000,
     });
 
     const res = http.post(`${BASE_URL}/events`, payload, {

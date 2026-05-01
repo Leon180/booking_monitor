@@ -304,7 +304,7 @@ groups:
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagamaxfailedageexceeded"
           summary: "Saga watchdog flagged stuck Failed orders >24h old — manual review needed"
-          description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (status='failed') and decide manually whether to revert inventory + MarkCompensated."
+          description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (to_status='failed') and decide manually whether to revert inventory + MarkCompensated."
 
       - alert: IdempotencyCacheGetErrors
         # Fires when the idempotency-cache GET path errors persistently.
@@ -400,6 +400,39 @@ groups:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisxaddfailures"
           summary: "Redis XADD failures on orders stream"
           description: "redis_xadd_failures_total averaging {{ $value }} errors/sec over 5m. The booking hot path is intermittently failing to enqueue orders into Redis Streams. User-visible 5xx rate may also be elevated. Check Redis health and AOF state."
+
+      - alert: TargetDown
+        # Meta-alert: fires when Prometheus has been unable to scrape a
+        # target for 2 minutes. Without this, a worker process that
+        # crashes silently or a metrics listener that gets misconfigured
+        # produces NO alerts — every other rate-based alert (Recon,
+        # Saga, Worker, DLQ, etc.) silently goes quiet because their
+        # input metrics stop flowing. Operators see "no alerts firing"
+        # and assume health.
+        #
+        # Closes the senior-review-checkpoint Important finding that
+        # the dark-worker-metrics gap (worker /metrics listeners
+        # disappear silently) had no scrape-failure tripwire after
+        # CP6/CP9 landed.
+        #
+        # The `up` metric is auto-injected by Prometheus per scrape
+        # target: 1 = healthy, 0 = scrape failed. `for: 2m` absorbs
+        # single-scrape blips (one missed pull during a deploy / reload)
+        # and only pages on sustained absence.
+        #
+        # Per-job severity: critical for the app itself + worker
+        # processes (their absence breaks correctness alerts);
+        # warning for adjacent infra (postgres exporter, redis-stream
+        # collector — listed for future infra-exporter scrape jobs
+        # that don't exist yet but the alert is forward-compatible).
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#targetdown"
+          summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is DOWN"
+          description: "Prometheus has been unable to scrape {{ $labels.job }} at {{ $labels.instance }} for 2m+. Every rate-based alert that depends on metrics from this job is silently inert until the scrape recovers. Check the target's process / network health; if the job is a worker, check `docker logs` for crash signatures."
 
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages

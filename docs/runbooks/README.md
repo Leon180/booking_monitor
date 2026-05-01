@@ -57,6 +57,9 @@ silence / inhibit / notification log.
 - [RedisXAddFailures](#redisxaddfailures)
 - [KafkaConsumerStuck](#kafkaconsumerstuck)
 
+### Meta (scrape health)
+- [TargetDown](#targetdown)
+
 ---
 
 ## HighErrorRate
@@ -231,7 +234,7 @@ silence / inhibit / notification log.
 
 **Symptom.** `increase(recon_resolved_total{outcome="max_age_exceeded"}[1h]) > 0`. Severity `critical`. The reconciler force-failed an order older than `RECON_MAX_CHARGING_AGE` (default 24h).
 
-**Diagnosis.** `psql ... -c "SELECT * FROM order_status_history WHERE from_status='charging' AND to_status='failed' AND created_at > now() - interval '1 hour'"`.
+**Diagnosis.** `psql ... -c "SELECT * FROM order_status_history WHERE from_status='charging' AND to_status='failed' AND occurred_at > now() - interval '1 hour'"`.
 
 **Action.**
 - For each order: cross-check the gateway side (was the customer actually charged?) and reconcile manually.
@@ -294,7 +297,7 @@ silence / inhibit / notification log.
 **Why this is different from `ReconMaxAgeExceeded`.** Recon force-fails. Watchdog DOES NOT auto-transition (moving Failed → Compensated without verifying inventory was reverted is unsafe). Operator decides manually.
 
 **Action.**
-- `psql ... -c "SELECT * FROM order_status_history WHERE status='failed' AND created_at < now() - interval '24 hours'"`.
+- `psql ... -c "SELECT * FROM order_status_history WHERE to_status='failed' AND occurred_at < now() - interval '24 hours'"`.
 - For each order: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering.
 
 ---
@@ -352,3 +355,35 @@ silence / inhibit / notification log.
 **Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
 
 **Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+
+---
+
+## TargetDown
+
+**Symptom.** Prometheus's `up` metric is `0` for some `{job, instance}` for 2m+. Severity `critical`. **This is the meta-alert that catches the silent-worker-death class** — every rate-based alert depending on metrics from the down target is now silently inert.
+
+**Diagnosis.**
+1. Identify the missing target: `up == 0` in Prometheus → note `{job, instance}`.
+2. `docker ps --filter name=booking_<job>` → is the container running?
+3. If yes: `docker logs booking_<job> --tail 100` — look for crash / panic / context-canceled signatures.
+4. If no: the container died. `docker inspect` → exit code + reason.
+
+**Action.**
+- Container down → `docker compose up -d <service>`.
+- Container up but unreachable → check `WORKER_METRICS_ADDR` env (the worker subcommands expose `/metrics` on `:9091` by default; empty disables, which is intentional only for k8s CronJob-hosted modes).
+- Network split between Prometheus and the target → standard Docker network triage (`docker network inspect booking_monitor_default`).
+
+**Escalation.** Page immediately. While this fires, you have NO visibility into the affected job's correctness alerts.
+
+---
+
+## Forcing TargetDown to fire (testing)
+
+Stop a worker container and wait 2m+:
+
+```bash
+docker stop booking_payment_worker
+# … wait 2m+ …
+# Verify: open Prometheus UI → Alerts → TargetDown firing for job=payment-worker
+docker start booking_payment_worker  # to recover
+```

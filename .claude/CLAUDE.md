@@ -137,7 +137,7 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 - Script: `scripts/k6_comparison.js`
 - VUs: 500
 - Duration: 60s
-- Ticket pool: 500,000 (so the run does not hit sold-out — measures pure capacity)
+- Ticket pool: 5,000,000 (sized to not deplete during the 60s window at sustained 40-50k RPS — measures pure capacity, not the 409 sold-out fast path. Bumped from 500,000 on 2026-05-02 after the senior-review checkpoint flagged that the prior pool depleted partway through and inflated headline RPS via the cheap path.)
 - Target: `http://app:8080/api/v1` (direct, bypasses nginx rate limit)
 - Both runs against an equivalent Docker stack on the same host
 

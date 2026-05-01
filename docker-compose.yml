@@ -227,8 +227,12 @@ services:
     # for alerts evaluated in Prometheus rule_files. Without it, firing
     # alerts are visible in Prometheus's Alerts tab but never push to
     # any delivery target. See deploy/alertmanager/alertmanager.yml for
-    # the receiver / route / inhibition config (Slack-or-noop fallback
-    # so dev stacks work without a real webhook secret).
+    # the receiver / route / inhibition config.
+    #
+    # Default receiver since 2026-05-02 is the `alert_logger` sidecar
+    # below — alerts genuinely leave Alertmanager in dev (visible via
+    # `docker logs booking_alert_logger`). Slack delivery is opt-in
+    # via deploy/alertmanager/alertmanager.slack.yml.example.
     image: prom/alertmanager:v0.27.0
     container_name: booking_alertmanager
     volumes:
@@ -242,6 +246,34 @@ services:
       - '--web.external-url=http://localhost:9093'
     ports:
       - "9093:9093"
+    depends_on:
+      - alert_logger
+
+  alert_logger:
+    # Webhook-logger sidecar for Alertmanager's default delivery path.
+    # Posts every webhook payload to its container logs as formatted
+    # JSON. Cheap, self-contained, no real secret to set up. Closes
+    # the senior-review-checkpoint Critical #1 finding that the dev
+    # stack's null receiver meant alerts never actually left the box.
+    #
+    # `mendhak/http-https-echo` is a long-standing public image (~30
+    # contributors, used in many CI pipelines) that prints the request
+    # body to stdout. We pin to a specific tag for reproducibility;
+    # bump deliberately when an upgrade is wanted.
+    image: mendhak/http-https-echo:34
+    container_name: booking_alert_logger
+    environment:
+      - HTTP_PORT=8080
+      - LOG_WITHOUT_NEWLINE=false
+      # JSON_RESPONSE=false keeps the logged body un-escaped so an
+      # operator scanning logs reads the AM payload directly, not
+      # double-encoded JSON.
+      - JSON_RESPONSE=false
+    ports:
+      # Expose 8081 → 8080 for ad-hoc curl-driven smoke tests; the
+      # AM container talks via the docker network at alert_logger:8080
+      # so the host port is convenience-only.
+      - "8081:8080"
 
   grafana:
     image: grafana/grafana:11.2.2

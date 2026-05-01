@@ -6,7 +6,10 @@
 # Usage: ./scripts/benchmark_compare.sh [VUS] [DURATION]
 #
 # Both runs use k6_comparison.js:
-#   - 500,000 tickets (never sells out → pure booking throughput)
+#   - 5,000,000 tickets (sized so the 60s/500-VU window does not deplete
+#                        the pool — measures the accepted booking hot path,
+#                        not the 409 sold-out fast path. Bumped from 500,000
+#                        on 2026-05-02 per the senior-review checkpoint.)
 #   - user_id range: 1–9,999,999 (minimises duplicate 409s)
 #   - quantity: 1 per request
 #
@@ -102,7 +105,7 @@ cat > "$SUMMARY" << EOF
 | Setting | Value |
 | :--- | :--- |
 | Script | \`k6_comparison.js\` |
-| Ticket pool | 500,000 (never sells out) |
+| Ticket pool | 5,000,000 (never sells out at 60s × 40-50k RPS) |
 | user_id range | 1 – 9,999,999 |
 | Quantity | 1 per request |
 | VUs | ${VUS} |
