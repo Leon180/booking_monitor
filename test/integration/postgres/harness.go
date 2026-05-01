@@ -225,6 +225,84 @@ func applyMigrations(ctx context.Context, db *sql.DB, dir string) error {
 	return nil
 }
 
+// ApplyMigrationFile runs a single migration file against the harness's
+// DB. Used by the round-trip test (CP4c) which needs to apply
+// individual up/down files in a controlled sequence rather than the
+// full forward replay that StartPostgres does.
+//
+// Same simple-protocol multi-statement reliance as applyMigrations
+// (see that function's comment for the lib/pq dependency note).
+func (h *Harness) ApplyMigrationFile(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ApplyMigrationFile: read %q: %v", path, err)
+	}
+	if _, err := h.DB.Exec(string(bytes)); err != nil {
+		t.Fatalf("ApplyMigrationFile: exec %q: %v", name, err)
+	}
+}
+
+// MigrationsDir returns the absolute path to the project's migrations
+// directory. Exported so the round-trip test can pass individual file
+// names to ApplyMigrationFile without re-resolving the path.
+func MigrationsDir(t *testing.T) string {
+	t.Helper()
+	return migrationsDir(t)
+}
+
+// EmptyHarness returns a Harness backed by a fresh container with NO
+// migrations applied — used by the round-trip test which drives
+// migrations explicitly, file-by-file. The CP4a/4b functional tests
+// continue to use StartPostgres which auto-applies the full forward
+// sequence.
+func EmptyHarness(ctx context.Context, t *testing.T) *Harness {
+	t.Helper()
+	pgContainer, err := tcpostgres.Run(ctx,
+		"postgres:15-alpine",
+		tcpostgres.WithDatabase("booking_test"),
+		tcpostgres.WithUsername("postgres"),
+		tcpostgres.WithPassword("postgres"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		t.Fatalf("EmptyHarness: container start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := pgContainer.Terminate(ctx2); err != nil {
+			t.Logf("EmptyHarness: container terminate: %v (non-fatal)", err)
+		}
+	})
+
+	dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("EmptyHarness: connection string: %v", err)
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("EmptyHarness: sql.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Logf("EmptyHarness: db.Close: %v (non-fatal)", err)
+		}
+	})
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := pingWithRetry(pingCtx, db, 30, 100*time.Millisecond); err != nil {
+		t.Fatalf("EmptyHarness: ping: %v", err)
+	}
+
+	return &Harness{Container: pgContainer, DB: db, DSN: dsn}
+}
+
 // Reset truncates every mutable test table so a single Harness can be
 // reused across multiple parent tests / subtests without rebooting
 // the container (container boot is ~2-3 s; TRUNCATE is sub-100 ms).
