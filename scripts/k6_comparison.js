@@ -50,16 +50,28 @@ export default function (data) {
         quantity: 1,
     });
 
+    const headers = { 'Content-Type': 'application/json' };
+    // IDEMPOTENCY=true exercises the N4 fingerprint compute path.
+    // Each iteration mints a unique key so the handler hits the
+    // Redis SETNX + fingerprint-write branch (cold), not the
+    // cache-replay branch. To measure the replay branch instead,
+    // set a stable key (e.g. `bench-${__VU}`) — that's an
+    // expected future variant but not what we measure here.
+    if (__ENV.IDEMPOTENCY === 'true') {
+        headers['Idempotency-Key'] = `bench-${__VU}-${__ITER}-${Date.now()}`;
+    }
+
     const start = Date.now();
-    const res = http.post(`${BASE_URL}/book`, payload, {
-        headers: { 'Content-Type': 'application/json' },
-    });
+    const res = http.post(`${BASE_URL}/book`, payload, { headers });
     bookingDuration.add(Date.now() - start);
 
-    businessErrors.add(res.status !== 200 && res.status !== 409);
+    // POST /api/v1/book returns 202 Accepted (since PR #47 — async pipeline:
+    // Redis-side deduct succeeded, DB persistence + payment + saga in flight).
+    // 409 = sold out. Anything else is a real error.
+    businessErrors.add(res.status !== 202 && res.status !== 409);
 
     check(res, {
-        'status is 200 or 409': (r) => r.status === 200 || r.status === 409,
-        'booking accepted': (r) => r.status === 200,
+        'status is 202 or 409': (r) => r.status === 202 || r.status === 409,
+        'booking accepted': (r) => r.status === 202,
     });
 }

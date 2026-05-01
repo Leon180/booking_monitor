@@ -58,6 +58,7 @@ run_k6() {
         --network=booking_monitor_default \
         -e VUS="$VUS" \
         -e DURATION="$DURATION" \
+        -e IDEMPOTENCY="${IDEMPOTENCY:-false}" \
         -v "$K6_SCRIPT:/script.js" \
         grafana/k6 run /script.js 2>&1 | tee "$out_file"
     echo "[k6] $label complete."
