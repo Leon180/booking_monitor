@@ -57,13 +57,27 @@ func (s *stubBookingService) GetBookingHistory(ctx context.Context, page, size i
 	return s.historyFn(ctx, page, size, status)
 }
 
-type stubEventService struct{}
-
-func (stubEventService) CreateEvent(_ context.Context, _ string, _ int) (domain.Event, error) {
-	return domain.Event{}, errors.New("not used in this test")
+// stubEventService mirrors stubBookingService — controllable via per-test
+// fn fields so each handler test pins one path. Tests that don't touch
+// the event surface leave createFn nil; if HandleCreateEvent fires on
+// such a test, the fallback returns a sentinel error to surface the
+// missing setup.
+//
+// Why no GetEvent method here: event.Service today only declares
+// CreateEvent (HandleViewEvent is a stub that returns gin.H without
+// hitting the service — see docs/checkpoints/20260430-phase2-review.md
+// item A4). Adding a no-op GetEvent stub here would silently absorb a
+// future event.Service interface expansion — the compile error is the
+// useful signal.
+type stubEventService struct {
+	createFn func(ctx context.Context, name string, totalTickets int) (domain.Event, error)
 }
-func (stubEventService) GetEvent(_ context.Context, _ uuid.UUID) (domain.Event, error) {
-	return domain.Event{}, errors.New("not used in this test")
+
+func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTickets int) (domain.Event, error) {
+	if s.createFn == nil {
+		return domain.Event{}, errors.New("CreateEvent called without createFn")
+	}
+	return s.createFn(ctx, name, totalTickets)
 }
 
 // noopIdempotencyRepo is the zero-behaviour repo passed to the route
@@ -83,7 +97,14 @@ func (noopIdempotencyRepo) Set(_ context.Context, _ string, _ *domain.Idempotenc
 }
 
 func newRouter(svc bookingapp.Service) *gin.Engine {
-	h := booking.NewBookingHandler(svc, stubEventService{})
+	return newRouterWithEvents(svc, &stubEventService{})
+}
+
+// newRouterWithEvents is the variant for tests that need to drive the
+// event handler. The two-arg form keeps the existing single-arg
+// newRouter callers unchanged.
+func newRouterWithEvents(svc bookingapp.Service, evt *stubEventService) *gin.Engine {
+	h := booking.NewBookingHandler(svc, evt)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	booking.RegisterRoutes(v1, h, noopIdempotencyRepo{})
@@ -257,4 +278,155 @@ func TestHandleListBookings_SizeIsCapped(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, cap, observedSize, "page size MUST be capped at %d to prevent unbounded scans", cap)
+}
+
+// TestHandleListBookings_DefaultsApply: ?page= empty + ?size= empty
+// → handler defaults to page=1, size=10. Pins the default contract
+// so a refactor that drops one default doesn't silently change pagination.
+func TestHandleListBookings_DefaultsApply(t *testing.T) {
+	t.Parallel()
+
+	var observedPage, observedSize int
+	svc := &stubBookingService{
+		historyFn: func(_ context.Context, page, size int, _ *domain.OrderStatus) ([]domain.Order, int, error) {
+			observedPage, observedSize = page, size
+			return []domain.Order{}, 0, nil
+		},
+	}
+	r := newRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/history", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 1, observedPage, "missing page query param must default to 1")
+	assert.Equal(t, 10, observedSize, "missing size query param must default to 10")
+}
+
+// TestHandleListBookings_StatusFilter: ?status=confirmed propagates as
+// a non-nil pointer to the service. Pins the parsing contract.
+func TestHandleListBookings_StatusFilter(t *testing.T) {
+	t.Parallel()
+
+	var observedStatus *domain.OrderStatus
+	svc := &stubBookingService{
+		historyFn: func(_ context.Context, _, _ int, status *domain.OrderStatus) ([]domain.Order, int, error) {
+			observedStatus = status
+			return []domain.Order{}, 0, nil
+		},
+	}
+	r := newRouter(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/history?status=confirmed", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, observedStatus, "?status=confirmed must propagate as non-nil pointer")
+	assert.Equal(t, domain.OrderStatusConfirmed, *observedStatus)
+}
+
+// TestHandleCreateEvent_HappyPath: POST /events with a valid body
+// returns 201 + EventResponse echoing the service's rehydrated Event.
+func TestHandleCreateEvent_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	wantID := uuid.New()
+	created := domain.ReconstructEvent(wantID, "Concert", 100, 100, 0)
+	bookSvc := &stubBookingService{}
+	evt := &stubEventService{
+		createFn: func(_ context.Context, name string, total int) (domain.Event, error) {
+			assert.Equal(t, "Concert", name)
+			assert.Equal(t, 100, total)
+			return created, nil
+		},
+	}
+	r := newRouterWithEvents(bookSvc, evt)
+
+	body := `{"name":"Concert","total_tickets":100}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "POST /events must return 201 Created on success")
+	var got dto.EventResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, wantID, got.ID, "response must echo the service-minted event id")
+	assert.Equal(t, "Concert", got.Name)
+	assert.Equal(t, 100, got.TotalTickets,
+		"DTO must echo total_tickets — guards against a name/totalTickets arg-swap regression at the service call site")
+	assert.Equal(t, 100, got.AvailableTickets, "fresh event must have AvailableTickets == TotalTickets")
+}
+
+// TestHandleCreateEvent_InvalidBody: malformed JSON → 400 from the
+// Gin binder, before the service is ever called.
+func TestHandleCreateEvent_InvalidBody(t *testing.T) {
+	t.Parallel()
+
+	bookSvc := &stubBookingService{}
+	evt := &stubEventService{
+		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
+			t.Fatal("CreateEvent must not be called when the body fails to bind")
+			return domain.Event{}, nil
+		},
+	}
+	r := newRouterWithEvents(bookSvc, evt)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "malformed JSON must surface as 400")
+	assert.Contains(t, w.Body.String(), "invalid request body")
+}
+
+// TestHandleCreateEvent_ServiceError: a generic service error falls
+// through to mapError's default branch → 500 with sanitized message.
+// Pins the never-leak-internals contract: the public message must NOT
+// contain the underlying driver / network text.
+func TestHandleCreateEvent_ServiceError(t *testing.T) {
+	t.Parallel()
+
+	bookSvc := &stubBookingService{}
+	evt := &stubEventService{
+		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
+			return domain.Event{}, errors.New("postgres: relation \"events\" does not exist")
+		},
+	}
+	r := newRouterWithEvents(bookSvc, evt)
+
+	body := `{"name":"Concert","total_tickets":100}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	respBody := w.Body.String()
+	assert.Contains(t, respBody, "internal server error")
+	assert.NotContains(t, respBody, "postgres",
+		"public error must NOT leak driver / SQL text")
+}
+
+// TestHandleViewEvent: the endpoint echoes the path param and bumps
+// the page-views counter. We verify the response shape — counter
+// observability is exercised at the metrics layer.
+func TestHandleViewEvent(t *testing.T) {
+	t.Parallel()
+
+	r := newRouter(&stubBookingService{})
+
+	id := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events/"+id.String(), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var got map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, id.String(), got["event_id"], "handler must echo the path-param id verbatim")
+	assert.Equal(t, "View event", got["message"])
 }
