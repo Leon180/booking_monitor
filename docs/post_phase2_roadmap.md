@@ -40,7 +40,7 @@ Phase 2.5 (cleanup, ~1 wk)
   CP6  Alertmanager deployment + delivery target wiring (row 14 = roadmap N3)
   CP7  test-surface sprint: saga_compensator, handler coverage, outbox.Run (row 16)
   CP8  header-bearing N4 benchmark (row 17) — DONE in PR #59 (2026-05-01). See [`docs/benchmarks/20260501_175422_compare_c500/comparison.md`](benchmarks/20260501_175422_compare_c500/comparison.md). Result: N4 fingerprint path costs ≈18% RPS / ≈46% p95 vs no-header baseline at 500 VUs (cold-path: SETNX + SHA-256 fingerprint + payload-write — two extra Redis round-trips dominate). Materially higher than the pre-N4 estimate of "<2% RPS / 2-5% p95"; calibration captured for capacity planning. Bundled with the k6_comparison.js 200→202 contract fix surfaced by the prior CP3b no-regression run.
-  CP9  Grafana dashboard panels for recon / saga / DLQ / DB pool / cache (row 18)
+  CP9  Grafana dashboard panels for recon / saga / DLQ / DB pool / cache (row 18) — DONE in PR #60 (2026-05-01). 6 collapsible row sections + 18 new panels added to `deploy/grafana/provisioning/dashboards/dashboard.json` covering A4 recon, A5 saga watchdog, Kafka+Redis DLQ activity, PG pool USE method, idempotency cache hit-rate / errors / replay outcomes, and Redis stream/DLQ infra failures. Queries mirror the alert exprs in `deploy/prometheus/alerts.yml` so an alert that fires has a matching panel for triage. `docs/monitoring.md` + zh-TW §4 updated with the full panel inventory.
 
 Phase 3 (demo readiness, ~9–13 wk total) — Pattern A + live mission control + 4-version comparison
 

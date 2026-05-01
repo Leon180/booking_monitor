@@ -134,13 +134,44 @@ Open http://localhost:3000, login `admin` / `admin`. **Dashboards → Browse →
 
 Pre-provisioned panels live in [deploy/grafana/provisioning/dashboards/dashboard.json](../deploy/grafana/provisioning/dashboards/dashboard.json). Provisioning is **read-only** from the UI — changes you make in the browser do not persist across `docker compose down`. To make a permanent change, edit the JSON file and restart Grafana.
 
-The current panels cover:
+Panels are organised by collapsible row. Top-of-dashboard "golden signals" first; reliability / infrastructure rows below.
 
-- Request Rate (RPS)
+**Golden signals (top of dashboard):**
+- Request Rate (RPS) — split by method/path/status
 - Global Request Latency (p99 / p95 / p50)
-- Conversion Rate (%)
+- Conversion Rate (%) — `bookings_total{status="success"}` / `page_views_total{page="event_detail"}`
 - Saturation — Goroutines
 - Saturation — Memory Alloc Bytes
+
+**Row: Reliability — Recon (A4 charging two-phase intent log)**
+- Recon resolved by outcome (rate, 5m) — `charged` / `declined` / `not_found` / `unknown` / `max_age_exceeded` / `transition_lost`
+- Recon stuck-charging gauge — `recon_stuck_charging_orders` (point-in-time)
+- Recon resolve duration p95/p50 — `recon_resolve_duration_seconds_bucket`
+- Recon error rates — find-stuck (DB) / gateway probe / mark (DB+outbox)
+
+**Row: Reliability — Saga Watchdog (A5)**
+- Saga watchdog resolved by outcome (rate, 5m) — `compensated` / `already_compensated` / `max_age_exceeded` / `getbyid_error` / `marshal_error` / `compensator_error`
+- Saga stuck-failed gauge — `saga_stuck_failed_orders`
+- Saga watchdog resolve duration p95/p50
+- Saga watchdog find-stuck error rate + saga poison messages
+
+**Row: Dead Letter Queue activity**
+- Kafka DLQ messages by topic + reason — `dlq_messages_total`
+- Redis DLQ routed by reason — `redis_dlq_routed_total`
+- Kafka consumer retry rate — `kafka_consumer_retry_total` (silent-retry surface)
+
+**Row: Database — pool (USE) + correctness signals**
+- PG pool: in-use vs idle — `pg_pool_in_use` / `pg_pool_idle`
+- PG pool wait rate + wait time + rollback failures — `pg_pool_wait_count_total` / `pg_pool_wait_duration_seconds_total` / `db_rollback_failures_total`
+
+**Row: Cache — idempotency (N4)**
+- Idempotency cache hit rate (%) — `cache_hits_total{cache="idempotency"}` / (hits + misses)
+- Idempotency cache GET errors — `idempotency_cache_get_errors_total` (page-worthy: rate >0 sustained 1m = idempotency protection suspended)
+- Idempotency replay outcomes — `match` / `mismatch` / `legacy_match`
+
+**Row: Redis — stream / DLQ infra failures**
+- Stream/DLQ failure rates — `redis_xack_failures_total` / `redis_xadd_failures_total{stream}` / `redis_revert_failures_total`
+- Stream collector errors by stream + operation — `redis_stream_collector_errors_total`
 
 **To add a new panel quickly (non-persistent — for exploration only):**
 1. Click **+ → Create dashboard → Add visualization**.

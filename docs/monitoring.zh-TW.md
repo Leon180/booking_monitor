@@ -134,13 +134,44 @@ recon_stuck_charging_orders
 
 預先配置的 panel 在 [deploy/grafana/provisioning/dashboards/dashboard.json](../deploy/grafana/provisioning/dashboards/dashboard.json)。Provisioning 在 UI 上是**唯讀的** — 你在瀏覽器裡的修改在 `docker compose down` 之後不會保留。要做永久的修改,改 JSON 檔再重啟 Grafana。
 
-目前的 panel 涵蓋:
+Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 基礎設施的 row 在下方。
 
-- Request Rate (RPS)
+**黃金訊號(dashboard 最上方):**
+- Request Rate (RPS) — 依 method/path/status 切分
 - Global Request Latency (p99 / p95 / p50)
-- Conversion Rate (%)
+- Conversion Rate (%) — `bookings_total{status="success"}` / `page_views_total{page="event_detail"}`
 - Saturation — Goroutines
 - Saturation — Memory Alloc Bytes
+
+**Row:Reliability — Recon(A4 charging 兩階段意圖紀錄)**
+- Recon resolved by outcome (rate, 5m) — `charged` / `declined` / `not_found` / `unknown` / `max_age_exceeded` / `transition_lost`
+- Recon stuck-charging 計量 — `recon_stuck_charging_orders`(時點值)
+- Recon resolve duration p95/p50 — `recon_resolve_duration_seconds_bucket`
+- Recon 錯誤率 — find-stuck(資料庫)/ gateway 探測 / mark(資料庫+outbox)
+
+**Row:Reliability — Saga Watchdog(A5)**
+- Saga watchdog resolved by outcome (rate, 5m) — `compensated` / `already_compensated` / `max_age_exceeded` / `getbyid_error` / `marshal_error` / `compensator_error`
+- Saga stuck-failed 計量 — `saga_stuck_failed_orders`
+- Saga watchdog resolve duration p95/p50
+- Saga watchdog find-stuck 錯誤率 + saga poison 訊息數
+
+**Row:Dead Letter Queue 活動**
+- Kafka DLQ 訊息依 topic + reason — `dlq_messages_total`
+- Redis DLQ routed by reason — `redis_dlq_routed_total`
+- Kafka consumer retry rate — `kafka_consumer_retry_total`(silent-retry 表面)
+
+**Row:資料庫 — 連線池(USE)+ 正確性訊號**
+- PG pool:in-use vs idle — `pg_pool_in_use` / `pg_pool_idle`
+- PG pool 等待頻率 + 等待時間 + rollback 失敗 — `pg_pool_wait_count_total` / `pg_pool_wait_duration_seconds_total` / `db_rollback_failures_total`
+
+**Row:Cache — idempotency(N4)**
+- Idempotency cache 命中率 (%) — `cache_hits_total{cache="idempotency"}` /(hits + misses)
+- Idempotency cache GET 錯誤 — `idempotency_cache_get_errors_total`(會 page:rate >0 持續 1m 表示 idempotency 保護已停擺)
+- Idempotency replay 結果 — `match` / `mismatch` / `legacy_match`
+
+**Row:Redis — stream / DLQ 基礎設施失敗**
+- Stream/DLQ 失敗率 — `redis_xack_failures_total` / `redis_xadd_failures_total{stream}` / `redis_revert_failures_total`
+- Stream collector 錯誤依 stream + operation — `redis_stream_collector_errors_total`
 
 **快速加一個新 panel(暫時的 — 只用來探索):**
 1. 點 **+ → Create dashboard → Add visualization**。
