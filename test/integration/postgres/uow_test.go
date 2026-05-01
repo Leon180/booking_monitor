@@ -42,8 +42,16 @@ import (
 //     non-ErrTxDone error and metrics.RecordRollbackFailure fires).
 //     Reproducing this requires injecting a fault into the
 //     `database/sql` driver — possible via a custom driver shim, but
-//     out of scope here. The metric is exercised by the unit tests
-//     in CP7's saga compensator suite (the recordingMetrics fake).
+//     out of scope here.
+//
+//     Honest accounting: this path is currently uncovered by any test.
+//     CP7's recordingSagaMetrics + recordingReconMetrics cover the
+//     saga / recon Metrics ports, NOT application.DBMetrics. A future
+//     PR (track in backlog) should add a unit test that injects a
+//     custom driver-level Tx whose Rollback returns a non-ErrTxDone
+//     error, then assert the metric port was called. Until then, the
+//     `db_rollback_failures_total` counter + DBRollbackFailures alert
+//     have no test gate.
 
 // uowHarness boots a container, builds the three concrete repos, and
 // wires them into a PostgresUnitOfWork. The repos are returned for
@@ -263,4 +271,11 @@ func TestUoW_BeginTxError_Surfaces(t *testing.T) {
 		"fn MUST NOT be invoked when BeginTx fails — the closure has no tx to run against")
 	assert.Contains(t, err.Error(), "begin tx",
 		"BeginTx error must be wrapped with the begin-tx context for triage")
+	// Companion assertion: the underlying context.Canceled must be
+	// reachable via errors.Is. Catches a regression where the
+	// production code drops the %w wrap (the err text might still
+	// happen to contain 'begin tx' from a different path, but
+	// errors.Is would correctly return false).
+	assert.ErrorIs(t, err, context.Canceled,
+		"BeginTx error must propagate context.Canceled via errors.Is — string-matching alone would silently pass an unwrapped error")
 }

@@ -4,6 +4,7 @@ package pgintegration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"booking_monitor/internal/domain"
@@ -129,7 +130,9 @@ func TestOutboxRepository_ListPending_OrderingIsIdAsc(t *testing.T) {
 
 	// Build outbox events with these specific ids via the wire-shape
 	// reconstruction helper (bypasses the factory's auto-id).
-	payloadFor := func(n int) []byte { return []byte(`{"n":` + string(rune('0'+n)) + `}`) }
+	// fmt.Sprintf instead of string(rune('0'+n)) — the latter
+	// produces ":" for n=10 and other non-digit runes for n>9.
+	payloadFor := func(n int) []byte { return []byte(fmt.Sprintf(`{"n":%d}`, n)) }
 	ev1 := domain.ReconstructOutboxEvent(id1, domain.EventTypeOrderCreated, payloadFor(1), domain.OutboxStatusPending, nil)
 	ev2 := domain.ReconstructOutboxEvent(id2, domain.EventTypeOrderCreated, payloadFor(2), domain.OutboxStatusPending, nil)
 	ev3 := domain.ReconstructOutboxEvent(id3, domain.EventTypeOrderCreated, payloadFor(3), domain.OutboxStatusPending, nil)
@@ -192,6 +195,20 @@ func TestOutboxRepository_MarkProcessed_Idempotent(t *testing.T) {
 	pending, err := repo.ListPending(ctx, 100)
 	require.NoError(t, err)
 	assert.Empty(t, pending)
+
+	// Direct column-level assertion that processed_at is non-NULL.
+	// The ListPending exclusion above is the indirect signal; this
+	// directly checks the column was actually written. Catches a
+	// hypothetical regression where MarkProcessed updated a different
+	// column (or no column at all) but ListPending's WHERE clause
+	// happened to filter the row out via some other path.
+	var processedAtIsSet bool
+	err = h.DB.QueryRowContext(ctx,
+		`SELECT processed_at IS NOT NULL FROM events_outbox WHERE id = $1`,
+		ev.ID()).Scan(&processedAtIsSet)
+	require.NoError(t, err)
+	assert.True(t, processedAtIsSet,
+		"MarkProcessed must persist processed_at = NOW() — the load-bearing column write that ListPending's predicate keys on")
 }
 
 // TestOutboxRepository_MarkProcessed_NonExistent: marking a
@@ -199,6 +216,8 @@ func TestOutboxRepository_MarkProcessed_Idempotent(t *testing.T) {
 // MarkProcessed via the event id from a previous ListPending result,
 // so this should never happen in practice, but the no-error contract
 // makes the relay implementation simpler.
+//
+// No h.Reset(t) — fresh container, no fixture needed.
 func TestOutboxRepository_MarkProcessed_NonExistent(t *testing.T) {
 	_, repo := outboxRepoHarness(t)
 

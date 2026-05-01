@@ -78,6 +78,10 @@ func TestEventRepository_CreateAndGetByID(t *testing.T) {
 // TestEventRepository_GetByID_NotFound: missing id returns
 // domain.ErrEventNotFound, not a generic error. Pins the contract
 // callers (event service, mapError) rely on.
+//
+// No h.Reset(t) — the harness gives each top-level test a fresh
+// container so the schema is empty on entry. This is the canonical
+// "no fixture needed" case.
 func TestEventRepository_GetByID_NotFound(t *testing.T) {
 	_, repo := eventRepoHarness(t)
 
@@ -284,6 +288,8 @@ func TestEventRepository_Delete(t *testing.T) {
 // TestEventRepository_Delete_Idempotent: deleting a non-existent
 // event must not error. Compensation may fire twice; each call must
 // be safe.
+//
+// No h.Reset(t) — fresh container, no fixture needed.
 func TestEventRepository_Delete_Idempotent(t *testing.T) {
 	_, repo := eventRepoHarness(t)
 
