@@ -7,6 +7,14 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
+// outboxTracerName scopes outbox spans to their own subsystem so a
+// future tracer-config change can target outbox specifically. Local
+// const because CP2.6 booking subpackage move otherwise removes the
+// `tracerName` symbol that this file used to share with booking
+// decorators. When outbox itself moves to `application/outbox/` later
+// in CP2.6 this const moves with it.
+const outboxTracerName = "application/outbox"
+
 // OutboxRelayTracingDecorator wraps OutboxRelay.processBatch with an OTEL span.
 // It follows the Decorator Pattern used throughout this codebase (see booking_service_tracing.go).
 type OutboxRelayTracingDecorator struct {
@@ -28,7 +36,7 @@ func (d *OutboxRelayTracingDecorator) Run(ctx context.Context) {
 // Jaeger reflects failures instead of always showing OK.
 func (d *OutboxRelayTracingDecorator) processBatchTraced(ctx context.Context) error {
 	// No attributes: batch size is logged, not traced, to avoid high-cardinality spans.
-	ctx, span := otel.Tracer(tracerName).Start(ctx, "OutboxRelay.processBatch")
+	ctx, span := otel.Tracer(outboxTracerName).Start(ctx, "OutboxRelay.processBatch")
 	defer span.End()
 
 	err := d.next.processBatch(ctx)

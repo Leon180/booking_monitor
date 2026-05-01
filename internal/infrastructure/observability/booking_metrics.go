@@ -1,14 +1,14 @@
 package observability
 
-import "booking_monitor/internal/application"
+import "booking_monitor/internal/application/booking"
 
-// prometheusBookingMetrics implements application.BookingMetrics by
+// prometheusBookingMetrics implements `booking.Metrics` by
 // incrementing the BookingsTotal counter declared in metrics.go.
 type prometheusBookingMetrics struct{}
 
 // NewBookingMetrics returns the Prometheus-backed implementation.
 // Wired into fx in cmd/booking-cli/main.go.
-func NewBookingMetrics() application.BookingMetrics {
+func NewBookingMetrics() booking.Metrics {
 	return &prometheusBookingMetrics{}
 }
 
