@@ -1,52 +1,53 @@
-package application
+package saga
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
-type SagaCompensator interface {
+type Compensator interface {
 	HandleOrderFailed(ctx context.Context, payload []byte) error
 }
 
-type sagaCompensator struct {
+type compensator struct {
 	inventoryRepo domain.InventoryRepository
-	uow           UnitOfWork
+	uow           application.UnitOfWork
 	log           *mlog.Logger
 }
 
-// NewSagaCompensator takes the logger as an explicit dependency rather
+// NewCompensator takes the logger as an explicit dependency rather
 // than reaching for zap's globals, matching the pattern used by
 // WorkerService and keeping tests deterministic (L7).
 //
 // All DB work happens inside uow.Do so the per-aggregate repos are
 // resolved off the closure parameter; the Redis revert outside the
 // tx still uses the long-lived inventoryRepo.
-func NewSagaCompensator(
+func NewCompensator(
 	inventoryRepo domain.InventoryRepository,
-	uow UnitOfWork,
+	uow application.UnitOfWork,
 	logger *mlog.Logger,
-) SagaCompensator {
-	return &sagaCompensator{
+) Compensator {
+	return &compensator{
 		inventoryRepo: inventoryRepo,
 		uow:           uow,
 		log:           logger.With(mlog.String("component", "saga_compensator")),
 	}
 }
 
-func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte) error {
-	var event OrderFailedEvent
+func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte) error {
+	var event application.OrderFailedEvent
 	if err := json.Unmarshal(payload, &event); err != nil {
 		s.log.Error(ctx, "failed to unmarshal event",
 			tag.Error(err),
 			mlog.ByteString("payload", payload),
 		)
-		return fmt.Errorf("sagaCompensator.HandleOrderFailed unmarshal: %w", err)
+		return fmt.Errorf("compensator.HandleOrderFailed unmarshal: %w", err)
 	}
 
 	s.log.Info(ctx, "rolling back inventory for failed order",
@@ -56,7 +57,7 @@ func (s *sagaCompensator) HandleOrderFailed(ctx context.Context, payload []byte)
 	)
 
 	// 1. Rollback PostgreSQL Inventory & Ensure Idempotency via UoW
-	errUow := s.uow.Do(ctx, func(repos *Repositories) error {
+	errUow := s.uow.Do(ctx, func(repos *application.Repositories) error {
 		order, err := repos.Order.GetByID(ctx, event.OrderID)
 		if err != nil {
 			return fmt.Errorf("orderRepo.GetByID order_id=%s: %w", event.OrderID, err)

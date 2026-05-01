@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -63,7 +62,7 @@ func (m *recordingSagaMetrics) ObserveResolveAge(s float64)        { m.resolveAg
 // tests run in milliseconds. Returns the mock repo so per-test setup
 // can drive the scenario, and the recording metrics so assertions can
 // read what the watchdog emitted.
-func watchdogHarness(t *testing.T, comp application.SagaCompensator) (*saga.Watchdog, *mocks.MockOrderRepository, *recordingSagaMetrics) {
+func watchdogHarness(t *testing.T, comp saga.Compensator) (*saga.Watchdog, *mocks.MockOrderRepository, *recordingSagaMetrics) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	repo := mocks.NewMockOrderRepository(ctrl)

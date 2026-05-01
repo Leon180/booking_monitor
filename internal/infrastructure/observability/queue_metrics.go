@@ -1,11 +1,11 @@
 package observability
 
-import "booking_monitor/internal/application"
+import "booking_monitor/internal/application/worker"
 
 type prometheusQueueMetrics struct{}
 
 // NewQueueMetrics returns the Prometheus-backed QueueMetrics implementation.
-func NewQueueMetrics() application.QueueMetrics {
+func NewQueueMetrics() worker.QueueMetrics {
 	return &prometheusQueueMetrics{}
 }
 

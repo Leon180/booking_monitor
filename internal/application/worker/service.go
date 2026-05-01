@@ -1,4 +1,4 @@
-package application
+package worker
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	mlog "booking_monitor/internal/log"
 )
 
-type WorkerService interface {
+type Service interface {
 	// Start runs the consumer loop until ctx is cancelled. Returns nil
 	// on clean shutdown (ctx.Canceled), or a wrapped error when the
 	// underlying queue cannot be set up or subscription fails. Callers
@@ -18,26 +18,26 @@ type WorkerService interface {
 	Start(ctx context.Context) error
 }
 
-type workerService struct {
+type service struct {
 	queue     OrderQueue
 	processor MessageProcessor
 	logger    *mlog.Logger
 }
 
-// NewWorkerService wires a worker around a (typically metrics-decorated)
+// NewService wires a worker around a (typically metrics-decorated)
 // MessageProcessor. The processor passed in is treated as an opaque
 // handler — the worker is only responsible for queue lifecycle
 // (EnsureGroup, Subscribe, ctx handling); per-message observability and
 // processing logic live in the processor chain.
-func NewWorkerService(queue OrderQueue, processor MessageProcessor, logger *mlog.Logger) WorkerService {
-	return &workerService{
+func NewService(queue OrderQueue, processor MessageProcessor, logger *mlog.Logger) Service {
+	return &service{
 		queue:     queue,
 		processor: processor,
 		logger:    logger.With(mlog.String("component", "worker_service")),
 	}
 }
 
-func (s *workerService) Start(ctx context.Context) error {
+func (s *service) Start(ctx context.Context) error {
 	s.logger.Info(ctx, "Starting worker service...")
 
 	// ensure group. A startup-time failure here means the stream /

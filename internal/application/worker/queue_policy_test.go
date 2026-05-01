@@ -1,4 +1,4 @@
-package application_test
+package worker_test
 
 import (
 	"errors"
@@ -7,11 +7,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/domain"
 )
 
-// TestDefaultOrderRetryPolicy pins the contract that
+// TestDefaultRetryPolicy pins the contract that
 // redis_queue.processWithRetry depends on:
 //   - malformed-input errors → policy returns false (don't retry)
 //   - everything else        → policy returns true  (burn the budget)
@@ -19,8 +19,8 @@ import (
 // If this test fails after a domain change (e.g. a new ErrInvalid*
 // sentinel that's not classified as malformed), the worker's DLQ
 // fast-path silently regresses to "burn 600ms of backoff before DLQ".
-func TestDefaultOrderRetryPolicy(t *testing.T) {
-	policy := application.DefaultOrderRetryPolicy()
+func TestDefaultRetryPolicy(t *testing.T) {
+	policy := worker.DefaultRetryPolicy()
 
 	tests := []struct {
 		name string

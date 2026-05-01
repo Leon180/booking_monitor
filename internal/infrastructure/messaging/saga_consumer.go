@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
-	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
@@ -77,7 +77,7 @@ func NewSagaConsumer(cfg *config.KafkaConfig, rdb *redis.Client, logger *mlog.Lo
 	}
 }
 
-func (c *SagaConsumer) Start(ctx context.Context, compensator application.SagaCompensator) error {
+func (c *SagaConsumer) Start(ctx context.Context, compensator saga.Compensator) error {
 	c.log.Info(ctx, "Starting Saga Consumer for topic: order.failed")
 
 	for {

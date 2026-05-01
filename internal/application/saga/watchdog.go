@@ -57,7 +57,7 @@ import (
 // finding A1 from the Phase 2 checkpoint).
 type Watchdog struct {
 	orders      domain.OrderRepository
-	compensator application.SagaCompensator
+	compensator Compensator
 	cfg         Config
 	metrics     Metrics
 	log         *mlog.Logger
@@ -77,7 +77,7 @@ type Watchdog struct {
 // line is filterable in Loki/Grafana without per-call ceremony.
 func NewWatchdog(
 	orders domain.OrderRepository,
-	compensator application.SagaCompensator,
+	compensator Compensator,
 	cfg Config,
 	metrics Metrics,
 	logger *mlog.Logger,

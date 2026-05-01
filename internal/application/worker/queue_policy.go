@@ -1,10 +1,10 @@
-package application
+package worker
 
 import (
 	"booking_monitor/internal/domain"
 )
 
-// WorkerRetryPolicy decides whether a per-message handler error is
+// RetryPolicy decides whether a per-message handler error is
 // worth retrying. Queue infrastructure consults this on every handler
 // failure: returning false short-circuits the retry budget and routes
 // the message straight to compensation + DLQ; returning true lets the
@@ -27,9 +27,9 @@ import (
 // A future second consumer of the same queue (DLQ replay worker,
 // shadow-test pipe) can plug in a different policy without forking
 // the queue implementation.
-type WorkerRetryPolicy func(err error) bool
+type RetryPolicy func(err error) bool
 
-// DefaultOrderRetryPolicy is the policy used by the production
+// DefaultRetryPolicy is the policy used by the production
 // booking pipeline: malformed-input errors from `domain.NewOrder`
 // (UserID<=0, zero EventID, non-positive Quantity) are deterministic
 // and skip the retry budget; everything else is treated as transient
@@ -38,7 +38,7 @@ type WorkerRetryPolicy func(err error) bool
 // `domain.IsMalformedOrderInput` IS the source of truth for which
 // sentinels classify a message as permanently unprocessable; this
 // function just inverts it (retryable = NOT malformed).
-func DefaultOrderRetryPolicy() WorkerRetryPolicy {
+func DefaultRetryPolicy() RetryPolicy {
 	return func(err error) bool {
 		return !domain.IsMalformedOrderInput(err)
 	}

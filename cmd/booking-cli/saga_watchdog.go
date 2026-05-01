@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 
-	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/bootstrap"
 	cacheinfra "booking_monitor/internal/infrastructure/cache"
@@ -51,7 +50,7 @@ func runSagaWatchdog(cmd *cobra.Command, _ []string) {
 		fx.Provide(
 			cacheinfra.NewRedisClient,
 			cacheinfra.NewRedisInventoryRepository,
-			application.NewSagaCompensator,
+			saga.NewCompensator,
 			// Translate the wire-format infrastructure config into the
 			// application-layer saga.Config + provide the Prometheus-
 			// backed Metrics adapter. Closes the layer-violation

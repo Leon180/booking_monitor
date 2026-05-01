@@ -42,7 +42,7 @@ Go 1.25 | Gin | PostgreSQL 15 | Redis 7 | Kafka | Prometheus | Grafana | Jaeger 
 ```
 internal/
   domain/         # Entities (Event, Order), interfaces (repos, services)
-  application/    # Services: BookingService, WorkerService, OutboxRelay, SagaCompensator, PaymentService
+  application/    # Cohesive flow subpackages — booking/, worker/, outbox/, event/, payment/, recon/, saga/ (each has its own Service + Metrics + decorators); plus cross-pkg fx module + UnitOfWork interface + wire-format DTOs at the top level
   infrastructure/ # Adapters: api/, cache/, persistence/postgres/, messaging/, observability/, payment/, config/
   mocks/          # Generated mocks (go.uber.org/mock)
 ```
@@ -219,7 +219,7 @@ Claude Code auto-discovers assets placed under `.claude/agents/` and `.claude/sk
 ### Subagents (`.claude/agents/`)
 - **go-reviewer** — TRIGGER: any `*.go` file modified in a PR. Checks security (SQL/command injection, race conditions, `InsecureSkipVerify`), error handling (wrapping, `errors.Is/As`), concurrency (goroutine leaks, channel deadlocks), and code quality.
 - **go-build-resolver** — TRIGGER: `go build` or `go test` fails. Diagnoses import cycles, version mismatches, module errors.
-- **silent-failure-hunter** — TRIGGER: reviewing code that returns or swallows errors, especially Kafka consumers ([internal/infrastructure/messaging/](../internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox_relay.go](../internal/application/outbox_relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
+- **silent-failure-hunter** — TRIGGER: reviewing code that returns or swallows errors, especially Kafka consumers ([internal/infrastructure/messaging/](../internal/infrastructure/messaging/)), the outbox relay ([internal/application/outbox/relay.go](../internal/application/outbox/relay.go)), saga compensator, and worker service. Hunts swallowed errors, empty catch blocks, and bad fallbacks.
 
 ### Skills (`.claude/skills/`)
 - **golang-patterns** — TRIGGER: writing new Go code. Go idioms: small interfaces, error wrapping, context propagation.

@@ -1,15 +1,28 @@
 package application
 
 import (
-	"context"
-
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application/booking"
+	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/domain"
-	mlog "booking_monitor/internal/log"
 )
 
+// Module wires the cross-package application graph: booking decorators
+// (which need fx.Provide for the chain composition) + standalone
+// services that don't yet have their own subpackage (EventService,
+// SagaCompensator).
+//
+// CP2.6b note: worker + outbox fx wirings deliberately live in
+// `cmd/booking-cli/server.go` (not here) because their subpackages
+// import `application` (for `UnitOfWork`, `Repositories`,
+// `NewOrderCreatedEvent`, `EventPublisher`, `DistributedLock`), so an
+// `application → {worker,outbox}` edge here would create an import
+// cycle. This matches the pattern already used by payment/saga/recon:
+// each cmd file owns its own fx.Provide for its subpackage's
+// constructors. booking/ is the exception — it doesn't import
+// application, so application can safely import it for the
+// decorator-chain wiring.
 var Module = fx.Module("application",
 	// booking.Service is provided as a fully-decorated chain:
 	//   base -> tracing -> metrics
@@ -32,64 +45,6 @@ var Module = fx.Module("application",
 				metrics,
 			)
 		},
-		NewEventService,
-		NewOutboxRelay,
-		NewSagaCompensator,
-		// WorkerRetryPolicy is wired here (application layer) rather
-		// than in cache so the queue infra never has to import a
-		// domain-specific predicate. The default policy short-circuits
-		// the retry budget on `domain.IsMalformedOrderInput`; an
-		// alternative consumer (e.g. DLQ replay worker) could plug in
-		// its own policy without forking the queue.
-		DefaultOrderRetryPolicy,
+		event.NewService,
 	),
-	// WorkerService is provided as:
-	//   base MessageProcessor -> metrics decorator -> WorkerService
-	//
-	// Future tracing decorator (see BookingServiceTracingDecorator for
-	// the pattern) MUST sit between metrics and WorkerService:
-	//   base -> metrics -> tracing -> WorkerService
-	// so that tracing spans wrap the metrics work too. Reversing the
-	// order would either double-count metrics inside spans or hide
-	// span timing inside the metrics histogram.
-	//
-	// The processor chain is wrapped once here so every code path that
-	// resolves a WorkerService gets the decorated chain. Keeping the
-	// composition inline (not a free-floating fx.Provide of
-	// MessageProcessor) avoids publishing the base processor into the
-	// fx graph where a future consumer could accidentally depend on
-	// the undecorated instance and skip metrics.
-	fx.Provide(
-		func(
-			queue OrderQueue,
-			uow UnitOfWork,
-			metrics WorkerMetrics,
-			logger *mlog.Logger,
-		) WorkerService {
-			base := NewOrderMessageProcessor(uow, logger)
-			processor := NewMessageProcessorMetricsDecorator(base, metrics)
-			return NewWorkerService(queue, processor, logger)
-		},
-	),
-	// Start the outbox relay (with tracing) as a background goroutine managed by the Fx lifecycle.
-	//
-	// The run-context is derived from context.Background() rather than a
-	// caller-supplied ctx because the relay must survive any individual
-	// fx lifecycle hook timeout. OnStop invokes cancel() explicitly so
-	// the background is still bounded by the fx lifecycle — just
-	// decoupled from the OnStop ctx deadline.
-	fx.Invoke(func(lc fx.Lifecycle, relay *OutboxRelay) {
-		traced := NewOutboxRelayTracingDecorator(relay)
-		ctx, cancel := context.WithCancel(context.Background())
-		lc.Append(fx.Hook{
-			OnStart: func(_ context.Context) error {
-				go traced.Run(ctx)
-				return nil
-			},
-			OnStop: func(_ context.Context) error {
-				cancel() // Signal relay to stop; Run() will return on next tick
-				return nil
-			},
-		})
-	}),
 )

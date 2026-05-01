@@ -9,8 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 
-	"booking_monitor/internal/application"
-	paymentApp "booking_monitor/internal/application/payment"
+	payment "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
@@ -35,7 +34,7 @@ func runPaymentWorker(_ *cobra.Command, _ []string) {
 		bootstrap.CommonModule(cfg),
 		fx.Provide(
 			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentGateway))),
-			paymentApp.NewService,
+			payment.NewService,
 			func(cfg *config.Config, logger *mlog.Logger) *messaging.KafkaConsumer {
 				return messaging.NewKafkaConsumer(&cfg.Kafka, logger)
 			},
@@ -53,7 +52,7 @@ func installPaymentWorker(
 	shutdowner fx.Shutdowner,
 	cfg *config.Config,
 	consumer *messaging.KafkaConsumer,
-	service application.PaymentService,
+	service payment.Service,
 	logger *mlog.Logger,
 ) error {
 	tp, err := initTracer()

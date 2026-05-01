@@ -1,4 +1,4 @@
-package application
+package worker
 
 // QueueMetrics is the observability port for Redis-queue infrastructure
 // failures that would otherwise be log-only. Each method records a

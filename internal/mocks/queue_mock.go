@@ -10,7 +10,7 @@
 package mocks
 
 import (
-	application "booking_monitor/internal/application"
+	worker "booking_monitor/internal/application/worker"
 	context "context"
 	reflect "reflect"
 
@@ -56,7 +56,7 @@ func (mr *MockOrderQueueMockRecorder) EnsureGroup(ctx any) *gomock.Call {
 }
 
 // Subscribe mocks base method.
-func (m *MockOrderQueue) Subscribe(ctx context.Context, handler func(context.Context, *application.QueuedBookingMessage) error) error {
+func (m *MockOrderQueue) Subscribe(ctx context.Context, handler func(context.Context, *worker.QueuedBookingMessage) error) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Subscribe", ctx, handler)
 	ret0, _ := ret[0].(error)

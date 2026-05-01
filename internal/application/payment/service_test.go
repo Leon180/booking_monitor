@@ -76,7 +76,7 @@ func TestProcessOrder_RejectsZeroOrderID(t *testing.T) {
 
 	err := svc.ProcessOrder(context.Background(), &application.OrderCreatedEvent{OrderID: uuid.Nil, Amount: 1})
 
-	assert.ErrorIs(t, err, application.ErrInvalidPaymentEvent)
+	assert.ErrorIs(t, err, payment.ErrInvalidPaymentEvent)
 }
 
 func TestProcessOrder_RejectsNegativeAmount(t *testing.T) {
@@ -92,7 +92,7 @@ func TestProcessOrder_RejectsNegativeAmount(t *testing.T) {
 	ev.Amount = -1
 
 	err := svc.ProcessOrder(context.Background(), ev)
-	assert.ErrorIs(t, err, application.ErrInvalidPaymentEvent)
+	assert.ErrorIs(t, err, payment.ErrInvalidPaymentEvent)
 }
 
 // ── Idempotency short-circuit (order already processed) ─────────────

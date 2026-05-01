@@ -14,7 +14,7 @@ import (
 	"booking_monitor/internal/log/tag"
 )
 
-type Service struct {
+type service struct {
 	gateway   domain.PaymentGateway
 	orderRepo domain.OrderRepository
 	uow       application.UnitOfWork
@@ -34,8 +34,8 @@ func NewService(
 	orderRepo domain.OrderRepository,
 	uow application.UnitOfWork,
 	logger *mlog.Logger,
-) application.PaymentService {
-	return &Service{
+) Service {
+	return &service{
 		gateway:   gateway,
 		orderRepo: orderRepo,
 		uow:       uow,
@@ -60,7 +60,7 @@ func NewService(
 // gateway implements it via sync.Map. ProcessOrder relies on that
 // contract here — ANY adapter that violates it will produce duplicate
 // charges under retry.
-func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
+func (s *service) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
 	s.log.Info(ctx, "Processing payment for order",
 		tag.OrderID(event.OrderID), tag.Amount(event.Amount))
 
@@ -71,12 +71,12 @@ func (s *Service) ProcessOrder(ctx context.Context, event *application.OrderCrea
 	// losing the event without any operator-visible signal.
 	if event.OrderID == uuid.Nil {
 		s.log.Error(ctx, "Invalid OrderID (zero UUID)", tag.OrderID(event.OrderID))
-		return fmt.Errorf("order_id is zero UUID: %w", application.ErrInvalidPaymentEvent)
+		return fmt.Errorf("order_id is zero UUID: %w", ErrInvalidPaymentEvent)
 	}
 	if event.Amount < 0 {
 		s.log.Error(ctx, "Invalid Amount",
 			tag.OrderID(event.OrderID), tag.Amount(event.Amount))
-		return fmt.Errorf("amount=%v: %w", event.Amount, application.ErrInvalidPaymentEvent)
+		return fmt.Errorf("amount=%v: %w", event.Amount, ErrInvalidPaymentEvent)
 	}
 
 	// 2. Idempotency Check
