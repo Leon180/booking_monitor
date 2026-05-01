@@ -35,7 +35,7 @@ SUMMARY="$REPORT_DIR/comparison.md"
 echo "============================================"
 echo "  Comparison Benchmark: VUS=$VUS DURATION=$DURATION"
 echo "  Report: $REPORT_DIR"
-echo "  Script: k6_comparison.js (500k tickets)"
+echo "  Script: k6_comparison.js (5M tickets)"
 echo "============================================"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

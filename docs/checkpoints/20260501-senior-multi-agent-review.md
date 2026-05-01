@@ -164,4 +164,12 @@ The strongest story is the reliability arc: UUIDv7 order identity through the as
 
 ## Outcome
 
-_TBD_. Recommended cleanup split: one focused ops/perf PR for alert delivery, runbook SQL, scrape target alerting, and benchmark pool sizing; one docs/API PR for AGENTS bilingual contract, schema docs, checkpoint history, backlog ledger, and `GET /events/:id`.
+**Cleanup split landed in two PRs.**
+
+- **Ops/perf cleanup** (this PR / branch `chore/codex-review-followup-ops-perf`, 2026-05-02) — addresses Critical #1 (alert delivery: webhook-logger sidecar replaces null receiver), #2 (runbook SQL column names + the `SagaMaxFailedAgeExceeded` query semantic was further corrected to target `orders` not `order_status_history`), #5 (benchmark pool 500k → 5M); plus Important #7 (TargetDown scrape-failure alert + dashboard panel + runbook with planned-maintenance silence guidance).
+
+- **Docs/API cleanup** (deferred next PR) — Critical #3 (AGENTS bilingual contract restoration), Critical #4 (PROJECT_SPEC schema doc refresh), and the `GET /events/:id` stub-or-implement decision. The Codex-produced AGENTS / `.agents/` / `.codex/` artifacts are stashed off-branch waiting on that PR.
+
+**Pre-existing operational surprise discovered during smoke testing.** When the new webhook-logger receiver came online, `OrdersDLQNonEmpty` and `OrdersStreamBacklogRed` immediately delivered to the sidecar with `OrdersDLQNonEmpty.description = "12092 entries in DLQ for 5m+"`. These alerts had been firing in Alertmanager for some time but were silently swallowed by the prior null receiver — exactly the operability gap Critical #1 was about. **Triage required separately** (out of scope for this PR): is the DLQ accumulation a stress-test artifact, a stuck consumer, or a payment-worker failure mode? Drain or investigate before treating the cleanup as complete.
+
+**Defensibility-grade unchanged by this PR.** The review's grade (A− as portfolio simulator / B if pitched production-ready) reflected over-claimed performance + auth gaps; those are addressed in different roadmap phases (Phase 3 Pattern A demo + N9 auth/RBAC).

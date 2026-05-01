@@ -297,8 +297,11 @@ silence / inhibit / notification log.
 **Why this is different from `ReconMaxAgeExceeded`.** Recon force-fails. Watchdog DOES NOT auto-transition (moving Failed → Compensated without verifying inventory was reverted is unsafe). Operator decides manually.
 
 **Action.**
-- `psql ... -c "SELECT * FROM order_status_history WHERE to_status='failed' AND occurred_at < now() - interval '24 hours'"`.
-- For each order: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering.
+- `psql ... -c "SELECT id, user_id, event_id, updated_at FROM orders WHERE status='failed' AND updated_at < NOW() - interval '24 hours'"`.
+
+  Query the `orders` table directly, NOT `order_status_history` — the alert intent is "currently stuck in Failed", and the history table records every transition into Failed including ones that have since been Compensated. Querying history would give false positives for orders the saga consumer eventually compensated.
+
+- For each order returned: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering.
 
 ---
 
@@ -374,6 +377,31 @@ silence / inhibit / notification log.
 - Network split between Prometheus and the target → standard Docker network triage (`docker network inspect booking_monitor_default`).
 
 **Escalation.** Page immediately. While this fires, you have NO visibility into the affected job's correctness alerts.
+
+**Planned maintenance.** A `docker compose restart <service>` typically completes in <30s and won't fire TargetDown. A longer-than-2m planned outage (e.g. image rebuild, database migration that blocks worker startup) WILL fire. Silence proactively:
+
+```bash
+# Silence TargetDown for 10 minutes (override during planned downtime).
+docker exec booking_alertmanager amtool silence add \
+  alertname=TargetDown \
+  --duration=10m \
+  --comment="planned maintenance: $REASON"
+
+# List active silences:
+docker exec booking_alertmanager amtool silence query
+
+# Expire a silence early:
+docker exec booking_alertmanager amtool silence expire <silence-id>
+```
+
+**Partial-stack local development.** Running only a subset of services (e.g. `docker compose up app postgres redis kafka prometheus grafana` without the worker services) makes Prometheus's static scrape targets for `payment-worker` / `recon` / `saga-watchdog` perpetually fail → TargetDown fires for each. Either run the full stack (`docker compose up -d`) during alert-aware development, or silence TargetDown for the dev session:
+
+```bash
+docker exec booking_alertmanager amtool silence add \
+  alertname=TargetDown \
+  --duration=8h \
+  --comment="dev: partial stack, workers intentionally absent"
+```
 
 ---
 

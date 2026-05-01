@@ -420,11 +420,19 @@ groups:
         # single-scrape blips (one missed pull during a deploy / reload)
         # and only pages on sustained absence.
         #
-        # Per-job severity: critical for the app itself + worker
-        # processes (their absence breaks correctness alerts);
-        # warning for adjacent infra (postgres exporter, redis-stream
-        # collector — listed for future infra-exporter scrape jobs
-        # that don't exist yet but the alert is forward-compatible).
+        # All targets currently fire at severity=critical. Per-job
+        # severity routing (e.g. warning for non-critical infra
+        # exporters, critical for app + workers) is a future change
+        # that will require either separate alert rules per job
+        # or alertmanager route overrides — add when infra exporters
+        # (postgres / redis exporters) get scrape jobs.
+        #
+        # Operational caveats (see runbook):
+        #   - Fires on planned deploys that take >2m. Use `amtool
+        #     silence add alertname=TargetDown` during maintenance.
+        #   - Fires on partial-stack local development (e.g.
+        #     running only `app` without workers). Either run the
+        #     full stack or silence during dev.
         expr: up == 0
         for: 2m
         labels:

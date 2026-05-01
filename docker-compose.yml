@@ -247,7 +247,8 @@ services:
     ports:
       - "9093:9093"
     depends_on:
-      - alert_logger
+      alert_logger:
+        condition: service_healthy
 
   alert_logger:
     # Webhook-logger sidecar for Alertmanager's default delivery path.
@@ -260,20 +261,41 @@ services:
     # contributors, used in many CI pipelines) that prints the request
     # body to stdout. We pin to a specific tag for reproducibility;
     # bump deliberately when an upgrade is wanted.
+    #
+    # restart + healthcheck rationale: a silent crash of this sidecar
+    # would invisibly kill all alert delivery (Alertmanager queues
+    # webhook POSTs and eventually drops them). Without auto-restart
+    # the operability story for "alerts genuinely leave the box"
+    # becomes "...as long as nobody noticed the sidecar died". The
+    # healthcheck pairs with alertmanager's `depends_on:
+    # condition: service_healthy` so the first alert post-startup
+    # doesn't race the sidecar's HTTP listener bind.
     image: mendhak/http-https-echo:34
     container_name: booking_alert_logger
+    restart: unless-stopped
     environment:
       - HTTP_PORT=8080
       - LOG_WITHOUT_NEWLINE=false
-      # JSON_RESPONSE=false keeps the logged body un-escaped so an
-      # operator scanning logs reads the AM payload directly, not
-      # double-encoded JSON.
+      # JSON_RESPONSE=false sets the HTTP response body format to
+      # plain text rather than JSON. The stdout log is always JSON
+      # regardless; this just keeps the response itself terse so an
+      # operator curl'ing the sidecar manually doesn't get back a
+      # double-encoded blob.
       - JSON_RESPONSE=false
     ports:
       # Expose 8081 → 8080 for ad-hoc curl-driven smoke tests; the
       # AM container talks via the docker network at alert_logger:8080
       # so the host port is convenience-only.
       - "8081:8080"
+    healthcheck:
+      # The image runs an HTTP server on $HTTP_PORT; a successful
+      # GET / proves the listener is bound. wget --spider gives a
+      # 0-byte HEAD-style request without polluting the access log.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   grafana:
     image: grafana/grafana:11.2.2
