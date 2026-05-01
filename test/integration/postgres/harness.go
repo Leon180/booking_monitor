@@ -267,3 +267,24 @@ func (h *Harness) SeedEvent(t *testing.T, id, name string, totalTickets int) {
 		t.Fatalf("Harness.SeedEvent: %v", err)
 	}
 }
+
+// SeedOrder inserts a row directly into orders bypassing OrderRepository
+// — used by CP4b's UoW + Outbox tests that need a pre-existing order
+// row as a fixture without paying the cost of a Create call. The
+// order's foreign-key target (eventID) must already exist.
+//
+// Default status is 'pending'; pass an explicit status string to
+// override (e.g. "charging" / "failed" for tests targeting specific
+// branches). user_id and quantity default to 1.
+func (h *Harness) SeedOrder(t *testing.T, id, eventID, status string) {
+	t.Helper()
+	if status == "" {
+		status = "pending"
+	}
+	const stmt = `
+		INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, updated_at)
+		VALUES ($1::uuid, $2::uuid, 1, 1, $3, NOW(), NOW())`
+	if _, err := h.DB.Exec(stmt, id, eventID, status); err != nil {
+		t.Fatalf("Harness.SeedOrder: %v", err)
+	}
+}
