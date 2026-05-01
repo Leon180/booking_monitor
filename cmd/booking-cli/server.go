@@ -198,7 +198,7 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.Boo
 	// Single combined middleware: logger + correlation ID in ONE
 	// context.WithValue + ONE c.Request.WithContext (see Phase 14 GC work).
 	r.Use(middleware.Combined(logger))
-	r.Use(observability.MetricsMiddleware())
+	r.Use(middleware.Metrics())
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Health probes live at the engine root, not under /api/v1 — they
