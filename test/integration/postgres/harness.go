@@ -230,8 +230,10 @@ func applyMigrations(ctx context.Context, db *sql.DB, dir string) error {
 // individual up/down files in a controlled sequence rather than the
 // full forward replay that StartPostgres does.
 //
-// Same simple-protocol multi-statement reliance as applyMigrations
-// (see that function's comment for the lib/pq dependency note).
+// Uses ExecContext (not Exec) for consistency with applyMigrations
+// and to respect the test's context cancellation budget. Same
+// simple-protocol multi-statement reliance (see applyMigrations'
+// comment for the lib/pq dependency note).
 func (h *Harness) ApplyMigrationFile(t *testing.T, dir, name string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -239,7 +241,7 @@ func (h *Harness) ApplyMigrationFile(t *testing.T, dir, name string) {
 	if err != nil {
 		t.Fatalf("ApplyMigrationFile: read %q: %v", path, err)
 	}
-	if _, err := h.DB.Exec(string(bytes)); err != nil {
+	if _, err := h.DB.ExecContext(t.Context(), string(bytes)); err != nil {
 		t.Fatalf("ApplyMigrationFile: exec %q: %v", name, err)
 	}
 }

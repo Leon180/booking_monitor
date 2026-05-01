@@ -52,16 +52,31 @@ import (
 // recovery path.
 
 // schemaSnapshot captures the relevant DDL state of the database as
-// three sorted string slices (tables, columns, indexes). Comparing
-// the three slices via ElementsMatch yields a robust schema-equality
-// check that's resilient to ordering differences from PG's catalog
-// queries.
+// four sorted string slices: tables, columns (with defaults +
+// nullability), indexes (with WHERE predicates), and constraints
+// (CHECK / FK / UNIQUE; PKs are subsumed by table existence).
+// Comparing via ElementsMatch yields a robust schema-equality check
+// resilient to ordering differences from PG's catalog queries.
 //
-// Includes only schemaname='public' to ignore PG system tables.
+// Includes only schema='public' to ignore PG system tables.
+//
+// Constraints was added in CP4c fixup after the initial review
+// surfaced that the prior 3-component snapshot did not detect
+// CHECK / FK constraint drift — the test's own doc comment claimed
+// to catch "CHECK constraint added in up but no DROP CONSTRAINT in
+// down" but couldn't, because the snapshot ignored constraints.
+// 000003's existing CHECK constraint round-trip is now genuinely
+// verified.
+//
+// column_default was added at the same time so a DROP DEFAULT
+// missing from a down (uncommon today; conceivable for future
+// admin-rename / partition-management migrations) doesn't slip
+// through.
 type schemaSnapshot struct {
-	Tables  []string
-	Columns []string
-	Indexes []string
+	Tables      []string
+	Columns     []string
+	Indexes     []string
+	Constraints []string
 }
 
 func captureSchema(t *testing.T, ctx context.Context, h *pgintegration.Harness) schemaSnapshot {
@@ -85,27 +100,34 @@ func captureSchema(t *testing.T, ctx context.Context, h *pgintegration.Harness) 
 		t.Logf("captureSchema: rows.Close: %v", err)
 	}
 
-	// 2. Columns — encode as "table.column:type:nullable" so a column
-	//    rename, type change, or nullability flip is detected.
+	// 2. Columns — encode as "table.column:type:nullable:default" so
+	//    column rename, type change, nullability flip, OR default-
+	//    expression drift are all detected. NULL defaults render as
+	//    "<none>" so the format string is always well-formed.
 	rows, err = h.DB.QueryContext(ctx, `
-		SELECT table_name, column_name, data_type, is_nullable
+		SELECT table_name, column_name, data_type, is_nullable,
+		       COALESCE(column_default, '<none>')
 		  FROM information_schema.columns
 		 WHERE table_schema = 'public'
 		 ORDER BY table_name, column_name`)
 	require.NoError(t, err)
 	for rows.Next() {
-		var table, col, dataType, isNullable string
-		require.NoError(t, rows.Scan(&table, &col, &dataType, &isNullable))
+		var table, col, dataType, isNullable, colDefault string
+		require.NoError(t, rows.Scan(&table, &col, &dataType, &isNullable, &colDefault))
 		snap.Columns = append(snap.Columns,
-			fmt.Sprintf("%s.%s:%s:nullable=%s", table, col, dataType, isNullable))
+			fmt.Sprintf("%s.%s:%s:nullable=%s:default=%s", table, col, dataType, isNullable, colDefault))
 	}
 	require.NoError(t, rows.Err())
 	if err := rows.Close(); err != nil {
 		t.Logf("captureSchema: rows.Close: %v", err)
 	}
 
-	// 3. Indexes — capture the full indexdef so a partial-index WHERE
-	//    clause change is detected. Excludes auto-generated PKs.
+	// 3. Indexes — store the indexdef verbatim. Postgres pins
+	//    indexdef format per major version; this test container is
+	//    pinned to postgres:15-alpine, so two runs produce
+	//    byte-identical strings. If the container is bumped to
+	//    postgres:16+, verify that pg_indexes.indexdef format hasn't
+	//    drifted.
 	rows, err = h.DB.QueryContext(ctx, `
 		SELECT tablename, indexname, indexdef
 		  FROM pg_indexes
@@ -115,11 +137,50 @@ func captureSchema(t *testing.T, ctx context.Context, h *pgintegration.Harness) 
 	for rows.Next() {
 		var table, name, def string
 		require.NoError(t, rows.Scan(&table, &name, &def))
-		// Normalize: strip the schema-qualified table name from
-		// indexdef so identical indexes across PG versions compare
-		// equal.
 		snap.Indexes = append(snap.Indexes,
 			fmt.Sprintf("%s.%s := %s", table, name, def))
+	}
+	require.NoError(t, rows.Err())
+	if err := rows.Close(); err != nil {
+		t.Logf("captureSchema: rows.Close: %v", err)
+	}
+
+	// 4. Constraints — captures user-named CHECK / FOREIGN KEY /
+	//    UNIQUE constraints. PRIMARY KEY constraints are subsumed
+	//    by table existence. The CHECK clause text from
+	//    check_constraints is joined in so a semantically-changed
+	//    CHECK predicate is detected even if the constraint name
+	//    stays the same.
+	//
+	//    Filters:
+	//      - cc.check_clause NOT LIKE '%IS NOT NULL': Postgres
+	//        auto-generates a CHECK constraint per NOT NULL column,
+	//        with an OID-based name like '2200_16457_4_not_null'.
+	//        These names are NOT stable across table re-creations
+	//        (the OID changes), so including them here causes
+	//        false positives on round-trips that drop+recreate the
+	//        table (e.g. migration 000010's ADD COLUMN ... NOT
+	//        NULL → DROP COLUMN → ADD COLUMN cycle). The
+	//        is_nullable='NO' attribute is already captured by the
+	//        Columns snapshot, so dropping these from Constraints
+	//        is non-redundant.
+	rows, err = h.DB.QueryContext(ctx, `
+		SELECT tc.table_name, tc.constraint_name, tc.constraint_type,
+		       COALESCE(cc.check_clause, '<n/a>')
+		  FROM information_schema.table_constraints tc
+		  LEFT JOIN information_schema.check_constraints cc
+		    ON tc.constraint_name = cc.constraint_name
+		   AND tc.constraint_schema = cc.constraint_schema
+		 WHERE tc.table_schema = 'public'
+		   AND tc.constraint_type IN ('CHECK', 'FOREIGN KEY', 'UNIQUE')
+		   AND COALESCE(cc.check_clause, '') NOT LIKE '%IS NOT NULL'
+		 ORDER BY tc.table_name, tc.constraint_name`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var table, name, ctype, clause string
+		require.NoError(t, rows.Scan(&table, &name, &ctype, &clause))
+		snap.Constraints = append(snap.Constraints,
+			fmt.Sprintf("%s.%s [%s] := %s", table, name, ctype, clause))
 	}
 	require.NoError(t, rows.Err())
 	if err := rows.Close(); err != nil {
@@ -159,6 +220,15 @@ func migrationFiles(t *testing.T, dir string) []string {
 			prefixes = append(prefixes, p)
 		} else {
 			t.Errorf("migration %q has up.sql but no paired down.sql — round-trip test cannot run on it", p)
+		}
+	}
+	// Symmetric check: an orphan down.sql with no paired up.sql is
+	// also a sign of layout drift. The TestMigrationsAllPaired
+	// guard catches this from a different angle, but warning here
+	// makes the failure-mode visible during the round-trip run too.
+	for p := range downSet {
+		if !upSet[p] {
+			t.Errorf("migration %q has down.sql but no paired up.sql — orphan down indicates layout drift", p)
 		}
 	}
 	sort.Strings(prefixes)
@@ -229,17 +299,23 @@ func TestMigrationRoundTrip(t *testing.T) {
 }
 
 // assertSnapshotsEqual compares two schemaSnapshots with
-// ElementsMatch on each component. Diagnostic output names which
-// component differs so a failure points the operator at the right
-// part of the migration to inspect.
+// ElementsMatch on each of the four components. Diagnostic output
+// names which component differs so a failure points the operator at
+// the right part of the migration to inspect.
+//
+// Fail-fast via t.FailNow on any mismatch — this prevents the parent
+// test's `priorSnapshot` variable from being updated to a polluted
+// state when an iteration fails, which would cascade into spurious
+// failures on subsequent migrations.
 func assertSnapshotsEqual(t *testing.T, want, got schemaSnapshot, msg string) {
 	t.Helper()
-	assert.ElementsMatch(t, want.Tables, got.Tables,
-		"%s: tables differ", msg)
-	assert.ElementsMatch(t, want.Columns, got.Columns,
-		"%s: columns differ", msg)
-	assert.ElementsMatch(t, want.Indexes, got.Indexes,
-		"%s: indexes differ", msg)
+	ok := assert.ElementsMatch(t, want.Tables, got.Tables, "%s: tables differ", msg)
+	ok = assert.ElementsMatch(t, want.Columns, got.Columns, "%s: columns differ", msg) && ok
+	ok = assert.ElementsMatch(t, want.Indexes, got.Indexes, "%s: indexes differ", msg) && ok
+	ok = assert.ElementsMatch(t, want.Constraints, got.Constraints, "%s: constraints differ", msg) && ok
+	if !ok {
+		t.FailNow()
+	}
 }
 
 // TestMigrationsAllPaired guards the convention that every up.sql
