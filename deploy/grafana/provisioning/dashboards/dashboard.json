@@ -13,12 +13,7 @@
       "title": "Request Rate (RPS)",
       "type": "timeseries",
       "datasource": "Prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 0
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
           "expr": "sum by (method, path, status) (rate(http_requests_total[1m]))",
@@ -32,12 +27,7 @@
       "title": "Global Request Latency (p99/p95/p50)",
       "type": "timeseries",
       "datasource": "Prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
           "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
@@ -56,9 +46,7 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
+        "defaults": { "unit": "s" }
       }
     },
     {
@@ -66,12 +54,7 @@
       "title": "Conversion Rate (%)",
       "type": "stat",
       "datasource": "Prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 8
-      },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
       "targets": [
         {
           "expr": "sum(rate(bookings_total{status=\"success\"}[5m])) / sum(rate(page_views_total{page=\"event_detail\"}[5m])) * 100",
@@ -80,11 +63,7 @@
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"] },
         "graphMode": "area"
       }
     },
@@ -93,12 +72,7 @@
       "title": "Saturation (Goroutines)",
       "type": "timeseries",
       "datasource": "Prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "targets": [
         {
           "expr": "sum by (job) (go_goroutines)",
@@ -112,12 +86,7 @@
       "title": "Saturation (Memory Alloc Bytes)",
       "type": "timeseries",
       "datasource": "Prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "targets": [
         {
           "expr": "sum by (job) (go_memstats_alloc_bytes)",
@@ -126,10 +95,389 @@
         }
       ],
       "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        }
+        "defaults": { "unit": "bytes" }
       }
+    },
+
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Reliability — Recon (A4 charging two-phase intent log)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 10,
+      "title": "Recon resolved by outcome (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Outcomes from the charging-state reconciler. `charged` = gateway confirmed payment, transitioned to Paid. `declined` = gateway refused, transitioned to Failed. `max_age_exceeded` is operator-page-worthy (force-fail without auto-transition; phantom-revert risk).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(recon_resolved_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Recon stuck-charging gauge (point-in-time)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Number of orders stuck in Charging older than RECON_CHARGING_THRESHOLD. Reset every sweep. Sustained >0 for 10m fires the StuckChargingOrders alert.",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 25 },
+      "targets": [
+        {
+          "expr": "recon_stuck_charging_orders",
+          "legendFormat": "stuck-charging",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Recon resolve duration (p95/p50) + error rate",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "p95/p50 wall-clock per resolved order. Errors panel below tracks find-stuck DB failures + gateway probe failures + DB mark errors — all are alert-paired.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 25 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(recon_resolve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(recon_resolve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Recon error rates (find-stuck / gateway / mark)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Three distinct failure modes — operator triage points at different subsystems. Find-stuck = DB query, gateway = probe HTTP/timeout, mark = DB transition + outbox write.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "expr": "rate(recon_find_stuck_errors_total[5m])",
+          "legendFormat": "find-stuck (DB)",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(recon_gateway_errors_total[5m])",
+          "legendFormat": "gateway probe",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(recon_mark_errors_total[5m])",
+          "legendFormat": "mark (DB + outbox)",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Reliability — Saga Watchdog (A5)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }
+    },
+    {
+      "id": 20,
+      "title": "Saga watchdog resolved by outcome (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "compensator_error sustained >0 = compensator hitting Redis/DB trouble re-driving stuck-Failed; max_age_exceeded for 1h = operator review required (auto-transition disabled to avoid phantom revert).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(saga_watchdog_resolved_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Saga stuck-failed gauge (point-in-time)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Failed orders older than SAGA_STUCK_THRESHOLD. Sustained >0 for 10m means saga consumer is silently dropping events or compensator is falling behind.",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 42 },
+      "targets": [
+        {
+          "expr": "saga_stuck_failed_orders",
+          "legendFormat": "stuck-failed",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Saga watchdog resolve duration (p95/p50)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Wall-clock to re-drive one stuck-Failed order via the compensator. Symmetric counterpart to the recon resolve panel.",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 42 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(saga_watchdog_resolve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(saga_watchdog_resolve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "id": 23,
+      "title": "Saga watchdog find-stuck error rate + poison messages",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "find-stuck rate >0 = watchdog itself broken (DB outage, missing index). saga_poison_messages_total = events that exceeded the compensator's retry budget and were dead-lettered.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 50 },
+      "targets": [
+        {
+          "expr": "rate(saga_watchdog_find_stuck_errors_total[5m])",
+          "legendFormat": "find-stuck (DB)",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(saga_poison_messages_total[5m])",
+          "legendFormat": "saga poison (dead-lettered)",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Dead Letter Queue activity",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 }
+    },
+    {
+      "id": 30,
+      "title": "Kafka DLQ messages by topic + reason (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Per-topic, per-reason routing. invalid_payload + invalid_event = malformed; max_retries = exhausted retry budget. Spike on max_retries = downstream is degraded.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 59 },
+      "targets": [
+        {
+          "expr": "sum by (topic, reason) (rate(dlq_messages_total[5m]))",
+          "legendFormat": "{{topic}} / {{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "title": "Redis DLQ routed by reason (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "orders:dlq stream routes. malformed_parse = JSON broken; malformed_classified = passes parse but fails domain factory invariants; exhausted_retries = transient error budget burned.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 59 },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(redis_dlq_routed_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "title": "Kafka consumer retry rate (silent retry surface)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Messages left UNCOMMITTED for Kafka rebalance to redeliver — consumer is stuck-but-not-dead. Sustained >1/s for 2m fires KafkaConsumerStuck.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 67 },
+      "targets": [
+        {
+          "expr": "sum by (topic, reason) (rate(kafka_consumer_retry_total[5m]))",
+          "legendFormat": "{{topic}} / {{reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Database — pool (USE) + correctness signals",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 75 }
+    },
+    {
+      "id": 40,
+      "title": "PG pool: in-use vs idle (live)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Saturation signal. in-use approaching MaxOpenConns (DB_MAX_OPEN_CONNS=50 default) means downstream queries are about to start blocking on pool acquisition.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+      "targets": [
+        {
+          "expr": "pg_pool_in_use",
+          "legendFormat": "in-use",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_pool_idle",
+          "legendFormat": "idle",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "title": "PG pool wait rate + wait time + rollback failures",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "wait_count rate = how often goroutines block waiting for a connection. db_rollback_failures = transactional defects (open transaction couldn't be rolled back; connection state is suspect).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+      "targets": [
+        {
+          "expr": "rate(pg_pool_wait_count_total[5m])",
+          "legendFormat": "wait rate (events/s)",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pg_pool_wait_duration_seconds_total[5m])",
+          "legendFormat": "wait time/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(db_rollback_failures_total[5m])",
+          "legendFormat": "rollback failures",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Cache — idempotency (N4)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 84 }
+    },
+    {
+      "id": 50,
+      "title": "Idempotency cache hit rate (%)",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "description": "hit / (hit + miss) over 5m. Sustained drop = cache cold / wrong-keyed / being bypassed. Doesn't reflect infra errors (those don't inflate misses; tracked separately).",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 85 },
+      "targets": [
+        {
+          "expr": "(sum(rate(cache_hits_total{cache=\"idempotency\"}[5m])) / (sum(rate(cache_hits_total{cache=\"idempotency\"}[5m])) + sum(rate(cache_misses_total{cache=\"idempotency\"}[5m])))) * 100",
+          "legendFormat": "hit rate",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100 }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 51,
+      "title": "Idempotency cache GET errors (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Page-worthy: rate >0 sustained 1m means idempotency protection is SUSPENDED (handler fails open) — duplicate-charge protection downgrades to DB UNIQUE constraints.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 85 },
+      "targets": [
+        {
+          "expr": "rate(idempotency_cache_get_errors_total[5m])",
+          "legendFormat": "GET errors",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "title": "Idempotency replay outcomes (rate, 5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "match = same key + same body → cached replay. mismatch = same key + different body → 409 (client misbehaving). legacy_match = pre-N4 cache entry; should taper to 0 within 24h after N4 deploy.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 85 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(idempotency_replays_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "id": 600,
+      "type": "row",
+      "title": "Redis — stream / DLQ infra failures",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 93 }
+    },
+    {
+      "id": 60,
+      "title": "Redis stream / DLQ failure rates (5m)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "XAck failures = double-processing risk (message retained in PEL). XAdd failures by stream = DLQ write failure surface. Revert failures = compensation drift (Redis/DB inventory disagreement risk).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 94 },
+      "targets": [
+        {
+          "expr": "rate(redis_xack_failures_total[5m])",
+          "legendFormat": "xack",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (stream) (rate(redis_xadd_failures_total[5m]))",
+          "legendFormat": "xadd / {{stream}}",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(redis_revert_failures_total[5m])",
+          "legendFormat": "revert (compensation)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 61,
+      "title": "Redis stream collector errors (XLEN/XPENDING) by stream + op",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Sustained >0 means the streams observability collector is degraded — stream-length / pending / lag gauges may be stale. Pairs with the RedisStreamCollectorDown alert.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 94 },
+      "targets": [
+        {
+          "expr": "sum by (stream, operation) (rate(redis_stream_collector_errors_total[5m]))",
+          "legendFormat": "{{stream}} / {{operation}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }
