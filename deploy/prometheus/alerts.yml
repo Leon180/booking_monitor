@@ -14,6 +14,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#higherrorrate"
           summary: "High Error Rate detected"
           description: "Error rate above 5% over 5m (current: {{ $value }})"
 
@@ -29,6 +30,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#highlatency"
           summary: "High Latency detected"
           description: "p99 Latency is above 2s for 2m+ (current: {{ $value }}s)"
 
@@ -43,6 +45,7 @@ groups:
         labels:
           severity: info
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorysoldout"
           summary: "Event Sold Out"
           description: "At least one booking attempt in the last 5 minutes returned sold_out ({{ $value }} attempts)."
 
@@ -61,6 +64,7 @@ groups:
         labels:
           severity: info
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#ordersstreambacklogyellow"
           summary: "orders:stream backlog rising (yellow)"
           description: "Stream length {{ $value }} for 2m. Worker may be slow; investigate before tier 2 (50K) fires."
 
@@ -72,6 +76,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#ordersstreambacklogorange"
           summary: "orders:stream backlog severe (orange)"
           description: "Stream length {{ $value }} for 2m. Worker degraded — scale or restart. Tier 3 fires at 200K."
 
@@ -85,6 +90,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#ordersstreambacklogred"
           summary: "orders:stream approaching unbounded growth (red)"
           description: "Stream length {{ $value }} for 1m. Without intervention, Redis OOM is imminent. Investigate worker liveness; consider manual scale-out or producer-side throttle."
 
@@ -99,6 +105,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#ordersstreamconsumerlag"
           summary: "orders:stream consumer lag > 60s"
           description: "Oldest pending entry is {{ $value }}s old for 2m. A consumer is stuck (GC pause, hung syscall, deadlock); inspect XINFO CONSUMERS for idle times."
 
@@ -118,6 +125,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#ordersdlqnonempty"
           summary: "orders:dlq has unreviewed entries"
           description: "{{ $value }} entries in DLQ for 5m+. Operator must review via Redis CLI: XRANGE orders:dlq - +. After investigation, XACK or manually XDEL after archiving."
 
@@ -138,6 +146,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisstreamcollectordown"
           summary: "Streams observability collector is failing"
           description: "{{ $labels.operation }} on {{ $labels.stream }} averaging {{ $value }} errors/sec for 2m+. Stream backlog gauges are stale; other stream-* alerts CANNOT fire until this is resolved. Check Redis connectivity from the app process."
 
@@ -159,6 +168,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#reconstuckcharging"
           summary: "Stuck Charging orders persisting (recon backlog)"
           description: "recon_stuck_charging_orders has been > 0 for 5m (current: {{ $value }}). Either the payment gateway is slow / degraded, or the reconciler is falling behind. Check recon_gateway_errors_total and recon_gateway_get_status_duration_seconds."
 
@@ -179,6 +189,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#reconfindstuckerrors"
           summary: "Reconciler sweep query is failing"
           description: "FindStuckCharging has been failing for 2m+ at {{ $value }} errors/sec. The reconciler is not detecting stuck orders. Check DB connectivity, migration status (000010 must be applied for the partial index), and query timeouts."
 
@@ -198,6 +209,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#recongatewayerrors"
           summary: "Reconciler gateway errors persisting"
           description: "recon_gateway_errors_total averaging {{ $value }} errors/sec over 5m. Gateway GetStatus is degraded; stuck-Charging orders are not being resolved on schedule."
 
@@ -216,6 +228,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#reconmaxageexceeded"
           summary: "Reconciler force-failed stuck order(s) — manual review needed"
           description: "{{ $value }} order(s) exceeded RECON_MAX_CHARGING_AGE in the last hour and were force-failed. Investigate via order_status_history (from_status=charging, to_status=failed) — the customer was never confirmed as charged."
 
@@ -234,6 +247,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagastuckfailedorders"
           summary: "Saga compensator falling behind — {{ $value }} orders stuck Failed"
           description: "saga_stuck_failed_orders has been > 0 for 10m (current: {{ $value }}). The watchdog has been re-driving the compensator every sweep without clearing the backlog — typical causes: Redis revert blocked (saga:reverted:* key contention), DB lock on orders table, or the compensator is throwing an unmapped error. Check saga_watchdog_resolved_total{outcome='compensator_error'} for the failure rate."
 
@@ -254,6 +268,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorerrors"
           summary: "Saga compensator returning errors during watchdog re-drive"
           description: "saga_watchdog_resolved_total{outcome='compensator_error'} averaging {{ $value }} errors/sec over 5m. The compensator's Redis revert or DB MarkCompensated is failing repeatedly. Check Redis health (saga:reverted:* key contention) and DB lock state on the orders table. Distinct from getbyid_error (DB read upstream of compensator) and marshal_error (regression in OrderFailedEvent shape)."
 
@@ -270,6 +285,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagawatchdogfindstuckerrors"
           summary: "Saga watchdog sweep query is failing"
           description: "FindStuckFailed has been failing for 2m+ at {{ $value }} errors/sec. Watchdog cannot detect stuck-Failed orders. Check DB connectivity, migration status (000011 must be applied for the partial index), and query timeouts."
 
@@ -286,6 +302,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagamaxfailedageexceeded"
           summary: "Saga watchdog flagged stuck Failed orders >24h old — manual review needed"
           description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (status='failed') and decide manually whether to revert inventory + MarkCompensated."
 
@@ -302,6 +319,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#idempotencycachegeterrors"
           summary: "Idempotency cache GET path returning errors"
           description: "idempotency_cache_get_errors_total averaging {{ $value }} errors/sec over 5m. Duplicate-charge protection is suspended for affected requests — operators must investigate Redis health immediately. See docs/monitoring.md §2 for the metric's contract."
 
@@ -318,6 +336,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#reconmarkerrors"
           summary: "Reconciler MarkConfirmed/MarkFailed errors persisting"
           description: "recon_mark_errors_total averaging {{ $value }} errors/sec over 5m. Recon classified orders as Charged/Declined/NotFound but the DB transition itself is failing — orders remain in Charging and the gauge will keep climbing. Check DB connectivity and lock state on the orders table."
 
@@ -333,6 +352,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#dbrollbackfailures"
           summary: "DB transaction rollback failing"
           description: "db_rollback_failures_total averaging {{ $value }} errors/sec over 5m. UoW Rollback should be effectively zero — a sustained rate means a driver / connection-pool bug is corrupting transaction state. Check DB logs and pgx/database/sql release notes for known issues."
 
@@ -347,6 +367,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisxackfailures"
           summary: "Redis XACK failures on orders stream"
           description: "redis_xack_failures_total averaging {{ $value }} errors/sec over 5m. Processed orders are not being acknowledged — the PEL will grow unbounded and consumers will redo work on rebalance. Check Redis connectivity, AOF state, and stream `orders:stream` consumer-group status (XINFO GROUPS)."
 
@@ -361,6 +382,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisrevertfailures"
           summary: "Redis revert.lua failing in saga compensation"
           description: "redis_revert_failures_total averaging {{ $value }} errors/sec over 5m. Compensation is failing to revert Redis inventory — drift vs DB will accumulate. Check Redis Lua execution logs (revert.lua), AOF state, and connectivity from the saga consumer."
 
@@ -375,6 +397,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisxaddfailures"
           summary: "Redis XADD failures on orders stream"
           description: "redis_xadd_failures_total averaging {{ $value }} errors/sec over 5m. The booking hot path is intermittently failing to enqueue orders into Redis Streams. User-visible 5xx rate may also be elevated. Check Redis health and AOF state."
 
@@ -399,5 +422,6 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#kafkaconsumerstuck"
           summary: "Kafka consumer stuck on topic {{ $labels.topic }}"
           description: "kafka_consumer_retry_total is averaging {{ $value }} retries/sec over 5m on topic {{ $labels.topic }}. Check downstream DB / Redis / payment gateway health."

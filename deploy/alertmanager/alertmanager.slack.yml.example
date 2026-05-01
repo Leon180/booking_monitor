@@ -1,0 +1,73 @@
+# Alertmanager configuration WITH Slack delivery enabled.
+#
+# How to use this file:
+#   1. Create an Incoming Webhook in Slack (App Directory → Incoming
+#      Webhooks). The URL has the shape
+#      https://hooks.slack.com/services/T.../B.../...
+#   2. Copy this file over the live config:
+#        cp alertmanager.slack.yml.example alertmanager.yml
+#   3. Replace the `api_url` literal below with your webhook URL.
+#      Alertmanager does NOT expand env vars in this YAML, so either
+#      edit in place or pre-process via envsubst / gomplate before
+#      mounting (or use slack_api_url_file to read from a file).
+#   4. `docker compose restart alertmanager`.
+#
+# Differences from alertmanager.yml (the dev/demo default):
+#   - Top-level route + per-severity routes use the `slack` receiver
+#     instead of `null`.
+#   - The `slack` receiver is fully populated.
+#   - Otherwise structurally identical (same group_*, repeat_interval,
+#     inhibit_rules) so behaviour is the same except for delivery.
+
+global:
+  resolve_timeout: 5m
+
+templates: []
+
+route:
+  receiver: slack
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: slack
+      group_wait: 10s
+      repeat_interval: 30m
+      continue: false
+
+    - matchers:
+        - severity = "warning"
+      receiver: slack
+      continue: false
+
+    - matchers:
+        - severity = "info"
+      receiver: slack
+      repeat_interval: 24h
+      continue: false
+
+inhibit_rules:
+  - source_matchers:
+      - alertname = "RedisStreamCollectorDown"
+    target_matchers:
+      - alertname =~ "OrdersStreamBacklog(Yellow|Orange|Red)|OrdersStreamConsumerLag|OrdersDLQNonEmpty"
+    equal: []
+
+receivers:
+  - name: slack
+    slack_configs:
+      - api_url: 'REPLACE_WITH_SLACK_WEBHOOK_URL'
+        channel: '#alerts-booking-monitor'
+        send_resolved: true
+        title: '{{ .CommonAnnotations.summary }}'
+        text: |
+          *Severity:* {{ .CommonLabels.severity }}
+          *Alert:* {{ .CommonLabels.alertname }}
+          {{ range .Alerts }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}

@@ -183,7 +183,11 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 
 ## 5. 告警
 
-告警定義在 [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml)。狀態在 Prometheus UI → **Alerts** 看得到。
+告警定義在 [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml)。狀態在 Prometheus UI → **Alerts**,以及 Alertmanager UI(http://localhost:9093,負責 silence / inhibit / 通知紀錄)。
+
+**Alertmanager 接線(CP6)。** Prometheus 把 firing 的告警推到 Alertmanager(設定檔:[deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml))。Alertmanager 負責去重、依 `alertname + severity` 分組、依 severity 設定不同的 repeat 節奏(critical:30 m;warning:4 h;info:24 h)、以及 inhibition(例如 `RedisStreamCollectorDown` 會壓制所有其他 stream-backlog 告警,因為計量本來就已經是 stale)。預設的投遞目標是 `null` — 告警在 Alertmanager 內會去重 / 分組 / 可以 silence,但不會往外推。Slack 投遞是 opt-in 的:把 `alertmanager.yml` 中所有 `null` receiver 換成 `slack` receiver,然後把 Incoming Webhook URL 貼進 `api_url`。
+
+**Runbook annotation(CP5)。** 每個告警都帶一條 `runbook_url` annotation,指向 [docs/runbooks/README.md](runbooks/README.md) 內的某個 section。Alertmanager 會透過 `alertmanager.yml` 中的 template 把該 URL 渲染進 Slack 通知。操作員的工作流:告警觸發 → 通知到達 → 點 runbook → 同一份文件內看到對應的 dashboard panel 與具體的處置步驟。
 
 目前的告警目錄:
 
