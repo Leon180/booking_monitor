@@ -27,6 +27,17 @@ global:
 rule_files:
   - "alerts.yml"
 
+# alerting — where Prometheus pushes "alert is firing" notifications.
+# Without this block, alerts evaluated by rule_files are visible in
+# the Prometheus UI's Alerts tab but go nowhere — no Slack, no email,
+# no PagerDuty. Alertmanager handles dedup / grouping / routing /
+# silencing; see deploy/alertmanager/alertmanager.yml. Added in CP6.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "alertmanager:9093"
+
 # Every scrape_configs entry is a `job`. For each job, Prometheus
 # automatically adds two labels to every metric it scrapes:
 #   job      = the job_name below

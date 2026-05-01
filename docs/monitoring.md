@@ -183,7 +183,11 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 
 ## 5. Alerts
 
-Alert definitions live in [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml). State is visible in the Prometheus UI → **Alerts**.
+Alert definitions live in [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml). State is visible in the Prometheus UI → **Alerts** AND in the Alertmanager UI at http://localhost:9093 (silence / inhibit / notification log).
+
+**Alertmanager wiring (CP6).** Prometheus pushes firing alerts to Alertmanager (config: [deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml)). Alertmanager handles dedup, grouping by `alertname + severity`, severity-specific cadences (critical: 30 m repeat, warning: 4 h, info: 24 h), and inhibition (e.g. `RedisStreamCollectorDown` suppresses every other stream-backlog alert because the gauges are stale anyway). The default delivery target is `null` — alerts dedupe / group / silence in Alertmanager but nothing pushes outbound. Slack delivery is opt-in: replace the `null` receiver references in `alertmanager.yml` with the `slack` receiver and paste your Incoming Webhook URL into `api_url`.
+
+**Runbook annotations (CP5).** Every alert carries a `runbook_url` annotation pointing at a section in [docs/runbooks/README.md](runbooks/README.md). Alertmanager renders the URL into Slack notifications via the template in `alertmanager.yml`. Operator workflow: alert fires → notification arrives → click runbook → matching dashboard panel + concrete remediation steps in one document.
 
 The current alert catalog:
 

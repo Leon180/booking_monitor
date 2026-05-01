@@ -219,6 +219,29 @@ services:
       - "9090:9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    # CP6 — Alertmanager handles dedup / grouping / routing / silencing
+    # for alerts evaluated in Prometheus rule_files. Without it, firing
+    # alerts are visible in Prometheus's Alerts tab but never push to
+    # any delivery target. See deploy/alertmanager/alertmanager.yml for
+    # the receiver / route / inhibition config (Slack-or-noop fallback
+    # so dev stacks work without a real webhook secret).
+    image: prom/alertmanager:v0.27.0
+    container_name: booking_alertmanager
+    volumes:
+      - ./deploy/alertmanager:/etc/alertmanager:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      # --web.external-url makes runbook_url annotations and silence
+      # links resolve correctly when accessed from the host browser
+      # rather than the in-network alertmanager:9093 hostname.
+      - '--web.external-url=http://localhost:9093'
+    ports:
+      - "9093:9093"
 
   grafana:
     image: grafana/grafana:11.2.2
