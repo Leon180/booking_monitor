@@ -20,10 +20,14 @@ Client -> Nginx (rate limit) -> Gin API -> Redis Lua (atomic deduct)
 cmd/booking-cli/          # CLI entry: server, stress, payment, recon, saga-watchdog subcommands
 internal/
   domain/                 # Entities (Event, Order, OutboxEvent), value types (StuckCharging, StuckFailed), repository interfaces
-  application/            # BookingService, WorkerService, OutboxRelay
-    payment/              # PaymentService — Kafka order.created consumer, gateway orchestration
+  application/            # Cross-package fx module + UnitOfWork interface + wire-format event DTOs (order_events.go)
+    booking/              # POST /book hot path: BookTicket validates + Redis Lua deduct
+    worker/               # Order-stream consumer + queue policy + per-message processor
+    outbox/               # Outbox relay polling + Kafka publish (transactional outbox impl)
+    event/                # Event creation + Redis hot inventory provisioning
+    payment/              # Kafka order.created consumer + gateway orchestration + saga trigger
     recon/                # Reconciler (A4) — sweeps stuck `charging` orders, queries gateway, resolves
-    saga/                 # SagaCompensator + Watchdog (A5) — order.failed consumer + DB-side sweep
+    saga/                 # Compensator + Watchdog (A5) — order.failed consumer + DB-side sweep
   infrastructure/
     api/
       booking/            # POST /book, GET /orders, GET /history, POST /events, GET /events/:id

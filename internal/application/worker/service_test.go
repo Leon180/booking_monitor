@@ -1,4 +1,4 @@
-package application_test
+package worker_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
@@ -18,22 +19,22 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-// SpyingWorkerMetrics records outcomes for decorator assertions.
-type SpyingWorkerMetrics struct {
+// SpyingMetrics records outcomes for decorator assertions.
+type SpyingMetrics struct {
 	Outcomes            []string
 	ProcessingDurations []time.Duration
 	ConflictCount       int
 }
 
-func (s *SpyingWorkerMetrics) RecordOrderOutcome(status string) {
+func (s *SpyingMetrics) RecordOrderOutcome(status string) {
 	s.Outcomes = append(s.Outcomes, status)
 }
 
-func (s *SpyingWorkerMetrics) RecordProcessingDuration(d time.Duration) {
+func (s *SpyingMetrics) RecordProcessingDuration(d time.Duration) {
 	s.ProcessingDurations = append(s.ProcessingDurations, d)
 }
 
-func (s *SpyingWorkerMetrics) RecordInventoryConflict() {
+func (s *SpyingMetrics) RecordInventoryConflict() {
 	s.ConflictCount++
 }
 
@@ -51,14 +52,14 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		msg           *application.QueuedBookingMessage
-		setupMocks    func(*application.QueuedBookingMessage, *mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockOutboxRepository, *mocks.MockUnitOfWork)
+		msg           *worker.QueuedBookingMessage
+		setupMocks    func(*worker.QueuedBookingMessage, *mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockOutboxRepository, *mocks.MockUnitOfWork)
 		expectedError error
 	}{
 		{
 			name: "Success",
-			msg:  &application.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
-			setupMocks: func(msg *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			setupMocks: func(msg *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
@@ -94,8 +95,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &application.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
-			setupMocks: func(_ *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
@@ -105,8 +106,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &application.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
-			setupMocks: func(_ *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
@@ -117,8 +118,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &application.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
-			setupMocks: func(_ *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
 				})
@@ -135,8 +136,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &application.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1},
-			setupMocks: func(_ *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1},
+			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — gomock will fail the test if any
 				// repo call fires, asserting fail-fast.
 			},
@@ -151,8 +152,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// must NOT slip a zero-UUID order through). Same fail-fast
 			// expectation as the other malformed cases.
 			name: "Malformed message — zero OrderID short-circuits before tx",
-			msg:  &application.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, UserID: 1, Quantity: 1},
-			setupMocks: func(_ *application.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, UserID: 1, Quantity: 1},
+			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — fail-fast assertion.
 			},
 			expectedError: domain.ErrInvalidOrderID,
@@ -173,7 +174,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				tt.setupMocks(tt.msg, mockEventRepo, mockOrderRepo, mockOutbox, mockUoW)
 			}
 
-			p := application.NewOrderMessageProcessor(mockUoW, nopLogger)
+			p := worker.NewOrderMessageProcessor(mockUoW, nopLogger)
 			err := p.Process(context.Background(), tt.msg)
 
 			if tt.expectedError != nil {
@@ -196,7 +197,7 @@ type fakeMessageProcessor struct {
 	err error
 }
 
-func (f *fakeMessageProcessor) Process(_ context.Context, _ *application.QueuedBookingMessage) error {
+func (f *fakeMessageProcessor) Process(_ context.Context, _ *worker.QueuedBookingMessage) error {
 	return f.err
 }
 
@@ -218,10 +219,10 @@ func TestMessageProcessorMetricsDecorator_Process(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			spy := &SpyingWorkerMetrics{}
-			decorated := application.NewMessageProcessorMetricsDecorator(&fakeMessageProcessor{err: tt.innerErr}, spy)
+			spy := &SpyingMetrics{}
+			decorated := worker.NewMessageProcessorMetricsDecorator(&fakeMessageProcessor{err: tt.innerErr}, spy)
 
-			err := decorated.Process(context.Background(), &application.QueuedBookingMessage{MessageID: "test"})
+			err := decorated.Process(context.Background(), &worker.QueuedBookingMessage{MessageID: "test"})
 
 			if tt.innerErr == nil {
 				assert.NoError(t, err)
@@ -240,17 +241,17 @@ func TestMessageProcessorMetricsDecorator_Process(t *testing.T) {
 	}
 }
 
-func TestWorkerService_Start(t *testing.T) {
+func TestService_Start(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	mockQueue := mocks.NewMockOrderQueue(ctrl)
 	nopLogger := mlog.NewNop()
 
-	// Processor is opaque to WorkerService — a fake suffices; Start
+	// Processor is opaque to Service — a fake suffices; Start
 	// never calls Process directly, it hands the method reference to
 	// Subscribe.
-	svc := application.NewWorkerService(mockQueue, &fakeMessageProcessor{}, nopLogger)
+	svc := worker.NewService(mockQueue, &fakeMessageProcessor{}, nopLogger)
 
 	ctx := context.Background()
 

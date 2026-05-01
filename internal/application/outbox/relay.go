@@ -1,10 +1,11 @@
-package application
+package outbox
 
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -13,26 +14,26 @@ import (
 const (
 	outboxPollInterval = 500 * time.Millisecond
 	// outboxLockID is the Postgres advisory lock key used for leader
-	// election across all OutboxRelay replicas. Defined once to avoid
+	// election across all Relay replicas. Defined once to avoid
 	// the historical magic-number-in-two-places bug (M4).
 	outboxLockID int64 = 1001
 )
 
-// OutboxRelay polls the outbox table and publishes pending events to the message bus.
+// Relay polls the outbox table and publishes pending events to the message bus.
 // It runs as a background goroutine managed by the Fx lifecycle.
-type OutboxRelay struct {
+type Relay struct {
 	outboxRepo domain.OutboxRepository
-	publisher  EventPublisher
+	publisher  application.EventPublisher
 	batchSize  int
-	mutex      DistributedLock
+	mutex      application.DistributedLock
 	log        *mlog.Logger
 }
 
-func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher EventPublisher, batchSize int, mutex DistributedLock, logger *mlog.Logger) *OutboxRelay {
+func NewRelay(outboxRepo domain.OutboxRepository, publisher application.EventPublisher, batchSize int, mutex application.DistributedLock, logger *mlog.Logger) *Relay {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
-	return &OutboxRelay{
+	return &Relay{
 		outboxRepo: outboxRepo,
 		publisher:  publisher,
 		batchSize:  batchSize,
@@ -42,7 +43,7 @@ func NewOutboxRelay(outboxRepo domain.OutboxRepository, publisher EventPublisher
 }
 
 // Run starts the relay loop. It blocks until ctx is cancelled.
-func (r *OutboxRelay) Run(ctx context.Context) {
+func (r *Relay) Run(ctx context.Context) {
 	r.runWithBatchHook(ctx, r.processBatch)
 }
 
@@ -53,7 +54,7 @@ func (r *OutboxRelay) Run(ctx context.Context) {
 // ctx.Done, or unexpected return — releases it. Previously the Unlock
 // only ran on the ctx.Done branch, which leaked the lock on panic or
 // on a bug that returned from the function without hitting ctx.Done.
-func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context.Context) error) {
+func (r *Relay) runWithBatchHook(ctx context.Context, batchFn func(context.Context) error) {
 	r.log.Info(ctx, "outbox relay started", mlog.Int("batch_size", r.batchSize))
 
 	ticker := time.NewTicker(outboxPollInterval)
@@ -113,7 +114,7 @@ func (r *OutboxRelay) runWithBatchHook(ctx context.Context, batchFn func(context
 // the FIRST fatal-to-batch error (list failure); per-event publish or
 // mark-processed errors are logged inline and do not abort the batch
 // because the next tick will retry.
-func (r *OutboxRelay) processBatch(ctx context.Context) error {
+func (r *Relay) processBatch(ctx context.Context) error {
 	events, err := r.outboxRepo.ListPending(ctx, r.batchSize)
 	if err != nil {
 		r.log.Error(ctx, "outbox relay: failed to list pending events", tag.Error(err))

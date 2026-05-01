@@ -20,10 +20,14 @@ Client -> Nginx (限流) -> Gin API -> Redis Lua (原子扣減)
 cmd/booking-cli/          # CLI 進入點:server / stress / payment / recon / saga-watchdog 子指令
 internal/
   domain/                 # Entities(Event、Order、OutboxEvent)、value type(StuckCharging、StuckFailed)、repository 介面
-  application/            # BookingService、WorkerService、OutboxRelay
-    payment/              # PaymentService — Kafka order.created consumer、gateway 編排
+  application/            # 跨子套件 fx module + UnitOfWork 介面 + wire-format 事件 DTO(order_events.go)
+    booking/              # POST /book 熱路徑:BookTicket 驗證 + Redis Lua 扣減
+    worker/               # 訂單 stream consumer + queue 策略 + 單筆訊息 processor
+    outbox/               # Outbox relay 輪詢 + Kafka 發布(transactional outbox 實作)
+    event/                # 活動建立 + Redis 熱庫存初始化
+    payment/              # Kafka order.created consumer + gateway 編排 + saga 觸發
     recon/                # Reconciler(A4)— 掃描卡在 `charging` 的訂單,呼叫 gateway 收尾
-    saga/                 # SagaCompensator + Watchdog(A5)— order.failed consumer + DB 端 sweep
+    saga/                 # Compensator + Watchdog(A5)— order.failed consumer + DB 端 sweep
   infrastructure/
     api/
       booking/            # POST /book、GET /orders、GET /history、POST /events、GET /events/:id

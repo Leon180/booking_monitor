@@ -1,4 +1,4 @@
-package application
+package worker
 
 import (
 	"context"
@@ -6,15 +6,16 @@ import (
 	"errors"
 	"fmt"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
 // MessageProcessor processes a single order message from the queue.
-// Separated from WorkerService so cross-cutting concerns (metrics,
+// Separated from Service so cross-cutting concerns (metrics,
 // tracing) can be layered as decorators without the circular-callback
-// problem of trying to decorate WorkerService.Start directly — Start
+// problem of trying to decorate Service.Start directly — Start
 // is a long-running loop that invokes processing internally via the
 // queue's Subscribe handler, which would bypass any outer wrapper.
 type MessageProcessor interface {
@@ -22,7 +23,7 @@ type MessageProcessor interface {
 }
 
 type orderMessageProcessor struct {
-	uow    UnitOfWork
+	uow    application.UnitOfWork
 	logger *mlog.Logger
 }
 
@@ -35,7 +36,7 @@ type orderMessageProcessor struct {
 // rather than fields on the processor struct. This keeps the tx
 // boundary explicit at the call site (no field access can accidentally
 // bypass it).
-func NewOrderMessageProcessor(uow UnitOfWork, logger *mlog.Logger) MessageProcessor {
+func NewOrderMessageProcessor(uow application.UnitOfWork, logger *mlog.Logger) MessageProcessor {
 	return &orderMessageProcessor{
 		uow:    uow,
 		logger: logger.With(mlog.String("component", "message_processor")),
@@ -66,7 +67,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		return err
 	}
 
-	return p.uow.Do(ctx, func(repos *Repositories) error {
+	return p.uow.Do(ctx, func(repos *application.Repositories) error {
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
 		// Redis view is ahead of DB (compensation path will fix it).
@@ -100,7 +101,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		// are theoretical for the current event shape but we
 		// surface them so a future field addition can't ship a
 		// silent nil-payload outbox row.
-		payload, err := json.Marshal(NewOrderCreatedEvent(created))
+		payload, err := json.Marshal(application.NewOrderCreatedEvent(created))
 		if err != nil {
 			p.logger.Error(ctx, "Failed to marshal order_created event for outbox",
 				tag.MsgID(msg.MessageID), tag.Error(err))

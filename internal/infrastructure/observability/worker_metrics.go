@@ -3,13 +3,13 @@ package observability
 import (
 	"time"
 
-	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/worker"
 )
 
-// prometheusWorkerMetrics implements application.WorkerMetrics using Prometheus counters.
+// prometheusWorkerMetrics implements worker.Metrics using Prometheus counters.
 type prometheusWorkerMetrics struct{}
 
-func NewWorkerMetrics() application.WorkerMetrics {
+func NewWorkerMetrics() worker.Metrics {
 	return &prometheusWorkerMetrics{}
 }
 

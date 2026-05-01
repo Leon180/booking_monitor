@@ -42,7 +42,7 @@ Go 1.25 | Gin | PostgreSQL 15 | Redis 7 | Kafka | Prometheus | Grafana | Jaeger 
 ```
 internal/
   domain/         # 實體 (Event, Order),介面 (repositories, services)
-  application/    # 服務: BookingService, WorkerService, OutboxRelay, SagaCompensator, PaymentService
+  application/    # 各個內聚流程的子套件 — booking/, worker/, outbox/, event/, payment/, recon/, saga/(每個都有自己的 Service + Metrics + decorator);頂層放跨套件 fx module + UnitOfWork 介面 + wire-format DTO
   infrastructure/ # 適配器: api/, cache/, persistence/postgres/, messaging/, observability/, payment/, config/
   mocks/          # 產生的 mock 檔 (go.uber.org/mock)
 ```
@@ -220,7 +220,7 @@ Claude Code 會自動探索 `.claude/agents/` 與 `.claude/skills/` 下的資產
 ### Subagents(`.claude/agents/`)
 - **go-reviewer** — TRIGGER:PR 內有任何 `*.go` 檔異動。檢查安全性(SQL/command injection、race condition、`InsecureSkipVerify`)、錯誤處理(wrapping、`errors.Is/As`)、併發(goroutine leak、channel deadlock)以及程式碼品質。
 - **go-build-resolver** — TRIGGER:`go build` 或 `go test` 失敗。診斷 import cycle、版本不一致、模組錯誤。
-- **silent-failure-hunter** — TRIGGER:review 錯誤處理路徑,尤其是 Kafka consumers([internal/infrastructure/messaging/](../internal/infrastructure/messaging/))、outbox relay([internal/application/outbox_relay.go](../internal/application/outbox_relay.go))、saga compensator、worker service。專門獵捕被吞掉的 error、空的 catch 區塊、錯誤的 fallback。
+- **silent-failure-hunter** — TRIGGER:review 錯誤處理路徑,尤其是 Kafka consumers([internal/infrastructure/messaging/](../internal/infrastructure/messaging/))、outbox relay([internal/application/outbox/relay.go](../internal/application/outbox/relay.go))、saga compensator、worker service。專門獵捕被吞掉的 error、空的 catch 區塊、錯誤的 fallback。
 
 ### Skills(`.claude/skills/`)
 - **golang-patterns** — TRIGGER:撰寫新的 Go 程式碼。Go 慣用寫法:小型介面、錯誤 wrapping、context 傳遞。

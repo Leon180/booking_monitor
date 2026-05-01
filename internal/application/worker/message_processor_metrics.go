@@ -1,4 +1,4 @@
-package application
+package worker
 
 import (
 	"context"
@@ -9,18 +9,18 @@ import (
 )
 
 // messageProcessorMetricsDecorator observes Process outcomes and emits
-// the corresponding WorkerMetrics. Splitting this out of the base
+// the corresponding Metrics. Splitting this out of the base
 // processor keeps the core processing flow free of observability
 // noise and mirrors the pattern used by bookingServiceMetricsDecorator.
 type messageProcessorMetricsDecorator struct {
 	next    MessageProcessor
-	metrics WorkerMetrics
+	metrics Metrics
 }
 
 // NewMessageProcessorMetricsDecorator wraps a MessageProcessor with
 // outcome + duration metrics. Caller provides the metrics
 // implementation (typically Prometheus-backed from infrastructure).
-func NewMessageProcessorMetricsDecorator(next MessageProcessor, metrics WorkerMetrics) MessageProcessor {
+func NewMessageProcessorMetricsDecorator(next MessageProcessor, metrics Metrics) MessageProcessor {
 	return &messageProcessorMetricsDecorator{next: next, metrics: metrics}
 }
 

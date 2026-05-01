@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
@@ -50,7 +50,7 @@ func TestRedisOrderQueue_EnsureGroup(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), nil)
 
 	ctx := context.Background()
 
@@ -77,7 +77,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	nopLogger := mlog.NewNop()
 
 	// No mock needed for happy path
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), nil)
 	ctx := mlog.NewContext(context.Background(), nopLogger, "")
 
 	// 1. Create Stream & Group
@@ -108,7 +108,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	defer cancel()
 
 	processedCount := 0
-	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
+	handler := func(ctx context.Context, msg *worker.QueuedBookingMessage) error {
 		processedCount++
 		assert.Equal(t, id, msg.MessageID)
 		assert.Equal(t, 1, msg.UserID)
@@ -136,7 +136,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -149,7 +149,7 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	})
 
 	handlerCalled := false
-	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
+	handler := func(ctx context.Context, msg *worker.QueuedBookingMessage) error {
 		handlerCalled = true
 		return nil
 	}
@@ -187,7 +187,7 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	// Inject DefaultOrderRetryPolicy so the malformed-input fast-path
 	// engages — without it the queue uses the always-retry default
 	// and the test would observe 3 attempts instead of 1.
-	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), application.DefaultOrderRetryPolicy())
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), worker.DefaultRetryPolicy())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -209,7 +209,7 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	// runs until ctx expires, so total elapsed measures ctx lifetime, not
 	// per-message latency.
 	var attempts int
-	handler := func(_ context.Context, _ *application.QueuedBookingMessage) error {
+	handler := func(_ context.Context, _ *worker.QueuedBookingMessage) error {
 		attempts++
 		return domain.ErrInvalidUserID
 	}
@@ -254,7 +254,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), application.NoopQueueMetrics(), nil)
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -266,7 +266,7 @@ func TestRedisOrderQueue_Subscribe_PersistentErrorBailout(t *testing.T) {
 	s.Close()
 
 	handlerCalled := false
-	handler := func(ctx context.Context, msg *application.QueuedBookingMessage) error {
+	handler := func(ctx context.Context, msg *worker.QueuedBookingMessage) error {
 		handlerCalled = true
 		return nil
 	}

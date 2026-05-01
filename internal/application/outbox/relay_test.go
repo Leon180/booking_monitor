@@ -1,11 +1,11 @@
-package application_test
+package outbox_test
 
 import (
 	"context"
 	"errors"
 	"testing"
 
-	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/outbox"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
@@ -14,7 +14,7 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-func TestOutboxRelay_ProcessBatch(t *testing.T) {
+func TestRelay_ProcessBatch(t *testing.T) {
 	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	id1 := uuid.New()
@@ -102,7 +102,7 @@ func TestOutboxRelay_ProcessBatch(t *testing.T) {
 			}
 
 			// We test the private method processBatch directly to avoid timing issues with Run()
-			relay := application.NewOutboxRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
+			relay := outbox.NewRelay(mockRepo, mockPub, tt.batchSize, mockLock, mlog.NewNop())
 			relay.ProcessBatchForTest(ctx)
 		})
 	}

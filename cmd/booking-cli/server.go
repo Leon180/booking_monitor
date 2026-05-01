@@ -18,6 +18,9 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/outbox"
+	"booking_monitor/internal/application/saga"
+	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api"
@@ -59,6 +62,61 @@ func runServer(_ *cobra.Command, _ []string) {
 
 		fx.Provide(observability.NewWorkerMetrics),
 		fx.Provide(observability.NewBookingMetrics),
+		// Worker fx wiring lives here (not in application/module.go)
+		// because the worker subpackage imports `application` for shared
+		// types (UnitOfWork, Repositories, NewOrderCreatedEvent), so an
+		// `application → worker` edge there would create an import
+		// cycle. Same convention used by payment/saga/recon: each cmd
+		// owns its subpackage's fx.Provide. CP2.6b moved this here.
+		//
+		// worker.Service is provided as a decorated chain:
+		//   base MessageProcessor -> metrics decorator -> worker.Service
+		// Future tracing decorator MUST sit between metrics and the
+		// service so spans wrap the metrics work.
+		fx.Provide(
+			worker.DefaultRetryPolicy,
+			func(
+				queue worker.OrderQueue,
+				uow application.UnitOfWork,
+				metrics worker.Metrics,
+				logger *mlog.Logger,
+			) worker.Service {
+				base := worker.NewOrderMessageProcessor(uow, logger)
+				processor := worker.NewMessageProcessorMetricsDecorator(base, metrics)
+				return worker.NewService(queue, processor, logger)
+			},
+		),
+		// Outbox fx wiring lives here for the same import-cycle reason
+		// as worker — outbox/ imports `application` for EventPublisher
+		// and DistributedLock. CP2.6b moved this from
+		// application/module.go.
+		fx.Provide(outbox.NewRelay),
+		// Saga compensator wiring lives here for the same reason —
+		// saga/ imports `application` for OrderFailedEvent + UnitOfWork
+		// + Repositories. CP2.6b moved this from application/module.go.
+		fx.Provide(saga.NewCompensator),
+		// Start the outbox relay (with tracing) as a background
+		// goroutine managed by the Fx lifecycle. The run-context is
+		// derived from context.Background() rather than a
+		// caller-supplied ctx because the relay must survive any
+		// individual fx lifecycle hook timeout. OnStop invokes
+		// cancel() explicitly so the background is still bounded by
+		// the fx lifecycle — just decoupled from the OnStop ctx
+		// deadline.
+		fx.Invoke(func(lc fx.Lifecycle, relay *outbox.Relay) {
+			traced := outbox.NewTracingDecorator(relay)
+			ctx, cancel := context.WithCancel(context.Background())
+			lc.Append(fx.Hook{
+				OnStart: func(_ context.Context) error {
+					go traced.Run(ctx)
+					return nil
+				},
+				OnStop: func(_ context.Context) error {
+					cancel()
+					return nil
+				},
+			})
+		}),
 		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
 			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
@@ -79,9 +137,9 @@ func installServer(
 	healthHandler *ops.HealthHandler,
 	logger *mlog.Logger,
 	cfg *config.Config,
-	worker application.WorkerService,
+	workerSvc worker.Service,
 	sagaConsumer *messaging.SagaConsumer,
-	compensator application.SagaCompensator,
+	compensator saga.Compensator,
 ) error {
 	tp, err := initTracer()
 	if err != nil {
@@ -107,7 +165,7 @@ func installServer(
 			if pprofServer != nil {
 				startPprofServer(pprofServer, logger)
 			}
-			startBackgroundRunners(runCtx, worker, sagaConsumer, compensator, logger, shutdowner)
+			startBackgroundRunners(runCtx, workerSvc, sagaConsumer, compensator, logger, shutdowner)
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
@@ -239,14 +297,14 @@ func startPprofServer(srv *http.Server, logger *mlog.Logger) {
 // new bookings against a dead compensation path.
 func startBackgroundRunners(
 	ctx context.Context,
-	worker application.WorkerService,
+	workerSvc worker.Service,
 	sagaConsumer *messaging.SagaConsumer,
-	compensator application.SagaCompensator,
+	compensator saga.Compensator,
 	logger *mlog.Logger,
 	shutdowner fx.Shutdowner,
 ) {
 	go func() {
-		if err := worker.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := workerSvc.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.L().Error("Worker stopped with error", tag.Error(err))
 			_ = shutdowner.Shutdown(fx.ExitCode(1))
 		}

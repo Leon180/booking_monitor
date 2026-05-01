@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"booking_monitor/internal/application"
 	bookingapp "booking_monitor/internal/application/booking"
+	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
 	"booking_monitor/internal/infrastructure/api/middleware"
@@ -69,7 +69,7 @@ type BookingHandler interface {
 
 type bookingHandler struct {
 	service      bookingapp.Service
-	eventService application.EventService
+	eventService event.Service
 }
 
 // NewBookingHandler constructs the booking handler. The idempotency
@@ -77,7 +77,7 @@ type bookingHandler struct {
 // the handler in server.go), so the handler itself no longer
 // depends on `domain.IdempotencyRepository` — its surface is purely
 // business-logic dependencies.
-func NewBookingHandler(service bookingapp.Service, eventService application.EventService) BookingHandler {
+func NewBookingHandler(service bookingapp.Service, eventService event.Service) BookingHandler {
 	return &bookingHandler{service: service, eventService: eventService}
 }
 

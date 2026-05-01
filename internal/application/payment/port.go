@@ -1,11 +1,13 @@
-package application
+package payment
 
 import (
 	"context"
 	"errors"
+
+	"booking_monitor/internal/application"
 )
 
-// ErrInvalidPaymentEvent is returned by PaymentService.ProcessOrder
+// ErrInvalidPaymentEvent is returned by Service.ProcessOrder
 // when the OrderCreatedEvent payload fails input validation
 // (zero/negative OrderID, negative Amount, etc.). Consumers MUST
 // treat this as a dead-letter condition: log, publish to DLQ if
@@ -20,7 +22,7 @@ var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 
 //go:generate mockgen -source=payment_service.go -destination=../mocks/payment_service_mock.go -package=mocks
 
-// PaymentService defines the application-layer port for the payment
+// Service defines the application-layer port for the payment
 // pipeline (Kafka order.created consumer → gateway.Charge → outbox
 // order.failed on failure). Implementation lives in
 // internal/application/payment/service.go.
@@ -34,6 +36,6 @@ var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 // `domain.PaymentGateway` (the external-integration port for Stripe /
 // MockGateway) stays in domain — that one IS a true domain port,
 // no DTOs leak through it.
-type PaymentService interface {
-	ProcessOrder(ctx context.Context, event *OrderCreatedEvent) error
+type Service interface {
+	ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error
 }

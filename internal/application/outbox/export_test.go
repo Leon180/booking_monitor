@@ -1,4 +1,4 @@
-package application
+package outbox
 
 import "context"
 
@@ -8,6 +8,6 @@ import "context"
 // application.Repositories), and a same-package test importing mocks
 // would create a compile-time cycle. This file is in *_test.go so it
 // never compiles into the production binary.
-func (r *OutboxRelay) ProcessBatchForTest(ctx context.Context) {
+func (r *Relay) ProcessBatchForTest(ctx context.Context) {
 	r.processBatch(ctx)
 }
