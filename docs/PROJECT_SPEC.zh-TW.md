@@ -177,7 +177,7 @@ CREATE INDEX events_outbox_pending_idx
 CREATE TABLE order_status_history (
     id          BIGSERIAL    PRIMARY KEY,
     order_id    UUID         NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    from_status VARCHAR(20),                 -- 只有最初的 Pending insert 路徑是 NULL
+    from_status VARCHAR(20),                 -- 可空值;預留給未來的 Pending-creation audit row。目前的 `orderRepository.Create` **不會**寫歷史列,所以實際上不存在 `from_status` 為 NULL 的紀錄 — 只有 `transitionStatus` 會寫歷史(永遠 from + to 都有)。
     to_status   VARCHAR(20)  NOT NULL,
     occurred_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

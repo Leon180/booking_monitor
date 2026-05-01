@@ -79,7 +79,7 @@ POST /api/v1/book          # 訂票(user_id, event_id, quantity)→ 202 含 orde
 GET  /api/v1/orders/:id    # 透過 id 查訂單狀態(在短暫的非同步處理視窗中會回 404)
 GET  /api/v1/history       # 分頁訂單歷史(?page=&size=&status=)
 POST /api/v1/events        # 建立活動(name, total_tickets)
-GET  /api/v1/events/:id    # 查看活動詳情
+GET  /api/v1/events/:id    # Stub — 回 {"message": "View event", "event_id": ...} 並遞增 page_views_total。**不會**載入活動詳情(延後到 Phase 3)。
 GET  /metrics              # Prometheus 指標
 GET  /livez                # Liveness probe — process 還活著就一律回 200
 GET  /readyz               # Readiness probe — PG + Redis + Kafka 都能在 1s 內回應才會 200,否則 503 帶 per-dep JSON

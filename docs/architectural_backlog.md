@@ -107,10 +107,11 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
 - **Why deferred.** PR #66 was scoped to alert delivery; triaging actual DLQ contents is operational work, not infrastructure.
 - **Revisit when.** Next operational sweep. Determine: stress-test artifact, stuck consumer, or payment-worker failure mode? Drain or investigate.
 
-### Reconciler max-age force-fail outbox emit
-- **What.** A4 reconciler force-fail path was found to miss the outbox emit (so saga compensator never triggers). Recorded in `docs/checkpoints/20260430-phase2-review.md` as DEF-CRIT.
-- **Why deferred.** Cleanup PR scope was limited; the fix is a real domain change.
-- **Revisit when.** Next reliability-arc PR (CP1 era). May already be addressed — verify before treating as open.
+<!-- Reconciler max-age force-fail outbox emit: VERIFIED FIXED (PR #51 / CP1).
+     `reconciler.failOrder()` runs MarkFailed + outbox.Create inside a single
+     UoW.Do, so the saga compensator is correctly triggered on force-fail.
+     Removed from this backlog 2026-05-02 per the close-when-done rule. -->
+
 
 ---
 

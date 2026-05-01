@@ -182,7 +182,7 @@ CREATE INDEX events_outbox_pending_idx
 CREATE TABLE order_status_history (
     id          BIGSERIAL    PRIMARY KEY,
     order_id    UUID         NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-    from_status VARCHAR(20),                 -- NULL only for the initial Pending insert path
+    from_status VARCHAR(20),                 -- nullable; reserved for a future Pending-creation audit row. Today's `orderRepository.Create` does NOT emit a history row, so no NULL `from_status` rows exist in practice — only `transitionStatus` writes history (always with both from + to set).
     to_status   VARCHAR(20)  NOT NULL,
     occurred_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

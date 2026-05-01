@@ -145,7 +145,7 @@ When dispatching, each agent gets a focused prompt. Below is the canonical shape
 > "Audit `<repo path>` test surface: unit/integration/e2e ratios via `find . -name '*_test.go' | xargs grep -l <build-tag-marker>`; identify packages with <60% coverage; flag flaky tests (search for `t.Skip`, time-dependent assertions, race-condition smells). Output: pyramid analysis, gap list, under 1500 words."
 
 ### Dimension 3 — Documentation drift
-> "Audit `<repo path>` docs: EN/zh-TW bilingual parity (PROJECT_SPEC, README, monitoring, CLAUDE.md), skills under `.claude/skills/`, memory under `.claude/projects/.../memory/`. Check structural identity, identify stale references, verify code↔doc accuracy on at least 5 sampled claims. Output: drift list with severity, under 1500 words."
+> "Audit `<repo path>` docs: EN/zh-TW bilingual parity (AGENTS.md, .claude/CLAUDE.md, README, PROJECT_SPEC, monitoring), skills under `.claude/skills/` (Claude Code) + `.agents/skills/` (Codex), memory under `~/.claude/projects/.../memory/`. Check structural identity, identify stale references, verify code↔doc accuracy on at least 5 sampled claims. Output: drift list with severity, under 1500 words."
 
 ### Dimension 4 — Operational maturity
 > "Audit `<repo path>` operational surface: probe coverage (`/livez`, `/readyz`); metric inventory completeness; alert + runbook coverage matrix (every alert has a runbook? every metric has a dashboard?); SLO definitions present? Output: ops gap matrix, under 1500 words."

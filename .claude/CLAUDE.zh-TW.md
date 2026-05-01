@@ -9,6 +9,7 @@
 **配對檔案(相對於 repo 根目錄):**
 | 英文 | 中文 |
 |------|------|
+| `AGENTS.md` | `AGENTS.zh-TW.md` |
 | `.claude/CLAUDE.md` | `.claude/CLAUDE.zh-TW.md` |
 | `README.md` | `README.zh-TW.md` |
 | `docs/PROJECT_SPEC.md` | `docs/PROJECT_SPEC.zh-TW.md` |
@@ -76,7 +77,7 @@ POST /api/v1/book          # 訂票 (user_id, event_id, quantity) → 回 202 + 
 GET  /api/v1/orders/:id    # 用 id 輪詢訂單狀態(在短暫的非同步處理視窗會回 404)
 GET  /api/v1/history       # 分頁查詢訂單 (?page=&size=&status=)
 POST /api/v1/events        # 建立活動 (name, total_tickets)
-GET  /api/v1/events/:id    # 查看活動
+GET  /api/v1/events/:id    # Stub — 回 {"message": "View event", "event_id": ...} 並遞增 page_views_total。**不會**載入活動詳情(延後到 Phase 3)。
 GET  /metrics              # Prometheus 指標
 GET  /livez                # 存活探針 — process 還活著就回 200
 GET  /readyz               # 就緒探針 — PG + Redis + Kafka 在 1s 內全部回應才回 200,失敗回 503 並附逐 dep 的 JSON

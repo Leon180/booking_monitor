@@ -9,6 +9,7 @@ This project maintains **paired English + Traditional Chinese (zh-TW)** versions
 **Paired files (relative to repo root):**
 | English | Chinese |
 |---------|---------|
+| `AGENTS.md` | `AGENTS.zh-TW.md` |
 | `.claude/CLAUDE.md` | `.claude/CLAUDE.zh-TW.md` |
 | `README.md` | `README.zh-TW.md` |
 | `docs/PROJECT_SPEC.md` | `docs/PROJECT_SPEC.zh-TW.md` |
@@ -76,7 +77,7 @@ POST /api/v1/book          # Book tickets (user_id, event_id, quantity) → 202 
 GET  /api/v1/orders/:id    # Poll order status by id (returns 404 during the brief async-processing window)
 GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
 POST /api/v1/events        # Create event (name, total_tickets)
-GET  /api/v1/events/:id    # View event details
+GET  /api/v1/events/:id    # Stub — returns {"message": "View event", "event_id": ...} + bumps page_views_total. Does NOT load event details (deferred to Phase 3).
 GET  /metrics              # Prometheus metrics
 GET  /livez                # Liveness probe — always 200 if process is up
 GET  /readyz               # Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 with per-dep JSON otherwise

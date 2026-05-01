@@ -8,6 +8,15 @@
 
 set -euo pipefail
 
+# `jq` is required to parse the PostToolUse JSON payload + emit the
+# response JSON. If it's missing the hook can't function — log loudly
+# (visible in the agent's tool-result stream) and exit non-zero so the
+# absence is observable rather than silent.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "check_bilingual_docs: jq not found — bilingual sync reminder DISABLED" >&2
+  exit 1
+fi
+
 # Read PostToolUse JSON payload from stdin.
 input="$(cat)"
 
@@ -15,9 +24,23 @@ input="$(cat)"
 file_path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')"
 [ -z "$file_path" ] && exit 0
 
-# Resolve repo-relative path. CLAUDE_PROJECT_DIR is set by Claude Code.
+# Resolve repo-relative path. CLAUDE_PROJECT_DIR is set by Claude Code;
+# fall back to PWD when the hook is invoked outside Claude (e.g. CI
+# script, manual test).
 repo_root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 rel_path="${file_path#"$repo_root"/}"
+
+# If the strip didn't take (e.g. CLAUDE_PROJECT_DIR was unset AND
+# pwd wasn't the repo root), `rel_path` will still be the absolute
+# path. Without this guard the case statement below silently falls
+# through to the catch-all and no reminder fires — the exact
+# silent-failure mode the bilingual contract is meant to prevent.
+# Surface this loudly so the operator sees the misconfiguration
+# instead of silently drifting docs.
+if [[ "$rel_path" == /* ]]; then
+  echo "check_bilingual_docs: could not resolve repo-relative path for '${file_path}' (CLAUDE_PROJECT_DIR='${CLAUDE_PROJECT_DIR:-unset}', pwd='$(pwd)') — bilingual sync reminder DISABLED for this edit" >&2
+  exit 1
+fi
 
 # Paired files — must stay structurally identical.
 paired=""
