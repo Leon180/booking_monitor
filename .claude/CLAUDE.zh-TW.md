@@ -50,7 +50,9 @@ internal/
 ## 關鍵指令
 ```bash
 make build          # 以 -race 建置 binary
-make test           # 跑測試含 race detection
+make test           # 跑單元測試含 race detection
+make test-integration  # 跑 testcontainers 撐起的 Postgres 整合測試套件(CP4a;需要 Docker;約 14s)
+make test-all       # 依序執行單元測試 + 整合測試
 make run-server     # 啟動 API server(port 8080)
 make run-stress     # 壓測(C=並發量,N=請求數)
 make stress-k6      # K6 壓測 (VUS=500, DURATION=30s)

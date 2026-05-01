@@ -50,7 +50,9 @@ internal/
 ## Key Commands
 ```bash
 make build          # Build binary with -race
-make test           # Run tests with race detection
+make test           # Run unit tests with race detection
+make test-integration  # Run testcontainers-backed Postgres integration suite (CP4a; requires Docker; ~14s)
+make test-all       # Unit + integration suites sequentially
 make run-server     # Start API server (port 8080)
 make run-stress     # Load test (C=concurrency, N=requests)
 make stress-k6      # K6 load test (VUS=500, DURATION=30s)
