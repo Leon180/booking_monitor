@@ -128,58 +128,89 @@ The split between `domain` and `application` packages is per-port: domain-side i
 
 ### PostgreSQL (port 5433)
 
+The schema below reflects the **post-migration-000011 state**. Migration 000008 (PR #34) swapped all primary keys from `SERIAL` to caller-generated `UUID` (UUIDv7 — RFC 9562, time-prefixed); 000009 added the `order_status_history` audit log; 000010/000011 added the `updated_at` column on `orders` and the partial index that powers reconciler + saga-watchdog sweeps.
+
 ```sql
 -- events: Source of truth for inventory
 CREATE TABLE events (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,           -- UUIDv7, caller-generated (000008)
     name VARCHAR(255) NOT NULL,
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
     version INT DEFAULT 0
 );
--- Added in migration 000004:
+-- Re-added by migration 000008's UUID swap (originally from 000003):
 ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
--- Seeded: INSERT INTO events (name, total_tickets, available_tickets)
---        VALUES ('Jay Chou Concert', 100, 100);
+-- No longer seeded by default. Tests use h.SeedEvent / domain.NewEvent.
 
 -- orders: Booking transaction log
 CREATE TABLE orders (
-    id SERIAL PRIMARY KEY,
-    event_id INT NOT NULL,
-    user_id INT NOT NULL,
+    id UUID PRIMARY KEY,           -- UUIDv7, caller-generated (000008)
+    event_id UUID NOT NULL,        -- FK target (no DB-level constraint; see note below)
+    user_id INT NOT NULL,          -- external user reference; this service does not own the users table
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,  -- pending, confirmed, failed, compensated
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- added in 000010 for recon/watchdog age comparisons
 );
--- Migration 000004 added UNIQUE(user_id, event_id) constraint.
--- Migration 000006 replaced it with a partial unique index to allow
--- retry after payment failure:
+-- Re-added in 000008 (originally 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
   WHERE status != 'failed';
+-- Added in 000010, widened in 000011:
+CREATE INDEX idx_orders_status_updated_at_partial
+    ON orders (status, updated_at)
+ WHERE status IN ('charging', 'pending', 'failed');
 
 -- events_outbox: Transactional outbox for event publishing
 CREATE TABLE events_outbox (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,           -- UUIDv7, caller-generated (000008); time-prefix preserves ListPending ORDER BY id ASC chronological order
     event_type VARCHAR(50) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    processed_at TIMESTAMPTZ  -- added in migration 000005
+    processed_at TIMESTAMPTZ       -- carried over from 000005
 );
+-- Partial index added in 000007 (CREATE INDEX CONCURRENTLY; the migration file
+-- carries `-- golang-migrate: no-transaction` so the migrate CLI runs it
+-- outside a tx):
+CREATE INDEX events_outbox_pending_idx
+    ON events_outbox (id)
+ WHERE processed_at IS NULL;
+
+-- order_status_history: Audit log for state transitions (added in 000009 / PR #40)
+CREATE TABLE order_status_history (
+    id          BIGSERIAL    PRIMARY KEY,
+    order_id    UUID         NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    from_status VARCHAR(20),                 -- NULL only for the initial Pending insert path
+    to_status   VARCHAR(20)  NOT NULL,
+    occurred_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_order_status_history_order_id_occurred
+    ON order_status_history (order_id, occurred_at);
+CREATE INDEX idx_order_status_history_occurred
+    ON order_status_history (occurred_at);
+-- Atomic CTE-based UPDATE+INSERT in postgresOrderRepository.transitionStatus
+-- ensures the row update + history insert succeed or fail as a unit.
 ```
 
-### Migration History (7 files in `deploy/postgres/migrations/`)
+**Note on `orders.event_id`:** there is no DB-level FK constraint to `events(id)`. Domain validation enforces the relationship at the application boundary (`domain.NewOrder` requires `eventID` to be the id of a real event) and integration tests pin the partial-unique-index re-buy contract; the absence of the FK is deliberate and documented in migration 000008.
+
+### Migration History (11 files in `deploy/postgres/migrations/`)
 
 | # | Purpose |
 |---|---------|
-| 000001 | Create `events` table + seed "Jay Chou Concert" (100 tickets) |
+| 000001 | Create `events` table |
 | 000002 | Create `orders` table |
-| 000003 | Create `events_outbox` table |
-| 000004 | Add `check_available_tickets_non_negative` + `UNIQUE(user_id, event_id)` |
+| 000003 | Create `events_outbox` table + `check_available_tickets_non_negative` CHECK on `events` |
+| 000004 | Add `UNIQUE(user_id, event_id)` to `orders` |
 | 000005 | Add `processed_at` column to `events_outbox` |
 | 000006 | Replace unique constraint with partial index `WHERE status != 'failed'` — allows users to retry purchase after payment failure |
-| 000007 | Add partial index `events_outbox_pending_idx ON events_outbox(id) WHERE processed_at IS NULL` — speeds up OutboxRelay.ListPending. Uses `CREATE INDEX CONCURRENTLY`; the file carries the `-- golang-migrate: no-transaction` pragma |
+| 000007 | Add partial index `events_outbox_pending_idx ON events_outbox(id) WHERE processed_at IS NULL` — speeds up `OutboxRelay.ListPending`. Uses `CREATE INDEX CONCURRENTLY`; the file carries the `-- golang-migrate: no-transaction` pragma |
+| 000008 | **PK migration: SERIAL → UUID** (PR #34) for `events` / `orders` / `events_outbox`. Caller-generated UUIDv7 ids assigned by `domain.NewX` factories at the API boundary so the same id flows handler → queue → worker → DB → outbox → saga. Time-prefixed UUIDv7 keeps B-tree index inserts roughly chronological. Destructive (DROP+CREATE); for production data the migration would need a multi-phase backfill — see in-file rationale. |
+| 000009 | **`order_status_history` audit table** (PR #40) — every transitionStatus call writes a history row atomically with the UPDATE via a CTE. Includes two indexes: `(order_id, occurred_at)` for per-order timelines + `(occurred_at)` for time-window scans. |
+| 000010 | **A4 charging two-phase intent log** (PR #45) — adds `orders.updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` + partial index `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')` to power the reconciler's `FindStuckCharging` sweep. |
+| 000011 | **A5 saga watchdog index widening** (PR #49) — re-creates the 000010 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed')` so the saga-watchdog `FindStuckFailed` sweep shares the same index plan as the reconciler. |
 
 ### Redis
 
@@ -285,7 +316,7 @@ Create a new event.
 ```
 
 ### GET /api/v1/events/:id
-View event details. Increments `page_views_total` metric for conversion tracking.
+**Stub.** Currently returns `{"message": "View event", "event_id": "<uuid>"}` and increments the `page_views_total` metric for conversion-funnel tracking. Does NOT load event details from `EventRepository`. The endpoint exists today as the page-view tracking surface; full event-detail loading is tracked separately and will land when the demo (Phase 3) needs it. README and tests intentionally pin this stub behavior so a future implementation has to deliberately update both.
 
 ### GET /metrics
 Prometheus metrics endpoint.

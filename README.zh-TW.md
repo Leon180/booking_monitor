@@ -101,7 +101,7 @@ deploy/                   # Postgres migrations(11 個)、Redis Lua、Nginx、Pr
 | GET | `/api/v1/orders/:id` | 用 `order_id` 查單筆訂單的最新狀態。在 `POST /book` 之後的短暫視窗裡會回 404(詳見「**訂票流程**」)。 |
 | GET | `/api/v1/history` | 訂單歷史 `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
-| GET | `/api/v1/events/:id` | 查看活動 |
+| GET | `/api/v1/events/:id` | **Stub** — 回 `{"message": "View event", "event_id": ...}` 並遞增 `page_views_total` 給轉換率追蹤。**不會**載入活動詳情(延後到 Phase 3 demo 才實作)。 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/livez` | Liveness 探針 — process 還活著就一律回 200(不依賴下游) |
 | GET | `/readyz` | Readiness 探針 — PG + Redis + Kafka 都在 1s 內回應才回 200,否則回 503 並附逐 dep 的 JSON |

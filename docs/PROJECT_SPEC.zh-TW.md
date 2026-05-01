@@ -124,57 +124,88 @@ Types: order.created, order.failed
 
 ### PostgreSQL(對外 port 5433)
 
+下面的 schema 反映的是 **migration 000011 之後的狀態**。Migration 000008(PR #34)把所有 primary key 從 `SERIAL` 換成 caller-generated 的 `UUID`(UUIDv7 — RFC 9562,前綴帶時間戳);000009 加入 `order_status_history` 審計記錄表;000010/000011 加入 `orders.updated_at` 欄位以及驅動 reconciler + saga-watchdog sweep 的部分索引。
+
 ```sql
 -- events: 庫存的事實來源
 CREATE TABLE events (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,           -- UUIDv7,呼叫端產生(000008)
     name VARCHAR(255) NOT NULL,
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
     version INT DEFAULT 0
 );
--- Migration 000004 新增:
+-- 由 000008 的 UUID 換 PK 過程重新加入(原本來自 000003):
 ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
--- 預設資料: INSERT INTO events (name, total_tickets, available_tickets)
---           VALUES ('Jay Chou Concert', 100, 100);
+-- 預設不再 seed。測試用 h.SeedEvent / domain.NewEvent。
 
 -- orders: 訂單交易紀錄
 CREATE TABLE orders (
-    id SERIAL PRIMARY KEY,
-    event_id INT NOT NULL,
-    user_id INT NOT NULL,
+    id UUID PRIMARY KEY,           -- UUIDv7,呼叫端產生(000008)
+    event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;見下方備註)
+    user_id INT NOT NULL,          -- 外部使用者參照;此服務不擁有 users 表
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,  -- pending, confirmed, failed, compensated
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- 000010 加入,給 recon/watchdog 做 age 比較
 );
--- Migration 000004 加上 UNIQUE(user_id, event_id) 約束。
--- Migration 000006 改為部分唯一索引,以允許付款失敗後重試:
+-- 由 000008 重新加入(原本 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
   WHERE status != 'failed';
+-- 000010 加入,000011 擴大 predicate:
+CREATE INDEX idx_orders_status_updated_at_partial
+    ON orders (status, updated_at)
+ WHERE status IN ('charging', 'pending', 'failed');
 
 -- events_outbox: 事件發布的交易型 outbox
 CREATE TABLE events_outbox (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY,           -- UUIDv7,呼叫端產生(000008);時間前綴讓 ListPending 的 ORDER BY id ASC 維持時序
     event_type VARCHAR(50) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(20) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    processed_at TIMESTAMPTZ  -- migration 000005 加入
+    processed_at TIMESTAMPTZ       -- 從 000005 沿用至今
 );
+-- 000007 加入的部分索引(用 CREATE INDEX CONCURRENTLY;migration 檔案
+-- 內帶 `-- golang-migrate: no-transaction` 讓 migrate CLI 在 tx 外執行):
+CREATE INDEX events_outbox_pending_idx
+    ON events_outbox (id)
+ WHERE processed_at IS NULL;
+
+-- order_status_history: 狀態轉換的審計記錄表(000009 / PR #40 加入)
+CREATE TABLE order_status_history (
+    id          BIGSERIAL    PRIMARY KEY,
+    order_id    UUID         NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    from_status VARCHAR(20),                 -- 只有最初的 Pending insert 路徑是 NULL
+    to_status   VARCHAR(20)  NOT NULL,
+    occurred_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_order_status_history_order_id_occurred
+    ON order_status_history (order_id, occurred_at);
+CREATE INDEX idx_order_status_history_occurred
+    ON order_status_history (occurred_at);
+-- postgresOrderRepository.transitionStatus 用 atomic CTE(UPDATE+INSERT)
+-- 確保 row update 跟 history insert 一起成功或一起失敗。
 ```
 
-### Migration 歷史(`deploy/postgres/migrations/` 內共 7 個檔案)
+**`orders.event_id` 備註:** 沒有 DB-level FK 約束指向 `events(id)`。Domain 驗證在 application 邊界強制這個關係(`domain.NewOrder` 要求 `eventID` 是真正存在的 event id),整合測試也固定了 partial-unique-index 重複購買的契約;沒有 FK 是刻意決定,並在 migration 000008 內部記錄。
+
+### Migration 歷史(`deploy/postgres/migrations/` 內共 11 個檔案)
 
 | # | 內容 |
 |---|------|
-| 000001 | 建立 `events` 資料表 + 初始化 "Jay Chou Concert"(100 張票) |
+| 000001 | 建立 `events` 資料表 |
 | 000002 | 建立 `orders` 資料表 |
-| 000003 | 建立 `events_outbox` 資料表 |
-| 000004 | 加入 `check_available_tickets_non_negative` + `UNIQUE(user_id, event_id)` |
+| 000003 | 建立 `events_outbox` 資料表 + 為 `events` 加上 `check_available_tickets_non_negative` CHECK |
+| 000004 | 為 `orders` 加上 `UNIQUE(user_id, event_id)` |
 | 000005 | 為 `events_outbox` 加上 `processed_at` 欄位 |
 | 000006 | 以部分索引 `WHERE status != 'failed'` 取代 unique constraint — 允許使用者在付款失敗後重試購買 |
-| 000007 | 加入部分索引 `events_outbox_pending_idx ON events_outbox(id) WHERE processed_at IS NULL` — 加速 OutboxRelay.ListPending。使用 `CREATE INDEX CONCURRENTLY`,檔案內有 `-- golang-migrate: no-transaction` pragma |
+| 000007 | 加入部分索引 `events_outbox_pending_idx ON events_outbox(id) WHERE processed_at IS NULL` — 加速 `OutboxRelay.ListPending`。使用 `CREATE INDEX CONCURRENTLY`,檔案內有 `-- golang-migrate: no-transaction` pragma |
+| 000008 | **PK migration:SERIAL → UUID**(PR #34)— 對 `events` / `orders` / `events_outbox` 把 PK 從 `SERIAL` 換成 caller-generated 的 UUIDv7,由 `domain.NewX` factory 在 API 邊界產生,讓同一個 id 從 handler → queue → worker → DB → outbox → saga 一路串下去。UUIDv7 帶時間前綴,B-tree index 插入大致照時序。是破壞性 migration(DROP+CREATE);production data 需要分階段 backfill — 詳見檔案內的說明。 |
+| 000009 | **`order_status_history` 審計記錄表**(PR #40)— 每次 transitionStatus 透過 CTE 跟 UPDATE 一起原子寫入歷史列。包含兩個索引:`(order_id, occurred_at)` 給單一訂單時間軸用 + `(occurred_at)` 給時間範圍 scan 用。 |
+| 000010 | **A4 charging 兩階段意圖紀錄**(PR #45)— 為 `orders` 加上 `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` 與部分索引 `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')`,驅動 reconciler 的 `FindStuckCharging` sweep。 |
+| 000011 | **A5 saga watchdog 索引擴大**(PR #49)— 重建 000010 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed')`,讓 saga-watchdog 的 `FindStuckFailed` sweep 跟 reconciler 共用同一個 index plan。 |
 
 ### Redis
 
@@ -280,7 +311,7 @@ Fingerprint 是把原始 request body bytes 做 hex `SHA-256`。**不做** JSON 
 ```
 
 ### GET /api/v1/events/:id
-查看活動。呼叫時會遞增 `page_views_total` 指標,用於轉換率追蹤。
+**Stub。** 目前回 `{"message": "View event", "event_id": "<uuid>"}` 並遞增 `page_views_total` 指標供轉換漏斗追蹤,但**不會**從 `EventRepository` 載入活動詳情。這個 endpoint 目前以 page-view 追蹤介面的形式存在;完整的活動詳情載入會單獨追蹤,等 Phase 3 demo 需要時再實作。README 跟測試刻意把這個 stub 行為釘住,讓未來的實作必須一起更新兩邊才能解開。
 
 ### GET /metrics
 Prometheus metrics 端點。

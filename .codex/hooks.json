@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/lileon/project/booking_monitor/.codex/hooks/check_bilingual_docs.sh'"
+          },
+          {
+            "type": "command",
+            "command": "'/Users/lileon/project/booking_monitor/.codex/hooks/check_monitoring_docs.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}

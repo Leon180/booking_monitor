@@ -101,7 +101,7 @@ deploy/                   # Postgres migrations (11), Redis Lua, Nginx, Promethe
 | GET | `/api/v1/orders/:id` | Look up the latest status of one order by `order_id`. May return 404 in a brief window after `POST /book` (see **Booking flow**). |
 | GET | `/api/v1/history` | Order history `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | Create event `{ name, total_tickets }` |
-| GET | `/api/v1/events/:id` | View event details |
+| GET | `/api/v1/events/:id` | **Stub** — returns `{"message": "View event", "event_id": ...}` + bumps `page_views_total` for conversion tracking. Does NOT load event details (deferred to Phase 3 demo). |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/livez` | Liveness probe — always 200 if process is up (no downstream deps) |
 | GET | `/readyz` | Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 + per-dep JSON otherwise |
