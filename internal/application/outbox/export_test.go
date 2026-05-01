@@ -11,3 +11,13 @@ import "context"
 func (r *Relay) ProcessBatchForTest(ctx context.Context) {
 	r.processBatch(ctx)
 }
+
+// RunWithBatchHookForTest exposes the unexported runWithBatchHook so
+// tests can drive the Run-loop's lock-acquisition / ctx-cancellation /
+// defer-Unlock branches without timing on a real ticker. The hook
+// replaces processBatch with a test-controlled function (counter,
+// signal channel) so leader / standby / lock-error paths are
+// deterministically exercised.
+func (r *Relay) RunWithBatchHookForTest(ctx context.Context, batchFn func(context.Context) error) {
+	r.runWithBatchHook(ctx, batchFn)
+}
