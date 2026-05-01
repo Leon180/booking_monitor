@@ -227,8 +227,12 @@ services:
     # for alerts evaluated in Prometheus rule_files. Without it, firing
     # alerts are visible in Prometheus's Alerts tab but never push to
     # any delivery target. See deploy/alertmanager/alertmanager.yml for
-    # the receiver / route / inhibition config (Slack-or-noop fallback
-    # so dev stacks work without a real webhook secret).
+    # the receiver / route / inhibition config.
+    #
+    # Default receiver since 2026-05-02 is the `alert_logger` sidecar
+    # below — alerts genuinely leave Alertmanager in dev (visible via
+    # `docker logs booking_alert_logger`). Slack delivery is opt-in
+    # via deploy/alertmanager/alertmanager.slack.yml.example.
     image: prom/alertmanager:v0.27.0
     container_name: booking_alertmanager
     volumes:
@@ -242,6 +246,56 @@ services:
       - '--web.external-url=http://localhost:9093'
     ports:
       - "9093:9093"
+    depends_on:
+      alert_logger:
+        condition: service_healthy
+
+  alert_logger:
+    # Webhook-logger sidecar for Alertmanager's default delivery path.
+    # Posts every webhook payload to its container logs as formatted
+    # JSON. Cheap, self-contained, no real secret to set up. Closes
+    # the senior-review-checkpoint Critical #1 finding that the dev
+    # stack's null receiver meant alerts never actually left the box.
+    #
+    # `mendhak/http-https-echo` is a long-standing public image (~30
+    # contributors, used in many CI pipelines) that prints the request
+    # body to stdout. We pin to a specific tag for reproducibility;
+    # bump deliberately when an upgrade is wanted.
+    #
+    # restart + healthcheck rationale: a silent crash of this sidecar
+    # would invisibly kill all alert delivery (Alertmanager queues
+    # webhook POSTs and eventually drops them). Without auto-restart
+    # the operability story for "alerts genuinely leave the box"
+    # becomes "...as long as nobody noticed the sidecar died". The
+    # healthcheck pairs with alertmanager's `depends_on:
+    # condition: service_healthy` so the first alert post-startup
+    # doesn't race the sidecar's HTTP listener bind.
+    image: mendhak/http-https-echo:34
+    container_name: booking_alert_logger
+    restart: unless-stopped
+    environment:
+      - HTTP_PORT=8080
+      - LOG_WITHOUT_NEWLINE=false
+      # JSON_RESPONSE=false sets the HTTP response body format to
+      # plain text rather than JSON. The stdout log is always JSON
+      # regardless; this just keeps the response itself terse so an
+      # operator curl'ing the sidecar manually doesn't get back a
+      # double-encoded blob.
+      - JSON_RESPONSE=false
+    ports:
+      # Expose 8081 → 8080 for ad-hoc curl-driven smoke tests; the
+      # AM container talks via the docker network at alert_logger:8080
+      # so the host port is convenience-only.
+      - "8081:8080"
+    healthcheck:
+      # The image runs an HTTP server on $HTTP_PORT; a successful
+      # GET / proves the listener is bound. wget --spider gives a
+      # 0-byte HEAD-style request without polluting the access log.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   grafana:
     image: grafana/grafana:11.2.2

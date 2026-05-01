@@ -137,13 +137,15 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 - Script: `scripts/k6_comparison.js`
 - VUs: 500
 - Duration: 60s
-- Ticket pool: 500,000 (so the run does not hit sold-out — measures pure capacity)
+- Ticket pool: 500,000 (realistic flash-sale-event scale — the regime the system is designed to simulate). The pool depletes partway through the 60s window. Headline metrics now report TWO numbers separately to be honest about what's measured: total `http_reqs/s` (capacity at the load-shed gate, dominated by cheap 409 fast path post-depletion) and `accepted_bookings/s` (the booking hot path through Redis Lua deduct + worker queue + DB). Both are operationally meaningful; collapsing them into one headline was the issue the senior-review checkpoint flagged.
 - Target: `http://app:8080/api/v1` (direct, bypasses nginx rate limit)
 - Both runs against an equivalent Docker stack on the same host
 
 **When to record**: PRs that touch the booking hot path (handler / `BookingService.BookTicket` / Redis Lua / `OrderMessageProcessor.Process` tx body / outbox relay polling) MUST land a comparison report. Pure refactors that the diff demonstrably leaves the hot path byte-identical (see PR 31→35 for the case that prompted this rule) MAY skip the report — but a report verifying "no regression" is still the cleanest evidence and is preferred.
 
 **Existing tooling**: `make benchmark-compare VUS=500 DURATION=60s` runs `scripts/benchmark_compare.sh` which produces the directory + raw outputs automatically; `comparison.md` is then hand-written referencing the captured raw files. Run-to-run variance for k6-on-Docker laptop is typically 3-5%; deltas below that are noise, not signal.
+
+**Future stress-test axis**: scale VUs (concurrency), not ticket pool. The system is positioned as a flash-sale simulator — the realistic stressor is "10× the users hammer the same scarce inventory", not "more inventory". Expected future runs push VUs to 1k → 5k → 10k against the same 500k pool to find the breaking point where time-to-sold-out, p99 latency, or `accepted_bookings`-to-`http_reqs` ratio degrades materially. Ticket pool stays fixed at the realistic scale so cross-run comparisons stay apples-to-apples on the booking hot path.
 
 ## Current State (as of 2026-04-30, post Phase 2 checkpoint)
 

@@ -8,6 +8,7 @@ The full framework lives in [`.claude/skills/project-review-checkpoint/SKILL.md`
 
 | Date | Trigger | Phase | PRs covered | Report | Outcome |
 | :-- | :-- | :-- | :-- | :-- | :-- |
+| 2026-05-01 | Senior multi-agent review | CP4c / pre-portfolio | #50..#64 + current CP4c branch | [20260501-senior-multi-agent-review.md](20260501-senior-multi-agent-review.md) | Grade A- as portfolio simulator, B if pitched production-ready. Criticals: alert delivery still null, failing runbook SQL, broken AGENTS bilingual contract, stale schema docs, benchmark pool exhaustion. Cleanup split into two PRs: ops/perf cleanup (this PR — fixes alert delivery, runbook SQL, benchmark pool, adds TargetDown), docs/API cleanup (next — AGENTS bilingual contract, schema docs, GET /events/:id stub). |
 | 2026-04-30 | Phase 2 boundary | 2 | #45..#49 | [20260430-phase2-review.md](20260430-phase2-review.md) | Grade A−. 1 verified correctness gap (recon max-age inventory leak) + 4 ops Criticals (no runbooks, no Alertmanager, dark worker metrics, doc contradiction). Cleanup PR scoped from action plan rows 1–9; larger items split to separate PRs. |
 
 ## Triggers

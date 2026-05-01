@@ -137,13 +137,15 @@ GitHub Actions 設定檔在 [`.github/workflows/ci.yml`](../.github/workflows/ci
 - Script:`scripts/k6_comparison.js`
 - VUs:500
 - Duration:60s
-- 票池:500,000(讓整個 run 都不會 sold-out — 測純容量)
+- 票池:500,000(符合真實 flash-sale 活動規模 — 也就是這個系統要模擬的場景)。票池會在 60s 視窗中途賣光。Headline metrics 現在會分開報兩個數字,如實呈現量測內容:總 `http_reqs/s`(load-shed gate 的容量,賣光後被便宜的 409 fast path 主導)以及 `accepted_bookings/s`(穿過 Redis Lua deduct + worker queue + DB 的訂票 hot path)。兩個數字在運維上都有意義;senior-review checkpoint 抓到的問題是把它們塞進單一 headline。
 - 目標:`http://app:8080/api/v1`(直連,繞過 nginx 限流)
 - 兩個 run 都在同一台主機、等價的 Docker 環境
 
 **何時要留 report**:會動到訂票 hot path 的 PR(handler / `BookingService.BookTicket` / Redis Lua / `OrderMessageProcessor.Process` 的 tx 主體 / outbox relay 輪詢)**必須**附上比對 report。純重構若 diff 可以證明 hot path 一個 byte 都沒改(例:PR 31→35 就是觸發這條規則的案例)**可以**跳過,但附一份「驗證無 regression」的 report 仍然是最乾淨的證據、也是優先選擇。
 
 **現有工具**:`make benchmark-compare VUS=500 DURATION=60s` 會跑 `scripts/benchmark_compare.sh`,自動建立目錄與 raw 輸出;`comparison.md` 再由人撰寫,引用已存下的 raw 檔。k6-on-Docker laptop 的 run-to-run 變異通常落在 3-5%,低於這個區間的 delta 是 noise 不是信號。
+
+**未來壓力測試的軸線**:推 VU(並發數),而不是票池。系統定位是 flash-sale 模擬器 — 真實的壓力來自「10× 的使用者打同一批稀缺庫存」,而不是「更多庫存」。預期後續測試會把 VU 從 1k → 5k → 10k 推上去,打同一個 500k 票池,找出 time-to-sold-out、p99 延遲、或 `accepted_bookings`-vs-`http_reqs` 比值開始惡化的臨界點。票池固定在真實規模上,讓跨次測試比較在訂票 hot path 維度上維持 apples-to-apples。
 
 ## 目前狀態(截至 2026-04-30,Phase 2 checkpoint 已完成)
 

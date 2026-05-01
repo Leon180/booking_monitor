@@ -173,6 +173,9 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 - Stream/DLQ failure rates — `redis_xack_failures_total` / `redis_xadd_failures_total{stream}` / `redis_revert_failures_total`
 - Stream collector errors by stream + operation — `redis_stream_collector_errors_total`
 
+**Row: Meta — scrape health (TargetDown)**
+- Scrape target up/down — `up` per `{job, instance}` (1 = healthy, 0 = down). Pairs with the `TargetDown` alert; sustained zero means rate-based alerts depending on that job are silently inert.
+
 **To add a new panel quickly (non-persistent — for exploration only):**
 1. Click **+ → Create dashboard → Add visualization**.
 2. Pick the **Prometheus** data source.
@@ -185,7 +188,9 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 
 Alert definitions live in [deploy/prometheus/alerts.yml](../deploy/prometheus/alerts.yml). State is visible in the Prometheus UI → **Alerts** AND in the Alertmanager UI at http://localhost:9093 (silence / inhibit / notification log).
 
-**Alertmanager wiring (CP6).** Prometheus pushes firing alerts to Alertmanager (config: [deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml)). Alertmanager handles dedup, grouping by `alertname + severity`, severity-specific cadences (critical: 30 m repeat, warning: 4 h, info: 24 h), and inhibition (e.g. `RedisStreamCollectorDown` suppresses every other stream-backlog alert because the gauges are stale anyway). The default delivery target is `null` — alerts dedupe / group / silence in Alertmanager but nothing pushes outbound. Slack delivery is opt-in: replace the `null` receiver references in `alertmanager.yml` with the `slack` receiver and paste your Incoming Webhook URL into `api_url`.
+**Alertmanager wiring (CP6, default delivery updated 2026-05-02).** Prometheus pushes firing alerts to Alertmanager (config: [deploy/alertmanager/alertmanager.yml](../deploy/alertmanager/alertmanager.yml)). Alertmanager handles dedup, grouping by `alertname + severity`, severity-specific cadences (critical: 30 m repeat, warning: 4 h, info: 24 h), and inhibition (e.g. `RedisStreamCollectorDown` suppresses every other stream-backlog alert because the gauges are stale anyway).
+
+**Default delivery (since 2026-05-02): a webhook-logger sidecar.** Alerts post to `booking_alert_logger` (a `mendhak/http-https-echo` container) which prints the payload to stdout. Operators see fired alerts via `docker logs booking_alert_logger -f`. This replaces the prior `null` receiver default which the senior-review checkpoint flagged as an operability gap (alerts never actually left Alertmanager). Slack delivery remains opt-in: copy `deploy/alertmanager/alertmanager.slack.yml.example` over `alertmanager.yml`, paste your Incoming Webhook URL into `api_url`, and `docker compose restart alertmanager`.
 
 **Runbook annotations (CP5).** Every alert carries a `runbook_url` annotation pointing at a section in [docs/runbooks/README.md](runbooks/README.md). Alertmanager renders the URL into Slack notifications via the template in `alertmanager.yml`. Operator workflow: alert fires → notification arrives → click runbook → matching dashboard panel + concrete remediation steps in one document.
 
@@ -217,6 +222,7 @@ The current alert catalog:
 | `RedisXAckFailures` | warning | `redis_xack_failures_total` rate > 0 for 5m — PEL grows unbounded; consumers redo work on rebalance |
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 for 5m — booking hot path intermittently failing to enqueue |
+| `TargetDown` | critical | `up == 0` for any (job, instance) for 2m+ — meta-alert; rate-based alerts for that job are silently inert until scrape recovers |
 
 > **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `kafka_consumer_retry_total`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,payment}` worker processes' default Prometheus registries. Each of those binaries now starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`payment-worker`, `recon`, `saga-watchdog`). Verify with `up{job=~"payment-worker|recon|saga-watchdog"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port. The new `saga_watchdog` compose service runs the watchdog in default-loop mode — `--once` mode is reserved for k8s CronJob hosting where the cluster scheduler drives cadence.
 
@@ -246,6 +252,11 @@ docker exec booking_db psql -U user -d booking -c \
 # Watchdog default sweep is 60s + alert `for: 10m`, so wait ~11m and check Prometheus → Alerts.
 # Cleanup: UPDATE the row back to its prior status, OR let the watchdog re-drive the compensator
 # (it will move Failed → Compensated since the row has no actual reverted-Redis-key tracked).
+
+# TargetDown — stop a worker, wait 2m+, watch Prometheus → Alerts → TargetDown firing.
+docker stop booking_payment_worker
+# Wait 2m+ (alert has `for: 2m`).
+# Cleanup: docker start booking_payment_worker → up returns to 1 within one scrape (15s).
 ```
 
 After testing, undo: `docker exec booking_redis redis-cli DEL orders:stream orders:dlq` (loses any in-flight production data — only safe in dev).

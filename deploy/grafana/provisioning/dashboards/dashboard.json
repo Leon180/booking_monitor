@@ -478,6 +478,32 @@
           "refId": "A"
         }
       ]
+    },
+
+    {
+      "id": 700,
+      "type": "row",
+      "title": "Meta — scrape health (TargetDown)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 102 }
+    },
+    {
+      "id": 70,
+      "title": "Scrape target up/down (1 = healthy, 0 = down)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "description": "Pairs with the TargetDown alert. A drop to 0 for any (job, instance) means rate-based alerts depending on that job's metrics are silently inert. Watch for sustained zero — every 'no alerts firing' diagnosis must rule this panel out first.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 103 },
+      "targets": [
+        {
+          "expr": "up",
+          "legendFormat": "{{job}} / {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "min": 0, "max": 1 }
+      }
     }
   ]
 }

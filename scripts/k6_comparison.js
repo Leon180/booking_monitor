@@ -1,9 +1,23 @@
 import http from 'k6/http';
 import { check } from 'k6';
-import { Rate, Trend } from 'k6/metrics';
+import { Counter, Rate, Trend } from 'k6/metrics';
 
 export const businessErrors = new Rate('business_errors');
 export const bookingDuration = new Trend('booking_duration', true);
+
+// acceptedBookings — counter incremented only on 202 (the booking
+// hot path). Pairs with the total `http_reqs/s` rate so reports
+// show BOTH numbers: total RPS (capacity at the load-shed gate) and
+// accepted-bookings/s (the path that actually exercises Redis Lua
+// deduct + worker queue + DB persistence). Without this, headline
+// RPS is dominated by the cheap 409 fast path once the pool depletes,
+// which the senior-review checkpoint flagged.
+//
+// We report acceptedBookings as a Counter rather than a Rate because
+// k6 prints Counters as both totals and per-second rates by default,
+// and the per-second rate is what operators want when comparing
+// "accepted booking throughput" across runs.
+export const acceptedBookings = new Counter('accepted_bookings');
 
 function randomIntBetween(min, max) {
     return Math.floor(Math.random() * (max - min + 1) + min);
@@ -26,6 +40,21 @@ export const options = {
 const BASE_URL = 'http://app:8080/api/v1';
 
 export function setup() {
+    // total_tickets is sized to a realistic flash-sale event scale
+    // (500,000 — large concert / popular ticketing event). This is
+    // the operating regime the system is designed to simulate; an
+    // unrealistically large pool would just measure sustained
+    // throughput, not the contention behavior that distinguishes
+    // a flash-sale system.
+    //
+    // The senior-review-checkpoint Critical #5 concern was that
+    // headline RPS heavily weighted the cheap 409 sold-out fast
+    // path once the pool depleted. The fix is methodology — we
+    // export `accepted_bookings` as a separate k6 metric so reports
+    // distinguish "total HTTP RPS at the load-shed gate" from
+    // "accepted bookings / s through the booking hot path". Both
+    // numbers are operationally meaningful; collapsing them into
+    // a single headline was the bug, not the pool size.
     const payload = JSON.stringify({
         name: `Comparison Benchmark ${Date.now()}`,
         total_tickets: 500000,
@@ -69,6 +98,9 @@ export default function (data) {
     // Redis-side deduct succeeded, DB persistence + payment + saga in flight).
     // 409 = sold out. Anything else is a real error.
     businessErrors.add(res.status !== 202 && res.status !== 409);
+    if (res.status === 202) {
+        acceptedBookings.add(1);
+    }
 
     check(res, {
         'status is 202 or 409': (r) => r.status === 202 || r.status === 409,
