@@ -205,6 +205,70 @@ services:
       timeout: 3s
       retries: 5
 
+  redis_exporter:
+    # Prometheus exporter for Redis. De-facto community standard
+    # (`oliver006/redis_exporter` — listed on the Prometheus exporters
+    # page but NOT officially endorsed by either Prometheus org or
+    # Redis Inc.). We use it because Redis OSS has no first-party
+    # Prometheus endpoint (issue redis/redis#5240, open since 2018) and
+    # rolling our own INFO-parser would re-implement ~1.8k LOC without
+    # ecosystem benefit.
+    #
+    # Exposed metrics fill the gap left by our app-internal cache
+    # observability (which only sees the Go-client view). With
+    # redis_exporter we additionally get:
+    #   - redis_cpu_sys_seconds_total / redis_cpu_user_seconds_total
+    #     (the "is Redis main thread saturated" question)
+    #   - redis_commands_duration_seconds_total{cmd=...}
+    #     (per-command latency — distinguish "deduct.lua hot" from
+    #     "XADD piling up")
+    #   - redis_slowlog_length / redis_last_slow_execution_duration
+    #     (SLOWLOG surfaces as metric, no manual redis-cli)
+    #   - redis_memory_* + redis_mem_fragmentation_ratio
+    #     (memory pressure / jemalloc state)
+    #   - redis_connected_clients / redis_blocked_clients
+    #     (pool-side back-pressure)
+    #
+    # Loopback port binding (127.0.0.1:9121) — the exporter scrape
+    # endpoint is only reachable from the host for ad-hoc curl, never
+    # from outside the docker bridge. Prometheus scrapes via the docker
+    # network at `redis_exporter:9121`.
+    image: oliver006/redis_exporter:v1.83.0-alpine
+    container_name: booking_redis_exporter
+    environment:
+      # Auth via env so the password stays in .env, not the image.
+      # Soft-optional `${REDIS_PASSWORD-}` matches the pattern the
+      # app/payment_worker/recon/saga_watchdog services use (line 36
+      # onwards) — a passwordless dev Redis is a legitimate config,
+      # and the hard-required `${VAR:?}` form would crash compose-up
+      # in that scenario. The Redis service itself (line ~200) IS
+      # hard-required because the server has to know whether to
+      # enable requirepass at all.
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD-}
+      # --include-system-metrics adds host-level CPU/mem of the Redis
+      # *process* (not the host) — useful for the "Redis CPU saturated"
+      # question even when the container shares the box with others.
+      - REDIS_EXPORTER_INCL_SYSTEM_METRICS=true
+      # CONFIG GET requires Redis admin perms; with requirepass+ACL the
+      # exporter falls back gracefully if denied. Default is true; left
+      # explicit so the intent is grep-able.
+      - REDIS_EXPORTER_INCL_CONFIG_METRICS=true
+    ports:
+      - "127.0.0.1:9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # The exporter exposes /health as a liveness endpoint (not the
+      # same as /metrics — /health doesn't probe Redis, just checks
+      # the exporter's HTTP listener bound).
+      test: ["CMD", "wget", "-qO-", "--tries=1", "http://localhost:9121/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: booking_prometheus
