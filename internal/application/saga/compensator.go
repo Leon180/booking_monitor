@@ -85,8 +85,17 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte) err
 	// 2. Rollback Redis Inventory (Hot path). Idempotency is enforced
 	// by the Lua script via an EXISTS-then-SET guard on a compensation
 	// key (see revert.lua for the crash-safety trade-off).
+	//
+	// B3 sharding: RevertInventory MUST hit the same shard the original
+	// deduct landed in. For B3.1's INVENTORY_SHARDS=1 default that is
+	// always shard 0 (only one shard). B3.2 will plumb the shard
+	// through OrderCreatedEvent → OrderFailedEvent and pass it here.
 	compensationID := fmt.Sprintf("order:%s", event.OrderID)
-	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, event.Quantity, compensationID); err != nil {
+	// TODO(B3.2): replace with event.Shard once OrderFailedEvent carries
+	// the shard id end-to-end (worker → outbox → Kafka → here). Until
+	// then INVENTORY_SHARDS defaults to 1 and the only valid shard is 0.
+	const b3_1ShardForN1 = 0
+	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, b3_1ShardForN1, event.Quantity, compensationID); err != nil {
 		s.log.Error(ctx, "failed to rollback Redis inventory",
 			tag.OrderID(event.OrderID),
 			tag.Error(err),

@@ -48,6 +48,15 @@ type QueuedBookingMessage struct {
 	UserID   int       // External user reference (this service does not own users)
 	EventID  uuid.UUID // FK to events.id
 	Quantity int
+
+	// Shard is the inventory shard id the deduct landed in (B3 sharding).
+	// Emitted by deduct.lua so saga compensation can revert to the same
+	// shard. For B3.1 with INVENTORY_SHARDS=1 this is always 0; B3.2
+	// will plumb a non-zero value through OrderCreated/OrderFailed
+	// events so handleFailure can use msg.Shard instead of a hardcoded
+	// constant. Validated at parse time — a missing/invalid `shard`
+	// stream field routes to DLQ alongside other malformed input.
+	Shard int
 }
 
 //go:generate mockgen -source=queue.go -destination=../mocks/queue_mock.go -package=mocks

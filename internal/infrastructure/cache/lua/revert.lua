@@ -1,6 +1,13 @@
--- KEYS[1]: inventory_key (event:{id}:qty)
+-- KEYS[1]: inventory_key (event:{id}:qty:{shard}) — caller picks the shard
 -- KEYS[2]: idempotency_key (saga:reverted:{compensation_id})
 -- ARGV[1]: count
+--
+-- B3 sharding note: KEYS[1] now embeds a shard id (e.g.
+-- event:abc-…-123:qty:2). The caller (saga compensator) MUST revert
+-- to the same shard the original deduct landed in — incrementing the
+-- wrong shard leaves one shard accumulating tickets above its allocation
+-- cap. With INVENTORY_SHARDS=1 (default in B3.1 scaffolding), there is
+-- only one shard so this is byte-equivalent to pre-B3 behavior.
 --
 -- Reverts Redis inventory for a compensated order. Idempotent via an
 -- EXISTS check on the idempotency key rather than SETNX so we can reason

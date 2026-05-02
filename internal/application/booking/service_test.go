@@ -41,7 +41,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 				// the orderID position — we don't pin its value here
 				// because the test asserts the service-side return
 				// value is non-nil/non-zero separately below.
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2).Return(true, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2).Return(true, 0, nil)
 			},
 			expectedError: nil,
 		},
@@ -52,7 +52,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			quantity: 5,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5).Return(false, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5).Return(false, 0, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
@@ -65,7 +65,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  eventID,
 			quantity: 1,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1).Return(false, 0, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},

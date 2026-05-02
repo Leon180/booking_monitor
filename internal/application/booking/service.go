@@ -112,7 +112,14 @@ func (s *service) BookTicket(ctx context.Context, userID int, eventID uuid.UUID,
 
 	// 2. Atomic Deduct from Redis (hot path — Redis is the load-
 	//    shedding gate; sold-out attempts never touch DB).
-	success, err := s.inventoryRepo.DeductInventory(ctx, order.ID(), order.EventID(), order.UserID(), order.Quantity())
+	//
+	// B3 sharding: DeductInventory returns the shard the deduct landed
+	// in (0..N-1). With B3.1's INVENTORY_SHARDS=1 default, shard is
+	// always 0. The shard is currently discarded — B3.2 will plumb it
+	// through OrderCreatedEvent → saga compensator so RevertInventory
+	// can revert to the same shard. For N=1 the discard is correct
+	// because there's only one shard to revert to anyway.
+	success, _, err := s.inventoryRepo.DeductInventory(ctx, order.ID(), order.EventID(), order.UserID(), order.Quantity())
 	if err != nil {
 		return domain.Order{}, fmt.Errorf("redis inventory error: %w", err)
 	}

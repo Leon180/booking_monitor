@@ -90,7 +90,7 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"order_id": orderUUID, "user_id": "1", "event_id": eventUUID, "quantity": "1",
+			"order_id": orderUUID, "user_id": "1", "event_id": eventUUID, "quantity": "1", "shard": "0",
 		},
 	}).Result()
 
@@ -199,7 +199,7 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"order_id": uuid.New().String(), "user_id": "1", "event_id": uuid.New().String(), "quantity": "1",
+			"order_id": uuid.New().String(), "user_id": "1", "event_id": uuid.New().String(), "quantity": "1", "shard": "0",
 		},
 	})
 
@@ -235,10 +235,10 @@ type fakeInventoryRevert struct{ reverted bool }
 func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
 	panic("SetInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int) (bool, error) {
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int) (bool, int, error) {
 	panic("DeductInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {
+func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ int, _ string) error {
 	f.reverted = true
 	return nil
 }

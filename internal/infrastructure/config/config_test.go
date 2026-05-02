@@ -24,6 +24,7 @@ func validBase() *config.Config {
 		Redis: config.RedisConfig{
 			MaxConsecutiveReadErrors: 30,
 			DLQRetention:             720 * time.Hour,
+			InventoryShards:          1,
 		},
 		Worker: config.WorkerConfig{
 			MaxRetries:          3,

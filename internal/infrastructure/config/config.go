@@ -209,6 +209,29 @@ type RedisConfig struct {
 	// flows that retry across days.
 	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
 
+	// InventoryShards splits an event's inventory across N independent
+	// Redis Lua keys (`event:{uuid}:qty:0` … `event:{uuid}:qty:{N-1}`)
+	// so the booking hot path's single-key Redis-Lua bottleneck (see
+	// docs/benchmarks/20260502_132247_vu_scaling/comparison.md — single-
+	// host ceiling ~8,330 accepted/s on Apple M-series) becomes
+	// approximately N-fold larger. Default 1 = backwards-compatible
+	// single-shard behavior, byte-identical to the pre-B3 path. Bump
+	// to 4 after the B3.2 PR has verified the lift via benchmark.
+	//
+	// Trade-off: sold-out detection becomes non-atomic. A booking
+	// against shard A returning -1 (depleted) does NOT mean the event
+	// is sold out — shards B/C/D may still have inventory. The
+	// repository handles this by retrying on alternate shards up to
+	// N-1 times before declaring sold-out. Worst-case sold-out cost is
+	// N Redis round-trips, which is acceptable because sold-out is
+	// the fast 409 path post-pool-depletion.
+	//
+	// Saga compensation must revert to the SAME shard the original
+	// deduct hit; the shard id flows end-to-end via OrderCreatedEvent
+	// → OrderFailedEvent. With N=1, the field is omitted from the
+	// wire format (omitempty) so existing consumers see no change.
+	InventoryShards int `yaml:"inventory_shards" env:"INVENTORY_SHARDS" env-default:"1"`
+
 	// DLQRetention is the bounded retention window for the
 	// `orders:dlq` stream. Translated to a Redis Streams MINID
 	// directive on every XADD so entries older than NOW-DLQRetention
@@ -429,6 +452,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.DLQRetention <= 0 {
 		missing = append(missing, "redis.dlq_retention / REDIS_DLQ_RETENTION (must be > 0; 0 would trim entire DLQ on every XADD)")
+	}
+	if c.Redis.InventoryShards < 1 {
+		missing = append(missing, "redis.inventory_shards / INVENTORY_SHARDS (must be >= 1; 1 = single-shard backwards-compatible mode, N>1 = sharded)")
 	}
 
 	// Recon tunables — same rationale as Worker tunables above. Zero

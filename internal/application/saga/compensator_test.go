@@ -116,7 +116,7 @@ func TestHandleOrderFailed_AlreadyCompensated(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
 
 	// IncrementTicket / MarkCompensated NOT expected — short-circuit.
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 0, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID))
 	require.NoError(t, err)
@@ -206,7 +206,7 @@ func TestHandleOrderFailed_RevertInventoryError(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	eventRepo.EXPECT().IncrementTicket(gomock.Any(), eventID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(redisErr)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 0, 1, "order:"+orderID.String()).Return(redisErr)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID))
 	require.Error(t, err)
@@ -227,7 +227,7 @@ func TestHandleOrderFailed_HappyPath(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	eventRepo.EXPECT().IncrementTicket(gomock.Any(), eventID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 0, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID))
 	require.NoError(t, err)

@@ -42,12 +42,13 @@ func (m *MockInventoryRepository) EXPECT() *MockInventoryRepositoryMockRecorder 
 }
 
 // DeductInventory mocks base method.
-func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, eventID uuid.UUID, userID, count int) (bool, error) {
+func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, eventID uuid.UUID, userID, count int) (bool, int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeductInventory", ctx, orderID, eventID, userID, count)
 	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret1, _ := ret[1].(int)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
 // DeductInventory indicates an expected call of DeductInventory.
@@ -57,17 +58,17 @@ func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, orderID, eve
 }
 
 // RevertInventory mocks base method.
-func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
+func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, shard, count int, compensationID string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count, compensationID)
+	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, shard, count, compensationID)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RevertInventory indicates an expected call of RevertInventory.
-func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, count, compensationID any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, shard, count, compensationID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, count, compensationID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, shard, count, compensationID)
 }
 
 // SetInventory mocks base method.
