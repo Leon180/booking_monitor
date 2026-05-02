@@ -196,3 +196,42 @@ This validates the decision to withdraw PR #69 (B3 sharding) **for the regime we
 
 **Honest next step:** instead of picking the "highest-leverage" optimization from a speculative-percentage table, audit the code paths called out above (does `GET /api/v1/orders/:id` actually short-circuit `Idempotency` + `BodySize`? — that's a yes/no code check, not a profile read) and re-run `make profile-saturation` after any change to validate the prediction with apples-to-apples diff. The tooling exists; the discipline is to not commit to a magnitude before measuring it.
 
+---
+
+## Audit follow-up (post PR #71 merge): "Are GET routes incorrectly running through Idempotency / BodySize?"
+
+**Investigation:** read [`internal/infrastructure/api/booking/handler.go::RegisterRoutes`](../../internal/infrastructure/api/booking/handler.go) and [`cmd/booking-cli/server.go::buildGinEngine`](../../cmd/booking-cli/server.go) to confirm middleware scoping.
+
+**Result: NO bug. Both middlewares are already correctly scoped.**
+
+```go
+// internal/infrastructure/api/booking/handler.go (around line 270)
+func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler, idempotencyRepo domain.IdempotencyRepository) {
+    r.POST("/book", middleware.Idempotency(idempotencyRepo), handler.HandleBook)  // ← Idempotency ONLY here
+    r.GET("/orders/:id", handler.HandleGetOrder)                                  // ← skip
+    r.GET("/history", handler.HandleListBookings)                                 // ← skip
+    r.POST("/events", handler.HandleCreateEvent)                                  // ← skip (admin, low collision risk)
+    r.GET("/events/:id", handler.HandleViewEvent)                                 // ← skip
+}
+```
+
+```go
+// cmd/booking-cli/server.go (line 215)
+v1.Use(middleware.BodySize(middleware.MaxBookingBodyBytes))   // group-level on /api/v1
+```
+
+| Middleware | Where applied | Cost on GET routes |
+| :-- | :-- | :-- |
+| `Idempotency` | Per-route on `POST /book` ONLY | Zero — not in the chain |
+| `BodySize` | Group-level on `/api/v1` | ~0 — `MaxBytesReader` only enforces on `Read()`; GET requests have no body, so it's a wrapping struct that is never exercised |
+
+A comment block above `RegisterRoutes` already documents the design decision: "Idempotent reads (GET /history, GET /events/:id, GET /orders/:id) and event setup (POST /events — admin-side, low collision risk) skip the cache lookup entirely."
+
+**Implication for the optimization roadmap:**
+
+The "Audit Idempotency middleware hot path" row in the table above is therefore **CLOSED with no action**. The 59.42% cumulative figure visible in pprof was honest in number but the conclusion "audit it" found no actionable issue — `POST /book` is the route that does the expensive work, Idempotency wraps only that route by design, and the cumulative figure is just the handler's own cost passing up the call graph.
+
+This eliminates the lowest-risk candidate. Remaining candidates from the table are all unmeasured-magnitude (HTTP/2, response body trim, go-redis pipelining) — each requires either an experiment or a follow-up PR with before/after profile diff.
+
+**The single biggest insight** that emerged from this audit: the saturation we're measuring may itself be partially the docker-compose userspace network stack (veth + iptables + bridge traversal). To know how much of the 8,332 ceiling is "the architecture" vs "the test environment", we need to re-measure under a different network shape. See [O3.2 — bare-metal benchmark plan](../post_phase2_roadmap.md#o32--bare-metal-benchmark-find-the-real-ceiling) for the next experiment.
+

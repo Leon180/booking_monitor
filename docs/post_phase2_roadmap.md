@@ -146,6 +146,55 @@ The demo tells **two interleaved stories**: (1) architectural evolution under lo
 - **Stripe vs MockGateway**: ship with `MockStripeAdapter` (signed-webhook simulator) so the demo runs without Stripe credentials. Document the adapter swap in `docs/PROJECT_SPEC.md` §6.x. Real-Stripe operator instructions in `docs/runbooks/stripe-integration.md` (CP5).
 - **Admin endpoint gating**: `ENABLE_ADMIN_DEMO=true` env var gates `/api/v1/admin/stream` and `/api/v1/admin/benchmark`. Off in any non-demo environment. Separate from `ENABLE_PPROF` so each surface can be turned on independently.
 
+## O3.2 — Bare-metal benchmark (find the real ceiling)
+
+**Why.** PR #71 ([docs/saturation-profile/20260502_221629_c500/](saturation-profile/20260502_221629_c500/)) established that under `make profile-saturation VUS=500 DURATION=60s` the system caps at **8,332 acc/s** with:
+
+- Redis main thread CPU at **53%** (47% headroom)
+- Pool: 0 misses, 0 timeouts, 23/200 conns in use (not pool-starved)
+- Postgres: 2 in-use of pool, no waits (not DB-bound)
+- ~33% Go CPU in `Syscall6` (writes 4× reads; ~11% HTTP response path, ~21% go-redis subtree)
+
+The post-merge audit (canonical profile README's "Audit follow-up" section) confirmed both `Idempotency` and `BodySize` middleware are already correctly scoped — no cheap in-process fix to extract. So the remaining hypothesis the profile cannot rule out is: **a meaningful slice of the 33% Syscall6 cost is the docker-compose userspace network stack itself** (veth pair + iptables NAT + bridge traversal between k6, app, redis, postgres containers). To know how much of the 8,332 ceiling is "the architecture" vs "the test environment", re-measure under a different network shape.
+
+### Experiment design
+
+| Variant | Network shape | What it isolates | Effort |
+| :-- | :-- | :-- | :-- |
+| **A** (current baseline) | k6-in-docker → docker bridge → app-in-docker | Status quo (8,332 acc/s) | Already captured (PR #71) |
+| **B** | host networking — `network_mode: host` for app + redis + postgres + k6 on a single Linux host | Removes veth + iptables overhead while keeping everything else the same | S–M (~1 day: compose override file + re-run + comparison report) |
+| **C** | k6 on one cloud VM → app on another (managed Redis + managed PG, e.g. AWS) | Realistic production wire shape; reveals what someone deploying this would actually hit | M–L (~2–3 days: provision two VMs, terraform-light, capture profile + benchmark) |
+
+For each variant, run the same `make profile-saturation` and compare:
+- `accepted_bookings/sec` (the headline)
+- `redis_cpu_total_rate` (does Redis become the bottleneck once network overhead is removed?)
+- `cpu.pprof` `Syscall6` share (does the I/O cost shrink?)
+- `bookings_total` p99 latency
+
+Save the comparison to `docs/saturation-profile/<ts>_compare_<A|B|C>/comparison.md` mirroring the convention in `docs/benchmarks/`.
+
+### Decision gates
+
+| Outcome | Interpretation | Next move |
+| :-- | :-- | :-- |
+| B ≈ A (e.g. within 5–10%) | Docker network is not the cap | Revisit go-redis worker-side pipelining and HTTP/2 as the remaining levers — those are unmeasured estimates that variant B would still leave unanswered |
+| B >> A (e.g. > 25%) | Docker network *is* a meaningful slice of the cap | Apply a "this measurement is local-docker-bound" caveat retroactively to the saturation profile findings; project narrative honestly notes "production ceiling is materially higher" |
+| C reveals genuine architectural cap | That number is the resume bullet | Use C's number as the "what does this architecture actually do?" answer in interview / portfolio context |
+
+### Out of scope
+
+- Multi-instance horizontal benchmarks (multi-replica app + Redis Cluster). Those are downstream of B3 inventory sharding which was rejected for this profile config — re-evaluate only if variant C reveals a real architectural ceiling and there's a clear next-instance-of-the-same-architecture-doesn't-cut-it story.
+- Cross-cloud / multi-region. Single-VM-pair (variant C) is enough to falsify "the docker overhead is most of what we're measuring".
+
+### When to do it
+
+This is the next experimentally-meaningful work after the demo arc. Order options:
+
+1. **Pre-demo** — if the project narrative needs the bare-metal ceiling number for a resume / portfolio bullet ("X acc/s on a single-instance bare-metal stack")
+2. **Post-demo** — if the demo's existing 8,332 acc/s headline is enough story by itself, and O3.2 is for personal-curiosity / interview-talking-point ("how would you find the actual ceiling?")
+
+Recommendation: pre-demo for variant B (cheap), post-demo for variant C (more setup cost).
+
 ## Deferred / explicitly NOT in this roadmap
 
 - **DLQ Worker** (formerly listed as next phase) — not blocking demo; defer until production traffic exists. Current DLQ + watchdog cover the recovery surface.
