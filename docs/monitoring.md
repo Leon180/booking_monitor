@@ -65,6 +65,7 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | Redis cache (Go-client view) | `cache_hits_total{cache}`, `cache_misses_total{cache}` | per-cache-name hit/miss; what *our app* sees |
 | Redis streams | `redis_stream_length{stream}`, `redis_stream_pending_entries{stream,group}`, `redis_stream_consumer_lag_seconds{stream,group}` | scraped at request time by `StreamsCollector` |
 | Redis server (oliver006 exporter, scraped from `redis_exporter:9121`) | `redis_*` | The "is Redis itself saturated" view that our app-side metrics can't answer. See sub-table below. |
+| Redis client pool (Go-redis `PoolStats()`, scraped from app `:8080/metrics`) | `redis_client_pool_*` | The "is OUR client starving for connections" view. Sibling to `db_pool_*`. See sub-table below. |
 
 **Redis-server-side metrics (from `redis_exporter`)** — fills the gap that our Go-client-side `cache_*` and `redis_stream_*` metrics can't answer. Useful when triaging "why is the booking hot path slow":
 
@@ -80,6 +81,19 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | Is the exporter itself healthy? | `up{job="redis"}` | `up{job="redis"} == 0` for sustained 1m → exporter or Redis itself unreachable |
 
 The exporter polls Redis `INFO` + `commandstats` + `SLOWLOG` per scrape. Each scrape is a single round-trip, so it does not meaningfully load Redis (verified via `redis_exporter`'s own self-metrics). For the full metric list see the [oliver006/redis_exporter README](https://github.com/oliver006/redis_exporter#whats-exported).
+
+**Redis-client-pool metrics (from `redis_pool_collector.go`)** — the missing third leg next to the server-side exporter and the app-side `cache_*` outcomes. Answers "is OUR Go redis client starving for connections?" — the most common saturation cause when the server side looks idle (Stack Overflow's published architecture serves 87k cmd/s at 2% Redis CPU; client-side starvation is the typical "Redis is slow" cause):
+
+| Question | Metric | Example query |
+| :-- | :-- | :-- |
+| Pool size + occupancy at this moment | `redis_client_pool_total_conns`, `redis_client_pool_idle_conns`, `redis_client_pool_stale_conns` | gauges, no rate needed |
+| Pool reuse rate (the fast path) | `redis_client_pool_hits_total` | `rate(redis_client_pool_hits_total[1m])` |
+| **PoolSize too small** (had to create new conn instead of reusing) | `redis_client_pool_misses_total` | `rate(redis_client_pool_misses_total[1m]) > 0` sustained → bump `cfg.Redis.PoolSize` |
+| **Pool fully exhausted** (page-worthy hard saturation) | `redis_client_pool_timeouts_total` | `rate(redis_client_pool_timeouts_total[1m]) > 0` sustained 1m → page |
+| Cumulative goroutine wait time | `redis_client_pool_wait_count_total`, `redis_client_pool_wait_duration_seconds_total` | `rate(redis_client_pool_wait_duration_seconds_total[1m])` ≈ "seconds-of-wait per second"; values > goroutine count × few ms = mild contention; values close to goroutine count = severe queueing |
+| Connections discarded as broken | `redis_client_pool_unusable_total` | `rate(redis_client_pool_unusable_total[5m])` non-zero → server-side disconnects (Redis restart, network) |
+
+The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, atomic loads — cheap). Mirrors the `pg_pool_*` collector pattern for Postgres.
 
 ### Domain-specific — what the business cares about
 
@@ -296,6 +310,37 @@ For day-to-day senior-level usage:
 4. **App logs** (`docker compose logs -f app`) — for context + correlation IDs that the metric alone can't give you
 
 Logs and metrics are linked: every structured log line includes `correlation_id` + (when sampled) `trace_id`/`span_id`. From a Grafana spike you can grab the timestamp, search Jaeger (http://localhost:16686) for traces in that window, and pull the matching `correlation_id` to grep app logs. See [internal/log/](../internal/log/) for the wiring.
+
+### One-shot saturation diagnostic — `make profile-saturation`
+
+When you need to answer **"why does throughput plateau at X req/s?"** rather than "is anything red right now?", reach for `make profile-saturation`. It runs k6 at the same conditions as `benchmark-compare`, then captures pprof + Redis `INFO commandstats` + SLOWLOG + a Prometheus signal snapshot at the moment of peak load, all dumped into `docs/saturation-profile/<timestamp>_c<vus>/`.
+
+```bash
+# Defaults: VUS=500 DURATION=60s — same regime as our k6 baseline.
+make profile-saturation
+
+# Or override:
+make profile-saturation VUS=1000 DURATION=90s
+```
+
+What the output gives you:
+
+| File | What it answers |
+| :-- | :-- |
+| `cpu.pprof` (30s window) | Where Go spent its CPU. `go tool pprof -http=:0 cpu.pprof` opens a flame graph. |
+| `heap.pprof`, `goroutine.pprof` | Allocation-site bytes, goroutine count + stacks. |
+| `commandstats_diff.txt` | Top Redis commands ranked by total μs spent during the window — the "what was Redis doing?" answer. |
+| `slowlog.txt` | Single commands > 10ms. Empty = no individual slow operation. |
+| `prom_signals.json` | Snapshot of the headline RED + USE signals at end-of-window: Redis CPU rate, client-pool hits/misses/timeouts, PG pool waits, p99 latency, goroutine count, accepted-bookings/sec. |
+| `k6_summary.txt` | Headline throughput + percentile latencies from the load generator. |
+| `README.md` | Auto-generated decision tree. Append a "Findings" section once you've read `cpu.pprof`. |
+
+The decision tree in the auto-generated README is the senior-grade move: **measure first, then optimize**. The first profile run we captured (`docs/saturation-profile/20260502_221629_c500/`) is the canonical example — it falsified the "Redis is bound" hypothesis (Redis CPU at 53% during peak) and pointed at network-syscall I/O as the actual cap, which validated withdrawing PR #69 (B3 inventory sharding) before any of its downstream PRs were written.
+
+Required for this command to work:
+- `ENABLE_PPROF=true` in `.env` so the app's pprof listener is active.
+- `grafana/k6` docker image (the script pulls it on first run if missing — adds ~30s).
+- The full compose stack up and warm (the script will `docker compose up -d` any missing service from `app`, `redis`, `prometheus`, `redis_exporter`).
 
 ---
 

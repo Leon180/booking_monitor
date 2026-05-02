@@ -65,6 +65,7 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | Redis 快取(Go-client 視角) | `cache_hits_total{cache}`、`cache_misses_total{cache}` | 每個快取名稱獨立的 hit/miss;**我們的應用程式**所看到的 |
 | Redis streams | `redis_stream_length{stream}`、`redis_stream_pending_entries{stream,group}`、`redis_stream_consumer_lag_seconds{stream,group}` | scrape 時由 `StreamsCollector` 即時讀取 |
 | Redis server(oliver006 exporter,從 `redis_exporter:9121` scrape) | `redis_*` | 「Redis 自己飽和了嗎」這類我們應用層指標無法回答的問題。請參考下方子表格。 |
+| Redis client pool(go-redis `PoolStats()`,從 app `:8080/metrics` scrape) | `redis_client_pool_*` | 「**我們的 client** 是不是在排隊等連線」這個視角。跟 `db_pool_*` 是兄弟。請參考下方子表格。 |
 
 **Redis 伺服器端指標(來自 `redis_exporter`)** — 補上 Go-client 端 `cache_*` 與 `redis_stream_*` 指標無法回答的盲點。triage「為什麼訂票熱路徑變慢」時非常有用:
 
@@ -80,6 +81,19 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | Exporter 自己健康嗎? | `up{job="redis"}` | `up{job="redis"} == 0` 持續 1 分鐘 → exporter 或 Redis 本身連不到 |
 
 Exporter 每次 scrape 跑一次 Redis `INFO` + `commandstats` + `SLOWLOG`,各只有單次 round-trip,實測對 Redis 沒有可觀的負載(由 `redis_exporter` 自己的 self-metrics 驗證)。完整指標清單請看 [oliver006/redis_exporter README](https://github.com/oliver006/redis_exporter#whats-exported)。
+
+**Redis client 連線池指標(來自 `redis_pool_collector.go`)** — 配合 server 端 exporter 與應用層 `cache_*` 結果指標的第三條腿。回答「**我們的 Go redis client** 是不是在排隊等連線」 — 當 server 端看起來閒閒的時候,這就是最常見的飽和原因(Stack Overflow 公開的架構在 Redis CPU 2% 的條件下做到 87k cmd/s,client 端飽和才是「Redis 變慢」的典型原兇):
+
+| 問題 | 指標 | 範例查詢 |
+| :-- | :-- | :-- |
+| 此刻連線池大小 + 佔用情況 | `redis_client_pool_total_conns`、`redis_client_pool_idle_conns`、`redis_client_pool_stale_conns` | gauge,不需要 rate |
+| 連線重用率(快路徑) | `redis_client_pool_hits_total` | `rate(redis_client_pool_hits_total[1m])` |
+| **PoolSize 太小**(被迫新建連線而非重用) | `redis_client_pool_misses_total` | `rate(redis_client_pool_misses_total[1m]) > 0` 持續 → 該調大 `cfg.Redis.PoolSize` |
+| **連線池完全爆掉**(page-worthy 硬飽和) | `redis_client_pool_timeouts_total` | `rate(redis_client_pool_timeouts_total[1m]) > 0` 持續 1m → page |
+| Goroutine 累計等待時間 | `redis_client_pool_wait_count_total`、`redis_client_pool_wait_duration_seconds_total` | `rate(redis_client_pool_wait_duration_seconds_total[1m])` ≈「每秒中有幾秒在等」;若值 > goroutine 數 × 幾 ms = 輕度爭用;若接近 goroutine 數 = 嚴重排隊 |
+| 連線被當成壞掉而拋棄 | `redis_client_pool_unusable_total` | `rate(redis_client_pool_unusable_total[5m])` 非零 → server 端斷線(Redis 重啟、網路) |
+
+Collector 在 scrape 當下讀 `*redis.Client.PoolStats()`(已經有鎖保護 + atomic load,很便宜)。模式跟 Postgres 的 `pg_pool_*` collector 完全一樣。
 
 ### 領域指標 — 業務在意的事
 
@@ -296,6 +310,37 @@ docker stop booking_payment_worker
 4. **App 日誌**(`docker compose logs -f app`) — 拿背景脈絡 + correlation ID,光靠指標看不到的東西
 
 日誌與指標是相連的:每一行結構化 log 都帶 `correlation_id`,以及(被取樣到時)`trace_id`/`span_id`。Grafana 上看到一個尖峰,把時間戳記下來,在 Jaeger(http://localhost:16686)搜該時段的 trace,把對應的 `correlation_id` 抓出來去 grep app 日誌。串線細節見 [internal/log/](../internal/log/)。
+
+### 一鍵飽和診斷 — `make profile-saturation`
+
+當你要回答的不是「現在有沒有閃紅」,而是 **「為什麼吞吐量在 X req/s 撞牆?」** 時,用 `make profile-saturation`。它在跟 `benchmark-compare` 同樣的條件下跑 k6,然後在峰值瞬間同時抓 pprof + Redis `INFO commandstats` + SLOWLOG + Prometheus 訊號快照,全部丟到 `docs/saturation-profile/<timestamp>_c<vus>/`。
+
+```bash
+# 預設:VUS=500 DURATION=60s — 跟我們的 k6 baseline 是同一個條件。
+make profile-saturation
+
+# 也可以覆寫:
+make profile-saturation VUS=1000 DURATION=90s
+```
+
+輸出會給你這些東西:
+
+| 檔案 | 回答的問題 |
+| :-- | :-- |
+| `cpu.pprof`(30s 視窗) | Go 的 CPU 花在哪裡。`go tool pprof -http=:0 cpu.pprof` 會打開 flame graph。 |
+| `heap.pprof`、`goroutine.pprof` | 配置點的 in-use bytes、goroutine 數量 + 堆疊。 |
+| `commandstats_diff.txt` | 視窗內 Redis 各指令依累計 μs 排名 — 「Redis 在做什麼?」的答案。 |
+| `slowlog.txt` | 單次 > 10ms 的指令。空的 = 沒有單一慢操作。 |
+| `prom_signals.json` | 視窗結束時的 RED + USE 訊號快照:Redis CPU rate、client 連線池 hits/misses/timeouts、PG pool waits、p99 latency、goroutine 數、accepted-bookings/sec。 |
+| `k6_summary.txt` | 從 load generator 角度看的吞吐量 + 各百分位延遲。 |
+| `README.md` | 自動生成的決策樹。讀完 `cpu.pprof` 後,把「Findings」段落補上去。 |
+
+自動生成 README 裡的決策樹就是 senior 級的做法:**先量測,再優化**。我們抓的第一份 profile (`docs/saturation-profile/20260502_221629_c500/`)就是標準範本 — 它證偽了「Redis 是瓶頸」這個假設(Redis CPU 在峰值只有 53%),指出真正的天花板是網路 syscall I/O,也驗證了在 PR #69(B3 庫存分片)被任何下游 PR 寫出來之前就把它撤掉的決定。
+
+執行這個指令需要:
+- `.env` 裡 `ENABLE_PPROF=true`,讓 app 的 pprof listener 是開的。
+- `grafana/k6` docker image(第一次跑時 script 會自動拉 — 多 ~30s)。
+- 完整 compose stack 起來且暖機完成(若 `app`、`redis`、`prometheus`、`redis_exporter` 任何一個沒起來,script 會自動 `docker compose up -d`)。
 
 ---
 
