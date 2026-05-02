@@ -211,7 +211,7 @@ docker compose exec -T redis redis-cli ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} -
 # in earlier runs.
 PROM_QUERIES=(
   "redis_up|redis_up{job=\"redis\"}"
-  "redis_cpu_total_rate|rate(redis_cpu_sys_seconds_total[1m])+rate(redis_cpu_user_seconds_total[1m])"
+  "redis_cpu_total_rate|sum(rate(redis_cpu_sys_seconds_total[1m]))+sum(rate(redis_cpu_user_seconds_total[1m]))"
   "redis_client_pool_total_conns|redis_client_pool_total_conns"
   "redis_client_pool_idle_conns|redis_client_pool_idle_conns"
   "redis_client_pool_hits_per_sec|rate(redis_client_pool_hits_total[1m])"
