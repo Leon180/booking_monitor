@@ -62,8 +62,24 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | :-- | :-- | :-- |
 | Go runtime | `go_*`, `process_*` | goroutines, GC pause, heap inuse — registered via `collectors.NewGoCollector` |
 | DB pool | `db_pool_*` | `db_pool_in_use`, `db_pool_idle`, `db_pool_wait_count`, `db_pool_wait_duration_seconds` |
-| Redis cache | `cache_hits_total{cache}`, `cache_misses_total{cache}` | per-cache-name hit/miss |
+| Redis cache (Go-client view) | `cache_hits_total{cache}`, `cache_misses_total{cache}` | per-cache-name hit/miss; what *our app* sees |
 | Redis streams | `redis_stream_length{stream}`, `redis_stream_pending_entries{stream,group}`, `redis_stream_consumer_lag_seconds{stream,group}` | scraped at request time by `StreamsCollector` |
+| Redis server (oliver006 exporter, scraped from `redis_exporter:9121`) | `redis_*` | The "is Redis itself saturated" view that our app-side metrics can't answer. See sub-table below. |
+
+**Redis-server-side metrics (from `redis_exporter`)** — fills the gap that our Go-client-side `cache_*` and `redis_stream_*` metrics can't answer. Useful when triaging "why is the booking hot path slow":
+
+| Question | Metric | Example query |
+| :-- | :-- | :-- |
+| Is Redis main thread CPU-saturated? | `redis_cpu_sys_seconds_total`, `redis_cpu_user_seconds_total` | `rate(redis_cpu_sys_seconds_total[1m]) + rate(redis_cpu_user_seconds_total[1m])` (close to 1.0 sustained → saturated) |
+| Which command is consuming Redis CPU? | `redis_commands_duration_seconds_total{cmd}` | `topk(5, rate(redis_commands_duration_seconds_total[5m]))` |
+| Which command is hot by call rate? | `redis_commands_total{cmd}` | `topk(5, rate(redis_commands_total[5m]))` |
+| Lua eval latency specifically | filter `cmd=~"eval.*"` on the duration metric | `rate(redis_commands_duration_seconds_total{cmd=~"eval.*"}[5m]) / rate(redis_commands_total{cmd=~"eval.*"}[5m])` (avg μs per call) |
+| SLOWLOG length / last slow exec | `redis_slowlog_length`, `redis_last_slow_execution_duration_seconds` | `redis_slowlog_length` non-zero for sustained > 30s = something is consistently slow |
+| Memory pressure | `redis_memory_used_bytes`, `redis_memory_max_bytes`, `redis_mem_fragmentation_ratio` | fragmentation > 1.5 sustained → consider `MEMORY PURGE` or restart |
+| Connection back-pressure | `redis_connected_clients`, `redis_blocked_clients` | `redis_blocked_clients > 0` for sustained 1m → some client is on `BLPOP`/`XREAD` block |
+| Is the exporter itself healthy? | `up{job="redis"}` | `up{job="redis"} == 0` for sustained 1m → exporter or Redis itself unreachable |
+
+The exporter polls Redis `INFO` + `commandstats` + `SLOWLOG` per scrape. Each scrape is a single round-trip, so it does not meaningfully load Redis (verified via `redis_exporter`'s own self-metrics). For the full metric list see the [oliver006/redis_exporter README](https://github.com/oliver006/redis_exporter#whats-exported).
 
 ### Domain-specific — what the business cares about
 
@@ -175,6 +191,12 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 
 **Row: Meta — scrape health (TargetDown)**
 - Scrape target up/down — `up` per `{job, instance}` (1 = healthy, 0 = down). Pairs with the `TargetDown` alert; sustained zero means rate-based alerts depending on that job are silently inert.
+
+**Second provisioned dashboard: Redis Exporter**
+
+[deploy/grafana/provisioning/dashboards/redis-exporter.json](../deploy/grafana/provisioning/dashboards/redis-exporter.json) — Grafana community dashboard `#763` (oliver006's reference dashboard, vendored locally so the stack works offline). Visit it at **Dashboards → Browse → Redis Exporter (oliver006/redis_exporter)**.
+
+Panels cover the metric families documented in §2's Redis-server-side sub-table: per-command rate + duration, CPU split (sys vs user), memory + fragmentation, connected/blocked clients, hit rate, expired/evicted keys, network I/O. Use this dashboard alongside the main Booking Monitor dashboard when triaging "is the Redis hot path itself the bottleneck?". The two dashboards are deliberately separate: the main one is the *application* view (RED + USE per app resource), this one is the *infrastructure* view (Redis-internal counters).
 
 **To add a new panel quickly (non-persistent — for exploration only):**
 1. Click **+ → Create dashboard → Add visualization**.

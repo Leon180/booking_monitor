@@ -76,6 +76,21 @@ scrape_configs:
     static_configs:
       - targets: ['jaeger:14269']
 
+  - job_name: 'redis'
+    # oliver006/redis_exporter — surfaces Redis INFO + commandstats +
+    # SLOWLOG as Prometheus metrics. The exporter does the heavy
+    # lifting (parses ~150 INFO fields, polls SLOWLOG); Prometheus
+    # just scrapes its /metrics. See docker-compose.yml `redis_exporter`
+    # service comment for what gaps these metrics close vs the existing
+    # app-internal cache observability.
+    #
+    # 15s scrape interval matches the global default — Redis INFO is
+    # a lightweight call (single round-trip, no key scanning), so the
+    # exporter is not a load source on Redis itself.
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['redis_exporter:9121']
+
   # The three worker subcommands run as separate compose services
   # (`payment_worker`, `recon`, `saga_watchdog`) — each binary has its
   # own Prometheus default registry, so their metrics MUST be scraped

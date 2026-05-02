@@ -62,8 +62,24 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | :-- | :-- | :-- |
 | Go runtime | `go_*`、`process_*` | goroutines、GC pause、heap inuse — 透過 `collectors.NewGoCollector` 註冊 |
 | DB pool | `db_pool_*` | `db_pool_in_use`、`db_pool_idle`、`db_pool_wait_count`、`db_pool_wait_duration_seconds` |
-| Redis 快取 | `cache_hits_total{cache}`、`cache_misses_total{cache}` | 每個快取名稱獨立的 hit/miss |
+| Redis 快取(Go-client 視角) | `cache_hits_total{cache}`、`cache_misses_total{cache}` | 每個快取名稱獨立的 hit/miss;**我們的應用程式**所看到的 |
 | Redis streams | `redis_stream_length{stream}`、`redis_stream_pending_entries{stream,group}`、`redis_stream_consumer_lag_seconds{stream,group}` | scrape 時由 `StreamsCollector` 即時讀取 |
+| Redis server(oliver006 exporter,從 `redis_exporter:9121` scrape) | `redis_*` | 「Redis 自己飽和了嗎」這類我們應用層指標無法回答的問題。請參考下方子表格。 |
+
+**Redis 伺服器端指標(來自 `redis_exporter`)** — 補上 Go-client 端 `cache_*` 與 `redis_stream_*` 指標無法回答的盲點。triage「為什麼訂票熱路徑變慢」時非常有用:
+
+| 問題 | 指標 | 範例查詢 |
+| :-- | :-- | :-- |
+| Redis 主執行緒 CPU 飽和了嗎? | `redis_cpu_sys_seconds_total`、`redis_cpu_user_seconds_total` | `rate(redis_cpu_sys_seconds_total[1m]) + rate(redis_cpu_user_seconds_total[1m])`(持續逼近 1.0 → 飽和) |
+| 哪個指令在吃 Redis CPU? | `redis_commands_duration_seconds_total{cmd}` | `topk(5, rate(redis_commands_duration_seconds_total[5m]))` |
+| 哪個指令呼叫頻率最高? | `redis_commands_total{cmd}` | `topk(5, rate(redis_commands_total[5m]))` |
+| 特別針對 Lua eval 的延遲 | 在 duration 指標上過濾 `cmd=~"eval.*"` | `rate(redis_commands_duration_seconds_total{cmd=~"eval.*"}[5m]) / rate(redis_commands_total{cmd=~"eval.*"}[5m])`(平均每次呼叫的 μs) |
+| SLOWLOG 長度 / 上一次慢操作耗時 | `redis_slowlog_length`、`redis_last_slow_execution_duration_seconds` | `redis_slowlog_length` 持續 > 30 秒非零 = 有東西穩定地慢 |
+| 記憶體壓力 | `redis_memory_used_bytes`、`redis_memory_max_bytes`、`redis_mem_fragmentation_ratio` | fragmentation 持續 > 1.5 → 考慮 `MEMORY PURGE` 或重啟 |
+| 連線端的 back-pressure | `redis_connected_clients`、`redis_blocked_clients` | `redis_blocked_clients > 0` 持續 1 分鐘 → 有 client 卡在 `BLPOP` / `XREAD` block 上 |
+| Exporter 自己健康嗎? | `up{job="redis"}` | `up{job="redis"} == 0` 持續 1 分鐘 → exporter 或 Redis 本身連不到 |
+
+Exporter 每次 scrape 跑一次 Redis `INFO` + `commandstats` + `SLOWLOG`,各只有單次 round-trip,實測對 Redis 沒有可觀的負載(由 `redis_exporter` 自己的 self-metrics 驗證)。完整指標清單請看 [oliver006/redis_exporter README](https://github.com/oliver006/redis_exporter#whats-exported)。
 
 ### 領域指標 — 業務在意的事
 
@@ -175,6 +191,12 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 
 **Row:Meta — scrape 健康度(TargetDown)**
 - Scrape target 上/下線 — `up`(每個 `{job, instance}`,1 = 健康、0 = 掛掉)。與 `TargetDown` 告警搭配;持續為 0 代表依賴該 job 指標的所有 rate 告警都已經無聲沉默。
+
+**第二個預先配置的 dashboard:Redis Exporter**
+
+[deploy/grafana/provisioning/dashboards/redis-exporter.json](../deploy/grafana/provisioning/dashboards/redis-exporter.json) — Grafana 社群 dashboard `#763`(oliver006 自己的參考 dashboard,內嵌進 repo 是為了讓整個 stack 離線也能跑)。位置在 **Dashboards → Browse → Redis Exporter (oliver006/redis_exporter)**。
+
+Panel 涵蓋 §2 Redis 伺服器端子表格列出的指標家族:每個指令的 rate + duration、CPU 切分(sys vs user)、記憶體 + fragmentation、connected/blocked clients、命中率、expired/evicted keys、網路 I/O。triage「Redis 熱路徑本身是不是瓶頸?」時跟主要的 Booking Monitor dashboard 搭配著看。兩個 dashboard 刻意分開:主 dashboard 是**應用層**視角(每個應用資源的 RED + USE),這個是**基礎設施**視角(Redis 內部計數器)。
 
 **快速加一個新 panel(暫時的 — 只用來探索):**
 1. 點 **+ → Create dashboard → Add visualization**。
