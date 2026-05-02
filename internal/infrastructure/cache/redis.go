@@ -73,7 +73,11 @@ var shardPickerSeed atomic.Int64
 func newShardPicker() *shardPicker {
 	seed := time.Now().UnixNano() ^ shardPickerSeed.Add(1)
 	return &shardPicker{
-		r:     rand.New(rand.NewSource(seed)),
+		// gosec G404 silenced: shard selection wants uniform distribution,
+		// not unpredictability. crypto/rand is ~50× slower per call and
+		// would itself become a hot-path bottleneck. See the type-level
+		// comment on shardPicker for the full rationale.
+		r:     rand.New(rand.NewSource(seed)), //nolint:gosec // G404: deliberate
 		order: make([]int, 0, 16),
 	}
 }
