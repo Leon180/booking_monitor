@@ -237,8 +237,15 @@ services:
     container_name: booking_redis_exporter
     environment:
       # Auth via env so the password stays in .env, not the image.
+      # Soft-optional `${REDIS_PASSWORD-}` matches the pattern the
+      # app/payment_worker/recon/saga_watchdog services use (line 36
+      # onwards) — a passwordless dev Redis is a legitimate config,
+      # and the hard-required `${VAR:?}` form would crash compose-up
+      # in that scenario. The Redis service itself (line ~200) IS
+      # hard-required because the server has to know whether to
+      # enable requirepass at all.
       - REDIS_ADDR=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - REDIS_PASSWORD=${REDIS_PASSWORD-}
       # --include-system-metrics adds host-level CPU/mem of the Redis
       # *process* (not the host) — useful for the "Redis CPU saturated"
       # question even when the container shares the box with others.

@@ -424,8 +424,11 @@ groups:
         # severity routing (e.g. warning for non-critical infra
         # exporters, critical for app + workers) is a future change
         # that will require either separate alert rules per job
-        # or alertmanager route overrides — add when infra exporters
-        # (postgres / redis exporters) get scrape jobs.
+        # or alertmanager route overrides. As of O3.1a the
+        # `redis` job (oliver006/redis_exporter) IS covered by this
+        # rule at critical severity — see RedisExporterCannotReachRedis
+        # below for the AUTH-failure variant where `up==1` but Redis
+        # is unreachable from the exporter.
         #
         # Operational caveats (see runbook):
         #   - Fires on planned deploys that take >2m. Use `amtool
@@ -441,6 +444,39 @@ groups:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#targetdown"
           summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is DOWN"
           description: "Prometheus has been unable to scrape {{ $labels.job }} at {{ $labels.instance }} for 2m+. Every rate-based alert that depends on metrics from this job is silently inert until the scrape recovers. Check the target's process / network health; if the job is a worker, check `docker logs` for crash signatures."
+
+      - alert: RedisExporterCannotReachRedis
+        # Two-tier health for the redis_exporter (O3.1a). TargetDown
+        # above catches "exporter container dead / network gone" via
+        # `up==0`. This rule catches the DIFFERENT failure mode where
+        # the exporter HTTP listener is alive (so up==1, scrape
+        # succeeds, no TargetDown alert) but the exporter cannot reach
+        # Redis itself — typical causes: REDIS_PASSWORD wrong / rotated,
+        # Redis container crashed, docker network split.
+        #
+        # Why this alert matters: WITHOUT it, every Redis-server-side
+        # metric (redis_cpu_*, redis_commands_*, redis_memory_*,
+        # redis_slowlog_*) silently flatlines to 0 / stale, and an
+        # operator looking at the new dashboard concludes "Redis
+        # idle — not the bottleneck" when actually the exporter just
+        # cannot authenticate. Stale-zero misinformation defeats the
+        # whole point of O3.1a.
+        #
+        # `redis_up` is emitted by the exporter itself: 1 when the
+        # last INFO call succeeded, 0 otherwise. Exists independently
+        # of `up{job="redis"}` (which is Prometheus-injected per scrape).
+        #
+        # for: 1m absorbs single-scrape blips during Redis HUP /
+        # password rotation but pages quickly enough that an operator
+        # rotating credentials notices within minutes.
+        expr: redis_up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#redisexportercannotreachredis"
+          summary: "redis_exporter alive but cannot reach Redis ({{ $labels.instance }})"
+          description: "redis_exporter at {{ $labels.instance }} is up and being scraped (so TargetDown won't fire) but redis_up=0 — typical causes: REDIS_PASSWORD wrong/rotated, Redis container down, docker network split. Every Redis-server metric on the dashboard is stale until this clears. Check redis_exporter logs for AUTH errors and the redis container's healthcheck status."
 
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages
