@@ -76,6 +76,19 @@ func (d *eventRepositoryTracingDecorator) DecrementTicket(ctx context.Context, e
 	return err
 }
 
+func (d *eventRepositoryTracingDecorator) ListAvailable(ctx context.Context) ([]domain.Event, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "ListAvailable")
+	defer span.End()
+
+	events, err := d.next.ListAvailable(ctx)
+	if err != nil {
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.Int("count", len(events)))
+	}
+	return events, err
+}
+
 func (d *eventRepositoryTracingDecorator) IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "IncrementTicket", trace.WithAttributes(
 		attribute.String("event_id", eventID.String()),

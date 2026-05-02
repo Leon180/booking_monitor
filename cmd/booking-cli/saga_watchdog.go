@@ -61,6 +61,18 @@ func runSagaWatchdog(cmd *cobra.Command, _ []string) {
 			bootstrap.NewPrometheusSagaMetrics,
 			saga.NewWatchdog,
 		),
+		// App-startup inventory rehydrate. Same wire as server.go —
+		// every Redis-using subprocess needs this. The advisory lock
+		// (id=2001) serialises across processes that start in the
+		// same wave; only one runs the actual scan.
+		//
+		// Why this matters for saga_watchdog specifically: the
+		// compensator's revert.lua reads the existing key value
+		// before INCRBY. If Redis is empty (post-FLUSHALL, fresh
+		// deploy), revert is a no-op for that key — meaning the
+		// reverted ticket is "lost in Redis" until rehydrate populates
+		// it. Wiring rehydrate here closes that window.
+		fx.Invoke(installInventoryRehydrate),
 		fx.Invoke(func(lc fx.Lifecycle, sd fx.Shutdowner, w *saga.Watchdog, l *mlog.Logger, c *config.Config) error {
 			return installSagaWatchdog(lc, sd, w, l, c, once)
 		}),

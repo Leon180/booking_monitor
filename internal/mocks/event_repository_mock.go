@@ -129,6 +129,21 @@ func (mr *MockEventRepositoryMockRecorder) IncrementTicket(ctx, eventID, quantit
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IncrementTicket", reflect.TypeOf((*MockEventRepository)(nil).IncrementTicket), ctx, eventID, quantity)
 }
 
+// ListAvailable mocks base method.
+func (m *MockEventRepository) ListAvailable(ctx context.Context) ([]domain.Event, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListAvailable", ctx)
+	ret0, _ := ret[0].([]domain.Event)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListAvailable indicates an expected call of ListAvailable.
+func (mr *MockEventRepositoryMockRecorder) ListAvailable(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListAvailable", reflect.TypeOf((*MockEventRepository)(nil).ListAvailable), ctx)
+}
+
 // Update mocks base method.
 func (m *MockEventRepository) Update(ctx context.Context, event domain.Event) error {
 	m.ctrl.T.Helper()

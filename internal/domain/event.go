@@ -119,6 +119,15 @@ type EventRepository interface {
 	DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
 	IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
 	Delete(ctx context.Context, id uuid.UUID) error
+	// ListAvailable returns events with `available_tickets > 0`,
+	// ordered newest-first. Used by app-startup inventory rehydrate
+	// (cache.RehydrateInventory) to repopulate Redis from DB after
+	// FLUSHALL / Redis restart / fresh deploy. The result set is the
+	// "active" events whose Redis qty keys must exist for the booking
+	// hot path to function — sold-out events are excluded because Lua
+	// deduct correctly returns sold-out for missing keys (DECRBY → -N
+	// → revert path → return -1).
+	ListAvailable(ctx context.Context) ([]Event, error)
 }
 
 // OutboxEvent is the outbox-row aggregate. Field names unexported.

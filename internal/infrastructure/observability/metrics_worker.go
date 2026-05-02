@@ -37,6 +37,23 @@ var InventoryConflictsTotal = promauto.NewCounter(
 	},
 )
 
+// InventoryRehydrateDriftTotal counts events where app-startup rehydrate
+// found Redis already had a key BUT with a value materially different
+// from DB's available_tickets. Normal operation has Redis < DB by the
+// in-flight count (Lua deducts that haven't reached the worker yet);
+// a sustained > 0 rate, or a single >>0 spike, signals corruption,
+// manual tinkering, or a NOGROUP-aftermath inconsistency.
+//
+// Read this metric WITH `inventory_conflicts_total` — if both fire,
+// the system is reading drifted state. PR-D will add a continuous
+// drift reconciler; this counter is the early signal until then.
+var InventoryRehydrateDriftTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "inventory_rehydrate_drift_total",
+		Help: "Total events where startup rehydrate detected Redis-vs-DB drift (Redis key exists, value differs).",
+	},
+)
+
 // DLQMessagesTotal counts messages routed to a dead-letter queue by
 // topic and reason. Labels:
 //   topic  = "order.created.dlq" | "order.failed.dlq"

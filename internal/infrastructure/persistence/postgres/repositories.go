@@ -116,6 +116,34 @@ func (r *postgresEventRepository) DecrementTicket(ctx context.Context, eventID u
 	return nil
 }
 
+// ListAvailable returns events with `available_tickets > 0`, ordered
+// newest-first. Used by app-startup inventory rehydrate (see
+// `cache.RehydrateInventory`) to repopulate Redis qty keys after
+// Redis is wiped or freshly deployed. No `LIMIT` — at our scale,
+// "active flash-sale events" is a small set; if this ever becomes
+// hot enough to matter, paginate.
+func (r *postgresEventRepository) ListAvailable(ctx context.Context) ([]domain.Event, error) {
+	rows, err := r.exec.QueryContext(ctx,
+		"SELECT "+eventColumns+" FROM events WHERE available_tickets > 0 ORDER BY id DESC")
+	if err != nil {
+		return nil, fmt.Errorf("eventRepository.ListAvailable query: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // close error is non-actionable; iter err already checked below
+
+	var out []domain.Event
+	for rows.Next() {
+		var row eventRow
+		if err := row.scanInto(rows); err != nil {
+			return nil, fmt.Errorf("eventRepository.ListAvailable scan: %w", err)
+		}
+		out = append(out, row.toDomain())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("eventRepository.ListAvailable iter: %w", err)
+	}
+	return out, nil
+}
+
 // IncrementTicket restores inventory. Used by saga compensation. The
 // `+ $2 <= total_tickets` predicate prevents over-restore.
 func (r *postgresEventRepository) IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error {

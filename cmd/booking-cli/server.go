@@ -121,9 +121,50 @@ func runServer(_ *cobra.Command, _ []string) {
 			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
 		}),
 
+		// App-startup inventory rehydrate from DB → Redis. Runs as an
+		// OnStart lifecycle hook BEFORE installServer's HTTP listener
+		// so the booking hot path always sees a populated cache. See
+		// `cache.RehydrateInventory` for the design rationale (Redis
+		// is ephemeral, DB is truth, SETNX preserves live values).
+		// Registered before installServer so its OnStart hook runs
+		// first in lifecycle order.
+		fx.Invoke(installInventoryRehydrate),
+
 		fx.Invoke(installServer),
 	)
 	app.Run()
+}
+
+// installInventoryRehydrate registers the app-startup OnStart hook
+// that scans Postgres events and populates Redis qty keys via SETNX.
+// Lifecycle ordering: this fx.Invoke is registered BEFORE
+// installServer in runServer, so its OnStart fires first — by the
+// time HTTP starts accepting bookings, the cache is populated.
+//
+// Errors abort startup. A failed rehydrate means Redis state is
+// unknown vs DB; serving requests in that condition would silently
+// reject valid bookings as sold-out. Better to fail-fast and let the
+// operator investigate (k8s liveness probe → pod restart cycle ends
+// when DB or Redis is reachable again).
+func installInventoryRehydrate(
+	lc fx.Lifecycle,
+	eventRepo domain.EventRepository,
+	rdb *redis.Client,
+	locker application.DistributedLock,
+	cfg *config.Config,
+	logger *mlog.Logger,
+) {
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			return cache.RehydrateInventory(ctx, cache.RehydrateInventoryParams{
+				EventRepo:   eventRepo,
+				RedisClient: rdb,
+				Locker:      locker,
+				Cfg:         cfg,
+				Logger:      logger,
+			})
+		},
+	})
 }
 
 // installServer builds + wires the HTTP server, pprof server, and
