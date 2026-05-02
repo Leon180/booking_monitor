@@ -123,15 +123,11 @@ mocks: tools ## Generate mocks using local wrapper
 	@echo "Generating mocks..."
 	@PATH=$(shell pwd)/bin:$(PATH) go generate ./...
 
-reset-db: ## Reset database — truncate orders/events/outbox + flush Redis. Tests create their own events via POST /api/v1/events
+reset-db: ## Reset database — truncate orders/events/outbox + clear Redis cache keys (preserves stream + consumer group). Tests create their own events via POST /api/v1/events
 	@echo "Resetting database..."
 	# Post-PR-34 events.id is UUID, so the previous "seed event id=1"
-	# pattern is gone (and was already obsolete: stress test requires
-	# --event-id <uuid>, k6 scripts call POST /api/v1/events in their
-	# setup()). Truncate everything; each test run creates a fresh
-	# event via the API. Redis is flushed wholesale because the
-	# event:{uuid}:qty keys are scoped per event and a stale UUID
-	# from a previous run carries no value.
+	# pattern is gone. Truncate everything; each test run creates a
+	# fresh event via the API.
 	# orders + order_status_history truncated together — FK with
 	# ON DELETE CASCADE rules out plain `TRUNCATE orders` (Postgres
 	# rejects without CASCADE when child tables reference the parent).
@@ -140,8 +136,29 @@ reset-db: ## Reset database — truncate orders/events/outbox + flush Redis. Tes
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE TABLE orders, order_status_history RESTART IDENTITY;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE events_outbox;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events;"
-	@docker exec booking_redis redis-cli -a $(REDIS_PASSWORD) --no-auth-warning FLUSHALL
-	@echo "Database and Redis reset complete. Create a fresh event via POST /api/v1/events for the next test run."
+	# Redis: precise DEL of CACHE keys ONLY — never `FLUSHALL`.
+	#
+	# `FLUSHALL` deletes the Redis Streams (`orders:stream`, `orders:dlq`)
+	# AND the consumer group (`orders:group`). Producers and the worker
+	# are likely still active during the reset; if FLUSHALL races with an
+	# in-flight Lua deduct, the worker self-heals NOGROUP by recreating
+	# the group with `XGROUP CREATE ... $` — and `$` SKIPS any messages
+	# that already arrived in the stream between FLUSHALL and recreation.
+	# Empirically validated 2026-05-03: 411 of 1000 successful Lua
+	# deducts had no DB row, no DLQ entry, no log trace — the messages
+	# were silently dropped by the self-heal. Full investigation in
+	# `docs/architectural_backlog.md` § "Cache-truth architecture".
+	#
+	# So: target ONLY application cache keys here. Stream / consumer-group
+	# / DLQ structures stay intact. Their messages get processed cleanly
+	# on the next test run because the worker's Subscribe loop never had
+	# a NOGROUP event to recover from.
+	@docker exec -e PASS=$(REDIS_PASSWORD) booking_redis sh -c '\
+		for pat in "event:*:qty" "idempotency:*" "saga:reverted:*"; do \
+			redis-cli -a "$$PASS" --no-auth-warning --scan --pattern "$$pat" \
+				| xargs -r redis-cli -a "$$PASS" --no-auth-warning DEL > /dev/null ; \
+		done'
+	@echo "DB + Redis cache keys reset (orders:stream / orders:group preserved). Create a fresh event via POST /api/v1/events for the next test run."
 
 help: ## Show help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

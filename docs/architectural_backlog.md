@@ -65,6 +65,35 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
 - **Why deferred.** No active blocker; the file isn't growing fast enough to warrant a layout PR on its own.
 - **Revisit when.** A future PR adds a fourth repository, or ownership clarity matters more than file-count cost.
 
+### Cache-truth architecture: Redis as ephemeral, DB as source of truth (2026-05-03)
+
+- **What.** A conservation-invariant check during the O3.1b saturation profile uncovered: under `make reset-db` + `FLUSHALL` followed by load, **411 of 1000 successful Lua deducts had no corresponding DB row, no DLQ entry, and no log trace**. Root cause traced to [`redis_queue.go`'s NOGROUP self-heal](../internal/infrastructure/cache/redis_queue.go#L201) calling `XGROUP CREATE ... $`, which silently skips messages that arrived before the recreation. Walked the trace end-to-end: timeline of XADDs, consumer-group recreation, and `last-delivered-id` confirms the bug is real but **only triggered in test environments that FLUSHALL during active production**.
+
+- **Industry consensus** ([antirez](https://redis.antirez.com/fundamental/streams-consumer-patterns.html), [Alibaba 秒殺 docs](https://www.alibabacloud.com/help/en/redis/use-cases/use-apsaradb-for-redis-to-build-a-business-system-that-can-handle-flash-sales), [Stripe idempotency post](https://stripe.com/blog/idempotency), [AWS ElastiCache](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/RedisAOF.html), [redis/redis#10630](https://github.com/redis/redis/issues/10630)):
+  - **DB is source of truth, Redis is ephemeral cache.** Treat Redis as rehydratable from DB at any time.
+  - **Initial population: at event-creation write + bulk rehydrate at app startup** (with advisory lock to prevent multi-app dogpile).
+  - **Continuous sync: outbox-pattern + cron reconciliation.** Periodic drift detection between `events.available_tickets` and `event:{id}:qty`.
+  - **Crash recovery: rehydrate from DB, accept seconds of recovery time.** No AOF/RDB needed for this use case.
+  - **NOGROUP is an architectural failure signal** — alert + structured log, do NOT silently recreate the group with `$` (loses messages) or `0` (replays everything as duplicates).
+  - **CDC / Debezium: overkill** for single-app + single-DB scope. Justified only when 100+ services need a shared cache view.
+
+- **What this finding is NOT.** Not a code-correctness bug under normal production operation (NOGROUP shouldn't fire unless someone manually `FLUSHALL`s or deletes the group). Not justification for B3 inventory sharding (saturation profile [PR #71](https://github.com/Leon180/booking_monitor/pull/71) showed Redis at 53% CPU — well below saturation). Not a Kafka-migration trigger (current scale doesn't warrant it). It IS a missing-design surface around cache vs DB consistency that future operations will need.
+
+- **Sequenced fix plan.**
+  1. **PR-A (this one): `make reset-db` precise DEL + backlog entry.** Test environment never again triggers NOGROUP self-heal during active production. Tooling fix only — no code-behavior change. ✓ landed in this PR.
+  2. **PR-B: app-startup bulk rehydrate from DB → Redis.** Advisory-lock-guarded scan of `events` table; populate `event:{id}:qty` keys via `SETNX` (don't overwrite live values). Closes the "Redis crash → no inventory state" gap. After this lands, `redis.conf` can flip to `appendonly no` + `save ""` because rehydrate becomes the recovery mechanism.
+  3. **PR-C: NOGROUP self-heal upgrade.** Keep self-healing (avoid k8s pod restart cascade) but emit a `consumer_group_recreated_total` metric + WARN log + alert rule. Don't change `$` to `0` — both are wrong. The right answer in a single-instance setup is "alert; operator investigates whether messages were lost; rehydrate from DB if needed".
+  4. **PR-D: inventory drift reconciler.** Extend the existing [`recon` subcommand](../internal/application/recon/) to scan `event:{id}:qty` vs `events.available_tickets`, emit `inventory_drift_orders` gauge, optionally repair via `XGROUP SETID` + cache update.
+
+- **Why deferred.** PRs B/C/D each warrant their own scoped review. PR-A unblocks the test environment immediately; B/C/D are sequenced design work that should not be rushed under the same change.
+
+- **Revisit when.** PR-B before any production-shaped deploy. PR-C alongside PR-B (alert hygiene). PR-D when reconciler infrastructure has bandwidth.
+
+- **References (verified 2026-05-03).**
+  - Empirical evidence: [`docs/saturation-profile/20260502_221629_c500/`](saturation-profile/20260502_221629_c500/) Findings + audit follow-up
+  - Code touchpoints: [`redis_queue.go`](../internal/infrastructure/cache/redis_queue.go) Subscribe loop, [`uow.go`](../internal/infrastructure/persistence/postgres/uow.go) Tx pattern, [`redis.conf`](../deploy/redis/redis.conf) persistence config
+  - Industry: Alibaba [Apsara­DB for Redis flash sales](https://www.alibabacloud.com/help/en/redis/use-cases/use-apsaradb-for-redis-to-build-a-business-system-that-can-handle-flash-sales), Stripe [Idempotency keys](https://stripe.com/blog/idempotency), [redis/redis discussions/13680](https://github.com/redis/redis/discussions/13680) (NOGROUP recovery thread), [Dapr components-contrib#3219](https://github.com/dapr/components-contrib/issues/3219) (NOGROUP-after-restart)
+
 ---
 
 ## Testing
