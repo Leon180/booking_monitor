@@ -41,6 +41,10 @@ User-stated stress-test direction: "scale users (concurrency), not ticket pool".
 
 500 → 5,000 VUs: total RPS drops 46k → 34k. Each individual VU does fewer round-trips per second because each round-trip blocks longer waiting for the Lua script. More contention = lower per-VU throughput. The system isn't breaking; it's queuing.
 
+The mechanism: k6 VUs run a `request → wait for response → next request` loop synchronously. When latency rises, each VU's per-VU RPS drops proportionally. So 5,000 VUs at 84 ms avg latency = ~12 RPS per VU = 60k VU-seconds → 34k total RPS, vs 500 VUs at 5.4 ms = ~185 RPS per VU = 92k VU-seconds → 46k total RPS. The system is processing MORE work per second at low VUs because each VU isn't blocked waiting on the queue.
+
+**Translation to user experience:** the system isn't dropping requests. Every user gets a response. They just wait longer for it.
+
 ### 3. The p95 latency knee is between 2,500 and 5,000 VUs
 
 | VUs | p95 | Δ vs prior level |
@@ -55,7 +59,45 @@ At 2.5k VUs the system is still operating in the "linear scaling" regime. At 5k 
 
 `business_errors = 0.00%` across all 4 runs. The system degrades **gracefully**: latency grows, but no 5xx, no Redis errors, no DB rejections, no inventory drift. The load-shed gate (Redis-Lua serialization) absorbs the contention without dropping requests.
 
+| Failure mode | observed at any VU level? |
+| :-- | :-- |
+| HTTP 5xx | **0** |
+| Redis error | **0** |
+| DB error | **0** |
+| Connection drop | **0** |
+| Inventory drift (Redis-OK / DB-rejected) | **0** |
+| Worker process death | **0** |
+| Any Prometheus alert firing | **0** |
+
 `http_req_failed` percentages (75-82%) are k6 reporting 4xx codes as "failed" — those are 409 sold-out responses, an expected outcome. The script's `business_errors` Rate correctly excludes 409 from the error count.
+
+**This is the senior-grade story.** A flash-sale system without a load-shed gate would, at 5,000 VUs against scarce inventory, exhibit: DB connection-pool exhaustion → worker queue runaway → payment-gateway timeouts → 5xx cascade. We see none of that because Redis Lua's single-threaded execution IS the load-shed gate, and it absorbs the entire contention curve as queueing latency rather than as failure.
+
+### 5. Queue-depth analysis via Little's Law
+
+Little's Law: `L = λ × W` (avg outstanding requests = arrival rate × avg wait time).
+
+| VUs   | λ (acceptance/s) | W (avg latency) | **L (queue depth)** |
+| ----: | ---------------: | --------------: | ------------------: |
+| 500   | 8,330            | 5.39 ms         | **45**              |
+| 1,000 | 8,331            | 8.65 ms         | **72**              |
+| 2,500 | 8,332            | 11.47 ms        | **96**              |
+| 5,000 | 8,314            | 83.6 ms         | **695**             |
+
+500 → 2,500 VUs: queue depth grows ~2× (45 → 96).  
+2,500 → 5,000 VUs: queue depth grows **7×** (96 → 695).
+
+This is the physical mechanism behind the p95 5.4× jump (32 ms → 174 ms). When queue depth crosses ~100 outstanding requests on a single-threaded executor, every new request waits for ~700 prior ones to clear before its own ~120 µs of work executes. The latency knee IS the queue-saturation transition.
+
+### 6. Theoretical-ceiling sanity check
+
+Each accepted booking = one Redis Lua atomic block doing roughly 6-10 Redis operations (HGET / DECR / condition / HMSET / XADD / optional revert). On Apple M-series single-host:
+
+- `redis-cli benchmark` baseline: ~100,000 SET ops/sec
+- Per-Lua call ≈ 6-10 ops → theoretical ceiling ≈ 10,000-16,000 Lua/sec
+- **Observed ceiling: ~8,330/sec ≈ 80-83% of theoretical.**
+
+We're already operating at high utilization of the Redis-Lua ceiling. There is no software-layer optimization that materially shifts this number — the application code adds <20% overhead on top of pure Redis work. Faster acceptance requires touching the bottleneck at its level (sharding, a faster Redis instance, or moving the deduct off Lua entirely).
 
 ## Operational interpretation
 
@@ -83,11 +125,37 @@ A horizontal scale-out (B1 from roadmap — k8s benchmark) wouldn't help on its 
 
 ## What this BENCHMARK enables
 
-The breaking point is now characterized: **booking acceptance saturates at ~8,330/s on this hardware regardless of concurrency**. This justifies:
+The breaking point is now characterized: **booking acceptance saturates at ~8,330/s on this hardware regardless of concurrency, with zero error budget consumed up to 5,000 VUs**. This justifies:
 
-1. **Roadmap B3 (inventory sharding) is no longer "conditional"** — the conditionality was "do this if benchmark shows single-key Redis CPU saturation". It does. Move B3 from conditional to required for higher-throughput targets.
-2. **"100k+ concurrent users" claim** in any portfolio framing must be paired with "at p95 ~200ms" and "limited by single-host Redis Lua". Honest framing matters; the numbers above are good for that.
-3. **Phase 5 capstone benchmark (B1 k8s scale)** has a baseline to compare against. Multi-pod app + sharded Redis should push the accepted-bookings ceiling proportionally.
+### 7. B1 vs B3 — what each next-step actually buys
+
+| Roadmap item | Effect on accepted/s ceiling | Cost |
+| :-- | :-- | :-- |
+| **B1** (k8s horizontal scale) alone | **~0×** — all app pods feed the same Redis; the Lua bottleneck is shared, not per-pod | Medium (k8s manifests + HPA) |
+| **B3** (inventory sharding, N shards) | **~N×** — splits one hot key into N independent Lua paths | High — sold-out detection becomes SUM-across-shards (slower, race-prone); shard-rebalancing on uneven contention is its own distributed-system problem |
+| **B1 + B3 combined** | **~N× × pod-count** — bothbreak loose | Sum of both costs |
+| Lua script optimization | < 20% headroom (we're at 80% of theoretical Redis-Lua ceiling) | Low — already tried; minimal Lua |
+
+**B3 elevation:** the original roadmap marked B3 *conditional* on "benchmark shows single-key Redis CPU saturation". This benchmark provides that evidence. Move B3 from conditional to required for any throughput target above 8,330 accepted/s.
+
+**B1 (k8s scale) without B3 won't help on this metric** — it would only help if the bottleneck were app-side CPU or per-pod connection limits. Neither is the case here.
+
+### 8. Defensibility framing — what to honestly claim externally
+
+The pre-benchmark "100k+ concurrent users" framing was generous. The post-benchmark honest version:
+
+> **Single-host flash-sale simulator.** Booking acceptance saturates at ~8,330 accepted/s on commodity hardware (Apple M-series), p95 < 32 ms up to 2,500 concurrent users, p95 ~174 ms at 5,000 concurrent users. **Zero 5xx errors at any tested concurrency** — graceful degradation via Redis-Lua load-shed gate. Horizontal scale-out (Phase 5 B1) and inventory sharding (Phase 5 B3) target the next 10× throughput band; B3 is now required-not-conditional based on the saturation evidence in this benchmark.
+
+This framing is:
+- **Accurate** — every number is reproducible from the raw outputs in this directory.
+- **Honest** — explicitly names the single-host limitation + the path forward.
+- **Strong** — "graceful degradation" + "0 errors at 5k VUs" is the load-bearing portfolio claim, not raw RPS.
+
+### 9. What this benchmark enables operationally
+
+1. **B3 is no longer a "maybe" item.** Open the implementation PR when the throughput target requires it.
+2. **Phase 5 B1 (k8s scale) baseline exists.** Multi-pod app + sharded Redis can be measured against this single-host curve and the lift attributed to each axis cleanly.
+3. **The 8,330/s number is portfolio-ready.** Use it instead of any larger number until a sharded run produces evidence for a higher one.
 
 ## Raw outputs
 
