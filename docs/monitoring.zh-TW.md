@@ -335,7 +335,7 @@ make profile-saturation VUS=1000 DURATION=90s
 | `k6_summary.txt` | 從 load generator 角度看的吞吐量 + 各百分位延遲。 |
 | `README.md` | 自動生成的決策樹。讀完 `cpu.pprof` 後,把「Findings」段落補上去。 |
 
-自動生成 README 裡的決策樹就是 senior 級的做法:**先量測,再優化**。我們抓的第一份 profile (`docs/saturation-profile/20260502_220022_c500/`)就是標準範本 — 它證偽了「Redis 是瓶頸」這個假設(Redis CPU 在峰值只有 39%),指出真正的天花板是網路 syscall I/O,也驗證了在 PR #69(B3 庫存分片)被任何下游 PR 寫出來之前就把它撤掉的決定。
+自動生成 README 裡的決策樹就是 senior 級的做法:**先量測,再優化**。我們抓的第一份 profile (`docs/saturation-profile/20260502_221629_c500/`)就是標準範本 — 它證偽了「Redis 是瓶頸」這個假設(Redis CPU 在峰值只有 53%),指出真正的天花板是網路 syscall I/O,也驗證了在 PR #69(B3 庫存分片)被任何下游 PR 寫出來之前就把它撤掉的決定。
 
 執行這個指令需要:
 - `.env` 裡 `ENABLE_PPROF=true`,讓 app 的 pprof listener 是開的。

@@ -1,0 +1,17 @@
+{
+  "redis_up": "1",
+  "redis_cpu_total_rate": "0.5331010534269713",
+  "redis_client_pool_total_conns": "200",
+  "redis_client_pool_idle_conns": "177",
+  "redis_client_pool_hits_per_sec": "35708.48241072024",
+  "redis_client_pool_misses_per_sec": "0",
+  "redis_client_pool_timeouts_per_sec": "0",
+  "redis_client_pool_wait_seconds_per_sec": "4.474202671748263",
+  "pg_pool_in_use": "2",
+  "pg_pool_wait_count_per_sec": "0",
+  "pg_pool_wait_seconds_per_sec": "0",
+  "go_goroutines": "627",
+  "http_requests_per_sec": "35448.25440565346",
+  "http_request_duration_p99": "0.019936343899261834",
+  "bookings_success_per_sec": "11111.402475610568"
+}

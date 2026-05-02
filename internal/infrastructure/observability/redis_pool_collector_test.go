@@ -6,7 +6,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,33 +81,33 @@ func TestRedisPoolCollector_CollectAfterPing(t *testing.T) {
 	require.NoError(t, rdb.Ping(t.Context()).Err())
 
 	c := NewRedisPoolCollector(rdb)
+	values := snapshotMetrics(t, c)
 
 	// total_conns must be >=1 after a Ping.
-	totalConns := testutil.ToFloat64(metricFromCollector(t, c, "redis_client_pool_total_conns"))
-	assert.GreaterOrEqual(t, totalConns, 1.0, "Ping should leave at least one connection in the pool")
+	assert.GreaterOrEqual(t, values["redis_client_pool_total_conns"], 1.0,
+		"Ping should leave at least one connection in the pool")
 
 	// hits OR misses must have moved (the first call always misses,
 	// subsequent calls within the same pool-lifetime hit).
-	hits := testutil.ToFloat64(metricFromCollector(t, c, "redis_client_pool_hits_total"))
-	misses := testutil.ToFloat64(metricFromCollector(t, c, "redis_client_pool_misses_total"))
-	assert.GreaterOrEqual(t, hits+misses, 1.0, "Ping must leave evidence in hits OR misses")
+	hits := values["redis_client_pool_hits_total"]
+	misses := values["redis_client_pool_misses_total"]
+	assert.GreaterOrEqual(t, hits+misses, 1.0,
+		"Ping must leave evidence in hits OR misses")
 
 	// timeouts MUST stay at 0 in the absence of contention. A non-zero
 	// reading on a fresh pool with no concurrent load would indicate
 	// a wiring bug.
-	timeouts := testutil.ToFloat64(metricFromCollector(t, c, "redis_client_pool_timeouts_total"))
-	assert.Equal(t, 0.0, timeouts, "no timeouts expected on an idle pool")
+	assert.Equal(t, 0.0, values["redis_client_pool_timeouts_total"],
+		"no timeouts expected on an idle pool")
 }
 
-// metricFromCollector is a small testutil helper that registers the
-// collector against an isolated registry and pulls one named gauge or
-// counter back as a prometheus.Collector for testutil.ToFloat64.
-//
-// We can't pass the RedisPoolCollector directly to testutil.ToFloat64
-// because that helper wants a *single-metric* collector; ours emits 9.
-// Routing through a dedicated registry + Gather + filter gives us the
-// per-metric extraction.
-func metricFromCollector(t *testing.T, c prometheus.Collector, name string) prometheus.Collector {
+// snapshotMetrics gathers the collector once into an isolated registry
+// and returns a name→value map. Replaces an earlier per-metric helper
+// that summed Counter and Gauge proto fields together — that worked by
+// proto-default-zero coincidence, but was opaque enough to confuse the
+// next reader. Reading the proto type explicitly (`MetricType_GAUGE`
+// vs `MetricType_COUNTER`) makes the extraction grep-able.
+func snapshotMetrics(t *testing.T, c prometheus.Collector) map[string]float64 {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(c))
@@ -115,15 +115,20 @@ func metricFromCollector(t *testing.T, c prometheus.Collector, name string) prom
 	families, err := reg.Gather()
 	require.NoError(t, err)
 
+	out := make(map[string]float64, len(families))
 	for _, mf := range families {
-		if mf.GetName() == name {
-			// Wrap the single-metric value in a tiny in-memory collector
-			// so testutil.ToFloat64 can read it.
-			g := prometheus.NewGauge(prometheus.GaugeOpts{Name: name, Help: "test extract"})
-			g.Set(mf.Metric[0].GetCounter().GetValue() + mf.Metric[0].GetGauge().GetValue())
-			return g
+		if len(mf.Metric) == 0 {
+			continue
+		}
+		m := mf.Metric[0]
+		switch mf.GetType() {
+		case dto.MetricType_GAUGE:
+			out[mf.GetName()] = m.GetGauge().GetValue()
+		case dto.MetricType_COUNTER:
+			out[mf.GetName()] = m.GetCounter().GetValue()
+		default:
+			t.Fatalf("unexpected metric type %v for %q — collector should only emit gauge or counter", mf.GetType(), mf.GetName())
 		}
 	}
-	t.Fatalf("metric %q not found in collector output", name)
-	return nil
+	return out
 }

@@ -335,7 +335,7 @@ What the output gives you:
 | `k6_summary.txt` | Headline throughput + percentile latencies from the load generator. |
 | `README.md` | Auto-generated decision tree. Append a "Findings" section once you've read `cpu.pprof`. |
 
-The decision tree in the auto-generated README is the senior-grade move: **measure first, then optimize**. The first profile run we captured (`docs/saturation-profile/20260502_220022_c500/`) is the canonical example — it falsified the "Redis is bound" hypothesis (Redis CPU at 39% during peak) and pointed at network-syscall I/O as the actual cap, which validated withdrawing PR #69 (B3 inventory sharding) before any of its downstream PRs were written.
+The decision tree in the auto-generated README is the senior-grade move: **measure first, then optimize**. The first profile run we captured (`docs/saturation-profile/20260502_221629_c500/`) is the canonical example — it falsified the "Redis is bound" hypothesis (Redis CPU at 53% during peak) and pointed at network-syscall I/O as the actual cap, which validated withdrawing PR #69 (B3 inventory sharding) before any of its downstream PRs were written.
 
 Required for this command to work:
 - `ENABLE_PPROF=true` in `.env` so the app's pprof listener is active.

@@ -16,9 +16,13 @@
 #   ├── commandstats_during.txt — diff = where Redis spent its time
 #   ├── commandstats_diff.txt   — auto-computed (during - before)
 #   ├── slowlog.txt            — Redis SLOWLOG GET 100
-#   ├── pool_metrics.json      — redis_client_pool_* snapshot at peak
-#   ├── prom_signals.json      — RED + USE signals from Prometheus
+#   ├── prom_signals.json      — RED + USE signals from Prometheus,
+#   │                            INCLUDING redis_client_pool_* snapshot
 #   └── k6_summary.txt         — load-generator output
+#
+# Note: old runs in docs/saturation-profile/ are diagnostic artifacts
+# (NOT test fixtures). Delete freely once the captured insight has been
+# transferred to PR descriptions / commit messages.
 #
 # Usage:
 #   make profile-saturation                       # defaults: VUS=500 DURATION=60s
@@ -63,7 +67,19 @@ pprof_get() {
 }
 
 # Redis password — read from .env if present (matches other scripts).
-REDIS_PASSWORD="${REDIS_PASSWORD:-$(grep -E '^REDIS_PASSWORD=' .env 2>/dev/null | cut -d= -f2 || echo '')}"
+# `cut -d= -f2-` (NOT `-f2`) so passwords containing `=` (base64 padding,
+# explicit secret-manager output) survive intact. The `-f2-` form takes
+# field 2 through end-of-line.
+REDIS_PASSWORD="${REDIS_PASSWORD:-$(grep -E '^REDIS_PASSWORD=' .env 2>/dev/null | cut -d= -f2- || echo '')}"
+
+# Docker compose's default network name is derived from the compose
+# project name, which defaults to the parent directory of docker-compose.yml.
+# Override via $COMPOSE_PROJECT_NAME (read from .env) to handle cloned
+# checkouts in non-standard paths. The fallback matches what compose
+# generates when nothing overrides it.
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | cut -d= -f2- || echo '')}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "$(pwd)")}"
+DOCKER_NETWORK="${COMPOSE_PROJECT}_default"
 
 echo "================================================================"
 echo "  Saturation profile run"
@@ -126,7 +142,7 @@ docker compose exec -T redis redis-cli ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} -
 echo "[step 3/6] Launch k6 (background) — VUS=$VUS DURATION=$DURATION"
 # k6 stdout+stderr → summary file. Run on the compose network so the
 # hardcoded http://app:8080 in k6_comparison.js resolves.
-K6_CMD=(docker run --rm -i --network booking_monitor_default
+K6_CMD=(docker run --rm -i --network "$DOCKER_NETWORK"
         -v "$(pwd)/scripts:/scripts:ro"
         -e VUS="$VUS"
         -e DURATION="$DURATION"
@@ -134,6 +150,18 @@ K6_CMD=(docker run --rm -i --network booking_monitor_default
 
 "${K6_CMD[@]}" > "$OUT_DIR/k6_summary.txt" 2>&1 &
 K6_PID=$!
+
+# Trap Ctrl-C / TERM so an interrupted profile run doesn't orphan the
+# k6 child + the in-flight CPU profile request. Cleanup is best-effort
+# (kill ignores already-dead PIDs); exit 130 mirrors the SIGINT
+# convention.
+cleanup() {
+  local rc=$?
+  [ -n "${K6_PID:-}" ] && kill "$K6_PID" 2>/dev/null || true
+  [ -n "${CPU_PID:-}" ] && kill "$CPU_PID" 2>/dev/null || true
+  exit "$rc"
+}
+trap cleanup INT TERM
 
 echo "  k6 running as pid $K6_PID, sleeping ${WARMUP_SECONDS}s for warmup..."
 sleep "$WARMUP_SECONDS"
@@ -168,35 +196,51 @@ docker compose exec -T redis redis-cli ${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"} -
   SLOWLOG GET 100 > "$OUT_DIR/slowlog.txt"
 
 # 4d. Prometheus snapshot — the headline RED + USE signals.
+#
+# Each entry: <friendly_key>|<promql>. The friendly key is the JSON
+# field name (stable, machine-readable); the promql is the actual
+# query. This shape is robust against double-quotes inside PromQL
+# (e.g. status="success") that previously broke the JSON output when
+# we tried to use the raw query as the field key.
+#
+# All counter-rate queries are wrapped in `sum()` because our metrics
+# carry labels (method/path/status, cache, status); without `sum()`,
+# Prometheus returns one series per label combination and we'd only
+# capture the first via `.data.result[0]`. That mismatch produced a
+# 166,000× discrepancy between http_requests_total and bookings_total
+# in earlier runs.
 PROM_QUERIES=(
-  "redis_up"
-  "rate(redis_cpu_sys_seconds_total[1m])+rate(redis_cpu_user_seconds_total[1m])"
-  "redis_client_pool_total_conns"
-  "redis_client_pool_idle_conns"
-  "rate(redis_client_pool_hits_total[1m])"
-  "rate(redis_client_pool_misses_total[1m])"
-  "rate(redis_client_pool_timeouts_total[1m])"
-  "rate(redis_client_pool_wait_duration_seconds_total[1m])"
-  "pg_pool_in_use"
-  "rate(pg_pool_wait_count_total[1m])"
-  "rate(pg_pool_wait_duration_seconds_total[1m])"
-  "go_goroutines"
-  "rate(http_requests_total[1m])"
-  "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))"
-  "rate(bookings_total{status=\"success\"}[1m])"
+  "redis_up|redis_up{job=\"redis\"}"
+  "redis_cpu_total_rate|rate(redis_cpu_sys_seconds_total[1m])+rate(redis_cpu_user_seconds_total[1m])"
+  "redis_client_pool_total_conns|redis_client_pool_total_conns"
+  "redis_client_pool_idle_conns|redis_client_pool_idle_conns"
+  "redis_client_pool_hits_per_sec|rate(redis_client_pool_hits_total[1m])"
+  "redis_client_pool_misses_per_sec|rate(redis_client_pool_misses_total[1m])"
+  "redis_client_pool_timeouts_per_sec|rate(redis_client_pool_timeouts_total[1m])"
+  "redis_client_pool_wait_seconds_per_sec|rate(redis_client_pool_wait_duration_seconds_total[1m])"
+  "pg_pool_in_use|pg_pool_in_use"
+  "pg_pool_wait_count_per_sec|rate(pg_pool_wait_count_total[1m])"
+  "pg_pool_wait_seconds_per_sec|rate(pg_pool_wait_duration_seconds_total[1m])"
+  "go_goroutines|go_goroutines"
+  "http_requests_per_sec|sum(rate(http_requests_total[1m]))"
+  "http_request_duration_p99|histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))"
+  "bookings_success_per_sec|sum(rate(bookings_total{status=\"success\"}[1m]))"
 )
-{
-  echo '{'
-  first=1
-  for q in "${PROM_QUERIES[@]}"; do
-    [ $first -eq 1 ] && first=0 || echo ','
-    val=$(curl -sS --data-urlencode "query=$q" "$PROM_URL/api/v1/query" \
-            | jq -c '.data.result[0].value[1] // null' 2>/dev/null || echo 'null')
-    printf '  %s: %s' "\"$q\"" "$val"
-  done
-  echo
-  echo '}'
-} > "$OUT_DIR/prom_signals.json"
+
+# Build the JSON via jq so quoting / escaping is the JSON encoder's
+# problem, not bash's. Each query is appended as one (key, value) pair.
+JSON_OBJ='{}'
+for entry in "${PROM_QUERIES[@]}"; do
+  key="${entry%%|*}"
+  query="${entry#*|}"
+  val=$(curl -sS --data-urlencode "query=$query" "$PROM_URL/api/v1/query" 2>/dev/null \
+          | jq -c '.data.result[0].value[1] // null' 2>/dev/null || echo 'null')
+  # `val` is already a JSON value (a quoted string like "0.39" or null).
+  # `--argjson` injects it as JSON, preserving the type.
+  JSON_OBJ=$(jq --arg k "$key" --argjson v "$val" \
+                '. + {($k): $v}' <<< "$JSON_OBJ")
+done
+printf '%s\n' "$JSON_OBJ" > "$OUT_DIR/prom_signals.json"
 
 # ── Wait for k6 to finish ───────────────────────────────────────────────────
 
@@ -222,7 +266,7 @@ else
     > "$OUT_DIR/commandstats_diff.txt"
 fi
 
-# README — auto-generated bottleneck analysis. Reads pool_metrics.json
+# README — auto-generated bottleneck analysis. Reads prom_signals.json
 # and surfaces signals that point at specific causes.
 cat > "$OUT_DIR/README.md" <<EOF
 # Saturation profile — ${TIMESTAMP}
@@ -239,24 +283,23 @@ pprof window: ${PPROF_SECONDS}s starting ${WARMUP_SECONDS}s after k6 launch.
 | \`goroutine.pprof\` | Goroutine count + stacks. \`go tool pprof -top goroutine.pprof\` |
 | \`commandstats_diff.txt\` | Top Redis commands by total μs spent during the window — the "what was Redis doing" answer |
 | \`slowlog.txt\` | Any single command that took >10ms. Empty = no individual slow op |
-| \`pool_metrics.json\` (n/a — see prom_signals.json) | Client-side connection-pool snapshot at peak |
-| \`prom_signals.json\` | RED + USE signal snapshot (Redis CPU, pool ops/sec, p99 latency, Postgres pool) |
+| \`prom_signals.json\` | RED + USE signal snapshot at end-of-window — Redis CPU, client-pool hits/misses/timeouts/wait, PG pool waits, p99 latency, goroutines, accepted bookings/sec |
 | \`k6_summary.txt\` | Headline throughput + latency from the load generator |
 
 ## How to read this
 
-The decision tree for "what's the bottleneck":
+The decision tree for "what's the bottleneck" — keys below match the JSON field names in \`prom_signals.json\`:
 
-1. **\`prom_signals.json\` → \`rate(redis_cpu_sys_seconds_total[1m]) + rate(redis_cpu_user_seconds_total[1m])\`**
+1. **\`redis_cpu_total_rate\`** (sys+user CPU per second)
    - Sustained > 0.8 → Redis main thread CPU is saturated. **Optimize Redis-side: io-threads, EVALSHA, pipelining.**
    - Sustained < 0.3 → Redis is NOT the bottleneck. Look elsewhere.
-2. **\`prom_signals.json\` → \`rate(redis_client_pool_misses_total[1m])\` + \`rate(redis_client_pool_timeouts_total[1m])\`**
-   - Misses sustained > 0 → PoolSize is too small. Bump it.
+2. **\`redis_client_pool_misses_per_sec\`** + **\`redis_client_pool_timeouts_per_sec\`**
+   - Misses sustained > 0 → PoolSize is too small. Bump \`cfg.Redis.PoolSize\`.
    - Timeouts > 0 → pool fully exhausted, this is a hard saturation signal.
-3. **\`prom_signals.json\` → \`rate(pg_pool_wait_duration_seconds_total[1m])\`**
+3. **\`pg_pool_wait_seconds_per_sec\`**
    - Sustained > 0 → Postgres connection pool is queueing. Check \`pg_pool_in_use\` vs configured max.
 4. **\`commandstats_diff.txt\` top row**
-   - \`evalsha_*\` or \`eval\` dominating → Lua scripts are the cost driver. Confirm with cpu.pprof.
+   - \`evalsha\` / \`eval\` dominating → Lua scripts are the cost driver. Confirm with cpu.pprof.
    - \`xadd\` / \`xreadgroup\` dominating → stream operations dominate (worker side).
 5. **\`cpu.pprof\` top samples**
    - \`runtime.gc*\` heavy → GC pressure; check heap.pprof for allocation churn.

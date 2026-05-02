@@ -74,7 +74,15 @@ benchmark-compare: ## Run two-run comparison benchmark (usage: make benchmark-co
 
 profile-saturation: ## Run one-shot saturation diagnostic (usage: make profile-saturation VUS=500 DURATION=60s)
 	@chmod +x scripts/profile_saturation.sh
-	@VUS=$(VUS) DURATION=$(DURATION) ./scripts/profile_saturation.sh
+	@# Override the global DURATION ?= 30s for this target only.
+	@# Saturation profiling needs at least one full Prometheus rate
+	@# window (60s) to see steady-state load — 30s only captures
+	@# warmup-time rates. Use $$(origin) to detect whether DURATION
+	@# came from the CLI/env (respect it) vs the global default
+	@# (override to 60s).
+	@VUS="$(VUS)" \
+	DURATION="$(if $(filter command\ line environment,$(origin DURATION)),$(DURATION),60s)" \
+	./scripts/profile_saturation.sh
 
 docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@echo "Restarting booking_app container..."

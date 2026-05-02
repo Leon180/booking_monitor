@@ -85,7 +85,7 @@ func NewRedisPoolCollector(client *redis.Client) *RedisPoolCollector {
 		),
 		staleConns: prometheus.NewDesc(
 			"redis_client_pool_stale_conns",
-			"Current number of stale connections removed from the pool (e.g. exceeded ConnMaxIdleTime).",
+			"Current number of stale connections in the pool pending removal (e.g. exceeded ConnMaxIdleTime). Gauge, not counter — sourced from PoolStats.StaleConns which is a current-state field.",
 			nil, nil,
 		),
 		hits: prometheus.NewDesc(
