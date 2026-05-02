@@ -62,6 +62,12 @@ var Module = fx.Options(
 	// is server-only; bootstrap.CommonModule is shared by all
 	// subcommands including ones with no Redis.
 	fx.Invoke(registerStreamsCollector),
+	// Pool collector — go-redis client connection-pool stats. Sibling
+	// to bootstrap.registerDBPoolCollector for *sql.DB. O3.1b: closes
+	// the gap left by O3.1a (server-side metrics + app-side cache_*
+	// metrics, but no client-side connection-pool view — which is the
+	// most common "Redis is slow" cause when server is idle).
+	fx.Invoke(registerRedisPoolCollector),
 )
 
 // registerStreamsCollector attaches the StreamsCollector to the
@@ -73,6 +79,19 @@ func registerStreamsCollector(client *redis.Client) error {
 		var are prometheus.AlreadyRegisteredError
 		if !errors.As(err, &are) {
 			return fmt.Errorf("registerStreamsCollector: %w", err)
+		}
+	}
+	return nil
+}
+
+// registerRedisPoolCollector attaches the RedisPoolCollector to the
+// default Prometheus registerer. Same idempotency pattern as
+// registerStreamsCollector / bootstrap.registerDBPoolCollector.
+func registerRedisPoolCollector(client *redis.Client) error {
+	if err := prometheus.DefaultRegisterer.Register(observability.NewRedisPoolCollector(client)); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("registerRedisPoolCollector: %w", err)
 		}
 	}
 	return nil

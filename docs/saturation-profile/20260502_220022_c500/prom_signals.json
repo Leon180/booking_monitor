@@ -1,0 +1,17 @@
+{
+  "redis_up": "1",
+  "rate(redis_cpu_sys_seconds_total[1m])+rate(redis_cpu_user_seconds_total[1m])": "0.39248637777777773",
+  "redis_client_pool_total_conns": "200",
+  "redis_client_pool_idle_conns": "163",
+  "rate(redis_client_pool_hits_total[1m])": "38758.64444444444",
+  "rate(redis_client_pool_misses_total[1m])": "0",
+  "rate(redis_client_pool_timeouts_total[1m])": "0",
+  "rate(redis_client_pool_wait_duration_seconds_total[1m])": "3.761383195888889",
+  "pg_pool_in_use": "2",
+  "rate(pg_pool_wait_count_total[1m])": "0",
+  "rate(pg_pool_wait_duration_seconds_total[1m])": "0",
+  "go_goroutines": "586",
+  "rate(http_requests_total[1m])": "0.06666666666666665",
+  "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le))": "0.015939409254267782",
+  "rate(bookings_total{status="success"}[1m])": "11111.244444444443"
+}

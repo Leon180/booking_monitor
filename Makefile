@@ -72,6 +72,10 @@ benchmark-compare: ## Run two-run comparison benchmark (usage: make benchmark-co
 	@chmod +x scripts/benchmark_compare.sh
 	@./scripts/benchmark_compare.sh $(VUS) $(DURATION)
 
+profile-saturation: ## Run one-shot saturation diagnostic (usage: make profile-saturation VUS=500 DURATION=60s)
+	@chmod +x scripts/profile_saturation.sh
+	@VUS=$(VUS) DURATION=$(DURATION) ./scripts/profile_saturation.sh
+
 docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@echo "Restarting booking_app container..."
 	@docker-compose stop app
