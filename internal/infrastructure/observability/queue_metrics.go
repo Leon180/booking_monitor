@@ -24,3 +24,7 @@ func (m *prometheusQueueMetrics) RecordRevertFailure() {
 func (m *prometheusQueueMetrics) RecordDLQRoute(reason string) {
 	RedisDLQRoutedTotal.WithLabelValues(reason).Inc()
 }
+
+func (m *prometheusQueueMetrics) RecordConsumerGroupRecreated() {
+	ConsumerGroupRecreatedTotal.Inc()
+}

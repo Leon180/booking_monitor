@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // testConfig builds a fully-populated *config.Config with the same
@@ -241,6 +242,80 @@ func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ 
 func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {
 	f.reverted = true
 	return nil
+}
+
+// TestRedisOrderQueue_Subscribe_NOGROUPRecreatesGroupAndIncrementsMetric
+// pins the contract that NOGROUP self-heal:
+//   1. recreates the consumer group (so XReadGroup can keep working)
+//   2. calls QueueMetrics.RecordConsumerGroupRecreated() — the alert
+//      surface that turns this silent failure mode into a paged event
+//
+// The recreation uses `$` (current end of stream), which silently drops
+// messages enqueued before recovery. The metric is the operator's only
+// signal that this happened — without RecordConsumerGroupRecreated being
+// called, the `ConsumerGroupRecreated` alert never fires and a real
+// production FLUSHALL would silently lose data.
+func TestRedisOrderQueue_Subscribe_NOGROUPRecreatesGroupAndIncrementsMetric(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+	metrics := &recordingQueueMetrics{}
+
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), metrics, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Stream + group exist initially.
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+	// Simulate FLUSHALL: blow away the stream + group while the worker
+	// is about to read. Subscribe will hit NOGROUP on its first
+	// XReadGroup, log + recreate, then try again.
+	rdb.FlushAll(ctx)
+
+	handler := func(_ context.Context, _ *worker.QueuedBookingMessage) error { return nil }
+	_ = queue.Subscribe(ctx, handler) // ctx-deadline exits the loop; we don't care about return
+
+	assert.GreaterOrEqual(t, metrics.consumerGroupRecreated, uint64(1),
+		"NOGROUP self-heal MUST call RecordConsumerGroupRecreated — without it, the ConsumerGroupRecreated alert never fires and silent message loss goes unnoticed")
+
+	// Sanity: the recreation should have actually rebuilt the group
+	// (otherwise subsequent XReadGroups would keep failing forever).
+	groups, err := rdb.XInfoGroups(context.Background(), "orders:stream").Result()
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "orders:group", groups[0].Name)
+}
+
+// recordingQueueMetrics is a deliberately small QueueMetrics impl for
+// test-side counter assertions. We don't reach for testify mocks because
+// the assertion shape (just "was X called at least N times") is simpler
+// inline. Each field is a direct counter.
+type recordingQueueMetrics struct {
+	xackFailures           uint64
+	xaddFailures           map[string]uint64
+	revertFailures         uint64
+	dlqRoutes              map[string]uint64
+	consumerGroupRecreated uint64
+}
+
+func (r *recordingQueueMetrics) RecordXAckFailure()         { r.xackFailures++ }
+func (r *recordingQueueMetrics) RecordXAddFailure(s string) {
+	if r.xaddFailures == nil {
+		r.xaddFailures = make(map[string]uint64)
+	}
+	r.xaddFailures[s]++
+}
+func (r *recordingQueueMetrics) RecordRevertFailure() { r.revertFailures++ }
+func (r *recordingQueueMetrics) RecordDLQRoute(reason string) {
+	if r.dlqRoutes == nil {
+		r.dlqRoutes = make(map[string]uint64)
+	}
+	r.dlqRoutes[reason]++
+}
+func (r *recordingQueueMetrics) RecordConsumerGroupRecreated() {
+	r.consumerGroupRecreated++
 }
 
 // TestRedisOrderQueue_Subscribe_PersistentErrorBailout verifies that
