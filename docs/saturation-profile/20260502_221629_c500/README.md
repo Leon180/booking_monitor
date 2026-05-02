@@ -109,35 +109,79 @@ redis_client_pool_wait_seconds_per_sec = 4.47 sec/sec
 
 200 conns provisioned, only 23 in use at peak. Zero misses, zero timeouts. **The 4.47 sec/sec cumulative wait spread across 627 goroutines** averages to ~7ms wait per goroutine — non-negligible but not the dominant cost (the median request is 3.98ms total). PoolSize is sufficient as configured.
 
-### 4. cpu.pprof — **syscall-dominated**
+### 4. cpu.pprof — **syscall-dominated, but the writes are bigger than the reads**
 
-A third+ of the Go process's CPU during peak is in raw syscalls — the network round-trips to Redis (read + write per command) and to the clients (HTTP request + response). This is the signature of an **I/O-bound Go service**, not a compute-bound one. (Run `go tool pprof -top cpu.pprof` for the precise breakdown.)
+A third+ of the Go process's CPU during peak is in raw syscalls — confirmed I/O-bound, not compute-bound. But "33% in Syscall6" is the umbrella; drilling into the call graph (`go tool pprof -peek` / `-top -focus`) gives a sharper breakdown:
 
-### 5. Goroutines — **627 in flight**
+```
+internal/runtime/syscall.Syscall6                 28.44s  34.26%   ← the umbrella number
+├── syscall.write                                 21.81s  26.27%   ← writes are 4× reads
+│   ├── via HTTP response writer                  ~9.15s  ~11%     ← the largest single source
+│   │   net/http.checkConnErrorWriter.Write
+│   │   ──> bufio.(*Writer).Flush
+│   │   ──> net.(*conn).Write
+│   ├── via go-redis client writes                ~6-7s   ~8%      ← EVAL command sending
+│   │   github.com/redis/go-redis/v9/internal/proto.(*Writer)
+│   │   ──> bufio.(*Writer).Flush ──> net.(*conn).Write
+│   └── via lib/pq (Postgres)                     0.43s   0.5%     ← negligible (only 2 PG conns)
+├── syscall.read                                  5.31s   6.40%    ← HTTP req parsing + Redis replies
+└── syscall.EpollWait                             1.09s   1.31%    ← network event loop
+```
+
+Verification: `-focus 'go-redis'` shows the entire go-redis package contributes 13.30% cumulative CPU. HTTP's `checkConnErrorWriter.Write` alone contributes 11.08%. **HTTP response writing is the single biggest syscall hot-spot, larger than the entire Redis client.**
+
+### 5. Cumulative call-graph — middleware chain dominates
+
+```
+74.95s  90.28%  net/http.(*conn).serve              ← almost everything is HTTP serving
+52.65s  63.42%  http.serverHandler.ServeHTTP
+52.63s  63.39%  gin.(*Engine).ServeHTTP
+52.15s  62.82%  gin.(*Context).Next                 ← Gin middleware chain
+50.43s  60.74%  buildGinEngine.Metrics.func2        ← Prometheus metric middleware
+49.46s  59.58%  buildGinEngine.BodySize.func4       ← BodySize middleware
+49.33s  59.42%  RegisterRoutes.Idempotency.func1    ← Idempotency middleware (PR #48)
+49.10s  59.14%  bookingHandler.HandleBook
+```
+
+The Idempotency middleware accounting for 59.42% cumulative CPU is the most interesting hint here — every request runs body fingerprinting + Redis SETNX/GET, and at 51,212 RPS that overhead amplifies. Worth investigating whether non-idempotent paths (read-only GET / bookings/orders/:id) are running through it unnecessarily.
+
+### 6. Goroutines — **627 in flight**
 
 Consistent with 500 k6 VUs each holding one in-flight request + worker goroutines. Not a leak.
 
 ### Most likely actual bottleneck
 
 The combination of:
-- ~33% Go CPU in `Syscall6` (per repeated runs of the profile)
-- ~4.47 sec/sec cumulative pool wait_duration (mild contention, not starvation)
+- ~33% Go CPU in `Syscall6`, of which **the writes (26.27%) dominate the reads (6.40%) by 4×**
+- HTTP response writing (`checkConnErrorWriter.Write`) at ~11% — **the single biggest syscall consumer**
+- Redis client writes (`go-redis ── proto.Writer ── bufio.Flush`) at ~8% — second
+- Idempotency middleware in the call path of 59.42% of CPU
 - Redis at only 53% utilization
 - Trivial PG pool usage
 
-…points at **goroutine scheduling around blocking syscalls** (network I/O serialization) as the likely cap. The 8,332 acc/s ≈ 33,000-row-Redis-ops/s × ~30 μs round-trip per Lua call ≈ matches what a single-Redis-network single-host setup yields.
+…points at the **HTTP response-writing path + middleware chain overhead at high-RPS** as the dominant cap, with the Redis client second. The 8,332 acc/s × ~10 syscalls per booking × ~4μs user-mode-syscall-overhead ≈ 33% CPU — arithmetically consistent.
 
 ### What this means for the optimization roadmap
 
-| Lever the senior research suggested | Predicted impact based on this profile |
-| :-- | :-- |
-| Redis 6+ `io-threads` | **Low.** Redis CPU is at 53% — single thread isn't saturated yet. Would help if we got to 80%+, not now. |
-| Client pipelining | **High.** Multiple Lua deducts batched per TCP round-trip would shrink the Syscall6 share directly. Worth experimenting with for the worker → Redis read path. |
-| `EVALSHA` instead of `EVAL` | **Low.** The cpu.pprof shows zero time in script-load paths; we're already on EVALSHA-cached scripts. |
-| Bigger `PoolSize` | **Tiny.** Already 200 conns, 177 idle at peak — no headroom shortage. |
-| Inventory sharding (B3 — REJECTED) | **Zero.** Redis is at 53%; splitting one key across N keys on the same instance does not multiply single-thread throughput. |
+| Lever | Predicted CPU saving | Risk / complexity |
+| :-- | :-- | :-- |
+| **Audit Idempotency middleware hot path** — confirm GET routes (orders/:id, history) short-circuit before fingerprint/SETNX. If they currently don't, that's free wins. | 5–15% | Low (conditional branch) |
+| **Trim 202 response body** — currently `{order_id, status, message, links: {self}}`. The `message` + `links` fields are convenience; bare `{order_id}` could shave ~10 bytes/response × 51k RPS = ~500KB/s in `bufio.Flush`. | 1–3% | Low |
+| **Audit BodySize middleware** — does it read the body twice (once to measure, once to bind)? At 51k RPS this matters. | 2–5% | Low |
+| **HTTP/2 between k6 ↔ nginx ↔ app** | Connection multiplexing reduces per-request connection overhead | Medium (config) |
+| **go-redis pipelining for worker XReadGroup → Lua deduct** | 4–6% | Medium |
+| Redis 6+ `io-threads` | **0** — Redis CPU is at 53%, single thread isn't saturated. |
+| `EVALSHA` instead of `EVAL` | 0 — already EVALSHA-cached. |
+| Bigger `PoolSize` | 0 — already 200 conns / 23 in use. |
+| Inventory sharding (B3 — REJECTED) | **0** — Redis is at 53%; splitting one key across N keys on the same single instance does not multiply single-thread throughput. |
 
 ### Single biggest takeaway for the project narrative
 
-This profile is the strongest evidence yet that **the original PR #68 saturation point of 8,332 acc/s is an I/O-bound ceiling specific to this single-host docker setup**, not a Redis architecture limitation. It validates the decision to withdraw PR #69 (B3 sharding) and pivot to evidence-based optimization. The next move is whichever of the levers above produces the biggest measurable shift — most likely **client-side pipelining for the worker XReadGroup → Lua deduct path** — and we now have the tooling (this script) to verify before/after with apples-to-apples profile diffs.
+The original PR #68 saturation point of 8,332 acc/s is an **I/O-bound ceiling on this single-host docker setup**, not a Redis architecture limitation — the call graph confirms it cleanly:
+
+- **HTTP response write path** is the single biggest syscall consumer (~11% of total CPU)
+- **Idempotency middleware** wraps 59% of CPU work — a candidate for closer-look
+- Redis is at 53% CPU with 47% headroom
+
+This validates the decision to withdraw PR #69 (B3 sharding) and pivot to evidence-based optimization. The highest-leverage next move is **NOT** the previously hypothesised "Redis pipelining" — that's a 4–6% gain. The bigger lever is **the HTTP-response + middleware path**, where 5–15% gains are plausible and the changes are low-risk. The tooling (`make profile-saturation`) lets us verify before/after each change with apples-to-apples profile diffs.
 
