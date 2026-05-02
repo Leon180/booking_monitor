@@ -1,0 +1,243 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /script.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 500 max VUs, 1m30s max duration (incl. graceful stop):
+              * booking_stress: 500 looping VUs for 1m0s (gracefulStop: 30s)
+
+
+running (0m01.0s), 500/500 VUs, 40546 complete and 0 interrupted iterations
+booking_stress   [   2% ] 500 VUs  0m01.0s/1m0s
+
+running (0m02.0s), 500/500 VUs, 84008 complete and 0 interrupted iterations
+booking_stress   [   3% ] 500 VUs  0m02.0s/1m0s
+
+running (0m03.0s), 500/500 VUs, 133122 complete and 0 interrupted iterations
+booking_stress   [   5% ] 500 VUs  0m03.0s/1m0s
+
+running (0m04.0s), 500/500 VUs, 181152 complete and 0 interrupted iterations
+booking_stress   [   7% ] 500 VUs  0m04.0s/1m0s
+
+running (0m05.0s), 500/500 VUs, 231144 complete and 0 interrupted iterations
+booking_stress   [   8% ] 500 VUs  0m05.0s/1m0s
+
+running (0m06.0s), 500/500 VUs, 276191 complete and 0 interrupted iterations
+booking_stress   [  10% ] 500 VUs  0m06.0s/1m0s
+
+running (0m07.0s), 500/500 VUs, 323356 complete and 0 interrupted iterations
+booking_stress   [  12% ] 500 VUs  0m07.0s/1m0s
+
+running (0m08.0s), 500/500 VUs, 369010 complete and 0 interrupted iterations
+booking_stress   [  13% ] 500 VUs  0m08.0s/1m0s
+
+running (0m09.0s), 500/500 VUs, 421915 complete and 0 interrupted iterations
+booking_stress   [  15% ] 500 VUs  0m09.0s/1m0s
+
+running (0m10.0s), 500/500 VUs, 473065 complete and 0 interrupted iterations
+booking_stress   [  17% ] 500 VUs  0m10.0s/1m0s
+
+running (0m11.0s), 500/500 VUs, 522076 complete and 0 interrupted iterations
+booking_stress   [  18% ] 500 VUs  0m11.0s/1m0s
+
+running (0m12.0s), 500/500 VUs, 564814 complete and 0 interrupted iterations
+booking_stress   [  20% ] 500 VUs  0m12.0s/1m0s
+
+running (0m13.0s), 500/500 VUs, 609326 complete and 0 interrupted iterations
+booking_stress   [  22% ] 500 VUs  0m13.0s/1m0s
+
+running (0m14.0s), 500/500 VUs, 653858 complete and 0 interrupted iterations
+booking_stress   [  23% ] 500 VUs  0m14.0s/1m0s
+
+running (0m15.0s), 500/500 VUs, 698750 complete and 0 interrupted iterations
+booking_stress   [  25% ] 500 VUs  0m15.0s/1m0s
+
+running (0m16.0s), 500/500 VUs, 743923 complete and 0 interrupted iterations
+booking_stress   [  27% ] 500 VUs  0m16.0s/1m0s
+
+running (0m17.0s), 500/500 VUs, 791130 complete and 0 interrupted iterations
+booking_stress   [  28% ] 500 VUs  0m17.0s/1m0s
+
+running (0m18.0s), 500/500 VUs, 833435 complete and 0 interrupted iterations
+booking_stress   [  30% ] 500 VUs  0m18.0s/1m0s
+
+running (0m19.0s), 500/500 VUs, 877672 complete and 0 interrupted iterations
+booking_stress   [  32% ] 500 VUs  0m19.0s/1m0s
+
+running (0m20.0s), 500/500 VUs, 926120 complete and 0 interrupted iterations
+booking_stress   [  33% ] 500 VUs  0m20.0s/1m0s
+
+running (0m21.0s), 500/500 VUs, 966390 complete and 0 interrupted iterations
+booking_stress   [  35% ] 500 VUs  0m21.0s/1m0s
+
+running (0m22.0s), 500/500 VUs, 1014305 complete and 0 interrupted iterations
+booking_stress   [  37% ] 500 VUs  0m22.0s/1m0s
+
+running (0m23.0s), 500/500 VUs, 1062529 complete and 0 interrupted iterations
+booking_stress   [  38% ] 500 VUs  0m23.0s/1m0s
+
+running (0m24.0s), 500/500 VUs, 1105960 complete and 0 interrupted iterations
+booking_stress   [  40% ] 500 VUs  0m24.0s/1m0s
+
+running (0m25.0s), 500/500 VUs, 1153565 complete and 0 interrupted iterations
+booking_stress   [  42% ] 500 VUs  0m25.0s/1m0s
+
+running (0m26.0s), 500/500 VUs, 1201091 complete and 0 interrupted iterations
+booking_stress   [  43% ] 500 VUs  0m26.0s/1m0s
+
+running (0m27.0s), 500/500 VUs, 1249537 complete and 0 interrupted iterations
+booking_stress   [  45% ] 500 VUs  0m27.0s/1m0s
+
+running (0m28.0s), 500/500 VUs, 1294618 complete and 0 interrupted iterations
+booking_stress   [  47% ] 500 VUs  0m28.0s/1m0s
+
+running (0m29.0s), 500/500 VUs, 1341819 complete and 0 interrupted iterations
+booking_stress   [  48% ] 500 VUs  0m29.0s/1m0s
+
+running (0m30.0s), 500/500 VUs, 1388747 complete and 0 interrupted iterations
+booking_stress   [  50% ] 500 VUs  0m30.0s/1m0s
+
+running (0m31.0s), 500/500 VUs, 1437128 complete and 0 interrupted iterations
+booking_stress   [  52% ] 500 VUs  0m31.0s/1m0s
+
+running (0m32.0s), 500/500 VUs, 1482475 complete and 0 interrupted iterations
+booking_stress   [  53% ] 500 VUs  0m32.0s/1m0s
+
+running (0m33.0s), 500/500 VUs, 1529608 complete and 0 interrupted iterations
+booking_stress   [  55% ] 500 VUs  0m33.0s/1m0s
+
+running (0m34.0s), 500/500 VUs, 1578201 complete and 0 interrupted iterations
+booking_stress   [  57% ] 500 VUs  0m34.0s/1m0s
+
+running (0m35.0s), 500/500 VUs, 1627684 complete and 0 interrupted iterations
+booking_stress   [  58% ] 500 VUs  0m35.0s/1m0s
+
+running (0m36.0s), 500/500 VUs, 1677398 complete and 0 interrupted iterations
+booking_stress   [  60% ] 500 VUs  0m36.0s/1m0s
+
+running (0m37.0s), 500/500 VUs, 1726189 complete and 0 interrupted iterations
+booking_stress   [  62% ] 500 VUs  0m37.0s/1m0s
+
+running (0m38.0s), 500/500 VUs, 1776304 complete and 0 interrupted iterations
+booking_stress   [  63% ] 500 VUs  0m38.0s/1m0s
+
+running (0m39.0s), 500/500 VUs, 1822922 complete and 0 interrupted iterations
+booking_stress   [  65% ] 500 VUs  0m39.0s/1m0s
+
+running (0m40.0s), 500/500 VUs, 1866752 complete and 0 interrupted iterations
+booking_stress   [  67% ] 500 VUs  0m40.0s/1m0s
+
+running (0m41.0s), 500/500 VUs, 1916778 complete and 0 interrupted iterations
+booking_stress   [  68% ] 500 VUs  0m41.0s/1m0s
+
+running (0m42.0s), 500/500 VUs, 1962091 complete and 0 interrupted iterations
+booking_stress   [  70% ] 500 VUs  0m42.0s/1m0s
+
+running (0m43.0s), 500/500 VUs, 2011937 complete and 0 interrupted iterations
+booking_stress   [  72% ] 500 VUs  0m43.0s/1m0s
+
+running (0m44.0s), 500/500 VUs, 2056445 complete and 0 interrupted iterations
+booking_stress   [  73% ] 500 VUs  0m44.0s/1m0s
+
+running (0m45.0s), 500/500 VUs, 2097212 complete and 0 interrupted iterations
+booking_stress   [  75% ] 500 VUs  0m45.0s/1m0s
+
+running (0m46.0s), 500/500 VUs, 2141039 complete and 0 interrupted iterations
+booking_stress   [  77% ] 500 VUs  0m46.0s/1m0s
+
+running (0m47.0s), 500/500 VUs, 2186540 complete and 0 interrupted iterations
+booking_stress   [  78% ] 500 VUs  0m47.0s/1m0s
+
+running (0m48.0s), 500/500 VUs, 2233697 complete and 0 interrupted iterations
+booking_stress   [  80% ] 500 VUs  0m48.0s/1m0s
+
+running (0m49.0s), 500/500 VUs, 2278563 complete and 0 interrupted iterations
+booking_stress   [  82% ] 500 VUs  0m49.0s/1m0s
+
+running (0m50.0s), 500/500 VUs, 2324675 complete and 0 interrupted iterations
+booking_stress   [  83% ] 500 VUs  0m50.0s/1m0s
+
+running (0m51.0s), 500/500 VUs, 2371434 complete and 0 interrupted iterations
+booking_stress   [  85% ] 500 VUs  0m51.0s/1m0s
+
+running (0m52.0s), 500/500 VUs, 2415799 complete and 0 interrupted iterations
+booking_stress   [  87% ] 500 VUs  0m52.0s/1m0s
+
+running (0m53.0s), 500/500 VUs, 2461667 complete and 0 interrupted iterations
+booking_stress   [  88% ] 500 VUs  0m53.0s/1m0s
+
+running (0m54.0s), 500/500 VUs, 2511828 complete and 0 interrupted iterations
+booking_stress   [  90% ] 500 VUs  0m54.0s/1m0s
+
+running (0m55.0s), 500/500 VUs, 2557299 complete and 0 interrupted iterations
+booking_stress   [  92% ] 500 VUs  0m55.0s/1m0s
+
+running (0m56.0s), 500/500 VUs, 2597014 complete and 0 interrupted iterations
+booking_stress   [  93% ] 500 VUs  0m56.0s/1m0s
+
+running (0m57.0s), 500/500 VUs, 2648560 complete and 0 interrupted iterations
+booking_stress   [  95% ] 500 VUs  0m57.0s/1m0s
+
+running (0m58.0s), 500/500 VUs, 2689422 complete and 0 interrupted iterations
+booking_stress   [  97% ] 500 VUs  0m58.0s/1m0s
+
+running (0m59.0s), 500/500 VUs, 2738006 complete and 0 interrupted iterations
+booking_stress   [  98% ] 500 VUs  0m59.0s/1m0s
+
+running (1m00.0s), 500/500 VUs, 2786476 complete and 0 interrupted iterations
+booking_stress   [ 100% ] 500 VUs  1m00.0s/1m0s
+
+
+  █ THRESHOLDS 
+
+    business_errors
+    ✓ 'rate<0.01' rate=0.00%
+
+    http_req_duration
+    ✓ 'p(95)<500' p(95)=14.45ms
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5579279 92949.648962/s
+    checks_succeeded...: 58.96%  3289653 out of 5579279
+    checks_failed......: 41.03%  2289626 out of 5579279
+
+    ✓ setup event created
+    ✓ status is 202 or 409
+    ✗ booking accepted
+      ↳  17% — ✓ 500013 / ✗ 2289626
+
+    CUSTOM
+    accepted_bookings..............: 500013  8330.114487/s
+    booking_duration...............: avg=7.61ms min=0s      med=6ms    max=90ms    p(90)=14ms    p(95)=18ms   
+    business_errors................: 0.00%   0 out of 2789639
+
+    HTTP
+    http_req_duration..............: avg=5.39ms min=49.41µs med=4.03ms max=88.75ms p(90)=10.94ms p(95)=14.45ms
+      { expected_response:true }...: avg=4.37ms min=49.41µs med=3.2ms  max=70.82ms p(90)=8.66ms  p(95)=11.53ms
+    http_req_failed................: 82.07%  2289626 out of 2789640
+    http_reqs......................: 2789640 46474.832811/s
+
+    EXECUTION
+    iteration_duration.............: avg=10.5ms min=81.16µs med=8.8ms  max=98.7ms  p(90)=19.97ms p(95)=24.5ms 
+    iterations.....................: 2789639 46474.816151/s
+    vus............................: 500     min=500                max=500
+    vus_max........................: 500     min=500                max=500
+
+    NETWORK
+    data_received..................: 619 MB  10 MB/s
+    data_sent......................: 586 MB  9.8 MB/s
+
+
+
+
+running (1m00.0s), 000/500 VUs, 2789639 complete and 0 interrupted iterations
+booking_stress ✓ [ 100% ] 500 VUs  1m0s
