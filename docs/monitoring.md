@@ -101,7 +101,7 @@ The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, 
 | :-- | :-- |
 | Successful bookings vs sold-out vs duplicate | `bookings_total{status}` |
 | Worker outcomes | `worker_orders_total{status}`, `worker_processing_duration_seconds` |
-| Inventory drift between Redis and DB | `inventory_conflicts_total` |
+| Inventory drift between Redis and DB | `inventory_conflicts_total` (worker-side, Redis approved but DB rejected); `inventory_rehydrate_drift_total` (startup-time, Redis key existed with value > DB available_tickets — see [`cache/rehydrate.go`](../internal/infrastructure/cache/rehydrate.go)). Sustained `rate(inventory_rehydrate_drift_total[1h]) > 0` across multiple deploys = something is putting wrong values into Redis (corruption, manual tinkering, or the NOGROUP-aftermath tracked in `architectural_backlog.md` § Cache-truth architecture). |
 | Dead-letter routing | `dlq_messages_total{topic,reason}`, `redis_dlq_routed_total{reason}` |
 | Saga compensation poison messages | `saga_poison_messages_total` |
 | Kafka consumer stuck on transient downstream failures | `kafka_consumer_retry_total{topic,reason}` |

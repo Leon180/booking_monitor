@@ -101,7 +101,7 @@ Collector 在 scrape 當下讀 `*redis.Client.PoolStats()`(已經有鎖保護 + 
 | :-- | :-- |
 | 成功訂票 vs 售完 vs 重複下單 | `bookings_total{status}` |
 | Worker 處理結果 | `worker_orders_total{status}`、`worker_processing_duration_seconds` |
-| Redis 與 DB 庫存漂移 | `inventory_conflicts_total` |
+| Redis 與 DB 庫存漂移 | `inventory_conflicts_total`(worker 端,Redis 通過但 DB 拒絕); `inventory_rehydrate_drift_total`(啟動時,Redis key 存在且值 > DB available_tickets — 見 [`cache/rehydrate.go`](../internal/infrastructure/cache/rehydrate.go))。多次部署後仍看到 `rate(inventory_rehydrate_drift_total[1h]) > 0` 持續 = 有人/事在把錯的值寫進 Redis(毀損、手動操作、或 `architectural_backlog.md` § Cache-truth architecture 紀錄的 NOGROUP 後遺症)。 |
 | Dead-letter 路由 | `dlq_messages_total{topic,reason}`、`redis_dlq_routed_total{reason}` |
 | Saga 補償 poison 訊息 | `saga_poison_messages_total` |
 | Kafka consumer 因下游短暫故障卡住 | `kafka_consumer_retry_total{topic,reason}` |
