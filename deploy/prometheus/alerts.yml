@@ -454,6 +454,70 @@ groups:
           summary: "Worker self-healed NOGROUP — messages may have been silently dropped"
           description: "Worker hit NOGROUP and recreated the consumer group. Any messages enqueued between the group's destruction and the recreation moment were silently skipped. Investigate: (1) did operations run FLUSHALL or XGROUP DESTROY? (2) did Redis restart without AOF? (3) cross-check `bookings_total` vs `orders` table count to detect drift."
 
+      - alert: OutboxPendingBacklog
+        # Fires when the transactional-outbox backlog
+        # (events_outbox WHERE processed_at IS NULL) stays elevated.
+        # In healthy operation the OutboxRelay drains pending rows
+        # within seconds — steady-state count is dominated by in-flight
+        # events, typically dozens. Sustained > 100 for 5m means the
+        # relay is wedged: leader crashed, advisory lock held by a
+        # zombie tx, broker unreachable, or relay's poll loop hung.
+        #
+        # Why this matters: the outbox is the bridge between
+        # "DB committed an order.created / order.failed event" and
+        # "Kafka downstream consumers see it". A stuck relay silences
+        # the saga compensator (no order.failed delivery → Redis
+        # inventory leaked) and the payment service (no order.created
+        # delivery → bookings stuck in async-processing forever).
+        # Customer 202s never advance to confirmed/failed.
+        #
+        # Threshold rationale (100): well above realistic in-flight
+        # peak (typical hot path produces single-digit pending at
+        # any moment) but well below the cardinality where Postgres
+        # transaction log pressure becomes a secondary problem
+        # (~10K rows). The `for: 5m` soak window is the standard
+        # "transient blip vs sustained anomaly" discriminator —
+        # a brief broker reconnect should not page.
+        #
+        # Severity warning, not critical: customers can still book
+        # (Redis hot path still works); only the post-commit fan-out
+        # is degraded. Page-worthy via Slack/email but not phone.
+        #
+        # See `docs/runbooks/README.md#outboxpendingbacklog` for
+        # diagnosis (advisory lock holders, relay liveness, broker
+        # connectivity) and remediation (restart relay, manual
+        # advisory_unlock if zombie tx detected).
+        expr: outbox_pending_count > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#outboxpendingbacklog"
+          summary: "events_outbox backlog elevated ({{ $value }} unprocessed for 5m)"
+          description: "OutboxRelay appears wedged: {{ $value }} rows unprocessed for 5m+. Saga compensator + payment service downstream consumers are silenced; in-flight orders cannot advance. Diagnose: (1) is recon container's relay leader healthy? (2) does pg_locks show a held advisory lock id=1001 from a dead tx? (3) is Kafka reachable? See runbook."
+
+      - alert: OutboxPendingCollectorDown
+        # Companion to RedisStreamCollectorDown — fires when the
+        # OutboxPendingCollector's per-scrape COUNT query is failing.
+        # Without this alert, a sustained DB outage would silently
+        # remove `outbox_pending_count` from /metrics and the
+        # OutboxPendingBacklog alert above would go QUIET (it can't
+        # fire on a metric that doesn't exist) — operators would see
+        # "no alerts firing" and assume health.
+        #
+        # `for: 2m` matches the RedisStreamCollectorDown discipline.
+        # Critical severity because every outbox-backed signal
+        # (the backlog gauge, downstream relay health) goes blind
+        # while this is firing.
+        expr: rate(outbox_pending_collector_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#outboxpendingcollectordown"
+          summary: "OutboxPendingCollector cannot query DB — outbox_pending_count is unreliable"
+          description: "Per-scrape COUNT(events_outbox WHERE processed_at IS NULL) failing for 2m+. The outbox_pending_count gauge is silent or stale; OutboxPendingBacklog alert cannot fire while this is degraded. Diagnose: DB outage, missing migration 000007 partial index, query timeout. See runbook."
+
       - alert: TargetDown
         # Meta-alert: fires when Prometheus has been unable to scrape a
         # target for 2 minutes. Without this, a worker process that

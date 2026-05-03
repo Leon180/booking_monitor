@@ -87,3 +87,17 @@ func registerDBPoolCollector(db *sql.DB) error {
 	}
 	return nil
 }
+
+// registerOutboxPendingCollector publishes the count of unprocessed
+// transactional-outbox rows as a gauge (see
+// observability.OutboxPendingCollector). Same idempotent
+// AlreadyRegisteredError handling as registerDBPoolCollector.
+func registerOutboxPendingCollector(db *sql.DB) error {
+	if err := prometheus.DefaultRegisterer.Register(observability.NewOutboxPendingCollector(db)); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("registerOutboxPendingCollector: %w", err)
+		}
+	}
+	return nil
+}

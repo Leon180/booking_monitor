@@ -108,6 +108,7 @@ The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, 
 | Charging stuck-order reconciliation | `recon_stuck_charging_orders` (gauge), `recon_resolved_total{outcome}`, `recon_gateway_errors_total`, `recon_resolve_duration_seconds`, `recon_resolve_age_seconds` |
 | Streams collector itself failing | `redis_stream_collector_errors_total{stream,operation}` |
 | **Worker self-healed NOGROUP (silent message loss signal)** | `consumer_group_recreated_total` — counter that increments when the worker hits NOGROUP and recreates the consumer group via `XGROUP CREATE ... $`. **MUST stay 0 in healthy production.** The recreation uses `$` so any messages enqueued in the destruction→recovery window are silently skipped. The companion alert (`ConsumerGroupRecreated`) fires on the FIRST occurrence (no soak window). Background: `docs/architectural_backlog.md` § Cache-truth architecture documents the 411-of-1000 silent-message-loss case that drove this metric. |
+| **Transactional outbox backlog** | `outbox_pending_count` — gauge of `events_outbox` rows where `processed_at IS NULL`, sampled at scrape time by [`OutboxPendingCollector`](../internal/infrastructure/observability/outbox_pending_collector.go). Steady-state count is single-digit (in-flight events drain within seconds via the OutboxRelay). Sustained > 100 = relay is wedged → saga compensator + payment service downstream consumers are silenced; in-flight orders cannot advance. Companion: `outbox_pending_collector_errors_total` increments on per-scrape COUNT failure (DB outage / missing migration 000007 / query timeout — gauge is unreliable while this is climbing). Pairs with the `OutboxPendingBacklog` (warning) and `OutboxPendingCollectorDown` (critical) alerts. |
 | What happens when a client retries with the same Idempotency-Key (N4) | `idempotency_replays_total{outcome}` — counts every replay attempt by what the server did with it. Three outcomes:<br>• `match` = same key + same body → we replay the previously-cached response (this is idempotency working as designed)<br>• `mismatch` = same key + **different** body → we return 409 Conflict (client bug: they're reusing one key across logically-distinct requests)<br>• `legacy_match` = entry was already in cache from before N4 shipped (no fingerprint stored), so we replay AND lazily write the fresh fingerprint back. **Should taper to 0 within 24h after deploy** (legacy entries expire); if it stays > 0, something is still writing the old wire format — investigate. |
 | How often the idempotency Redis lookup is failing (N4) | `idempotency_cache_get_errors_total` — number of times the idempotency cache GET failed (Redis unreachable, unmarshal error). **Page-worthy.** When this is sustained > 0, the booking endpoint is still accepting requests but **idempotency protection is OFF** — a duplicate request will be processed twice (only the DB UNIQUE constraint catches it at the last layer).<br>**Why we don't just reject requests when Redis is down**: refusing all bookings during a Redis outage = the whole endpoint is down. "Idempotency briefly disabled" is strictly better than "endpoint disabled"; this counter exists so on-call knows we're in that degraded mode.<br>Alert: `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m` → page. |
 | How many orders are stuck in Failed state without compensation (A5) | `saga_stuck_failed_orders` — gauge of orders that have been in Failed state longer than `SAGA_STUCK_THRESHOLD` (default 60s), set by the saga watchdog on every sweep. A non-zero value at any single moment is fine (the watchdog will re-drive the compensator next sweep). **Sustained > 0 for 10m means the compensator is failing repeatedly** — typical causes: Redis revert blocked, DB lock contention, or an unmapped compensator error. Watchdog default sweep interval is 60s, so 10m gives ~10 attempts to clear before paging. |
@@ -260,6 +261,8 @@ The current alert catalog:
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 for 5m — booking hot path intermittently failing to enqueue |
 | `ConsumerGroupRecreated` | critical | `increase(consumer_group_recreated_total[5m]) > 0` — worker hit NOGROUP and self-healed via `XGROUP CREATE ... $`. Recovery preserves availability but **silently drops messages** that were enqueued in the destruction→recovery window. Triggers on the FIRST occurrence (no soak); `[5m]` window gives comfortable overlap with Prometheus's default 1m eval cadence so a single spike isn't missed. Investigate: did operations FLUSHALL? did Redis crash without AOF? Cross-check `bookings_total` vs DB orders count. See `docs/architectural_backlog.md` § Cache-truth architecture. |
+| `OutboxPendingBacklog` | warning | `outbox_pending_count > 100 for 5m` — the OutboxRelay is wedged. Customers can still book (Redis hot path is fine), but the post-commit fan-out to Kafka downstream consumers is silenced — saga compensator stops compensating, payment service stops processing. In-flight orders cannot advance. Diagnose via `pg_locks` (zombie advisory lock 1001), relay container liveness, broker connectivity. |
+| `OutboxPendingCollectorDown` | critical | `rate(outbox_pending_collector_errors_total[5m]) > 0 for 2m` — the per-scrape COUNT(events_outbox WHERE processed_at IS NULL) query is failing. While this fires, `outbox_pending_count` is silent or stale and `OutboxPendingBacklog` cannot fire. Diagnose: DB outage, missing migration 000007 partial index, query timeout. Mirrors `RedisStreamCollectorDown` discipline. |
 | `TargetDown` | critical | `up == 0` for any (job, instance) for 2m+ — meta-alert; rate-based alerts for that job are silently inert until scrape recovers |
 | `RedisExporterCannotReachRedis` | critical | `redis_up{job="redis"} == 0` for 1m — exporter HTTP listener is alive (so `TargetDown` won't fire) but it can't reach Redis itself. Typical causes: REDIS_PASSWORD wrong/rotated, Redis container down, docker network split. Every Redis-server metric on the dashboard goes stale until this clears. |
 
@@ -296,6 +299,25 @@ docker exec booking_db psql -U user -d booking -c \
 docker stop booking_payment_worker
 # Wait 2m+ (alert has `for: 2m`).
 # Cleanup: docker start booking_payment_worker → up returns to 1 within one scrape (15s).
+
+# OutboxPendingBacklog — directly INSERT 200 unprocessed outbox rows.
+# Bypass the relay's normal poll cadence by pushing rows that look like
+# legitimate `order.created` events but have NO matching DB order row
+# (the rows fail to publish silently because the JSON payload isn't
+# tied to a real order; they sit pending). Faster than killing the
+# relay container, and cleanup is a single DELETE.
+docker exec booking_db psql -U booking -d booking -c \
+  "INSERT INTO events_outbox (id, event_type, payload, status)
+   SELECT gen_random_uuid(), 'order.created', '{\"probe\":true}'::jsonb, 'PENDING'
+   FROM generate_series(1, 200);"
+# Default sweep + alert `for: 5m`, so wait ~6m and check Prometheus → Alerts.
+# Cleanup: DELETE FROM events_outbox WHERE payload->>'probe' = 'true';
+
+# OutboxPendingCollectorDown — break the COUNT query by stopping postgres
+# briefly. After ~2m the OutboxPendingCollectorDown fires; postgres
+# coming back clears it within one scrape.
+docker compose stop postgres
+# Wait 2m+. Cleanup: docker compose start postgres.
 ```
 
 After testing, undo: `docker exec booking_redis redis-cli DEL orders:stream orders:dlq` (loses any in-flight production data — only safe in dev).
