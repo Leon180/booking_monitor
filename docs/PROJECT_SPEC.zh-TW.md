@@ -166,7 +166,7 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;見下方備註)
     user_id INT NOT NULL,          -- 外部使用者參照;此服務不擁有 users 表
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated(legacy)+ awaiting_payment | paid | expired | payment_failed(由 D2 跟 000012 一起加入;D1 migration 只動 schema,D2 才上 Go state-machine)
+    status VARCHAR(50) NOT NULL,   -- legacy:pending | charging | confirmed | failed | compensated(A4)· Pattern A(D2):pending | awaiting_payment | paid | expired | payment_failed | compensated。兩種狀態詞彙會共存,直到 D7 narrowing saga scope 之後的 cleanup PR 才移除舊的。
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- 000010 加入,給 recon/watchdog 做 age 比較
     -- Pattern A 欄位(000012 / Phase 3 D1 加入):
@@ -241,6 +241,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000010 | **A4 charging 兩階段意圖紀錄**(PR #45)— 為 `orders` 加上 `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` 與部分索引 `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')`,驅動 reconciler 的 `FindStuckCharging` sweep。 |
 | 000011 | **A5 saga watchdog 索引擴大**(PR #49)— 重建 000010 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed')`,讓 saga-watchdog 的 `FindStuckFailed` sweep 跟 reconciler 共用同一個 index plan。 |
 | 000012 | **Phase 3 D1 — Pattern A schema** — 加入 `event_sections` 資料表(multi-section 模型 + Layer 1 sharding 軸);`events.reservation_window_seconds`(可由 admin 調整的 TTL 預設值,900s = 15 分鐘);`orders.section_id`(可空值;新流程會設值,legacy 列維持 NULL);`orders.reserved_until`(每筆訂單的 TTL 事實值);`orders.payment_intent_id`(Stripe-shape,由 POST /orders/:id/pay 設值);部分索引 `idx_orders_awaiting_payment_reserved_until` 給 reservation 過期 sweeper(D6)用;部分索引 `idx_orders_section_id_active` 給未來 Layer 1 sharding router 用。**只動 schema — 對應的 Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`)**由 D2 接著上**。`section_id` 沒有 DB-level FK,新狀態也沒有 CHECK;跟 000008 / 000010 一樣由應用層強制。 |
+| 000013 | **Phase 3 D2 — 擴大 `idx_orders_status_updated_at_partial`** — 重建 000011 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed')`。跟 D2 一起上是因為 D5 / D6 開始產生 `expired` / `payment_failed` 訂單後,saga watchdog 的 `FindStuckFailed` 查詢(現在是 `WHERE status IN ('failed', 'expired', 'payment_failed')`)若沒有對應索引就會退化成 sequential scan。形狀跟 000011 一樣是 DROP + CREATE — Postgres 沒有原地改寫部分索引 predicate 的 DDL;在當前資料量下,non-concurrent CREATE INDEX 的短暫 lock window 可以接受。 |
 
 ### Redis
 

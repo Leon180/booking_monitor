@@ -219,12 +219,25 @@ func TestOrderRepository_StateMachine_LegalTransitions(t *testing.T) {
 	mkCompensated := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
 		return r.MarkCompensated(ctx, id)
 	}
+	mkAwaitingPayment := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkAwaitingPayment(ctx, id)
+	}
+	mkPaid := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkPaid(ctx, id)
+	}
+	mkExpired := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkExpired(ctx, id)
+	}
+	mkPaymentFailed := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkPaymentFailed(ctx, id)
+	}
 
 	tests := []struct {
 		name     string
 		path     []step
 		wantLast domain.OrderStatus
 	}{
+		// Legacy paths (A4):
 		{
 			name:     "Pending → Charging → Confirmed",
 			path:     []step{mkCharging, mkConfirmed},
@@ -239,6 +252,22 @@ func TestOrderRepository_StateMachine_LegalTransitions(t *testing.T) {
 			name:     "Pending → Failed (transitional direct edge)",
 			path:     []step{mkFailed},
 			wantLast: domain.OrderStatusFailed,
+		},
+		// Pattern A paths (D2):
+		{
+			name:     "Pending → AwaitingPayment → Paid",
+			path:     []step{mkAwaitingPayment, mkPaid},
+			wantLast: domain.OrderStatusPaid,
+		},
+		{
+			name:     "Pending → AwaitingPayment → Expired → Compensated",
+			path:     []step{mkAwaitingPayment, mkExpired, mkCompensated},
+			wantLast: domain.OrderStatusCompensated,
+		},
+		{
+			name:     "Pending → AwaitingPayment → PaymentFailed → Compensated",
+			path:     []step{mkAwaitingPayment, mkPaymentFailed, mkCompensated},
+			wantLast: domain.OrderStatusCompensated,
 		},
 	}
 
@@ -276,18 +305,42 @@ func TestOrderRepository_StateMachine_IllegalTransitions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pending → Compensated is illegal — Compensated only follows
-	// Failed. The CTE returns 0 rows; transitionStatus surfaces
-	// ErrInvalidTransition.
+	// Failed | Expired | PaymentFailed (D2 widening). The CTE returns
+	// 0 rows; transitionStatus surfaces ErrInvalidTransition.
 	err = repo.MarkCompensated(ctx, o.ID())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
-		"Pending → Compensated must surface ErrInvalidTransition (compensator only runs after Failed)")
+		"Pending → Compensated must surface ErrInvalidTransition (compensator only runs after a failure-terminal status)")
 
 	// Status must not have been mutated.
 	got, err := repo.GetByID(ctx, o.ID())
 	require.NoError(t, err)
 	assert.Equal(t, domain.OrderStatusPending, got.Status(),
 		"failed transition must NOT mutate status")
+
+	// AwaitingPayment → Compensated is also illegal — D2 widened
+	// MarkCompensated to accept Failed | Expired | PaymentFailed but
+	// AwaitingPayment is mid-flow, NOT a failure-terminal state. A
+	// stray compensator re-drive against an awaiting-payment order
+	// must NOT walk the row to Compensated; the user is still mid-pay
+	// and the reservation TTL sweep (D6) is the only legal exit
+	// (→ Expired → Compensated). Lock that down at the DB level so
+	// it's enforced even if a buggy app path slips past the domain
+	// receiver guard.
+	o2 := newOrder(t, eventID, 2, 1)
+	_, err = repo.Create(ctx, o2)
+	require.NoError(t, err)
+	require.NoError(t, repo.MarkAwaitingPayment(ctx, o2.ID()))
+
+	err = repo.MarkCompensated(ctx, o2.ID())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
+		"AwaitingPayment → Compensated must surface ErrInvalidTransition (must traverse Expired or PaymentFailed first)")
+
+	got, err = repo.GetByID(ctx, o2.ID())
+	require.NoError(t, err)
+	assert.Equal(t, domain.OrderStatusAwaitingPayment, got.Status(),
+		"failed transition must NOT mutate status — AwaitingPayment must remain")
 }
 
 // TestOrderRepository_StateMachine_HistoryRecorded: the CTE's INSERT

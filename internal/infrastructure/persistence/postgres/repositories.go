@@ -413,15 +413,25 @@ func (r *postgresOrderRepository) FindStuckCharging(
 	return out, nil
 }
 
-// FindStuckFailed returns Failed-state orders older than minAge, up
-// to limit rows. Backs the saga watchdog subcommand's sweep (A5).
+// FindStuckFailed returns failure-terminal-state orders older than
+// minAge, up to limit rows. Backs the saga watchdog subcommand's
+// sweep (A5). Status set: {failed (legacy A4), expired (Pattern A
+// reservation TTL), payment_failed (Pattern A webhook failure)} —
+// all three have the same recovery shape (run compensator → revert
+// Redis + mark compensated) and so should all be visible to the
+// watchdog.
 //
-// Same query shape as FindStuckCharging — the partial index from
-// migration 000011 covers `status IN ('charging', 'pending', 'failed')`
-// so both the reconciler and the watchdog share one index.
+// Same query shape as FindStuckCharging. The partial index from
+// migration 000013 (widened from 000011's predicate) covers
+// `status IN ('charging', 'pending', 'failed', 'expired',
+// 'payment_failed')` so both the reconciler and the watchdog share
+// one index. The widening lands with D2 (this PR) so when D5/D6
+// add code paths that produce `expired` / `payment_failed` orders,
+// the watchdog already covers them — no orphan window where a
+// stuck Pattern A failure is invisible to the existing safety net.
 //
-// "Stuck Failed" means: an order was MarkFailed'd by the payment
-// service but the saga compensator never moved it to Compensated —
+// "Stuck" means: an order reached one of the failure-terminal
+// states but the saga compensator never moved it to Compensated —
 // usually because the saga consumer crashed mid-handler, the DLQ
 // route swallowed the event, or a Kafka rebalance lost the offset.
 // The watchdog detects these and re-drives the existing (idempotent)
@@ -437,7 +447,7 @@ func (r *postgresOrderRepository) FindStuckFailed(
 	const sqlStmt = `
 		SELECT id, EXTRACT(EPOCH FROM (NOW() - updated_at))
 		  FROM orders
-		 WHERE status = 'failed'
+		 WHERE status IN ('failed', 'expired', 'payment_failed')
 		   AND updated_at < NOW() - $1::interval
 		 ORDER BY updated_at ASC
 		 LIMIT $2`
@@ -495,12 +505,61 @@ func (r *postgresOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) 
 		domain.OrderStatusPending, domain.OrderStatusCharging)
 }
 
-// MarkCompensated atomically transitions Failed → Compensated (saga
-// completion). NOTE: not Pending→Compensated — the saga compensator
-// is invoked AFTER payment failure has already moved the order to
-// Failed, so Compensated only follows Failed.
+// MarkCompensated atomically transitions Failed | Expired |
+// PaymentFailed → Compensated (saga completion). NOT Pending→
+// Compensated — the saga compensator is invoked AFTER one of the
+// failure-terminal states has already been written.
+//
+// The set is wider than the legacy "Failed only" because Pattern A
+// (D6 expiry sweeper, D5 webhook failure) produces two new failure-
+// terminal states (Expired, PaymentFailed) that ALSO need
+// compensation (revert Redis inventory). Same compensator logic
+// applies to all three.
 func (r *postgresOrderRepository) MarkCompensated(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusCompensated, domain.OrderStatusFailed)
+	return r.transitionStatus(ctx, id, domain.OrderStatusCompensated,
+		domain.OrderStatusFailed,
+		domain.OrderStatusExpired,
+		domain.OrderStatusPaymentFailed)
+}
+
+// MarkAwaitingPayment atomically transitions Pending → AwaitingPayment.
+// The Pattern A entry transition — `BookingService.BookTicket` will
+// call this in D3 to create the reservation that the customer pays
+// for via POST /orders/:id/pay (D4).
+func (r *postgresOrderRepository) MarkAwaitingPayment(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusAwaitingPayment, domain.OrderStatusPending)
+}
+
+// MarkPaid atomically transitions AwaitingPayment → Paid (terminal).
+// Triggered by the POST /webhook/payment success callback (D5).
+//
+// Strictly AwaitingPayment-only as source; not Pending → Paid. The
+// webhook only fires after a payment intent was created, which only
+// happens after the order is in AwaitingPayment.
+func (r *postgresOrderRepository) MarkPaid(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPaid, domain.OrderStatusAwaitingPayment)
+}
+
+// MarkExpired atomically transitions AwaitingPayment → Expired.
+// Triggered by the reservation expiry sweeper (D6) when
+// `reserved_until < NOW()` and the order has been in AwaitingPayment
+// past its TTL without a successful payment webhook.
+//
+// Expired is NOT terminal — the saga compensator runs after Expired
+// (Expired → Compensated) to revert Redis inventory.
+func (r *postgresOrderRepository) MarkExpired(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusExpired, domain.OrderStatusAwaitingPayment)
+}
+
+// MarkPaymentFailed atomically transitions AwaitingPayment →
+// PaymentFailed. Triggered by the POST /webhook/payment failure
+// callback (D5).
+//
+// PaymentFailed is NOT terminal — the saga compensator runs after
+// PaymentFailed (PaymentFailed → Compensated) to revert Redis
+// inventory.
+func (r *postgresOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPaymentFailed, domain.OrderStatusAwaitingPayment)
 }
 
 // --- OutboxRepository ---

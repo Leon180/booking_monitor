@@ -100,10 +100,15 @@ func TestListBookingsQueryParams_StatusFilter(t *testing.T) {
 		{name: "Charging filter", raw: ptr("charging"), expected: orderStatusPtr(domain.OrderStatusCharging)},
 		{name: "Failed filter", raw: ptr("failed"), expected: orderStatusPtr(domain.OrderStatusFailed)},
 		{name: "Compensated filter", raw: ptr("compensated"), expected: orderStatusPtr(domain.OrderStatusCompensated)},
+		// Pattern A (D2) — new statuses also accepted as filters.
+		{name: "AwaitingPayment filter", raw: ptr("awaiting_payment"), expected: orderStatusPtr(domain.OrderStatusAwaitingPayment)},
+		{name: "Paid filter", raw: ptr("paid"), expected: orderStatusPtr(domain.OrderStatusPaid)},
+		{name: "Expired filter", raw: ptr("expired"), expected: orderStatusPtr(domain.OrderStatusExpired)},
+		{name: "PaymentFailed filter", raw: ptr("payment_failed"), expected: orderStatusPtr(domain.OrderStatusPaymentFailed)},
 		// S2 — invalid status values fall back to nil (no filter) instead
 		// of being passed through to SQL. Defense-in-depth even though
 		// the SQL layer parameterises the value.
-		{name: "Unknown status returns nil filter", raw: ptr("expired"), expected: nil},
+		{name: "Unknown status returns nil filter", raw: ptr("definitely_not_a_real_status"), expected: nil},
 		{name: "Empty string returns nil filter", raw: ptr(""), expected: nil},
 		{name: "Garbage string returns nil filter", raw: ptr("'; DROP TABLE orders;--"), expected: nil},
 	}

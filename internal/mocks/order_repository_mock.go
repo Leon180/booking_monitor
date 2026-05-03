@@ -119,6 +119,20 @@ func (mr *MockOrderRepositoryMockRecorder) ListOrders(ctx, limit, offset, status
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListOrders", reflect.TypeOf((*MockOrderRepository)(nil).ListOrders), ctx, limit, offset, status)
 }
 
+// MarkAwaitingPayment mocks base method.
+func (m *MockOrderRepository) MarkAwaitingPayment(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkAwaitingPayment", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkAwaitingPayment indicates an expected call of MarkAwaitingPayment.
+func (mr *MockOrderRepositoryMockRecorder) MarkAwaitingPayment(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkAwaitingPayment", reflect.TypeOf((*MockOrderRepository)(nil).MarkAwaitingPayment), ctx, id)
+}
+
 // MarkCharging mocks base method.
 func (m *MockOrderRepository) MarkCharging(ctx context.Context, id uuid.UUID) error {
 	m.ctrl.T.Helper()
@@ -161,6 +175,20 @@ func (mr *MockOrderRepositoryMockRecorder) MarkConfirmed(ctx, id any) *gomock.Ca
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkConfirmed", reflect.TypeOf((*MockOrderRepository)(nil).MarkConfirmed), ctx, id)
 }
 
+// MarkExpired mocks base method.
+func (m *MockOrderRepository) MarkExpired(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkExpired", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkExpired indicates an expected call of MarkExpired.
+func (mr *MockOrderRepositoryMockRecorder) MarkExpired(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkExpired", reflect.TypeOf((*MockOrderRepository)(nil).MarkExpired), ctx, id)
+}
+
 // MarkFailed mocks base method.
 func (m *MockOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) error {
 	m.ctrl.T.Helper()
@@ -173,4 +201,32 @@ func (m *MockOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) erro
 func (mr *MockOrderRepositoryMockRecorder) MarkFailed(ctx, id any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkFailed", reflect.TypeOf((*MockOrderRepository)(nil).MarkFailed), ctx, id)
+}
+
+// MarkPaid mocks base method.
+func (m *MockOrderRepository) MarkPaid(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkPaid", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkPaid indicates an expected call of MarkPaid.
+func (mr *MockOrderRepositoryMockRecorder) MarkPaid(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPaid", reflect.TypeOf((*MockOrderRepository)(nil).MarkPaid), ctx, id)
+}
+
+// MarkPaymentFailed mocks base method.
+func (m *MockOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "MarkPaymentFailed", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// MarkPaymentFailed indicates an expected call of MarkPaymentFailed.
+func (mr *MockOrderRepositoryMockRecorder) MarkPaymentFailed(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPaymentFailed", reflect.TypeOf((*MockOrderRepository)(nil).MarkPaymentFailed), ctx, id)
 }

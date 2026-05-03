@@ -171,7 +171,7 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK target (no DB-level constraint; see note below)
     user_id INT NOT NULL,          -- external user reference; this service does not own the users table
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated (legacy) + awaiting_payment | paid | expired | payment_failed (added by D2 alongside 000012; D1 migration is schema-only, D2 ships the Go state-machine)
+    status VARCHAR(50) NOT NULL,   -- legacy: pending | charging | confirmed | failed | compensated (A4) · Pattern A (D2): pending | awaiting_payment | paid | expired | payment_failed | compensated. Both vocabularies coexist until cleanup PR after D7 narrows saga scope.
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- added in 000010 for recon/watchdog age comparisons
     -- Pattern A columns (added in 000012 / Phase 3 D1):
@@ -248,6 +248,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000010 | **A4 charging two-phase intent log** (PR #45) — adds `orders.updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` + partial index `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')` to power the reconciler's `FindStuckCharging` sweep. |
 | 000011 | **A5 saga watchdog index widening** (PR #49) — re-creates the 000010 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed')` so the saga-watchdog `FindStuckFailed` sweep shares the same index plan as the reconciler. |
 | 000012 | **Phase 3 D1 — Pattern A schema** — adds `event_sections` table (multi-section model + Layer 1 sharding axis); `events.reservation_window_seconds` (admin-configurable TTL default, 900s = 15 min); `orders.section_id` (NULLable; new code paths set it; legacy rows stay NULL); `orders.reserved_until` (per-order TTL fact); `orders.payment_intent_id` (Stripe-shape, set during POST /orders/:id/pay); partial index `idx_orders_awaiting_payment_reserved_until` for the reservation expiry sweeper (D6); partial index `idx_orders_section_id_active` for the future Layer 1 sharding router. **Schema-only — D2 ships the matching Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`). No DB-level FK on `section_id` and no CHECK on the new statuses; same rationale as 000008 / 000010 (application enforces). |
+| 000013 | **Phase 3 D2 — widen `idx_orders_status_updated_at_partial`** — re-creates the 000011 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed')`. Lands together with D2 because once D5 / D6 add code paths that produce `expired` / `payment_failed` orders, the saga watchdog's `FindStuckFailed` query (now `WHERE status IN ('failed', 'expired', 'payment_failed')`) would otherwise fall back to a sequential scan. Same DROP + CREATE shape as 000011 — Postgres has no DDL to rewrite a partial-index predicate in place; brief lock window during non-concurrent CREATE INDEX is acceptable at current scale. |
 
 ### Redis
 
