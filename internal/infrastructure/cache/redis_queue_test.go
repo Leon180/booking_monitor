@@ -243,6 +243,9 @@ func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ 
 	f.reverted = true
 	return nil
 }
+func (f *fakeInventoryRevert) GetInventory(_ context.Context, _ uuid.UUID) (int, bool, error) {
+	panic("GetInventory not expected in this test")
+}
 
 // TestRedisOrderQueue_Subscribe_NOGROUPRecreatesGroupAndIncrementsMetric
 // pins the contract that NOGROUP self-heal:

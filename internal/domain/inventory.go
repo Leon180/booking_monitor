@@ -37,4 +37,23 @@ type InventoryRepository interface {
 	// RevertInventory restores inventory count.
 	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
 	RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error
+
+	// GetInventory returns the cached inventory count for an event,
+	// and a `found` bool that distinguishes "key absent in Redis"
+	// (`found=false`) from "key present with value 0" (`found=true,
+	// qty=0` — the legitimate sold-out steady state).
+	//
+	// The bool is load-bearing for the inventory-drift detector
+	// (PR-D / `recon` subcommand): a fresh / post-FLUSHALL Redis
+	// returns `(0, false, nil)` and produces a `cache_missing` alert
+	// (operator runs rehydrate); a key that decremented all the way
+	// to zero returns `(0, true, nil)` and is treated like any other
+	// `cache_low_excess` case (the worker may be stuck) — collapsing
+	// the two would mis-label the alert and route the operator to
+	// the wrong branch of the runbook.
+	//
+	// Returns the wrapped Redis error on transient infra failure
+	// (caller handles via metric bump + retry next sweep). The
+	// `(qty, found)` pair is only meaningful when `err == nil`.
+	GetInventory(ctx context.Context, eventID uuid.UUID) (qty int, found bool, err error)
 }
