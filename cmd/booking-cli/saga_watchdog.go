@@ -145,7 +145,7 @@ func runSagaWatchdogOnce(
 	shutdowner fx.Shutdowner,
 ) {
 	logger.L().Info("saga-watchdog: starting one-shot sweep")
-	if err := w.Sweep(ctx); err != nil && ctx.Err() == nil {
+	if err := safeSweep(ctx, "once_saga_watchdog", w.Sweep, logger); err != nil && ctx.Err() == nil {
 		logger.L().Error("saga-watchdog: sweep failed", tag.Error(err))
 		_ = shutdowner.Shutdown(fx.ExitCode(1))
 		return
@@ -168,7 +168,7 @@ func runSagaWatchdogLoop(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	if err := w.Sweep(ctx); err != nil && ctx.Err() == nil {
+	if err := safeSweep(ctx, "saga_watchdog", w.Sweep, logger); err != nil && ctx.Err() == nil {
 		logger.L().Error("saga-watchdog: boot sweep failed (continuing)", tag.Error(err))
 	}
 
@@ -178,7 +178,7 @@ func runSagaWatchdogLoop(
 			logger.L().Info("saga-watchdog: loop exiting", tag.Error(ctx.Err()))
 			return
 		case <-ticker.C:
-			if err := w.Sweep(ctx); err != nil && ctx.Err() == nil {
+			if err := safeSweep(ctx, "saga_watchdog", w.Sweep, logger); err != nil && ctx.Err() == nil {
 				logger.L().Error("saga-watchdog: sweep failed (continuing)", tag.Error(err))
 			}
 		}

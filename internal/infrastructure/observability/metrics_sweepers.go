@@ -36,13 +36,12 @@ import (
 //
 // `sweeper` label distinguishes which loop panicked:
 //
-//	"recon"             — Reconciler.Sweep
-//	"inventory_drift"   — InventoryDriftDetector.Sweep
-//	"saga_watchdog"     — SagaWatchdog.Sweep
-//	"once_recon"        — recon --once mode (paired with the existing
-//	                      defer recover in runRecOnceBoth — the counter
-//	                      was previously unmetricked, only logged)
-//	"once_drift"        — same, drift --once half
+//	"recon"               — Reconciler.Sweep (loop mode)
+//	"inventory_drift"     — InventoryDriftDetector.Sweep (loop mode)
+//	"saga_watchdog"       — saga.Watchdog.Sweep (loop mode)
+//	"once_recon"          — Reconciler.Sweep, --once / CronJob mode
+//	"once_drift"          — InventoryDriftDetector.Sweep, --once mode
+//	"once_saga_watchdog"  — saga.Watchdog.Sweep, --once mode
 var sweepGoroutinePanicsTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "sweep_goroutine_panics_total",

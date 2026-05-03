@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdlog "log"
+	"runtime/debug"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -40,12 +41,36 @@ func safeSweep(
 	logger *mlog.Logger,
 ) (err error) {
 	defer func() {
-		if rec := recover(); rec != nil {
-			observability.RecordSweepPanic(sweeper)
-			logger.L().Error(sweeper+": sweep goroutine recovered from panic",
-				tag.Error(fmt.Errorf("panic: %v", rec)))
-			err = fmt.Errorf("%s: panic recovered: %v", sweeper, rec)
+		rec := recover()
+		if rec == nil {
+			return
 		}
+		// Capture the stack BEFORE doing anything else — debug.Stack()
+		// must run inside the panicking goroutine's frame, and the
+		// metric / log calls below could themselves throw if degraded.
+		stack := debug.Stack()
+
+		// Bump the counter first; even if logging fails below, the
+		// alert path stays intact. WithLabelValues is internally
+		// mutex-protected so this is safe from any goroutine.
+		observability.RecordSweepPanic(sweeper)
+
+		// Defensive nil-logger guard: a degraded fx wiring could
+		// hand us a nil *mlog.Logger, which would itself panic
+		// inside the recover() and ESCAPE this defer (Go semantics:
+		// a panic during a deferred recover crashes the process).
+		// Fall back to stdlog so the panic still leaves an audit
+		// trail; the metric bump above is the truth signal anyway.
+		if logger == nil {
+			stdlog.Printf("%s: sweep goroutine recovered from panic: %v\n%s",
+				sweeper, rec, stack)
+		} else {
+			logger.L().Error(sweeper+": sweep goroutine recovered from panic",
+				tag.Error(fmt.Errorf("panic: %v", rec)),
+				mlog.ByteString("stack", stack))
+		}
+
+		err = fmt.Errorf("%s: panic recovered: %v", sweeper, rec)
 	}()
 	return sweep(ctx)
 }

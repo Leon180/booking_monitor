@@ -100,16 +100,16 @@ func init() {
 	// alert fires immediately on any non-zero increase, so the series
 	// MUST exist in /metrics before the first panic — otherwise
 	// `increase()` over a never-yet-emitted series returns no data
-	// (not 0) and the alert can't evaluate. Pre-warming with `Add(0)`
-	// is the canonical idempotent shape: registers the series without
-	// counting a fake event.
-	for _, sweeper := range []string{"recon", "inventory_drift", "once_recon", "once_drift"} {
-		sweepGoroutinePanicsTotal.WithLabelValues(sweeper).Add(0)
+	// (not 0) and the alert can't evaluate. Bare WithLabelValues
+	// matches the existing pre-warm pattern in this file (line 81+):
+	// the act of looking up the labelled child registers the series.
+	for _, sweeper := range []string{"recon", "inventory_drift", "saga_watchdog", "once_recon", "once_drift", "once_saga_watchdog"} {
+		sweepGoroutinePanicsTotal.WithLabelValues(sweeper)
 	}
 	// Pre-warm inventory-drift direction labels (PR-D). Same rationale
 	// as ReconResolvedTotal: dashboards should show "0 so far" not
 	// "no data" before the first drift event.
 	for _, direction := range []string{"cache_missing", "cache_high", "cache_low_excess"} {
-		InventoryDriftDetectedTotal.WithLabelValues(direction).Add(0)
+		InventoryDriftDetectedTotal.WithLabelValues(direction)
 	}
 }
