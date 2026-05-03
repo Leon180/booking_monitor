@@ -564,6 +564,17 @@ groups:
         # rate-based alert, it's a "did this ever happen" alert.
         # `severity: critical` — operator must investigate before the
         # bug compounds into something worse.
+        #
+        # `[5m]` window vs Prometheus eval cadence: same trade-off as
+        # `ConsumerGroupRecreated`. With Prometheus's default 1m eval
+        # cadence and a 5m increase window, a single panic stays
+        # visible to the alert evaluator for ~5 successive evaluations,
+        # so it's caught even when scrape + eval phases land
+        # unfavourably. This alert is best-effort "did this happen
+        # recently" rather than SLA-grade — acceptable for a counter
+        # expected to be 0 in healthy production. If the panic recurs
+        # at the sweep cadence (every ~60s), every eval will see > 0
+        # and the alert will stay firing until the bug is fixed.
         expr: increase(sweep_goroutine_panics_total[5m]) > 0
         for: 0s
         labels:
