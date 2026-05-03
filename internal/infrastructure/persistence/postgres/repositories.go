@@ -189,8 +189,8 @@ func (r *postgresOrderRepository) WithTx(tx *sql.Tx) *postgresOrderRepository {
 func (r *postgresOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	row := orderRowFromDomain(order)
 	if _, err := r.exec.ExecContext(ctx,
-		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt); err != nil {
+		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, reserved_until) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt, row.ReservedUntil); err != nil {
 		var pgErr *pq.Error
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			return domain.Order{}, domain.ErrUserAlreadyBought

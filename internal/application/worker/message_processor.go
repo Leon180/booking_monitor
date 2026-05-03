@@ -48,6 +48,15 @@ func NewOrderMessageProcessor(uow application.UnitOfWork, logger *mlog.Logger) M
 // classify outcome via errors.Is. Callers that need to know outcome
 // category should NOT parse the error string — use errors.Is against
 // domain.ErrSoldOut / domain.ErrUserAlreadyBought / domain.ErrInvalid*.
+//
+// D3 (Pattern A): the worker now constructs a Pattern A reservation
+// (status=AwaitingPayment, reservedUntil set) via
+// `domain.NewReservation`. BookingService already validated upstream;
+// re-validating here is defense-in-depth — a malformed message that
+// somehow slipped past parseMessage still trips a sentinel and the
+// retry classifier short-circuits to DLQ. The legacy A4 charging
+// flow is gone for new bookings; payment is now triggered by the D4
+// `POST /api/v1/orders/:id/pay` endpoint.
 func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingMessage) error {
 	// Validate BEFORE opening a tx. A malformed queue message will
 	// never become valid via PEL retry — failing fast saves a DB
@@ -60,7 +69,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 	// retries this is stable; pre-PR-47 the worker minted a fresh
 	// uuid per redelivery so the client's id and DB's id diverged on
 	// retry.
-	newOrder, err := domain.NewOrder(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity)
+	newOrder, err := domain.NewReservation(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity, msg.ReservedUntil)
 	if err != nil {
 		p.logger.Error(ctx, "Malformed order message",
 			tag.MsgID(msg.MessageID), tag.Error(err))

@@ -33,13 +33,16 @@ const (
 
 	// XADD payload field names — must match the keys `deduct.lua`
 	// writes via `XADD orders:stream * order_id $orderID user_id
-	// $userID event_id $eventID quantity $quantity`. parseMessage /
-	// parsePending / moveToDLQ all use these constants instead of
-	// inline literals.
-	fieldOrderID  = "order_id"
-	fieldUserID   = "user_id"
-	fieldEventID  = "event_id"
-	fieldQuantity = "quantity"
+	// $userID event_id $eventID quantity $quantity reserved_until
+	// $unix`. parseMessage / parsePending / moveToDLQ all use these
+	// constants instead of inline literals. fieldReservedUntil added
+	// in D3 — Pattern A reservation TTL flows producer → stream →
+	// worker DB INSERT in one atomic chain.
+	fieldOrderID       = "order_id"
+	fieldUserID        = "user_id"
+	fieldEventID       = "event_id"
+	fieldQuantity      = "quantity"
+	fieldReservedUntil = "reserved_until"
 
 	// DLQ payload extra fields — wire contract with whatever
 	// downstream consumer reads `orders:dlq` for forensics. Same
@@ -471,6 +474,11 @@ func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 		return nil, fmt.Errorf("missing %s", fieldQuantity)
 	}
 
+	reservedUntilStr, ok := msg.Values[fieldReservedUntil].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing %s", fieldReservedUntil)
+	}
+
 	// OrderID is a UUID v7 string minted in the API handler since
 	// PR #47 (BookingService.BookTicket). Reject zero UUID / malformed
 	// at the queue boundary so the worker can rely on a valid id.
@@ -497,13 +505,25 @@ func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s %q: %w", fieldQuantity, qtyStr, err)
 	}
+	// reserved_until is unix seconds (UTC). Reject "0" / negative — Lua
+	// emits the value verbatim as time.Time{}.UTC().Unix() returns
+	// -62135596800 for the zero time and BookingService rejects that
+	// upstream, so seeing it here means a producer regression.
+	reservedUnix, err := strconv.ParseInt(reservedUntilStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldReservedUntil, reservedUntilStr, err)
+	}
+	if reservedUnix <= 0 {
+		return nil, fmt.Errorf("invalid %s: %d (must be a positive unix timestamp)", fieldReservedUntil, reservedUnix)
+	}
 
 	return &worker.QueuedBookingMessage{
-		MessageID: msg.ID, // redis.XMessage.ID — opaque transport handle for ACK
-		OrderID:   orderID,
-		UserID:    userID,
-		EventID:   eventID,
-		Quantity:  qty,
+		MessageID:     msg.ID, // redis.XMessage.ID — opaque transport handle for ACK
+		OrderID:       orderID,
+		UserID:        userID,
+		EventID:       eventID,
+		Quantity:      qty,
+		ReservedUntil: time.Unix(reservedUnix, 0).UTC(),
 	}, nil
 }
 

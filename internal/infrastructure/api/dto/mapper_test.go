@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOrderResponseFromDomain(t *testing.T) {
@@ -18,8 +19,14 @@ func TestOrderResponseFromDomain(t *testing.T) {
 	orderID := uuid.New()
 	eventID := uuid.New()
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		orderID, 7, eventID, 3, domain.OrderStatusConfirmed, created,
+		orderID, 7, eventID, 3, domain.OrderStatusConfirmed, created, time.Time{},
 	))
+	// D3: legacy A4 row (zero reservedUntil) must NOT carry a
+	// reserved_until pointer in the wire response — pinned via the
+	// pointer rather than a string match so the omitempty path is
+	// load-bearing.
+	assert.Nil(t, got.ReservedUntil,
+		"legacy order with zero reservedUntil must marshal without the reserved_until field (omitempty contract)")
 
 	// Field-by-field — a swap (e.g. UserID/EventID) silently breaks
 	// the wire contract for every consumer; this test is what stops it.
@@ -29,6 +36,25 @@ func TestOrderResponseFromDomain(t *testing.T) {
 	assert.Equal(t, 3, got.Quantity)
 	assert.Equal(t, "confirmed", got.Status, "Status flattens domain.OrderStatus enum to plain string")
 	assert.Equal(t, created, got.CreatedAt)
+}
+
+// TestOrderResponseFromDomain_PatternA_ReservedUntilEmitted: the
+// reservation TTL must round-trip through the mapper as a non-nil
+// *time.Time so JSON marshalling emits the "reserved_until" key.
+// This pins the wire-format complement to the omitempty test: legacy
+// rows skip the field, Pattern A rows include it.
+func TestOrderResponseFromDomain_PatternA_ReservedUntilEmitted(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	reservedUntil := created.Add(15 * time.Minute)
+	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
+		uuid.New(), 7, uuid.New(), 1, domain.OrderStatusAwaitingPayment, created, reservedUntil,
+	))
+
+	require.NotNil(t, got.ReservedUntil,
+		"Pattern A order must carry a non-nil ReservedUntil pointer so the JSON encoder emits the field")
+	assert.Equal(t, reservedUntil, *got.ReservedUntil)
 }
 
 func TestEventResponseFromDomain(t *testing.T) {
@@ -53,8 +79,8 @@ func TestListBookingsResponseFromDomain(t *testing.T) {
 	id1 := uuid.New()
 	id2 := uuid.New()
 	orders := []domain.Order{
-		domain.ReconstructOrder(id1, 7, uuid.New(), 1, domain.OrderStatusPending, now),
-		domain.ReconstructOrder(id2, 8, uuid.New(), 5, domain.OrderStatusConfirmed, now),
+		domain.ReconstructOrder(id1, 7, uuid.New(), 1, domain.OrderStatusPending, now, time.Time{}),
+		domain.ReconstructOrder(id2, 8, uuid.New(), 5, domain.OrderStatusConfirmed, now, time.Time{}),
 	}
 
 	got := dto.ListBookingsResponseFromDomain(orders, 17, 2, 10)

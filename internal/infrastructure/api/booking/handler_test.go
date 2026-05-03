@@ -123,7 +123,11 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 
 	wantOrderID := uuid.Must(uuid.NewV7())
 	wantEventID := uuid.New()
-	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusPending, time.Now())
+	// D3 (Pattern A): the handler now expects an Order with reservedUntil
+	// set. We pin a specific TTL so the response-side assertions can
+	// match exactly rather than against gomock-Any-style tolerances.
+	wantReservedUntil := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
+	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusAwaitingPayment, time.Now(), wantReservedUntil)
 	svc := &stubBookingService{
 		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
 			return wantOrder, nil
@@ -142,11 +146,17 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	var got dto.BookingAcceptedResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, wantOrderID, got.OrderID, "response must echo the BookTicket-minted order_id")
-	assert.Equal(t, dto.BookingStatusProcessing, got.Status,
-		"status must be the typed BookingStatusProcessing constant — catches stringly-typed regressions")
-	assert.Contains(t, got.Message, "booking accepted")
+	assert.Equal(t, dto.BookingStatusReserved, got.Status,
+		"D3: status must be 'reserved' (not 'processing') — Pattern A response vocabulary")
+	assert.Contains(t, got.Message, "reservation accepted")
+	assert.WithinDuration(t, wantReservedUntil, got.ReservedUntil, time.Second,
+		"reserved_until must round-trip as RFC3339 UTC; 1s tolerance for JSON encode-decode rounding")
+	assert.True(t, got.ExpiresInSeconds > 0 && got.ExpiresInSeconds <= 15*60,
+		"expires_in_seconds must be a positive duration ≤ window; got %d", got.ExpiresInSeconds)
 	assert.Equal(t, "/api/v1/orders/"+wantOrderID.String(), got.Links.Self,
 		"links.self must be a valid GET /orders/:id URL")
+	assert.Equal(t, "/api/v1/orders/"+wantOrderID.String()+"/pay", got.Links.Pay,
+		"D3: links.pay must point at the D4 payment endpoint — clients use this to initiate Stripe checkout")
 }
 
 // TestHandleBook_SoldOut pins the 409 sold-out path. Status code +
@@ -186,7 +196,7 @@ func TestHandleGetOrder_OK(t *testing.T) {
 	svc := &stubBookingService{
 		getFn: func(_ context.Context, gotID uuid.UUID) (domain.Order, error) {
 			assert.Equal(t, id, gotID, "handler must propagate the path-param uuid verbatim")
-			return domain.ReconstructOrder(id, 7, eventID, 2, domain.OrderStatusConfirmed, created), nil
+			return domain.ReconstructOrder(id, 7, eventID, 2, domain.OrderStatusConfirmed, created, time.Time{}), nil
 		},
 	}
 	r := newRouter(svc)

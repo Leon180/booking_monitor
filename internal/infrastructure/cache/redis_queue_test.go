@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -86,12 +87,19 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 
 	// 2. Add a message and claim it (simulate pending). event_id is a
 	// UUID string post-PR-34; user_id stays int (external reference).
+	// reserved_until added in D3 — Pattern A reservation TTL field that
+	// parseMessage now requires. The value just needs to be a positive
+	// unix timestamp for parseMessage to accept it.
 	eventUUID := uuid.New().String()
 	orderUUID := uuid.New().String()
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"order_id": orderUUID, "user_id": "1", "event_id": eventUUID, "quantity": "1",
+			"order_id":       orderUUID,
+			"user_id":        "1",
+			"event_id":       eventUUID,
+			"quantity":       "1",
+			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
 		},
 	}).Result()
 
@@ -200,7 +208,11 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
-			"order_id": uuid.New().String(), "user_id": "1", "event_id": uuid.New().String(), "quantity": "1",
+			"order_id":       uuid.New().String(),
+			"user_id":        "1",
+			"event_id":       uuid.New().String(),
+			"quantity":       "1",
+			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
 		},
 	})
 
@@ -236,7 +248,7 @@ type fakeInventoryRevert struct{ reverted bool }
 func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
 	panic("SetInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int) (bool, error) {
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int, _ time.Time) (bool, error) {
 	panic("DeductInventory not expected in this test")
 }
 func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {

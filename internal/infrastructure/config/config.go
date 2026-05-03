@@ -19,6 +19,38 @@ type Config struct {
 	Recon           ReconConfig           `yaml:"recon"`
 	Saga            SagaConfig            `yaml:"saga"`
 	InventoryDrift  InventoryDriftConfig  `yaml:"inventory_drift"`
+	Booking         BookingConfig         `yaml:"booking"`
+}
+
+// BookingConfig holds the tunables for `BookingService.BookTicket` —
+// the Pattern A reservation entry point. Per-event TTL override
+// (events.reservation_window_seconds, added in 000012) lands in D8
+// when admin section CRUD is wired; until then this single value
+// applies to every event.
+type BookingConfig struct {
+	// ReservationWindow is how long a Pattern A reservation stays
+	// valid before the D6 expiry sweeper flips it to Expired and
+	// reverts the Redis-side inventory deduct.
+	//
+	// Default 15 minutes mirrors Stripe Checkout / KKTIX / event-
+	// ticketing-industry norms — long enough that a real customer can
+	// finish a Stripe Elements flow (median ~2-3 min) without timing
+	// out, short enough that abandoned carts don't sit on inventory
+	// during a sold-out flash sale (the worst case is 15 min × peak-
+	// concurrent bookings worth of "soft-locked" stock).
+	//
+	// Lower bound: must comfortably exceed the slowest expected
+	// Stripe Elements interaction (failure scenarios: 3DS challenge,
+	// retry after declined card, resubmit on validation error). 5 min
+	// is the practical floor; below that, false expiries hurt UX more
+	// than they protect inventory.
+	//
+	// Upper bound: must stay below the per-event sold-out window so
+	// inventory doesn't soft-lock for a meaningfully long share of the
+	// sale. For a 30-second flash sale, 15 min would lock all stock
+	// for the duration of the sale window — plan to override per-event
+	// once D8 lands.
+	ReservationWindow time.Duration `yaml:"reservation_window" env:"BOOKING_RESERVATION_WINDOW" env-default:"15m"`
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the

@@ -277,18 +277,23 @@ Group IDs and topic names are all sourced from `KafkaConfig` (`KAFKA_PAYMENT_GRO
 ## 5. API Reference
 
 ### POST /api/v1/book
-Book tickets for an event.
+Reserve tickets for an event (D3 — Pattern A reservation flow).
 ```json
 // Request
 { "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
 // Headers: Idempotency-Key: <ASCII-printable, <= 128 chars> (optional)
 
-// 202 Accepted — Redis-side deduct succeeded; the rest is async
+// 202 Accepted — Redis reservation succeeded; client must complete payment before reserved_until
 {
   "order_id": "019dd493-480a-7499-b208-812c930b152e",
-  "status": "processing",
-  "message": "booking accepted, awaiting confirmation",
-  "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
+  "status": "reserved",
+  "message": "reservation accepted; complete payment before reserved_until",
+  "reserved_until": "2026-05-03T18:30:00Z",
+  "expires_in_seconds": 900,
+  "links": {
+    "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e",
+    "pay":  "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e/pay"
+  }
 }
 // 409 Conflict — sold out
 { "error": "sold out" }
@@ -302,7 +307,9 @@ Book tickets for an event.
 { "error": "internal server error" }
 ```
 
-Status is `202 Accepted` — the success path is honest about the async pipeline. Redis-side inventory deduct succeeded (the load-shed gate) and an order intent has been queued; DB persistence + payment + saga are in flight. Clients use `order_id` against `GET /api/v1/orders/:id` for the terminal status. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga. PEL retries reuse the same id; pre-PR-47 the worker minted its own uuid per redelivery and the client's id diverged from the DB's.
+Status is `202 Accepted` — the success path is honest about the async pipeline. Pattern A semantics: Redis-side inventory has been **reserved** (not auto-charged), and the worker is in flight to persist the row as `awaiting_payment` with `reserved_until = NOW() + BOOKING_RESERVATION_WINDOW` (default 15m). The client must POST to `links.pay` (D4 endpoint, currently 404 — wires up in D4) before `reserved_until` to actually charge; otherwise the D6 expiry sweeper flips the order to `expired` and reverts inventory via the saga compensator. Clients use `order_id` against `GET /api/v1/orders/:id` for the live status. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Lua deduct → Redis stream (incl. `reserved_until` as unix-seconds) → worker `domain.NewReservation(id, ...)` → DB orders.id + orders.reserved_until → response polling. PEL retries reuse the same id; pre-PR-47 the worker minted its own uuid per redelivery and the client's id diverged from the DB's.
+
+**D3 wire-format note.** The legacy `status: "processing"` value is kept as an exported constant for backwards compatibility with mid-flight clients pinned to the pre-D3 vocabulary, but every newly-deployed server returns `status: "reserved"`. The legacy auto-charge path (Pending → Charging → Confirmed) is bypassed for Pattern A; payment_worker still consumes `order.created` but its early-return on `status != Pending` makes it a graceful no-op (no double-charge risk). D7 cleans up the now-dead payment_worker subscription + outbox emit on the Pattern A path.
 
 **Idempotency-Key contract (N4)** — Stripe-style fingerprint validation:
 

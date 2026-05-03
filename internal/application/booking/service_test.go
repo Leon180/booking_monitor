@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 
@@ -14,6 +16,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 )
+
+// testBookingConfig builds a *config.Config carrying just the
+// BookingConfig BookingService cares about. Centralised so a future
+// config-shape change doesn't ripple across every test row.
+func testBookingConfig() *config.Config {
+	return &config.Config{
+		Booking: config.BookingConfig{ReservationWindow: 15 * time.Minute},
+	}
+}
 
 func TestBookingService_BookTicket(t *testing.T) {
 	// Silent logger via the package's own Nop helper — avoids pulling
@@ -36,12 +47,13 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  eventID,
 			quantity: 2,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
-				// PR 47: BookingService now mints the orderID upfront and
-				// passes it through to DeductInventory. Match Any() on
-				// the orderID position — we don't pin its value here
-				// because the test asserts the service-side return
-				// value is non-nil/non-zero separately below.
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2).Return(true, nil)
+				// D3 (Pattern A): BookingService now passes reservedUntil
+				// (a future time.Time) as the 6th arg. We match gomock.Any()
+				// on the orderID + reservedUntil positions because both are
+				// computed inside the service from time.Now(); the relevant
+				// assertion is that DeductInventory is called with the
+				// validated user/event/quantity tuple.
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2, gomock.Any()).Return(true, nil)
 			},
 			expectedError: nil,
 		},
@@ -52,7 +64,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			quantity: 5,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5).Return(false, nil)
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5, gomock.Any()).Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
@@ -65,7 +77,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			eventID:  eventID,
 			quantity: 1,
 			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1).Return(false, errors.New("connection failed"))
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1, gomock.Any()).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},
@@ -85,7 +97,7 @@ func TestBookingService_BookTicket(t *testing.T) {
 			}
 
 			// Service
-			service := booking.NewService(mockOrderRepo, mockInventoryRepo)
+			service := booking.NewService(mockOrderRepo, mockInventoryRepo, testBookingConfig())
 
 			// Execute
 			order, err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)
@@ -103,7 +115,11 @@ func TestBookingService_BookTicket(t *testing.T) {
 				assert.NotEqual(t, uuid.Nil, order.ID(), "success path must return an Order with a minted UUIDv7 id")
 				assert.Equal(t, tt.userID, order.UserID(), "Order must carry the validated UserID")
 				assert.Equal(t, tt.quantity, order.Quantity(), "Order must carry the validated Quantity")
-				assert.Equal(t, domain.OrderStatusPending, order.Status(), "newly-constructed Order must be Pending")
+				assert.Equal(t, domain.OrderStatusAwaitingPayment, order.Status(),
+					"D3: Pattern A reservation must start in AwaitingPayment, NOT Pending — that's the load-bearing semantics")
+				assert.False(t, order.ReservedUntil().IsZero(), "Pattern A reservation must carry a non-zero reservedUntil")
+				assert.True(t, order.ReservedUntil().After(time.Now()),
+					"reservedUntil must be in the future at return time (window > 0)")
 			}
 		})
 	}
@@ -141,7 +157,7 @@ func TestBookingService_BookTicket_RejectsInvariantViolations(t *testing.T) {
 			// fix must reject BEFORE Redis is touched. gomock fails the
 			// test if DeductInventory fires unexpectedly.
 
-			service := booking.NewService(mockOrderRepo, mockInventoryRepo)
+			service := booking.NewService(mockOrderRepo, mockInventoryRepo, testBookingConfig())
 			order, err := service.BookTicket(ctx, tt.userID, eventID, tt.quantity)
 
 			assert.ErrorIs(t, err, tt.expectedErr,

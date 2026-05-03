@@ -6,6 +6,7 @@ import (
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 )
 
 // Module wires the cross-package application graph: booking decorators
@@ -37,9 +38,10 @@ var Module = fx.Module("application",
 		func(
 			orderRepo domain.OrderRepository,
 			inventoryRepo domain.InventoryRepository,
+			cfg *config.Config,
 			metrics booking.Metrics,
 		) booking.Service {
-			base := booking.NewService(orderRepo, inventoryRepo)
+			base := booking.NewService(orderRepo, inventoryRepo, cfg)
 			return booking.NewMetricsDecorator(
 				booking.NewTracingDecorator(base),
 				metrics,

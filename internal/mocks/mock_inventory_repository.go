@@ -12,6 +12,7 @@ package mocks
 import (
 	context "context"
 	reflect "reflect"
+	time "time"
 
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
@@ -42,18 +43,18 @@ func (m *MockInventoryRepository) EXPECT() *MockInventoryRepositoryMockRecorder 
 }
 
 // DeductInventory mocks base method.
-func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, eventID uuid.UUID, userID, count int) (bool, error) {
+func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, eventID uuid.UUID, userID, count int, reservedUntil time.Time) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeductInventory", ctx, orderID, eventID, userID, count)
+	ret := m.ctrl.Call(m, "DeductInventory", ctx, orderID, eventID, userID, count, reservedUntil)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // DeductInventory indicates an expected call of DeductInventory.
-func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, orderID, eventID, userID, count any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, orderID, eventID, userID, count, reservedUntil any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, orderID, eventID, userID, count)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, orderID, eventID, userID, count, reservedUntil)
 }
 
 // GetInventory mocks base method.

@@ -12,12 +12,14 @@ import (
 var (
 	ErrOrderNotFound = errors.New("order not found")
 
-	// Invariant violations from NewOrder. Caller-actionable errors —
-	// each maps to a malformed-input case the worker should DLQ.
-	ErrInvalidOrderID  = errors.New("order id must not be the zero UUID")
-	ErrInvalidUserID   = errors.New("order user_id must be positive")
-	ErrInvalidEventID  = errors.New("order event_id must not be the zero UUID")
-	ErrInvalidQuantity = errors.New("order quantity must be positive")
+	// Invariant violations from NewOrder / NewReservation. Caller-
+	// actionable errors — each maps to a malformed-input case the worker
+	// should DLQ.
+	ErrInvalidOrderID       = errors.New("order id must not be the zero UUID")
+	ErrInvalidUserID        = errors.New("order user_id must be positive")
+	ErrInvalidEventID       = errors.New("order event_id must not be the zero UUID")
+	ErrInvalidQuantity      = errors.New("order quantity must be positive")
+	ErrInvalidReservedUntil = errors.New("order reserved_until must be a non-zero time in the future")
 
 	// ErrInvalidTransition is returned by Order.Mark* (and their
 	// repository-side counterparts) when the source state doesn't
@@ -65,9 +67,10 @@ var (
 	ErrInvalidTransition = errors.New("invalid order status transition")
 )
 
-// IsMalformedOrderInput reports whether err originated from a NewOrder
-// invariant violation (zero UUID order_id/event_id, zero/negative
-// user_id, or non-positive quantity).
+// IsMalformedOrderInput reports whether err originated from a
+// NewOrder / NewReservation invariant violation (zero UUID
+// order_id/event_id, zero/negative user_id, non-positive quantity,
+// or a non-future reserved_until).
 //
 // The booking pipeline uses this to route deterministic-failure
 // messages straight to the DLQ instead of cycling the per-message
@@ -87,7 +90,8 @@ func IsMalformedOrderInput(err error) bool {
 	return errors.Is(err, ErrInvalidOrderID) ||
 		errors.Is(err, ErrInvalidUserID) ||
 		errors.Is(err, ErrInvalidEventID) ||
-		errors.Is(err, ErrInvalidQuantity)
+		errors.Is(err, ErrInvalidQuantity) ||
+		errors.Is(err, ErrInvalidReservedUntil)
 }
 
 type OrderStatus string
@@ -197,12 +201,13 @@ type StuckFailed struct {
 //     full time.Time for human-friendly display via DTOs and for
 //     business logic that compares times directly.
 type Order struct {
-	id        uuid.UUID
-	eventID   uuid.UUID
-	userID    int
-	quantity  int
-	status    OrderStatus
-	createdAt time.Time
+	id            uuid.UUID
+	eventID       uuid.UUID
+	userID        int
+	quantity      int
+	status        OrderStatus
+	createdAt     time.Time
+	reservedUntil time.Time // Pattern A — zero value for legacy A4 / pre-D3 rows
 }
 
 // NewOrder constructs a fresh pending order. The caller supplies the
@@ -238,21 +243,84 @@ func NewOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int) (Order,
 	}, nil
 }
 
-// ReconstructOrder rehydrates an Order from a persisted row. Skips
-// the invariant validation in NewOrder because the row was already
-// validated at insert time. Use ONLY from repository row-scanning
-// code, never to "create" a new order. Future refactor: move into
-// internal/infrastructure/persistence/postgres so the visibility
-// matches the contract; for now the comment-only contract holds
-// because all postgres scan code is the only caller.
-func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time) Order {
+// NewReservation constructs a fresh Pattern A reservation. The order
+// starts in `AwaitingPayment` (NOT `Pending`) — the canonical Pattern
+// A flow is "API books → reservation persisted as AwaitingPayment →
+// client calls /pay (D4) → webhook flips to Paid (D5) OR D6 sweeper
+// flips to Expired".
+//
+// The legacy `NewOrder` factory is kept for the legacy A4 path used
+// by tests that exercise the legacy state machine. Once D7 narrows
+// saga scope and removes the legacy edges, NewOrder will go away.
+//
+// Why a separate factory rather than `NewOrder` + `MarkAwaitingPayment`:
+// the reservation has additional invariants (reservedUntil must be a
+// future time) that don't apply to a legacy Pending order. Threading
+// reservedUntil through `NewOrder` would mean "this argument is
+// optional / zero for legacy" — fragile contract. Two factories,
+// each with its own invariant set, is cleaner.
+//
+// Implementation note: `time.Now()` is captured ONCE at the top of
+// the function so the invariant check (`reservedUntil > now`) and the
+// `createdAt` assignment use the same wallclock value. Two
+// `time.Now()` calls (one for the check, one for createdAt) could
+// straddle a clock tick, leaving an Order whose createdAt is later
+// than its reservedUntil even though the invariant "passed" — a
+// nanosecond-scale TOCTOU but visible in stress tests.
+func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, reservedUntil time.Time) (Order, error) {
+	if id == uuid.Nil {
+		return Order{}, ErrInvalidOrderID
+	}
+	if userID <= 0 {
+		return Order{}, ErrInvalidUserID
+	}
+	if eventID == uuid.Nil {
+		return Order{}, ErrInvalidEventID
+	}
+	if quantity <= 0 {
+		return Order{}, ErrInvalidQuantity
+	}
+	// Snap `now` once. See doc-comment for the TOCTOU rationale.
+	now := time.Now()
+	// reservedUntil must be a real, future time. Zero value is invalid
+	// (callers passing time.Time{} as a placeholder); past times mean
+	// the reservation is already expired before it lands in DB —
+	// indicates a clock-skew or upstream-bug condition we should reject.
+	if reservedUntil.IsZero() || !reservedUntil.After(now) {
+		return Order{}, ErrInvalidReservedUntil
+	}
 	return Order{
-		id:        id,
-		userID:    userID,
-		eventID:   eventID,
-		quantity:  quantity,
-		status:    status,
-		createdAt: createdAt,
+		id:            id,
+		userID:        userID,
+		eventID:       eventID,
+		quantity:      quantity,
+		status:        OrderStatusAwaitingPayment,
+		createdAt:     now,
+		reservedUntil: reservedUntil,
+	}, nil
+}
+
+// ReconstructOrder rehydrates an Order from a persisted row. Skips
+// the invariant validation in NewOrder / NewReservation because the
+// row was already validated at insert time. Use ONLY from repository
+// row-scanning code, never to "create" a new order. Future refactor:
+// move into internal/infrastructure/persistence/postgres so the
+// visibility matches the contract; for now the comment-only contract
+// holds because all postgres scan code is the only caller.
+//
+// reservedUntil is zero-valued for legacy A4 rows (pre-D1 schema) or
+// rows whose `reserved_until` column is NULL. Callers reading the
+// accessor get the zero time.Time which marshals as RFC3339
+// "0001-01-01T00:00:00Z" — visibly distinct from a real reservation.
+func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time, reservedUntil time.Time) Order {
+	return Order{
+		id:            id,
+		userID:        userID,
+		eventID:       eventID,
+		quantity:      quantity,
+		status:        status,
+		createdAt:     createdAt,
+		reservedUntil: reservedUntil,
 	}
 }
 
@@ -388,12 +456,13 @@ func (o Order) MarkPaymentFailed() (Order, error) {
 // Accessors — read-only views on the unexported fields. Wild Workouts
 // pattern (no "Get" prefix), aligned with Go stdlib (time.Time.Hour()
 // etc.).
-func (o Order) ID() uuid.UUID        { return o.id }
-func (o Order) EventID() uuid.UUID   { return o.eventID }
-func (o Order) UserID() int          { return o.userID }
-func (o Order) Quantity() int        { return o.quantity }
-func (o Order) Status() OrderStatus  { return o.status }
-func (o Order) CreatedAt() time.Time { return o.createdAt }
+func (o Order) ID() uuid.UUID            { return o.id }
+func (o Order) EventID() uuid.UUID       { return o.eventID }
+func (o Order) UserID() int              { return o.userID }
+func (o Order) Quantity() int            { return o.quantity }
+func (o Order) Status() OrderStatus      { return o.status }
+func (o Order) CreatedAt() time.Time     { return o.createdAt }
+func (o Order) ReservedUntil() time.Time { return o.reservedUntil }
 
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {

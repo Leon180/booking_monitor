@@ -1,8 +1,13 @@
 -- KEYS[1]: inventory_key (event:{id}:qty)
 -- ARGV[1]: count
 -- ARGV[2]: event_id
--- ARGV[3]: user_id    (passed through to stream only)
--- ARGV[4]: order_id   (caller-minted UUIDv7; passed through to stream only)
+-- ARGV[3]: user_id              (passed through to stream only)
+-- ARGV[4]: order_id             (caller-minted UUIDv7; passed through to stream only)
+-- ARGV[5]: reserved_until_unix  (D3 — Pattern A reservation TTL as
+--                                UTC unix seconds; passed through
+--                                to stream so the worker can write
+--                                orders.reserved_until alongside the
+--                                INSERT, no second Redis trip needed)
 
 -- 1. Deduct inventory atomically
 local new_val = tonumber(redis.call("DECRBY", KEYS[1], ARGV[1]))
@@ -15,11 +20,14 @@ end
 
 -- 3. Publish to Stream — order_id flows end-to-end so the worker can
 --    use the caller's id verbatim instead of generating a fresh one
---    on every PEL retry.
+--    on every PEL retry. reserved_until is included as part of the
+--    same atomic XADD so a Pattern A reservation is fully described
+--    by one stream message (Lua → worker → DB).
 redis.call("XADD", "orders:stream", "*",
-    "order_id", ARGV[4],
-    "user_id",  ARGV[3],
-    "event_id", ARGV[2],
-    "quantity", ARGV[1])
+    "order_id",       ARGV[4],
+    "user_id",        ARGV[3],
+    "event_id",       ARGV[2],
+    "quantity",       ARGV[1],
+    "reserved_until", ARGV[5])
 
 return 1 -- Success
