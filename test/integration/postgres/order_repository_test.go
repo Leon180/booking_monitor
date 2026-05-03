@@ -219,12 +219,25 @@ func TestOrderRepository_StateMachine_LegalTransitions(t *testing.T) {
 	mkCompensated := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
 		return r.MarkCompensated(ctx, id)
 	}
+	mkAwaitingPayment := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkAwaitingPayment(ctx, id)
+	}
+	mkPaid := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkPaid(ctx, id)
+	}
+	mkExpired := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkExpired(ctx, id)
+	}
+	mkPaymentFailed := func(r domain.OrderRepository, ctx context.Context, id uuid.UUID) error {
+		return r.MarkPaymentFailed(ctx, id)
+	}
 
 	tests := []struct {
 		name     string
 		path     []step
 		wantLast domain.OrderStatus
 	}{
+		// Legacy paths (A4):
 		{
 			name:     "Pending → Charging → Confirmed",
 			path:     []step{mkCharging, mkConfirmed},
@@ -239,6 +252,22 @@ func TestOrderRepository_StateMachine_LegalTransitions(t *testing.T) {
 			name:     "Pending → Failed (transitional direct edge)",
 			path:     []step{mkFailed},
 			wantLast: domain.OrderStatusFailed,
+		},
+		// Pattern A paths (D2):
+		{
+			name:     "Pending → AwaitingPayment → Paid",
+			path:     []step{mkAwaitingPayment, mkPaid},
+			wantLast: domain.OrderStatusPaid,
+		},
+		{
+			name:     "Pending → AwaitingPayment → Expired → Compensated",
+			path:     []step{mkAwaitingPayment, mkExpired, mkCompensated},
+			wantLast: domain.OrderStatusCompensated,
+		},
+		{
+			name:     "Pending → AwaitingPayment → PaymentFailed → Compensated",
+			path:     []step{mkAwaitingPayment, mkPaymentFailed, mkCompensated},
+			wantLast: domain.OrderStatusCompensated,
 		},
 	}
 

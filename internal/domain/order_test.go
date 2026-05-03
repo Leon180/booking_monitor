@@ -154,6 +154,72 @@ func TestOrder_Transitions_HappyPath(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, domain.OrderStatusFailed, failed.Status())
 	})
+
+	// Pattern A — D2 transitions through reservation + payment states.
+
+	t.Run("D2 MarkAwaitingPayment: Pending → AwaitingPayment", func(t *testing.T) {
+		t.Parallel()
+		original := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := original.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusAwaitingPayment, awaiting.Status())
+		assert.Equal(t, domain.OrderStatusPending, original.Status(), "receiver must be untouched")
+	})
+
+	t.Run("D2 MarkPaid: AwaitingPayment → Paid", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := o.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		paid, err := awaiting.MarkPaid()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusPaid, paid.Status())
+		assert.Equal(t, domain.OrderStatusAwaitingPayment, awaiting.Status(), "receiver must be untouched")
+	})
+
+	t.Run("D2 MarkExpired: AwaitingPayment → Expired", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := o.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		expired, err := awaiting.MarkExpired()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusExpired, expired.Status())
+	})
+
+	t.Run("D2 MarkPaymentFailed: AwaitingPayment → PaymentFailed", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := o.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		paymentFailed, err := awaiting.MarkPaymentFailed()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusPaymentFailed, paymentFailed.Status())
+	})
+
+	t.Run("D2 MarkCompensated: Expired → Compensated", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := o.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		expired, err := awaiting.MarkExpired()
+		assert.NoError(t, err)
+		compensated, err := expired.MarkCompensated()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusCompensated, compensated.Status())
+	})
+
+	t.Run("D2 MarkCompensated: PaymentFailed → Compensated", func(t *testing.T) {
+		t.Parallel()
+		o := newTestOrder(t, 1, uuid.New(), 1)
+		awaiting, err := o.MarkAwaitingPayment()
+		assert.NoError(t, err)
+		paymentFailed, err := awaiting.MarkPaymentFailed()
+		assert.NoError(t, err)
+		compensated, err := paymentFailed.MarkCompensated()
+		assert.NoError(t, err)
+		assert.Equal(t, domain.OrderStatusCompensated, compensated.Status())
+	})
 }
 
 // TestOrder_Transitions_IllegalSource verifies every illegal edge in
@@ -186,11 +252,38 @@ func TestOrder_Transitions_IllegalSource(t *testing.T) {
 		{"MarkFailed from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
 		{"MarkFailed from Failed", domain.OrderStatusFailed, domain.Order.MarkFailed, domain.ErrInvalidTransition},
 		{"MarkFailed from Compensated", domain.OrderStatusCompensated, domain.Order.MarkFailed, domain.ErrInvalidTransition},
-		// MarkCompensated: only Failed is legal.
+		// MarkCompensated: Failed | Expired | PaymentFailed legal (D2 widening).
+		// All other source states are illegal.
 		{"MarkCompensated from Pending", domain.OrderStatusPending, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 		{"MarkCompensated from Charging", domain.OrderStatusCharging, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 		{"MarkCompensated from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 		{"MarkCompensated from Compensated", domain.OrderStatusCompensated, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+		{"MarkCompensated from AwaitingPayment", domain.OrderStatusAwaitingPayment, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+		{"MarkCompensated from Paid", domain.OrderStatusPaid, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
+
+		// D2 — Pattern A transitions. Each only accepts a narrow source.
+		// MarkAwaitingPayment: only Pending is legal.
+		{"MarkAwaitingPayment from Charging", domain.OrderStatusCharging, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from AwaitingPayment", domain.OrderStatusAwaitingPayment, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from Paid", domain.OrderStatusPaid, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from Expired", domain.OrderStatusExpired, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		// MarkPaid: only AwaitingPayment is legal.
+		{"MarkPaid from Pending", domain.OrderStatusPending, domain.Order.MarkPaid, domain.ErrInvalidTransition},
+		{"MarkPaid from Charging", domain.OrderStatusCharging, domain.Order.MarkPaid, domain.ErrInvalidTransition},
+		{"MarkPaid from Paid", domain.OrderStatusPaid, domain.Order.MarkPaid, domain.ErrInvalidTransition},
+		{"MarkPaid from Expired", domain.OrderStatusExpired, domain.Order.MarkPaid, domain.ErrInvalidTransition},
+		{"MarkPaid from PaymentFailed", domain.OrderStatusPaymentFailed, domain.Order.MarkPaid, domain.ErrInvalidTransition},
+		// MarkExpired: only AwaitingPayment is legal.
+		{"MarkExpired from Pending", domain.OrderStatusPending, domain.Order.MarkExpired, domain.ErrInvalidTransition},
+		{"MarkExpired from Paid", domain.OrderStatusPaid, domain.Order.MarkExpired, domain.ErrInvalidTransition},
+		{"MarkExpired from Expired", domain.OrderStatusExpired, domain.Order.MarkExpired, domain.ErrInvalidTransition},
+		{"MarkExpired from PaymentFailed", domain.OrderStatusPaymentFailed, domain.Order.MarkExpired, domain.ErrInvalidTransition},
+		// MarkPaymentFailed: only AwaitingPayment is legal.
+		{"MarkPaymentFailed from Pending", domain.OrderStatusPending, domain.Order.MarkPaymentFailed, domain.ErrInvalidTransition},
+		{"MarkPaymentFailed from Paid", domain.OrderStatusPaid, domain.Order.MarkPaymentFailed, domain.ErrInvalidTransition},
+		{"MarkPaymentFailed from Expired", domain.OrderStatusExpired, domain.Order.MarkPaymentFailed, domain.ErrInvalidTransition},
+		{"MarkPaymentFailed from PaymentFailed", domain.OrderStatusPaymentFailed, domain.Order.MarkPaymentFailed, domain.ErrInvalidTransition},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

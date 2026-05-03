@@ -262,3 +262,59 @@ func (d *orderRepositoryTracingDecorator) MarkCompensated(ctx context.Context, i
 	}
 	return err
 }
+
+// Pattern A transitions (D2). Same wrapping pattern as the legacy
+// methods above — start a span, delegate, RecordError on failure,
+// return the wrapped error.
+
+func (d *orderRepositoryTracingDecorator) MarkAwaitingPayment(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderAwaitingPayment", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkAwaitingPayment(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkPaid(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderPaid", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkPaid(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkExpired(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderExpired", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkExpired(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *orderRepositoryTracingDecorator) MarkPaymentFailed(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderPaymentFailed", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.MarkPaymentFailed(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}

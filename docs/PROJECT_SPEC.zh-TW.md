@@ -166,7 +166,7 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;見下方備註)
     user_id INT NOT NULL,          -- 外部使用者參照;此服務不擁有 users 表
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated(legacy)+ awaiting_payment | paid | expired | payment_failed(由 D2 跟 000012 一起加入;D1 migration 只動 schema,D2 才上 Go state-machine)
+    status VARCHAR(50) NOT NULL,   -- legacy:pending | charging | confirmed | failed | compensated(A4)· Pattern A(D2):pending | awaiting_payment | paid | expired | payment_failed | compensated。兩種狀態詞彙會共存,直到 D7 narrowing saga scope 之後的 cleanup PR 才移除舊的。
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- 000010 加入,給 recon/watchdog 做 age 比較
     -- Pattern A 欄位(000012 / Phase 3 D1 加入):

@@ -495,12 +495,61 @@ func (r *postgresOrderRepository) MarkFailed(ctx context.Context, id uuid.UUID) 
 		domain.OrderStatusPending, domain.OrderStatusCharging)
 }
 
-// MarkCompensated atomically transitions Failed → Compensated (saga
-// completion). NOTE: not Pending→Compensated — the saga compensator
-// is invoked AFTER payment failure has already moved the order to
-// Failed, so Compensated only follows Failed.
+// MarkCompensated atomically transitions Failed | Expired |
+// PaymentFailed → Compensated (saga completion). NOT Pending→
+// Compensated — the saga compensator is invoked AFTER one of the
+// failure-terminal states has already been written.
+//
+// The set is wider than the legacy "Failed only" because Pattern A
+// (D6 expiry sweeper, D5 webhook failure) produces two new failure-
+// terminal states (Expired, PaymentFailed) that ALSO need
+// compensation (revert Redis inventory). Same compensator logic
+// applies to all three.
 func (r *postgresOrderRepository) MarkCompensated(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusCompensated, domain.OrderStatusFailed)
+	return r.transitionStatus(ctx, id, domain.OrderStatusCompensated,
+		domain.OrderStatusFailed,
+		domain.OrderStatusExpired,
+		domain.OrderStatusPaymentFailed)
+}
+
+// MarkAwaitingPayment atomically transitions Pending → AwaitingPayment.
+// The Pattern A entry transition — `BookingService.BookTicket` will
+// call this in D3 to create the reservation that the customer pays
+// for via POST /orders/:id/pay (D4).
+func (r *postgresOrderRepository) MarkAwaitingPayment(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusAwaitingPayment, domain.OrderStatusPending)
+}
+
+// MarkPaid atomically transitions AwaitingPayment → Paid (terminal).
+// Triggered by the POST /webhook/payment success callback (D5).
+//
+// Strictly AwaitingPayment-only as source; not Pending → Paid. The
+// webhook only fires after a payment intent was created, which only
+// happens after the order is in AwaitingPayment.
+func (r *postgresOrderRepository) MarkPaid(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPaid, domain.OrderStatusAwaitingPayment)
+}
+
+// MarkExpired atomically transitions AwaitingPayment → Expired.
+// Triggered by the reservation expiry sweeper (D6) when
+// `reserved_until < NOW()` and the order has been in AwaitingPayment
+// past its TTL without a successful payment webhook.
+//
+// Expired is NOT terminal — the saga compensator runs after Expired
+// (Expired → Compensated) to revert Redis inventory.
+func (r *postgresOrderRepository) MarkExpired(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusExpired, domain.OrderStatusAwaitingPayment)
+}
+
+// MarkPaymentFailed atomically transitions AwaitingPayment →
+// PaymentFailed. Triggered by the POST /webhook/payment failure
+// callback (D5).
+//
+// PaymentFailed is NOT terminal — the saga compensator runs after
+// PaymentFailed (PaymentFailed → Compensated) to revert Redis
+// inventory.
+func (r *postgresOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid.UUID) error {
+	return r.transitionStatus(ctx, id, domain.OrderStatusPaymentFailed, domain.OrderStatusAwaitingPayment)
 }
 
 // --- OutboxRepository ---

@@ -171,7 +171,7 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK target (no DB-level constraint; see note below)
     user_id INT NOT NULL,          -- external user reference; this service does not own the users table
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated (legacy) + awaiting_payment | paid | expired | payment_failed (added by D2 alongside 000012; D1 migration is schema-only, D2 ships the Go state-machine)
+    status VARCHAR(50) NOT NULL,   -- legacy: pending | charging | confirmed | failed | compensated (A4) · Pattern A (D2): pending | awaiting_payment | paid | expired | payment_failed | compensated. Both vocabularies coexist until cleanup PR after D7 narrows saga scope.
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- added in 000010 for recon/watchdog age comparisons
     -- Pattern A columns (added in 000012 / Phase 3 D1):
