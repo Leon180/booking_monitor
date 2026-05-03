@@ -76,6 +76,7 @@ Different from the [bilingual contract](../../.claude/CLAUDE.md) that covers AGE
 | :-- | :-- | :-- | :-- | :-- |
 | [2026-05-cache-truth-architecture.zh-TW.md](2026-05-cache-truth-architecture.zh-TW.md) | [EN](2026-05-cache-truth-architecture.md) | published | Why Redis is ephemeral, not durable. The FLUSHALL incident, the 411/1000 silent message loss, and the 5-PR closure. | [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) |
 | [2026-05-lua-single-thread-ceiling.zh-TW.md](2026-05-lua-single-thread-ceiling.zh-TW.md) | [EN](2026-05-lua-single-thread-ceiling.md) | published | The Lua single-thread ceiling at 8,330 acc/s. Why Redis CPU isn't the problem; why the next 10× requires two-layer sharding (section-level + hot-section quota router); why generic hash sharding is the wrong frame. | [VU stress benchmark](../benchmarks/), [saturation profile](../saturation-profile/) |
+| [2026-05-detect-but-dont-fix.zh-TW.md](2026-05-detect-but-dont-fix.zh-TW.md) | [EN](2026-05-detect-but-dont-fix.md) | published | Detect-but-don't-fix multi-layer safety. Why saga / watchdog / recon / drift detector are four non-overlapping layers; why none auto-corrects; the design rule for non-overlapping responsibility. | [PR #45](https://github.com/Leon180/booking_monitor/pull/45), [PR #49](https://github.com/Leon180/booking_monitor/pull/49), [PR #76](https://github.com/Leon180/booking_monitor/pull/76) |
 
 ### Planned (per [Phase 3 roadmap D15](../post_phase2_roadmap.md))
 
