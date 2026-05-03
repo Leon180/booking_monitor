@@ -47,6 +47,10 @@ func validBase() *config.Config {
 			MaxFailedAge:     24 * time.Hour,
 			BatchSize:        100,
 		},
+		InventoryDrift: config.InventoryDriftConfig{
+			SweepInterval:     60 * time.Second,
+			AbsoluteTolerance: 100,
+		},
 	}
 }
 
@@ -127,6 +131,39 @@ func TestValidate_ReconCrossField(t *testing.T) {
 		c.Recon.ChargingThreshold = 2 * time.Minute
 		c.Recon.MaxChargingAge = 24 * time.Hour // far greater → accept
 
+		require.NoError(t, c.Validate())
+	})
+}
+
+// TestValidate_InventoryDriftRejections covers the drift-detector
+// guards: SweepInterval > 0 (zero means "no sweeps fire"), and
+// AbsoluteTolerance >= 0 (negative is meaningless — would flag every
+// healthy event).
+func TestValidate_InventoryDriftRejections(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SweepInterval=0 rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.InventoryDrift.SweepInterval = 0
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "INVENTORY_DRIFT_SWEEP_INTERVAL")
+	})
+
+	t.Run("AbsoluteTolerance negative rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.InventoryDrift.AbsoluteTolerance = -1
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "INVENTORY_DRIFT_ABSOLUTE_TOLERANCE")
+	})
+
+	t.Run("AbsoluteTolerance=0 accepted (strict mode for tests / idle prod)", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.InventoryDrift.AbsoluteTolerance = 0
 		require.NoError(t, c.Validate())
 	})
 }

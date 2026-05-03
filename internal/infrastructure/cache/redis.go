@@ -173,6 +173,27 @@ func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uui
 	return r.client.Set(ctx, inventoryKey(eventID), count, r.inventoryTTL).Err()
 }
 
+// GetInventory returns the cached qty for an event plus a `found`
+// bool that distinguishes "key absent" from "key present with value 0".
+// Per the InventoryRepository interface contract, this distinction is
+// load-bearing for drift detection — a missing key is `cache_missing`
+// (rehydrate didn't run); a present-and-zero key is the legitimate
+// sold-out state (or a `cache_low_excess` if DB still says > 0).
+//
+// `redis.Nil` (key absent) → (0, false, nil).
+// Other Redis errors → (0, false, wrapped err); caller treats as
+// transient and retries next sweep.
+func (r *redisInventoryRepository) GetInventory(ctx context.Context, eventID uuid.UUID) (int, bool, error) {
+	val, err := r.client.Get(ctx, inventoryKey(eventID)).Int()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("redisInventoryRepository.GetInventory event=%s: %w", eventID, err)
+	}
+	return val, true, nil
+}
+
 func (r *redisInventoryRepository) DeductInventory(ctx context.Context, orderID uuid.UUID, eventID uuid.UUID, userID int, count int) (bool, error) {
 	key := inventoryKey(eventID)
 	keys := []string{key}

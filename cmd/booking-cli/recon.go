@@ -12,6 +12,7 @@ import (
 	"booking_monitor/internal/application/recon"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	mlog "booking_monitor/internal/log"
@@ -57,29 +58,52 @@ func runRecon(cmd *cobra.Command, _ []string) {
 			bootstrap.NewReconConfig,
 			bootstrap.NewPrometheusReconMetrics,
 			recon.NewReconciler,
+			// PR-D — inventory drift detector. Co-resident with the
+			// reconciler in this same subcommand process: both are
+			// "periodic Postgres-truth sweepers", and running them as
+			// one process keeps the operational footprint small (one
+			// CronJob / Deployment, one /metrics, one shared lifecycle).
+			//
+			// Drift detection needs Redis (read-only) — the recon
+			// process previously didn't, so we wire JUST the client +
+			// inventory repository here. Avoiding the full cache.Module
+			// keeps the queue / idempotency / collectors out of recon's
+			// graph; those belong with the booking server's lifecycle.
+			cache.NewRedisClient,
+			cache.NewRedisInventoryRepository,
+			bootstrap.NewDriftConfig,
+			bootstrap.NewPrometheusDriftMetrics,
+			recon.NewInventoryDriftDetector,
 		),
-		fx.Invoke(func(lc fx.Lifecycle, sd fx.Shutdowner, r *recon.Reconciler, l *mlog.Logger, c *config.Config) error {
-			return installRecon(lc, sd, r, l, c, once)
+		fx.Invoke(func(lc fx.Lifecycle, sd fx.Shutdowner, r *recon.Reconciler, d *recon.InventoryDriftDetector, l *mlog.Logger, c *config.Config) error {
+			return installRecon(lc, sd, r, d, l, c, once)
 		}),
 	)
 	app.Run()
 }
 
-// installRecon wires the reconciler into the fx lifecycle.
+// installRecon wires the reconciler + the inventory drift detector
+// into the fx lifecycle. Both run inside this same `recon` subcommand
+// process — sibling sweepers with disjoint responsibilities (recon
+// resolves stuck-Charging orders via gateway; drift detector compares
+// Redis cache vs DB inventory). Sharing one process keeps operational
+// footprint small (one CronJob / Deployment, one /metrics surface).
 //
-// Loop mode: a goroutine runs Sweep on a time.Ticker until the
-// runCtx is cancelled. Errors from Sweep are logged but never abort
-// the loop — the next tick gets a fresh chance. Only an unexpected
-// fatal (e.g., the Reconciler's logger Sync panicking) escalates via
-// fx.Shutdown.
+// Loop mode: two goroutines, one per sweeper, each running Sweep on
+// its own time.Ticker until runCtx is cancelled. Errors from Sweep
+// are logged but never abort the loop — the next tick gets a fresh
+// chance. Only an unexpected fatal escalates via fx.Shutdown.
 //
-// --once mode: invoke Sweep ONCE in OnStart, then call Shutdown ourselves
-// so fx exits cleanly with code 0 on success or 1 on Sweep failure.
-// Mirrors the k8s CronJob contract: container exits, scheduler reaps.
+// --once mode: ALL sweepers fire ONCE in OnStart concurrently. fx
+// shuts down after BOTH complete (whether successfully or not). Exit
+// code reflects the worst outcome — any sweep failure → exit 1, all
+// success → exit 0. Mirrors the k8s CronJob contract: container exits,
+// scheduler reaps.
 func installRecon(
 	lc fx.Lifecycle,
 	shutdowner fx.Shutdowner,
 	reconciler *recon.Reconciler,
+	driftDetector *recon.InventoryDriftDetector,
 	logger *mlog.Logger,
 	cfg *config.Config,
 	once bool,
@@ -90,9 +114,9 @@ func installRecon(
 	}
 
 	// Worker metrics listener (Phase 2 checkpoint O3). Without this
-	// recon_resolved_total / recon_stuck_charging_orders / recon_*_errors_total
-	// would stay dark — registered into the recon process's default
-	// registry but unreachable to Prometheus.
+	// recon_* / inventory_drift_* metrics would stay dark — registered
+	// into the recon process's default registry but unreachable to
+	// Prometheus.
 	if err := bootstrap.InstallMetricsListener(lc, cfg, logger); err != nil {
 		return fmt.Errorf("installRecon: metrics listener: %w", err)
 	}
@@ -102,19 +126,21 @@ func installRecon(
 	lc.Append(fx.Hook{
 		OnStart: func(_ context.Context) error {
 			if once {
-				go runSweepOnce(runCtx, reconciler, logger, shutdowner)
+				// Both sweeps fire concurrently; the helper waits for
+				// both before shutting down with the worst exit code.
+				go runRecOnceBoth(runCtx, reconciler, driftDetector, logger, shutdowner)
 				return nil
 			}
-			// Read the loop interval off the Reconciler itself rather
-			// than re-deriving it from the infrastructure cfg here —
-			// keeps the source-of-truth for "this Reconciler's tunables"
-			// in one place (the application-layer recon.Config that
-			// NewReconciler consumed).
+			// Each sweeper reads its own interval off itself rather
+			// than re-deriving from the infrastructure cfg here —
+			// keeps the source-of-truth for tunables in one place
+			// (the application-layer Config the constructor consumed).
 			go runSweepLoop(runCtx, reconciler, logger, reconciler.SweepInterval())
+			go runDriftLoop(runCtx, driftDetector, logger, driftDetector.SweepInterval())
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			logger.L().Info("Stopping reconciler")
+			logger.L().Info("Stopping reconciler + drift detector")
 			cancel()
 			shutdownErr := tp.Shutdown(ctx)
 			if shutdownErr != nil {
@@ -127,13 +153,15 @@ func installRecon(
 	return nil
 }
 
-// runSweepOnce performs ONE sweep then triggers fx shutdown. Used by
-// --once mode (k8s CronJob host). Exit code reflects sweep success:
-//   - 0 on Sweep returning nil
+// runRecOnceBoth performs ONE sweep of BOTH the reconciler AND the
+// drift detector concurrently, then triggers fx shutdown after both
+// complete. Used by --once mode (k8s CronJob host). Exit code reflects
+// the worst outcome:
+//   - 0 if both Sweeps return nil (or were graceful-cancelled)
 //   - 0 when the parent ctx is cancelled (graceful SIGTERM = succeeded
-//     job, per k8s CronJob semantics — the scheduler will retry on
-//     the next cron tick)
-//   - 1 on real Sweep failure (DB error etc.; preserved via fx.ExitCode)
+//     job, per k8s CronJob semantics — the scheduler will retry on the
+//     next cron tick)
+//   - 1 if either Sweep returned a real error (preserved via fx.ExitCode)
 //
 // We use the `ctx.Err() == nil` pattern rather than enumerating
 // context.Canceled / context.DeadlineExceeded individually:
@@ -145,20 +173,73 @@ func installRecon(
 //
 // This handles future context-wrapping scenarios without needing to
 // enumerate every context.* sentinel.
-func runSweepOnce(
+func runRecOnceBoth(
 	ctx context.Context,
 	r *recon.Reconciler,
+	d *recon.InventoryDriftDetector,
 	logger *mlog.Logger,
 	shutdowner fx.Shutdowner,
 ) {
-	logger.L().Info("recon: starting one-shot sweep")
-	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
-		logger.L().Error("recon: sweep failed", tag.Error(err))
-		_ = shutdowner.Shutdown(fx.ExitCode(1))
-		return
+	logger.L().Info("recon + drift: starting one-shot sweep")
+
+	// Run both sweeps concurrently. Each goroutine reports a single
+	// boolean: did THIS sweep fail (real failure, parent ctx healthy)?
+	//
+	// `defer recover()` is mandatory: without it, a panic in either
+	// Sweep skips the channel send and the receiver below blocks
+	// forever. In a k8s CronJob host that means the pod hangs until
+	// `activeDeadlineSeconds` reaps it — which can wedge a retry
+	// storm if the panic is deterministic. The recover writes
+	// `failed=true` so the surrounding logic still produces an
+	// exit-1 and re-panics the value so the host runtime dumps the
+	// stack instead of silencing it.
+	reconFailed := make(chan bool, 1)
+	driftFailed := make(chan bool, 1)
+
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.L().Error("recon: sweep goroutine panicked",
+					tag.Error(fmt.Errorf("panic: %v", rec)))
+				reconFailed <- true
+			}
+		}()
+		err := r.Sweep(ctx)
+		failed := err != nil && ctx.Err() == nil
+		if failed {
+			logger.L().Error("recon: sweep failed", tag.Error(err))
+		}
+		reconFailed <- failed
+	}()
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.L().Error("inventory drift: sweep goroutine panicked",
+					tag.Error(fmt.Errorf("panic: %v", rec)))
+				driftFailed <- true
+			}
+		}()
+		err := d.Sweep(ctx)
+		failed := err != nil && ctx.Err() == nil
+		if failed {
+			logger.L().Error("inventory drift: sweep failed", tag.Error(err))
+		}
+		driftFailed <- failed
+	}()
+
+	// Wait for both. Either failure → exit 1; both clean → exit 0.
+	anyFailed := <-reconFailed
+	if <-driftFailed {
+		anyFailed = true
 	}
-	logger.L().Info("recon: one-shot sweep complete, exiting")
-	_ = shutdowner.Shutdown(fx.ExitCode(0))
+
+	exitCode := 0
+	if anyFailed {
+		exitCode = 1
+	}
+	logger.L().Info("recon + drift: one-shot sweep complete, exiting",
+		mlog.Int("exit_code", exitCode))
+	_ = shutdowner.Shutdown(fx.ExitCode(exitCode))
 }
 
 // runSweepLoop runs Sweep on a time.Ticker until ctx is cancelled.
@@ -202,6 +283,40 @@ func runSweepLoop(
 		case <-ticker.C:
 			if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
 				logger.L().Error("recon: sweep failed (continuing)", tag.Error(err))
+			}
+		}
+	}
+}
+
+// runDriftLoop is the inventory-drift-detector counterpart of
+// runSweepLoop — same boot-immediate-then-tick shape, same
+// "log-and-continue on per-cycle failures" discipline. Separate
+// goroutine so the two sweepers' tick cadences don't share a
+// scheduler hot path; if the gateway-bound recon Sweep blocks for
+// seconds, the drift detector still fires its checks on schedule.
+func runDriftLoop(
+	ctx context.Context,
+	d *recon.InventoryDriftDetector,
+	logger *mlog.Logger,
+	interval time.Duration,
+) {
+	logger.L().Info("inventory drift: starting loop", mlog.Duration("interval", interval))
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	if err := d.Sweep(ctx); err != nil && ctx.Err() == nil {
+		logger.L().Error("inventory drift: boot sweep failed (continuing)", tag.Error(err))
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.L().Info("inventory drift: loop exiting", tag.Error(ctx.Err()))
+			return
+		case <-ticker.C:
+			if err := d.Sweep(ctx); err != nil && ctx.Err() == nil {
+				logger.L().Error("inventory drift: sweep failed (continuing)", tag.Error(err))
 			}
 		}
 	}
