@@ -6,13 +6,25 @@ A high-concurrency ticket booking system simulation designed for flash sale scen
 
 ## Architecture
 
+Current production shape (Stage 4 — see [Architecture Evolution](#architecture-evolution) below for how we got here):
+
+```mermaid
+flowchart LR
+    Client((Client)) --> Nginx[Nginx<br/>rate limit]
+    Nginx --> API[Gin API]
+    API -->|Lua DECRBY + XADD| Redis[(Redis<br/>inventory + stream)]
+    Redis -.->|XReadGroup| Worker
+    Worker -->|UoW: INSERT order<br/>+ events_outbox| PG[(Postgres<br/>source of truth)]
+    PG -.->|advisory-lock<br/>leadered relay| Kafka{{Kafka}}
+    Kafka -.->|order.created| Payment[Payment Worker]
+    Payment -.->|fail| Kafka
+    Kafka -.->|order.failed| Saga[Saga<br/>Compensator]
+    Saga --> Redis
+    Saga --> PG
 ```
-Client -> Nginx (rate limit) -> Gin API -> Redis Lua (atomic deduct)
-  -> Redis Stream -> Worker -> PostgreSQL TX [Order + Outbox]
-    -> OutboxRelay -> Kafka (order.created)
-      -> PaymentWorker -> Success: confirmed | Failure: order.failed
-        -> SagaCompensator -> DB + Redis inventory rollback
-```
+
+> Solid arrows = synchronous hot path · dashed arrows = async / event-driven
+> See [v0.4.0 release notes](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) for the cache-truth contract: Redis ephemeral, Postgres source-of-truth, drift detected and named.
 
 **Design**: Domain-Driven Design + Clean Architecture (Modular Monolith)
 
@@ -44,6 +56,101 @@ internal/
   bootstrap/              # fx wiring for logger + tracer + DI primitives
 deploy/                   # Postgres migrations (11), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
 ```
+
+### Architecture Evolution
+
+The current Stage 4 didn't appear all at once. Each layer was added in response to a benchmark-documented bottleneck — the four-stage progression below is the architecture-evolution story you can walk through commit-by-commit on the [Releases page](https://github.com/Leon180/booking_monitor/releases).
+
+**Stage 1 — synchronous baseline.** API → Postgres `SELECT FOR UPDATE`. Saturates well below 1k req/s due to row-lock contention. The C500 benchmark on [v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) documented this ceiling.
+
+```mermaid
+flowchart LR
+    C1((Client)) --> A1[API]
+    A1 -->|SELECT FOR UPDATE<br/>+ INSERT| P1[(Postgres)]
+```
+
+**Stage 2 — Redis hot path, sync DB write.** Lua atomic deduct on Redis removes the row-lock contention, but the synchronous DB write becomes the new bottleneck.
+
+```mermaid
+flowchart LR
+    C2((Client)) --> A2[API]
+    A2 -->|Lua DECRBY| R2[(Redis)]
+    A2 -->|sync INSERT| P2[(Postgres)]
+```
+
+**Stage 3 — async via Redis Streams + worker pool.** Lua deduct emits to a stream; a worker pool drains it asynchronously. Customer gets HTTP 202 the moment Redis confirms.
+
+```mermaid
+flowchart LR
+    C3((Client)) --> A3[API]
+    A3 -->|Lua DECRBY + XADD| R3[(Redis)]
+    R3 -.->|stream| W3[Worker]
+    W3 -->|INSERT| P3[(Postgres)]
+```
+
+**Stage 4 — full event-driven (current).** Worker writes order + outbox in one UoW; advisory-lock-leadered relay pushes to Kafka; payment service + saga compensator are independent consumers. This is the architecture released as [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) and hardened through [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0).
+
+```mermaid
+flowchart LR
+    C4((Client)) --> A4[API]
+    A4 -->|Lua DECRBY + XADD| R4[(Redis)]
+    R4 -.->|stream| W4[Worker]
+    W4 -->|UoW: order + outbox| P4[(Postgres)]
+    P4 -.->|relay| K4{{Kafka}}
+    K4 -.-> Pay4[Payment]
+    K4 -.-> S4[Saga]
+```
+
+The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12 in [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md)) is planned for Phase 3 — same `internal/` packages, different fx wirings, side-by-side benchmark runs.
+
+### Pattern A flow (planned — Phase 3a)
+
+The next milestone splits `POST /book` into reservation + explicit `POST /pay` + `POST /webhook/payment`. Brings the booking flow into Stripe Checkout / KKTIX shape.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API
+    participant R as Redis
+    participant W as Worker
+    participant P as Postgres
+    participant GW as Payment<br/>Gateway
+    participant SW as Expiry<br/>Sweeper
+
+    rect rgb(240, 248, 255)
+    Note over C,P: Reservation (D1-D3)
+    C->>+API: POST /book {event_id, qty}
+    API->>+R: Lua DECRBY + XADD
+    R-->>-API: ok
+    API-->>-C: 202 {order_id, awaiting_payment,<br/>reserved_until, payment_intent}
+    R-->>W: XReadGroup
+    W->>P: INSERT order status=awaiting_payment
+    end
+
+    alt Customer pays before TTL (D4-D5)
+        rect rgb(245, 255, 245)
+        C->>+API: POST /orders/:id/pay
+        API->>+GW: CreatePaymentIntent
+        GW-->>-API: client_secret
+        API-->>-C: client_secret
+        Note over C,GW: customer completes Stripe Elements
+        GW->>+API: POST /webhook/payment (signed)
+        API->>API: verify signature + idempotency
+        API->>P: status awaiting_payment → paid
+        API-->>-GW: 200
+        end
+    else TTL expires without payment (D6)
+        rect rgb(255, 245, 245)
+        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until < NOW()
+        P-->>SW: stuck rows
+        SW->>R: revert.lua INCRBY
+        SW->>P: status awaiting_payment → expired
+        end
+    end
+```
+
+`v0.5.0` will be tagged when this flow is complete.
 
 ## Features
 
