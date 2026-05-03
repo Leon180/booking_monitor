@@ -108,6 +108,8 @@ The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, 
 | Charging stuck-order reconciliation | `recon_stuck_charging_orders` (gauge), `recon_resolved_total{outcome}`, `recon_gateway_errors_total`, `recon_resolve_duration_seconds`, `recon_resolve_age_seconds` |
 | Streams collector itself failing | `redis_stream_collector_errors_total{stream,operation}` |
 | **Worker self-healed NOGROUP (silent message loss signal)** | `consumer_group_recreated_total` — counter that increments when the worker hits NOGROUP and recreates the consumer group via `XGROUP CREATE ... $`. **MUST stay 0 in healthy production.** The recreation uses `$` so any messages enqueued in the destruction→recovery window are silently skipped. The companion alert (`ConsumerGroupRecreated`) fires on the FIRST occurrence (no soak window). Background: `docs/architectural_backlog.md` § Cache-truth architecture documents the 411-of-1000 silent-message-loss case that drove this metric. |
+| **Inventory drift between Redis and DB (PR-D)** | `inventory_drift_detected_total{direction}` — counter, labelled `cache_missing` / `cache_high` / `cache_low_excess`. Bumped by the `recon` process's drift detector every time a sweep flags an event whose Redis qty disagrees with `events.available_tickets` beyond `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100).<br>• `cache_missing` = Redis returns 0 / key absent while DB has inventory → rehydrate didn't run after a Redis reset.<br>• `cache_high` = Redis > DB → saga compensation desync OR manual SetInventory beyond reset baseline.<br>• `cache_low_excess` = Redis < DB by more than tolerance → worker is failing to commit OR recon force-fail leaks inventory.<br>Companion gauges: `inventory_drifted_events_count` (point-in-time, set per sweep), `inventory_drift_sweep_duration_seconds` (histogram), `inventory_drift_list_events_errors_total` / `inventory_drift_cache_read_errors_total` (sweep-internal failure counters). Alerts: `InventoryDriftDetected` (warning, `for: 5m`), `InventoryDriftListEventsErrors` (critical — DB-side blind), `InventoryDriftCacheReadErrors` (warning — partial visibility). Final piece of the cache-truth roadmap; see `docs/architectural_backlog.md` § Cache-truth architecture. |
+| **Sweeper goroutine panic (silent-failure canary)** | `sweep_goroutine_panics_total{sweeper}` — counter, labelled by sweeper (`recon` / `inventory_drift` / `once_recon` / `once_drift`). Bumped from the loop's `defer recover()` every time a Sweep goroutine panics and is rescued. **MUST stay 0 in healthy production.** Without this counter, a recovered panic is invisible to operators (process stays up, /metrics keeps serving last-known gauge values, `up{}` stays 1 → TargetDown does not fire). Companion alert `SweepGoroutinePanic` fires on the FIRST occurrence (no soak, critical). |
 | What happens when a client retries with the same Idempotency-Key (N4) | `idempotency_replays_total{outcome}` — counts every replay attempt by what the server did with it. Three outcomes:<br>• `match` = same key + same body → we replay the previously-cached response (this is idempotency working as designed)<br>• `mismatch` = same key + **different** body → we return 409 Conflict (client bug: they're reusing one key across logically-distinct requests)<br>• `legacy_match` = entry was already in cache from before N4 shipped (no fingerprint stored), so we replay AND lazily write the fresh fingerprint back. **Should taper to 0 within 24h after deploy** (legacy entries expire); if it stays > 0, something is still writing the old wire format — investigate. |
 | How often the idempotency Redis lookup is failing (N4) | `idempotency_cache_get_errors_total` — number of times the idempotency cache GET failed (Redis unreachable, unmarshal error). **Page-worthy.** When this is sustained > 0, the booking endpoint is still accepting requests but **idempotency protection is OFF** — a duplicate request will be processed twice (only the DB UNIQUE constraint catches it at the last layer).<br>**Why we don't just reject requests when Redis is down**: refusing all bookings during a Redis outage = the whole endpoint is down. "Idempotency briefly disabled" is strictly better than "endpoint disabled"; this counter exists so on-call knows we're in that degraded mode.<br>Alert: `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m` → page. |
 | How many orders are stuck in Failed state without compensation (A5) | `saga_stuck_failed_orders` — gauge of orders that have been in Failed state longer than `SAGA_STUCK_THRESHOLD` (default 60s), set by the saga watchdog on every sweep. A non-zero value at any single moment is fine (the watchdog will re-drive the compensator next sweep). **Sustained > 0 for 10m means the compensator is failing repeatedly** — typical causes: Redis revert blocked, DB lock contention, or an unmapped compensator error. Watchdog default sweep interval is 60s, so 10m gives ~10 attempts to clear before paging. |
@@ -260,6 +262,10 @@ The current alert catalog:
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 for 5m — booking hot path intermittently failing to enqueue |
 | `ConsumerGroupRecreated` | critical | `increase(consumer_group_recreated_total[5m]) > 0` — worker hit NOGROUP and self-healed via `XGROUP CREATE ... $`. Recovery preserves availability but **silently drops messages** that were enqueued in the destruction→recovery window. Triggers on the FIRST occurrence (no soak); `[5m]` window gives comfortable overlap with Prometheus's default 1m eval cadence so a single spike isn't missed. Investigate: did operations FLUSHALL? did Redis crash without AOF? Cross-check `bookings_total` vs DB orders count. See `docs/architectural_backlog.md` § Cache-truth architecture. |
+| `InventoryDriftDetected` | warning | `increase(inventory_drift_detected_total[5m]) > 0 for 5m` — drift detector flagged events whose Redis qty disagrees with `events.available_tickets`. Three direction labels distinguish remediation paths: `cache_missing` → rehydrate didn't run; `cache_high` → saga / manual desync; `cache_low_excess` → worker failing to commit OR recon force-fail leaks inventory. `for: 5m` discriminates "transient in-flight blip" from "sustained corruption". Final piece of the cache-truth 4-PR plan (PR-D). See `docs/architectural_backlog.md` § Cache-truth architecture. |
+| `InventoryDriftListEventsErrors` | critical | `rate(inventory_drift_list_events_errors_total[5m]) > 0 for 2m` — drift detector's per-sweep `ListAvailable` query is failing. While this fires the detector is BLIND on the DB side: every sweep aborts, gauge held at 0, `InventoryDriftDetected` cannot fire because there's nothing to detect. Diagnose: DB outage, pool exhaustion, query timeout from the recon container. Same shape as `ReconFindStuckErrors` and `SagaWatchdogFindStuckErrors`. |
+| `InventoryDriftCacheReadErrors` | warning | `rate(inventory_drift_cache_read_errors_total[5m]) > 0 for 5m` — per-event Redis GET failures during drift sweeps. Sweep continues with partial visibility (`events_skipped` > 0 in logs). Diagnose: Redis pool exhaustion (`redis_client_pool_timeouts_total`), Redis CPU saturation, slow keys (`redis_slowlog_length`). Lenient `for: 5m` because per-event Redis blips are realistic background noise. |
+| `SweepGoroutinePanic` | critical | `increase(sweep_goroutine_panics_total[5m]) > 0 for 0s` — a sweeper goroutine (recon / inventory_drift / once_recon / once_drift) panicked and was rescued by the loop's `defer recover()`. Process is still running but a deterministic bug surfaced. Without this alert, the recovered panic would be invisible (`up{}` stays 1, TargetDown does not fire). Pull recon container logs filtered for `recovered from panic` for the panic value + stack trace, then file a bug. |
 | `TargetDown` | critical | `up == 0` for any (job, instance) for 2m+ — meta-alert; rate-based alerts for that job are silently inert until scrape recovers |
 | `RedisExporterCannotReachRedis` | critical | `redis_up{job="redis"} == 0` for 1m — exporter HTTP listener is alive (so `TargetDown` won't fire) but it can't reach Redis itself. Typical causes: REDIS_PASSWORD wrong/rotated, Redis container down, docker network split. Every Redis-server metric on the dashboard goes stale until this clears. |
 
@@ -296,6 +302,33 @@ docker exec booking_db psql -U user -d booking -c \
 docker stop booking_payment_worker
 # Wait 2m+ (alert has `for: 2m`).
 # Cleanup: docker start booking_payment_worker → up returns to 1 within one scrape (15s).
+
+# InventoryDriftDetected — directly mutate Redis to disagree with DB, wait for
+# the recon process's drift sweep to flag it. Pick a known event_id from
+# `SELECT id FROM events WHERE available_tickets > 0 LIMIT 1`, then:
+docker exec booking_redis redis-cli SET event:<event-uuid>:qty 999999
+# Default sweep interval is 60s + alert `for: 5m`, so wait ~6m and check
+# Prometheus → Alerts. The metric will fire with direction=cache_high
+# (Redis > DB beyond tolerance).
+# Cleanup: re-run app rehydrate (docker compose restart app) OR
+# manually `SET event:<uuid>:qty <db_available_tickets>`.
+
+# InventoryDriftListEventsErrors / InventoryDriftCacheReadErrors —
+# stop the underlying dependency briefly. Both alerts are
+# rate-counter alerts so each scrape during the outage increments
+# the counter once.
+docker compose stop postgres   # → InventoryDriftListEventsErrors after 2m
+docker compose stop redis      # → InventoryDriftCacheReadErrors after 5m
+# Cleanup: docker compose start <service>; counters stop incrementing,
+# alerts clear after the rate window expires.
+
+# SweepGoroutinePanic — there is no clean way to trigger this without
+# editing the binary (the recovery counter only fires on actual Go
+# panics). For local validation, temporarily inject a panic into
+# `recon.Reconciler.Sweep` or `recon.InventoryDriftDetector.Sweep`
+# (e.g., `panic("smoke")` at the top of the function), build, run for
+# > 1 sweep interval, observe `sweep_goroutine_panics_total{sweeper=...}`
+# bumping. NEVER ship the injected panic. Revert before commit.
 ```
 
 After testing, undo: `docker exec booking_redis redis-cli DEL orders:stream orders:dlq` (loses any in-flight production data — only safe in dev).

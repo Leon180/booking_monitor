@@ -85,6 +85,47 @@ func (prometheusReconMetrics) ObserveGatewayDuration(seconds float64) {
 	observability.ReconGatewayDurationSeconds.Observe(seconds)
 }
 
+// ── inventory drift detector (PR-D) ──────────────────────────────────
+
+// NewDriftConfig translates the wire-format InventoryDriftConfig into
+// the application-layer recon.DriftConfig and validates it. Used by
+// `cmd/booking-cli/recon.go` via fx.Provide alongside NewReconConfig
+// — both detectors live in the same `recon` subcommand process.
+func NewDriftConfig(cfg *config.Config) (recon.DriftConfig, error) {
+	c := recon.DriftConfig{
+		SweepInterval:     cfg.InventoryDrift.SweepInterval,
+		AbsoluteTolerance: cfg.InventoryDrift.AbsoluteTolerance,
+	}
+	if err := c.Validate(); err != nil {
+		return recon.DriftConfig{}, err
+	}
+	return c, nil
+}
+
+// prometheusDriftMetrics implements recon.DriftMetrics. Same shape /
+// rationale as prometheusReconMetrics — stateless pass-through to
+// the singletons in `infrastructure/observability/metrics_inventory_drift.go`.
+type prometheusDriftMetrics struct{}
+
+// NewPrometheusDriftMetrics is the fx-friendly constructor.
+func NewPrometheusDriftMetrics() recon.DriftMetrics { return prometheusDriftMetrics{} }
+
+func (prometheusDriftMetrics) SetDriftedEventsCount(c int) {
+	observability.InventoryDriftedEventsCount.Set(float64(c))
+}
+func (prometheusDriftMetrics) IncDriftDetected(direction string) {
+	observability.InventoryDriftDetectedTotal.WithLabelValues(direction).Inc()
+}
+func (prometheusDriftMetrics) IncListEventsErrors() {
+	observability.InventoryDriftListEventsErrorsTotal.Inc()
+}
+func (prometheusDriftMetrics) IncCacheReadErrors() {
+	observability.InventoryDriftCacheReadErrorsTotal.Inc()
+}
+func (prometheusDriftMetrics) ObserveSweepDuration(seconds float64) {
+	observability.InventoryDriftSweepDurationSeconds.Observe(seconds)
+}
+
 // ── saga watchdog ────────────────────────────────────────────────────
 
 // NewSagaConfig translates the wire-format SagaConfig into the

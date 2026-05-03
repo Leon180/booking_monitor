@@ -56,6 +56,10 @@ silence / inhibit / notification log.
 - [RedisRevertFailures](#redisrevertfailures)
 - [RedisXAddFailures](#redisxaddfailures)
 - [ConsumerGroupRecreated](#consumergrouprecreated)
+- [InventoryDriftDetected](#inventorydriftdetected)
+- [InventoryDriftListEventsErrors](#inventorydriftlisteventserrors)
+- [InventoryDriftCacheReadErrors](#inventorydriftcachereaderrors)
+- [SweepGoroutinePanic](#sweepgoroutinepanic)
 - [KafkaConsumerStuck](#kafkaconsumerstuck)
 
 ### Meta (scrape health)
@@ -397,6 +401,76 @@ silence / inhibit / notification log.
 
 ---
 
+## InventoryDriftDetected
+
+**Symptom.** `increase(inventory_drift_detected_total[5m]) > 0 for 5m`. Severity **warning**. The drift detector running in the `recon` process found at least one event whose Redis cache disagrees with the Postgres source-of-truth (`events.available_tickets`) beyond the configured `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100). The `direction` label tells you WHICH failure mode and routes you to the right diagnosis branch.
+
+**Why this is warning-severity (not critical).** Drift between Redis and DB is RECOVERABLE — the rehydrate path (`cache.RehydrateInventory`) re-runs at app startup and SETNX-guards in-flight values, so a manual restart is the worst-case remediation. The risk is sustained drift left undetected: customers see "sold out" while DB still has inventory (`cache_low_excess`), or successful 202s with no DB row (`cache_high`). The `for: 5m` window discriminates "transient in-flight blip" (one busy moment crosses tolerance briefly) from "sustained corruption worth paging".
+
+**Diagnosis (branches by `direction` label):**
+
+### `direction="cache_missing"`
+
+DB has inventory, Redis returns 0 (key absent or value zero). Means rehydrate didn't run or was incomplete.
+
+1. **Check if the app actually rehydrated at boot.** Search the app logs for the `RehydrateInventory` line:
+   ```
+   docker compose logs app | grep -E "rehydrate|RehydrateInventory"
+   ```
+   You should see one line per available event at startup. If the count is 0 OR the rehydrate completed with `events_skipped > 0`, that's your culprit.
+
+2. **Verify the affected event_id from the alert's logs.** The drift detector logs `component=inventory_drift` with the event_id at WARN level:
+   ```
+   docker compose logs recon | grep "drift: cache key absent"
+   ```
+
+3. **Force rehydrate via app restart.** `docker compose restart app` will re-run the OnStart rehydrate hook for all `available_tickets > 0` events.
+
+### `direction="cache_high"`
+
+Redis > DB. Anomalous regardless of magnitude — only saga compensation desync OR manual `SetInventory` produces this state.
+
+1. **Did someone run `make reset-db` or manual SetInventory recently?** Check git log + operator's terminal history. The reset path was hardened in PR #73 (precise DEL, no FLUSHALL) but a manual `SET event:{uuid}:qty 999` would still trigger this.
+
+2. **Check saga compensator outcomes.** `cache_high` after a flurry of saga compensations means revert.lua bumped Redis but DB didn't roll back the order. Search:
+   ```promql
+   rate(saga_watchdog_resolved_total{outcome="compensator_error"}[10m])
+   ```
+   If non-zero, the compensator is partially succeeding (Redis revert happens before the DB transition; failure between them leaves Redis ahead).
+
+3. **Reconcile manually.** `UPDATE events SET available_tickets = <redis_qty> WHERE id = '<event_id>'` aligns DB to Redis IF the customer was charged and confirmed. **Verify by joining `orders` first** before any UPDATE — getting this wrong creates duplicate/missing inventory.
+
+### `direction="cache_low_excess"`
+
+Redis < DB by more than tolerance. Steady-state drift is positive (in-flight bookings between Lua deduct and worker DB-commit); excess means the worker is failing to commit OR the reconciler force-fail path is leaking inventory.
+
+1. **Check worker consumer lag.** `worker_consumer_lag_seconds` p99 should be sub-second. A persistent lag > 60s means the worker is unable to keep up — the booking funnel is decrementing Redis but DB writes are queueing.
+   ```promql
+   histogram_quantile(0.99, rate(worker_processing_duration_seconds_bucket[5m]))
+   ```
+
+2. **Check recon force-fail rate.** The DEF-CRIT path (recon force-failing without emitting outbox) was supposedly closed in PR #45, but this counter is the canary for any regression:
+   ```promql
+   rate(recon_resolved_total{outcome="max_age_exceeded"}[15m])
+   ```
+   Sustained > 0 means recon is force-failing orders without saga compensation → Redis stays decremented but DB rolls forward to `failed` → exactly this drift pattern.
+
+**Action (general):**
+
+- **Single sweep flagged once and cleared:** acknowledge and move on. The detector's `for: 5m` window already filtered transients.
+- **Persistent for > 30m:** start with the diagnosis branch matching the `direction` label. If unclear, dump current state for the affected event:
+  ```bash
+  docker exec booking_redis redis-cli GET event:<uuid>:qty
+  docker exec booking_db psql -U user -d booking -c \
+    "SELECT id, available_tickets FROM events WHERE id = '<uuid>';"
+  ```
+
+**Escalation.** If drift exceeds 1000 tickets for any single event OR multiple events drift simultaneously across direction labels, that suggests systemic corruption (Redis or DB). Bring in whoever owns the storage layer.
+
+**Background.** This alert was added in PR-D of the cache-truth architecture roadmap — the final piece of the 4-PR plan that started with PR-A (Makefile precise reset), PR-B (rehydrate-on-startup), PR-C (NOGROUP self-heal alert). See `docs/architectural_backlog.md` § "Cache-truth architecture" for the full sequence.
+
+---
+
 ## KafkaConsumerStuck
 
 **Symptom.** `kafka_consumer_retry_total` rate > 0 for a topic over 2m. Severity `warning`. Consumer is "stuck but not dead" — leaving messages uncommitted for rebalance retry.
@@ -404,6 +478,76 @@ silence / inhibit / notification log.
 **Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
 
 **Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+
+---
+
+## InventoryDriftListEventsErrors
+
+**Symptom.** `rate(inventory_drift_list_events_errors_total[5m]) > 0 for 2m`. Severity `critical`. The drift detector's per-sweep `EventRepository.ListAvailable` query is failing — the detector is **blind on the DB side** until this clears. While this fires, `inventory_drifted_events_count` is held at 0 (intentional — see metric godoc) and `InventoryDriftDetected` cannot fire because there is nothing to detect.
+
+**Diagnosis.**
+
+1. **Is the DB reachable from the recon container?** `docker compose logs recon | grep -i "list events\|postgres"`. The drift detector logs `component=inventory_drift` at WARN/ERROR for these failures.
+2. **Is the recon container's DB pool saturated?** Cross-check `pg_pool_in_use` — if pinned at the configured max, the COUNT/LIST queries are queued behind hot-path traffic.
+3. **Is migration 000007's partial index missing?** Drift detector uses `ListAvailable` (full event scan), NOT the outbox partial index, so the `events` table indexes are what matter here. Verify `idx_events_available` etc. exist via `\d events`.
+
+**Action.**
+
+- DB outage: fix the DB (separate ticket); alert clears within one scrape after recovery.
+- Pool saturated: bump `DB_MAX_OPEN_CONNS` for the recon process (it shares the same env as the API but a separate pool).
+- Specific timeout pattern: check the `events` table's row count and existing indexes; ListAvailable should be fast on any healthy schema.
+
+**Escalation.** Always pages alongside `TargetDown` if the DB outage is total — if both fire, focus on `TargetDown` first.
+
+---
+
+## InventoryDriftCacheReadErrors
+
+**Symptom.** `rate(inventory_drift_cache_read_errors_total[5m]) > 0 for 5m`. Severity `warning`. Per-event Redis GET failures during drift sweeps. **Distinct from `InventoryDriftListEventsErrors`**: there the WHOLE sweep aborts; here the sweep continues with partial visibility (some events skipped, others checked). The structured log line `events_skipped` per sweep is the diagnostic field.
+
+**Diagnosis.**
+
+1. **Is the Redis client pool exhausted?** `redis_client_pool_timeouts_total` rate > 0 → bump `REDIS_POOL_SIZE` for the recon container.
+2. **Is Redis CPU saturated?** `redis_cpu_*` rates close to 1.0 sustained → the booking hot path is competing for the same Redis with the drift detector. Either accept the partial visibility or shard.
+3. **Specific keys timing out?** `redis_slowlog_length` > 0 + the affected event_ids in the `component=inventory_drift` log lines.
+
+**Action.**
+
+- Pool exhaustion: bump pool size; restart recon container.
+- Redis CPU saturation: this alert is the SECOND-order signal; the booking hot path will be visibly slow first. Address that root cause.
+- Specific slow keys: use the event_ids from logs to inspect Redis directly.
+
+**Escalation.** Doesn't usually page on its own (warning severity). If it persists past one Redis restart cycle, escalate to whoever owns Redis infrastructure.
+
+---
+
+## SweepGoroutinePanic
+
+**Symptom.** `increase(sweep_goroutine_panics_total[5m]) > 0 for 0s`. Severity `critical`. A periodic-sweeper goroutine (Reconciler / InventoryDriftDetector / SagaWatchdog) panicked and was rescued by the loop's `defer recover()`. Process is still running, but a deterministic bug surfaced.
+
+**Why this is critical (no soak window).** In healthy production this counter MUST stay 0. Without this alert, a recovered panic would be invisible — process stays up, /metrics keeps serving, `up{}` stays 1, `TargetDown` does NOT fire. The panic itself is the architectural signal; it doesn't need to recur to be page-worthy.
+
+**Diagnosis.**
+
+1. **Pull the panic value + stack trace.** The recovery path logs at ERROR level with the panic value and tag.Error. Filter:
+   ```
+   docker compose logs recon | grep -A 30 "recovered from panic"
+   ```
+   The grep window of 30 lines should cover the stack trace zap printed alongside the recover error. If you don't see a stack, check `docker compose logs --tail=200 recon` for the runtime's stderr panic dump (it prints separately from zap when the goroutine is mid-frame).
+
+2. **Identify which sweeper.** The alert's `sweeper` label is also in the log line's `error` field. `recon` / `inventory_drift` / `saga_watchdog` correspond to the loop sweepers; `once_recon` / `once_drift` correspond to the `--once` mode (k8s CronJob host).
+
+3. **Reproduce locally.** The cause is by definition deterministic if it panicked once. Stand up the same DB / Redis state, run `booking-cli recon --once`, observe the panic.
+
+**Action.**
+
+- File a bug with the panic value, stack trace, and sweeper label. The recovery is automatic; this alert exists so the panic doesn't go unnoticed.
+- Until fixed, the loop continues running but every Sweep with the same trigger will re-panic and re-bump the counter. If the panic is on a SPECIFIC event / order (not deterministic on every Sweep), the counter rises slowly; if it's on every Sweep, the counter rises at the sweep cadence rate.
+- **Do NOT remove the recover()**. It is the safety net; without it the loop dies silently and you'd discover the problem hours later via stale gauges.
+
+**Escalation.** Always page; this is a "we have a bug" signal, not a "dependency is down" signal.
+
+**Background.** This alert was added as part of the cache-truth roadmap follow-up. The silent-failure-hunter agent flagged the loop-without-recover scenario: a panic in `runSweepLoop` would kill the goroutine entirely, the metrics listener would keep serving stale values, and operators would see "recon container is healthy" while every sweep had stopped firing. The fix is twofold: defer recover() in the loop body (so the loop survives) AND a dedicated counter (so the recover isn't itself silent).
 
 ---
 

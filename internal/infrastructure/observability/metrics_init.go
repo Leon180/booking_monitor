@@ -96,4 +96,20 @@ func init() {
 	for _, outcome := range []string{"compensated", "already_compensated", "max_age_exceeded", "getbyid_error", "marshal_error", "compensator_error"} {
 		SagaWatchdogResolvedTotal.WithLabelValues(outcome)
 	}
+	// Pre-warm sweeper-panic labels (PR-D fixup). The SweepGoroutinePanic
+	// alert fires immediately on any non-zero increase, so the series
+	// MUST exist in /metrics before the first panic — otherwise
+	// `increase()` over a never-yet-emitted series returns no data
+	// (not 0) and the alert can't evaluate. Bare WithLabelValues
+	// matches the existing pre-warm pattern in this file (line 81+):
+	// the act of looking up the labelled child registers the series.
+	for _, sweeper := range []string{"recon", "inventory_drift", "saga_watchdog", "once_recon", "once_drift", "once_saga_watchdog"} {
+		sweepGoroutinePanicsTotal.WithLabelValues(sweeper)
+	}
+	// Pre-warm inventory-drift direction labels (PR-D). Same rationale
+	// as ReconResolvedTotal: dashboards should show "0 so far" not
+	// "no data" before the first drift event.
+	for _, direction := range []string{"cache_missing", "cache_high", "cache_low_excess"} {
+		InventoryDriftDetectedTotal.WithLabelValues(direction)
+	}
 }

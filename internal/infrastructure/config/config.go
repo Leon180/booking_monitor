@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	App      AppConfig      `yaml:"app"`
-	Server   ServerConfig   `yaml:"server"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Worker   WorkerConfig   `yaml:"worker"`
-	Postgres PostgresConfig `yaml:"postgres"`
-	Kafka    KafkaConfig    `yaml:"kafka"`
-	Recon    ReconConfig    `yaml:"recon"`
-	Saga     SagaConfig     `yaml:"saga"`
+	App             AppConfig             `yaml:"app"`
+	Server          ServerConfig          `yaml:"server"`
+	Redis           RedisConfig           `yaml:"redis"`
+	Worker          WorkerConfig          `yaml:"worker"`
+	Postgres        PostgresConfig        `yaml:"postgres"`
+	Kafka           KafkaConfig           `yaml:"kafka"`
+	Recon           ReconConfig           `yaml:"recon"`
+	Saga            SagaConfig            `yaml:"saga"`
+	InventoryDrift  InventoryDriftConfig  `yaml:"inventory_drift"`
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the
@@ -143,6 +144,45 @@ type SagaConfig struct {
 	// 100 orders/sweep at <50ms each = ~5s, well within
 	// WatchdogInterval. Bump if backlog grows.
 	BatchSize int `yaml:"batch_size" env:"SAGA_BATCH_SIZE" env-default:"100"`
+}
+
+// InventoryDriftConfig holds tunables for the PR-D drift detector that
+// runs in the same `recon` subcommand process. Sibling to ReconConfig
+// rather than a sub-struct because the two sweepers SHOULD tune
+// independently — the reconciler queries an EXTERNAL gateway (slow);
+// the drift detector reads the LOCAL Redis pool (sub-ms) so it can
+// afford a tighter cadence on a much larger scan.
+//
+// Final piece of the cache-truth roadmap (PR-A: Makefile reset; PR-B:
+// rehydrate-on-startup; PR-C: NOGROUP self-heal alert; PR-D: drift
+// detection). See docs/architectural_backlog.md "Cache-truth
+// architecture" for the full sequence.
+type InventoryDriftConfig struct {
+	// SweepInterval — how often the drift detector loop fires when
+	// running in default loop mode. 60s default rationale: Redis GET
+	// is sub-ms and ListAvailable scans a single index — even at 10k
+	// active events one sweep is well under a second. 60s gives the
+	// alert's `for: 5m` clause five fresh data points before paging,
+	// which is the standard SRE "transient blip vs sustained anomaly"
+	// discriminator. Lower if drift events MUST be caught faster than
+	// 5 minutes (reasonable for a high-throughput flash sale).
+	SweepInterval time.Duration `yaml:"sweep_interval" env:"INVENTORY_DRIFT_SWEEP_INTERVAL" env-default:"60s"`
+
+	// AbsoluteTolerance — the |drift| ceiling for the `cache_low_excess`
+	// branch. Drift values within this band are NOT flagged.
+	//
+	// Default 100 rationale: under steady-state load the difference
+	// between Redis (decremented immediately by Lua) and DB (decremented
+	// by the worker after async stream-consume) is bounded by inflight-
+	// bookings. At C=500 VUs with a typical 50ms worker round-trip,
+	// inflight is on the order of 25 messages. 100 leaves comfortable
+	// headroom while still catching the operationally-meaningful
+	// "worker is failing to commit hundreds of bookings" failure mode.
+	//
+	// Set lower (e.g. 10) in test environments where in-flight is
+	// always zero. Set higher only after observing sustained false
+	// positives in production at the chosen value.
+	AbsoluteTolerance int `yaml:"absolute_tolerance" env:"INVENTORY_DRIFT_ABSOLUTE_TOLERANCE" env-default:"100"`
 }
 
 type AppConfig struct {
@@ -488,6 +528,19 @@ func (c *Config) Validate() error {
 		missing = append(missing, fmt.Sprintf(
 			"saga.max_failed_age (%s) must be > saga.stuck_threshold (%s); otherwise every order the watchdog sees is immediately flagged max_age_exceeded",
 			c.Saga.MaxFailedAge, c.Saga.StuckThreshold,
+		))
+	}
+
+	// Inventory drift detector (PR-D). SweepInterval must be > 0 (zero
+	// = no sweeps ever fire); AbsoluteTolerance must be >= 0 (negative
+	// is meaningless — would flag every event including healthy ones).
+	if c.InventoryDrift.SweepInterval <= 0 {
+		missing = append(missing, "inventory_drift.sweep_interval / INVENTORY_DRIFT_SWEEP_INTERVAL (must be > 0)")
+	}
+	if c.InventoryDrift.AbsoluteTolerance < 0 {
+		missing = append(missing, fmt.Sprintf(
+			"inventory_drift.absolute_tolerance / INVENTORY_DRIFT_ABSOLUTE_TOLERANCE (must be >= 0; got %d)",
+			c.InventoryDrift.AbsoluteTolerance,
 		))
 	}
 
