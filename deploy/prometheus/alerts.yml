@@ -287,7 +287,7 @@ groups:
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagawatchdogfindstuckerrors"
           summary: "Saga watchdog sweep query is failing"
-          description: "FindStuckFailed has been failing for 2m+ at {{ $value }} errors/sec. Watchdog cannot detect stuck-Failed orders. Check DB connectivity, migration status (000011 must be applied for the partial index), and query timeouts."
+          description: "FindStuckFailed has been failing for 2m+ at {{ $value }} errors/sec. Watchdog cannot detect stuck failure-terminal orders (failed | expired | payment_failed post-D2). Check DB connectivity, migration status (000011 + 000013 must both be applied — 000011 created the partial index, 000013 widens its predicate to cover Pattern A's `expired` / `payment_failed` states), and query timeouts."
 
       - alert: SagaMaxFailedAgeExceeded
         # Fires when the watchdog flags an order older than
@@ -303,8 +303,8 @@ groups:
           severity: critical
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagamaxfailedageexceeded"
-          summary: "Saga watchdog flagged stuck Failed orders >24h old — manual review needed"
-          description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving Failed → Compensated without verifying inventory is unsafe. Investigate via order_status_history (to_status='failed') and decide manually whether to revert inventory + MarkCompensated."
+          summary: "Saga watchdog flagged stuck failure-terminal orders (failed | expired | payment_failed) >24h old — manual review needed"
+          description: "{{ $value }} order(s) exceeded SAGA_MAX_FAILED_AGE in the last hour. Watchdog will NOT auto-compensate — moving to Compensated without verifying inventory is unsafe. Investigate via order_status_history (to_status IN ('failed', 'expired', 'payment_failed')) and decide manually whether to revert inventory + MarkCompensated. Note: as of D2 (Pattern A), three failure-terminal statuses can be 'stuck' — `failed` (legacy A4), `expired` (Pattern A reservation TTL), and `payment_failed` (Pattern A webhook failure)."
 
       - alert: IdempotencyCacheGetErrors
         # Fires when the idempotency-cache GET path errors persistently.

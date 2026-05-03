@@ -303,14 +303,16 @@ silence / inhibit / notification log.
 
 **Symptom.** `increase(saga_watchdog_resolved_total{outcome="max_age_exceeded"}[1h]) > 0`. Severity `critical`.
 
-**Why this is different from `ReconMaxAgeExceeded`.** Recon force-fails. Watchdog DOES NOT auto-transition (moving Failed → Compensated without verifying inventory was reverted is unsafe). Operator decides manually.
+**Why this is different from `ReconMaxAgeExceeded`.** Recon force-fails. Watchdog DOES NOT auto-transition (moving any failure-terminal status → Compensated without verifying inventory was reverted is unsafe). Operator decides manually.
+
+**Scope (post-D2 / Pattern A).** The watchdog's `FindStuckFailed` query covers all three failure-terminal statuses that compensation accepts: `failed` (legacy A4 worker / charging-fail path), `expired` (Pattern A reservation TTL), `payment_failed` (Pattern A webhook failure). All three reach `Compensated` via the same compensator, so the alert and triage flow are unified.
 
 **Action.**
-- `psql ... -c "SELECT id, user_id, event_id, updated_at FROM orders WHERE status='failed' AND updated_at < NOW() - interval '24 hours'"`.
+- `psql ... -c "SELECT id, user_id, event_id, status, updated_at FROM orders WHERE status IN ('failed', 'expired', 'payment_failed') AND updated_at < NOW() - interval '24 hours'"`.
 
-  Query the `orders` table directly, NOT `order_status_history` — the alert intent is "currently stuck in Failed", and the history table records every transition into Failed including ones that have since been Compensated. Querying history would give false positives for orders the saga consumer eventually compensated.
+  Query the `orders` table directly, NOT `order_status_history` — the alert intent is "currently stuck in a failure-terminal status", and the history table records every transition including ones that have since been Compensated. Querying history would give false positives for orders the saga consumer eventually compensated.
 
-- For each order returned: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering.
+- For each order returned: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering. The remediation step is the same regardless of which failure-terminal status the order is stuck in (the compensator widens accordingly in D2).
 
 ---
 

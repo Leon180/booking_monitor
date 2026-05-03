@@ -255,7 +255,7 @@ The current alert catalog:
 | `SagaStuckFailedOrders` | warning | `saga_stuck_failed_orders > 0 for 10m` — compensator failing repeatedly |
 | `SagaCompensatorErrors` | warning | `rate(saga_watchdog_resolved_total{outcome="compensator_error"}[5m]) > 0 for 2m` — fast-path companion; catches a 100%-failing compensator before the gauge alert's 10m window elapses |
 | `SagaWatchdogFindStuckErrors` | critical | Watchdog sweep query failing — gauge goes blind |
-| `SagaMaxFailedAgeExceeded` | critical | Stuck Failed orders >24h — manual review needed (watchdog will NOT auto-transition) |
+| `SagaMaxFailedAgeExceeded` | critical | Stuck failure-terminal orders >24h — manual review needed (watchdog will NOT auto-transition). As of D2 (Pattern A) the watchdog covers `failed` (legacy A4) + `expired` (Pattern A reservation TTL) + `payment_failed` (Pattern A webhook failure); all three reach Compensated via the same compensator. |
 | `KafkaConsumerStuck` | warning | Consumer rebalance retries — downstream dependency degraded |
 | `IdempotencyCacheGetErrors` | warning | `idempotency_cache_get_errors_total` rate > 0 for 1m — duplicate-charge protection suspended |
 | `DBRollbackFailures` | warning | `db_rollback_failures_total` rate > 0 for 5m — UoW rollback failing (driver / connection-state bug) |

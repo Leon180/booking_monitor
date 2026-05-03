@@ -262,12 +262,19 @@ func TestOrder_Transitions_IllegalSource(t *testing.T) {
 		{"MarkCompensated from Paid", domain.OrderStatusPaid, domain.Order.MarkCompensated, domain.ErrInvalidTransition},
 
 		// D2 — Pattern A transitions. Each only accepts a narrow source.
-		// MarkAwaitingPayment: only Pending is legal.
+		// MarkAwaitingPayment: only Pending is legal. Every other source
+		// state must be illegal — including the failure-terminal trio
+		// (Failed | Compensated | PaymentFailed) so a watchdog or recon
+		// re-drive can never accidentally walk a terminal order back into
+		// the reservation flow.
 		{"MarkAwaitingPayment from Charging", domain.OrderStatusCharging, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
 		{"MarkAwaitingPayment from AwaitingPayment", domain.OrderStatusAwaitingPayment, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
 		{"MarkAwaitingPayment from Confirmed", domain.OrderStatusConfirmed, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
 		{"MarkAwaitingPayment from Paid", domain.OrderStatusPaid, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
 		{"MarkAwaitingPayment from Expired", domain.OrderStatusExpired, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from Failed", domain.OrderStatusFailed, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from Compensated", domain.OrderStatusCompensated, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
+		{"MarkAwaitingPayment from PaymentFailed", domain.OrderStatusPaymentFailed, domain.Order.MarkAwaitingPayment, domain.ErrInvalidTransition},
 		// MarkPaid: only AwaitingPayment is legal.
 		{"MarkPaid from Pending", domain.OrderStatusPending, domain.Order.MarkPaid, domain.ErrInvalidTransition},
 		{"MarkPaid from Charging", domain.OrderStatusCharging, domain.Order.MarkPaid, domain.ErrInvalidTransition},
@@ -337,4 +344,57 @@ func TestNewOrder_ErrorClassesDistinct(t *testing.T) {
 	assert.False(t, errors.Is(errUser, domain.ErrInvalidEventID))
 	assert.True(t, errors.Is(errEvent, domain.ErrInvalidEventID))
 	assert.True(t, errors.Is(errQty, domain.ErrInvalidQuantity))
+}
+
+// TestOrderStatus_IsValid_Exhaustiveness asserts that every OrderStatus
+// constant exported from the domain package is recognised by IsValid.
+// Go has no compile-time exhaustiveness check for typed strings, so a
+// new constant added without updating IsValid would silently fail open
+// — StatusFilter() (api/dto layer) maps unrecognised statuses to "no
+// filter, return everything", which has historically been a footgun
+// (see PR #75 dto regression where adding "expired" to the test
+// sentinel masked the new Pattern A status as the unknown).
+//
+// This test enumerates the canonical list explicitly so adding a new
+// status WITHOUT also adding it to IsValid + this test produces a
+// failing test diff at code-review time. The test fails LOUDLY (assert
+// per-status) so reviewers see exactly which status was overlooked.
+func TestOrderStatus_IsValid_Exhaustiveness(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		status domain.OrderStatus
+	}{
+		// Legacy / A4 set.
+		{"Confirmed", domain.OrderStatusConfirmed},
+		{"Pending", domain.OrderStatusPending},
+		{"Charging", domain.OrderStatusCharging},
+		{"Failed", domain.OrderStatusFailed},
+		// Pattern A set (D2).
+		{"AwaitingPayment", domain.OrderStatusAwaitingPayment},
+		{"Paid", domain.OrderStatusPaid},
+		{"Expired", domain.OrderStatusExpired},
+		{"PaymentFailed", domain.OrderStatusPaymentFailed},
+		// Shared terminal.
+		{"Compensated", domain.OrderStatusCompensated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.True(t, tc.status.IsValid(),
+				"OrderStatus(%q) must be recognised by IsValid — adding a new status without updating IsValid is a footgun (StatusFilter would silently degrade to 'no filter')", tc.status)
+		})
+	}
+
+	// Negative companion: a string that looks like a status but isn't
+	// declared as a constant must NOT be IsValid. Catches the case
+	// where IsValid drifts to `return true` (always-pass).
+	t.Run("unknown status rejected", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, domain.OrderStatus("definitely_not_a_real_status").IsValid(),
+			"IsValid must reject strings that aren't declared OrderStatus constants")
+		assert.False(t, domain.OrderStatus("").IsValid(),
+			"IsValid must reject empty string")
+	})
 }
