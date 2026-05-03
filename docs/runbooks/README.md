@@ -435,6 +435,8 @@ silence / inhibit / notification log.
    ```
    If you see a stuck PID with `state = 'idle in transaction'` for minutes — that's the culprit. `SELECT pg_terminate_backend(<pid>)` releases the lock; the next relay poll grabs it.
 
+   **Verify `state` BEFORE terminating.** `pg_terminate_backend` cancels the session immediately with no rollback grace period. `idle in transaction` = safe to terminate (no in-flight DML; the lock is the only state). `active` = mid-query, in-flight DML will roll back — for the relay this is benign (its `UPDATE events_outbox SET processed_at = ...` rows just re-appear as pending and get re-processed on the next poll), but for any other backend that happens to hold a different advisory lock you'd be killing legitimate work. Always read `state` from the query above before pasting the PID.
+
 3. **Is Kafka reachable?** Even if the relay is alive and holding the lock, broker unreachability blocks publish:
    ```
    docker compose logs app | grep -i "kafka.*error\|broker"
@@ -478,7 +480,7 @@ silence / inhibit / notification log.
 **Action.**
 
 - DB outage → fix the DB (separate ticket); alert clears within one scrape after recovery.
-- Missing migration → `make migrate-up`. Index is `CONCURRENTLY` so it can be added in production without locking the table.
+- Missing migration → `make migrate-up`. Migration 000007 uses `CREATE INDEX CONCURRENTLY` and is tagged `-- golang-migrate: no-transaction`, so it does NOT block writes when the migrate runner honours the pragma. **Verify your migrate toolchain handles the `no-transaction` pragma correctly before running against a live primary** — if not, drop in via the manual `psql` route outside a transaction window. The migration file itself documents the fall-back path.
 - Query timeout → bump `outboxPendingScrapeBudget` (currently 1s) only after confirming the partial index exists. The right fix is the index, not the budget.
 
 **Escalation.** Pages with `OutboxPendingCollectorDown` should always be cross-checked against `TargetDown` — if both fire, the entire scrape job is degraded, not just this collector.
