@@ -87,3 +87,31 @@ func registerDBPoolCollector(db *sql.DB) error {
 	}
 	return nil
 }
+
+// registerOutboxPendingCollector publishes the count of unprocessed
+// transactional-outbox rows as a gauge (see
+// observability.OutboxPendingCollector). Idempotent
+// AlreadyRegisteredError handling like registerDBPoolCollector, with
+// one addition: log at Warn level when re-registration occurs.
+//
+// Why the extra log: this collector is the sole source of the
+// `outbox_pending_count` gauge that drives a critical alert path. If
+// a future code path constructs a second OutboxPendingCollector
+// against a DIFFERENT *sql.DB (e.g., a misconfigured fx wiring with
+// duplicate provides), the AlreadyRegisteredError swallow would
+// silently keep the FIRST DB's collector alive — the second DB's
+// outbox state would be invisible in metrics, and dashboards would
+// silently mis-report. The Warn line makes the reuse auditable so
+// the mismatch surfaces in logs even when registration "succeeds".
+func registerOutboxPendingCollector(db *sql.DB, logger *mlog.Logger) error {
+	if err := prometheus.DefaultRegisterer.Register(observability.NewOutboxPendingCollector(db)); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("registerOutboxPendingCollector: %w", err)
+		}
+		logger.Warn(context.Background(),
+			"outbox pending collector already registered, reusing existing instance",
+			mlog.String("existing_type", fmt.Sprintf("%T", are.ExistingCollector)))
+	}
+	return nil
+}

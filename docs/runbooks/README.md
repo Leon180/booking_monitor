@@ -62,6 +62,10 @@ silence / inhibit / notification log.
 - [SweepGoroutinePanic](#sweepgoroutinepanic)
 - [KafkaConsumerStuck](#kafkaconsumerstuck)
 
+### Outbox (Kafka publish bridge)
+- [OutboxPendingBacklog](#outboxpendingbacklog)
+- [OutboxPendingCollectorDown](#outboxpendingcollectordown)
+
 ### Meta (scrape health)
 - [TargetDown](#targetdown)
 
@@ -478,6 +482,82 @@ Redis < DB by more than tolerance. Steady-state drift is positive (in-flight boo
 **Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
 
 **Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+
+---
+
+## OutboxPendingBacklog
+
+**Symptom.** `outbox_pending_count > 100 for 5m`. Severity `warning`. The transactional outbox is the bridge between "DB committed an `order.created` / `order.failed` event" and "Kafka downstream consumers see it" — when this fires the bridge is broken.
+
+**Why this is warning, not critical.** Customers can still book. The Redis hot path is unaffected. What's broken is the post-commit fan-out — saga compensator stops compensating, payment service stops processing, in-flight orders cannot advance from `processing` to `confirmed` / `failed`. The customer-visible damage takes minutes to surface (a 202 with no progress on `GET /orders/:id`); page-worthy via Slack/email but not phone.
+
+**Diagnosis (in order):**
+
+1. **Is the relay container actually alive?** The relay runs inside the `app` container today (will be split out under k8s). Check:
+   ```
+   docker compose logs app | grep "outbox relay"
+   docker compose ps app
+   ```
+   A healthy relay logs poll-cycle entries; a wedged one stops logging entirely.
+
+2. **Is a zombie tx holding the advisory lock?** The relay uses `pg_try_advisory_lock(1001)` for leader election. A crashed or hung tx still holding the lock blocks every other replica from taking over:
+   ```sql
+   SELECT pid, usename, state, query, query_start
+   FROM pg_locks l
+   JOIN pg_stat_activity a USING (pid)
+   WHERE l.locktype = 'advisory' AND l.objid = 1001;
+   ```
+   If you see a stuck PID with `state = 'idle in transaction'` for minutes — that's the culprit. `SELECT pg_terminate_backend(<pid>)` releases the lock; the next relay poll grabs it.
+
+   **Verify `state` BEFORE terminating.** `pg_terminate_backend` cancels the session immediately with no rollback grace period. `idle in transaction` = safe to terminate (no in-flight DML; the lock is the only state). `active` = mid-query, in-flight DML will roll back — for the relay this is benign (its `UPDATE events_outbox SET processed_at = ...` rows just re-appear as pending and get re-processed on the next poll), but for any other backend that happens to hold a different advisory lock you'd be killing legitimate work. Always read `state` from the query above before pasting the PID.
+
+3. **Is Kafka reachable?** Even if the relay is alive and holding the lock, broker unreachability blocks publish:
+   ```
+   docker compose logs app | grep -i "kafka.*error\|broker"
+   docker compose exec kafka kafka-broker-api-versions --bootstrap-server localhost:9092
+   ```
+
+4. **Is `events_outbox` actually growing or just bouncing on the threshold?** Run:
+   ```sql
+   SELECT MIN(created_at), MAX(created_at), COUNT(*)
+   FROM events_outbox WHERE processed_at IS NULL;
+   ```
+   `MAX - MIN` should be small (relay processes oldest-first). If `MIN` is hours old, the relay is wedged on a specific row.
+
+**Action.**
+
+- **Stuck advisory lock:** terminate the holder (above).
+- **Stuck on a poison row:** find the `MIN(created_at)` row's id and inspect its payload. If malformed, manually `UPDATE events_outbox SET processed_at = NOW(), status = 'POISON_SKIPPED' WHERE id = '<id>'` and file a bug for whoever produced it.
+- **Relay container hung:** `docker compose restart app` (or in k8s, `kubectl rollout restart deployment/app`).
+
+**Escalation.** Critical if backlog > 1000 OR sustained > 30m — at that scale customer 202s are going to start visibly stalling and product / support need a heads-up.
+
+**Background.** This alert was added as part of the cache-truth roadmap follow-up. The PR-D drift detector caught Redis↔DB inventory drift, but the outbox-relay-broken failure mode (saga compensator goes quiet → Redis inventory leaked → drift detector eventually fires `cache_low_excess`) was previously detectable only via downstream effects, minutes-to-hours after the relay actually broke. This alert closes that gap.
+
+---
+
+## OutboxPendingCollectorDown
+
+**Symptom.** `rate(outbox_pending_collector_errors_total[5m]) > 0 for 2m`. Severity `critical`. Mirrors `RedisStreamCollectorDown` discipline: while this fires, `outbox_pending_count` is silent or stale, and `OutboxPendingBacklog` cannot fire — operators see "no backlog alert" and assume health when the collector is actually blind.
+
+**Diagnosis.**
+
+1. **Is the DB reachable?** `docker compose logs app | grep -i "postgres\|db.*error"` — a sustained connectivity failure produces this counter at high rate.
+2. **Is the partial index on `events_outbox` present?** Migration 000007 added `CREATE INDEX ... ON events_outbox(id) WHERE processed_at IS NULL`. Without it, the COUNT query fans out to the full table and may exceed the 1s scrape budget under load:
+   ```sql
+   SELECT indexname FROM pg_indexes
+   WHERE tablename = 'events_outbox' AND indexdef LIKE '%processed_at IS NULL%';
+   ```
+   If empty, re-run `make migrate-up`.
+3. **Query timeout under load?** If the gauge collector is timing out specifically during high-load windows, `pg_pool_in_use` will be pinned. Cross-check `pg_pool_*` gauges.
+
+**Action.**
+
+- DB outage → fix the DB (separate ticket); alert clears within one scrape after recovery.
+- Missing migration → `make migrate-up`. Migration 000007 uses `CREATE INDEX CONCURRENTLY` and is tagged `-- golang-migrate: no-transaction`, so it does NOT block writes when the migrate runner honours the pragma. **Verify your migrate toolchain handles the `no-transaction` pragma correctly before running against a live primary** — if not, drop in via the manual `psql` route outside a transaction window. The migration file itself documents the fall-back path.
+- Query timeout → bump `outboxPendingScrapeBudget` (currently 1s) only after confirming the partial index exists. The right fix is the index, not the budget.
+
+**Escalation.** Pages with `OutboxPendingCollectorDown` should always be cross-checked against `TargetDown` — if both fire, the entire scrape job is degraded, not just this collector.
 
 ---
 

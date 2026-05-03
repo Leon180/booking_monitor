@@ -56,5 +56,14 @@ func CommonModule(cfg *config.Config) fx.Option {
 		postgresRepo.Module,
 		fx.Invoke(observability.RegisterRuntimeMetrics),
 		fx.Invoke(registerDBPoolCollector),
+		// Outbox pending-backlog collector. Lives in CommonModule
+		// because the metric MUST be available wherever the *sql.DB is
+		// — including subcommands that don't run the relay (recon /
+		// saga-watchdog) so a multi-process deploy can still scrape the
+		// gauge from any pod. Closes the cache-truth-roadmap follow-up
+		// gap: outbox-relay failure was previously detectable only via
+		// downstream effects (saga compensator silent, customer 202s
+		// never advancing).
+		fx.Invoke(registerOutboxPendingCollector),
 	)
 }
