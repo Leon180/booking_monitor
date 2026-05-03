@@ -59,7 +59,7 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
 
 > **Scope decision (2026-05-03):** trimmed from the original ~9–13 wk plan. Senior-engineer interviews almost never click through to a polished demo UI — they read README + PR history + benchmark archive + maybe a short asciinema. Frontend mission-control SSE (D11) and the React frontend comparison view (D13) cost 7-10 weeks for ~5% interview-impact value, so they were cut. The minimal Stripe Elements page (D8-minimal, replacing original D8) stays because Taiwan-local interviews (KKTIX / Pinkoi / 91APP / 街口) DO weight portfolio sites slightly higher, and "let a non-engineer click through Stripe checkout" is the threshold for that. D9 (k6 scenario for two-step flow) and D10 (demo recording) are kept but trimmed: terminal-recorded asciinema replaces the original "5-minute video with mission-control overlay" scope.
 >
-> **Replaced with:** README architecture diagram (mermaid / excalidraw, ~1 day), curated benchmark archive comparison report (~1 day), asciinema terminal walkthrough (~1 day), engineering blog post documenting the architecture-evolution narrative + key decisions (cache-truth roadmap, Lua single-thread ceiling, Docker Mac NAT cap, recon failure recovery) (~2-3 days). Total replacement cost ~3-5 days vs ~7-10 weeks original.
+> **Replaced with:** D14 README architecture diagram (mermaid, ~1 day), D15 multi-post engineering blog series under `docs/blog/` using a hybrid-STAR template (~3-5 days, paced incrementally), D16 CHANGELOG.md + retroactive git tags + GitHub Releases page (~1 day, highest ROI of the three because it surfaces architecture-evolution at the GitHub repo entry). Asciinema terminal walkthrough lands as D10-minimal under "Minimal demo polish" rather than the portfolio-narrative section. Total replacement cost ~5-7 days vs ~7-10 weeks original.
 
   3a. Pattern A core (~3–5 wk) — UNCHANGED, this is the real architectural learning
   D1   schema migration: add orders.reserved_until + orders.payment_intent_id; new status `awaiting_payment`
@@ -84,22 +84,47 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
        Each binary registers Prometheus default labels with constant `version_tag={stage1..stage4}` so Grafana can split by version. Each implements only `POST /api/v1/book` for the comparison; full feature set stays on Stage 4. `docker-compose` gets a `comparison` profile spinning up all four on ports 8081–8084. Shared Postgres + Redis instances with namespace isolation (per-stage Postgres database, per-stage Redis DB index). k6 takes `--target=http://localhost:8081` argument; results stored under `docs/benchmarks/comparisons/<timestamp>/{stage1,stage2,stage3,stage4}/`.
        **Output: a markdown comparison report (`docs/benchmarks/comparisons/<ts>/comparison.md`) with a table + collapsed plots — NOT a React frontend.** The Recharts visualization originally in D13 is dropped; the markdown comparison stands on its own as interview material.
 
-  3c. Portfolio narrative (~3–5 days; runs in parallel with D8-D10 minimal)
+  3c. Portfolio narrative (~5–7 days; runs in parallel with D8-D10 minimal)
   D14  README architecture diagram — mermaid sequence diagram(s) showing: (a) the four-stage architecture evolution (Stage 1 → Stage 4), and (b) the Pattern A reservation→payment→webhook flow with saga compensation. Embed in main README + cross-link from PROJECT_SPEC. (~1 day)
-  D15  Engineering blog post — long-form narrative on the architecture-evolution arc:
-       - Why Stage 1 doesn't scale (PG row-lock contention)
-       - Why we added Redis (Lua atomic deduct) and what it costs
-       - The cache-truth roadmap (PR-A through PR-D — why "cache as truth" was wrong, what we learned from the FLUSHALL incident)
-       - Lua single-thread ceiling at 8,330 acc/s and how to think about the next 10×
-       - Docker Mac NAT cap discovery (Phase 5 / O3.2)
-       - Recon failure recovery story (saga + watchdog + drift detector layers)
-       Target: 2-3k words, GitHub-flavored markdown, lives at `docs/blog/architecture-evolution.md`. (~2-3 days)
+
+  D15  Engineering blog series under `docs/blog/` — multi-post format using a hybrid-STAR template (decision made 2026-05-03 after reviewing pure STAR vs free-form options).
+       **Why in-repo `docs/blog/` and NOT external (Medium / Hashnode):** posts can reference specific commit/PR SHAs without context-switching, GitHub renders mermaid + code blocks natively, no separate site to maintain. Reviewers can prose↔code in one tab.
+       **Why hybrid-STAR (not pure STAR):** pure STAR is interview-prep mechanical; engineering decisions need quantitative evidence + trade-off detail that doesn't fit in STAR's "Result" cell. The hybrid keeps STAR's interview-answer structure while giving each section enough room for benchmark tables, code excerpts, and citations.
+       **Per-post template** (each post = one architectural decision):
+       ```
+       # Title — concrete technical decision (e.g., "Why Redis is ephemeral, not durable")
+       ## Context              ← Situation + Task merged. Quantified if possible.
+       ## Options Considered   ← 2-4 alternatives, each with 1-2 sentence trade-off.
+       ## Decision             ← The chosen option + rationale + PR/commit references.
+       ## Result               ← Benchmark numbers, second-order effects, industry citations.
+       ## Lessons              ← Honest hindsight. Senior interviews weight this heavily.
+       ```
+       **First batch (~3-5 posts, written incrementally — don't block on completing all of them):**
+       - **Cache-truth architecture: why Redis is ephemeral, not durable** (PR-A→PR-D, the FLUSHALL incident)
+       - **The Lua single-thread ceiling: 8,330 acc/s and how to think about the next 10×** (VU stress test + 1M QPS analysis)
+       - **Recon + drift detection: building the safety net after the silent-loss incident**
+       - **Why Docker Desktop on Mac caps your benchmark at ~80k req/s** (write AFTER O3.2 variant B has data — currently estimated)
+       - **Saga compensation in production-shape Go: outbox + watchdog + idempotency**
+       Target: ~1000-1500 words per post, 1-2 days each. **Pace: write 3 posts before Phase 3 finishes; the rest can land post-roadmap as portfolio additions.**
+
+  D16  Repo storytelling — `CHANGELOG.md` + retroactive git tags + GitHub Releases (~1 day, highest ROI of the portfolio-narrative tasks).
+       **Why this exists:** the GitHub repo entry currently shows a flat list of 70+ PRs with no architectural-milestone visual. Recruiters / interviewers don't piece architecture evolution together from PR titles. A CHANGELOG + Releases page IS the architecture timeline, in the place GitHub surfaces it most prominently.
+       **Format:** [Keep a Changelog](https://keepachangelog.com/) at repo root. Each entry one-line summary + grouped under a milestone version.
+       **Retroactive tags** at architectural milestones (don't tag every PR — tag the inflection points):
+       - `v0.1.0` — Phase 1 baseline (synchronous Stage 1 + 2 architecture)
+       - `v0.2.0` — Phase 1 complete + Redis Lua hot path + outbox + saga (Stage 4 architecture, pre-Phase-2)
+       - `v0.3.0` — Phase 2 complete (CP1-CP9: reconciler + watchdog + checkpoints + alertmanager)
+       - `v0.4.0` — Cache-truth roadmap complete (PR #73-#77: Makefile reset / rehydrate / NOGROUP alert / drift detector / outbox backlog) ← we are HERE as of 2026-05-03
+       - `v0.5.0` — Pattern A complete (D1-D7: reservation + payment + webhook + expiry sweeper)
+       - `v1.0.0` — Phase 3 complete (D1-D16: Pattern A + comparison harness + minimal frontend + CHANGELOG + blog)
+       **GitHub Releases page** for each tag — 2-3 paragraph release notes (can paste from CHANGELOG entry), list of included PRs (`Includes: #45, #46, ...`). The Releases URL becomes the resume bullet's anchor: "https://github.com/Leon180/booking_monitor/releases" replaces "browse my PR history" as the architectural-evolution surface.
+       **Order:** D16 lands EARLY in Phase 3 (week 1-2) so the existing v0.4.0 milestone is captured BEFORE Pattern A starts adding new commits — retroactive tagging is much cleaner against a static SHA range than a moving HEAD.
 
 ### Explicitly DEFERRED / DROPPED from Phase 3
 
 | ID | Original scope | Why dropped |
 | :-- | :-- | :-- |
-| D11 | Live mission-control SSE dashboard (React Flow pipeline animation) | High build cost (~1-2 wk), low interview signal. Senior reviewers don't watch demos; they read code + benchmarks. The visual story is told via D14 mermaid diagrams + D15 blog post + D12 comparison.md instead. |
+| D11 | Live mission-control SSE dashboard (React Flow pipeline animation) | High build cost (~1-2 wk), low interview signal. Senior reviewers don't watch demos; they read code + benchmarks. The visual story is told via D14 mermaid diagrams + D15 blog series + D16 CHANGELOG/Releases + D12 comparison.md instead. |
 | D13 | Frontend comparison view (Recharts side-by-side) | Same rationale. The markdown comparison report from D12 is interview-suitable on its own; an HTML chart adds polish but no signal. |
 | D9 (original full scope) | Multi-stage k6 comparison + per-stage baselines | Folded into D12 — comparison.md captures all per-stage runs at once. Standalone D9-minimal keeps just the Pattern A two-step baseline. |
 | D10 (original full scope) | 5-minute video walkthrough with mission-control overlay | Replaced by D10-minimal asciinema. Senior interview viewers prefer asciinema (proves CLI literacy + reproducibility) over edited video (proves nothing about engineering). |
