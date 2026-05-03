@@ -1,5 +1,7 @@
 # Why Redis is ephemeral, not durable — the 411-of-1000 silent message loss that drove our cache-truth refactor
 
+> 中文版本(主要):[2026-05-cache-truth-architecture.zh-TW.md](2026-05-cache-truth-architecture.zh-TW.md)
+
 > **TL;DR.** A FLUSHALL during smoke testing dropped 411 of 1000 in-flight messages and we couldn't tell. The fix wasn't to make Redis durable — it was to commit to "Redis ephemeral, Postgres source of truth, drift detected and named" as an explicit architectural contract, then build the rehydrate / NOGROUP-self-heal-alert / drift-detector layers that contract requires. Five PRs, ~6 weeks elapsed, ~1,300 LOC. Quantitative outcome: drift detector confirms zero unintended drift across multiple stress runs; consumer-group recreation counter stays at 0. The deeper outcome: a coherent answer to "what does Redis do here?" that previously had no clean phrasing.
 
 Pairs with [v0.4.0 release](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0). For the series template, see [`docs/blog/README.md`](README.md).
