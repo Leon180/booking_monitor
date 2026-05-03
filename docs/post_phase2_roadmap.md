@@ -55,9 +55,13 @@ Phase 2.5 (cleanup, ~1 wk)
   CP8  header-bearing N4 benchmark (row 17) — DONE in PR #59 (2026-05-01). See [`docs/benchmarks/20260501_175422_compare_c500/comparison.md`](benchmarks/20260501_175422_compare_c500/comparison.md). Result: N4 fingerprint path costs ≈18% RPS / ≈46% p95 vs no-header baseline at 500 VUs (cold-path: SETNX + SHA-256 fingerprint + payload-write — two extra Redis round-trips dominate). Materially higher than the pre-N4 estimate of "<2% RPS / 2-5% p95"; calibration captured for capacity planning. Bundled with the k6_comparison.js 200→202 contract fix surfaced by the prior CP3b no-regression run.
   CP9  Grafana dashboard panels for recon / saga / DLQ / DB pool / cache (row 18) — DONE in PR #60 (2026-05-01). 6 collapsible row sections + 18 new panels added to `deploy/grafana/provisioning/dashboards/dashboard.json` covering A4 recon, A5 saga watchdog, Kafka+Redis DLQ activity, PG pool USE method, idempotency cache hit-rate / errors / replay outcomes, and Redis stream/DLQ infra failures. Queries mirror the alert exprs in `deploy/prometheus/alerts.yml` so an alert that fires has a matching panel for triage. `docs/monitoring.md` + zh-TW §4 updated with the full panel inventory.
 
-Phase 3 (demo readiness, ~9–13 wk total) — Pattern A + live mission control + 4-version comparison
+Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern A + 4-version comparison + minimal frontend
 
-  3a. Pattern A core (~3–5 wk)
+> **Scope decision (2026-05-03):** trimmed from the original ~9–13 wk plan. Senior-engineer interviews almost never click through to a polished demo UI — they read README + PR history + benchmark archive + maybe a short asciinema. Frontend mission-control SSE (D11) and the React frontend comparison view (D13) cost 7-10 weeks for ~5% interview-impact value, so they were cut. The minimal Stripe Elements page (D8-minimal, replacing original D8) stays because Taiwan-local interviews (KKTIX / Pinkoi / 91APP / 街口) DO weight portfolio sites slightly higher, and "let a non-engineer click through Stripe checkout" is the threshold for that. D9 (k6 scenario for two-step flow) and D10 (demo recording) are kept but trimmed: terminal-recorded asciinema replaces the original "5-minute video with mission-control overlay" scope.
+>
+> **Replaced with:** README architecture diagram (mermaid / excalidraw, ~1 day), curated benchmark archive comparison report (~1 day), asciinema terminal walkthrough (~1 day), engineering blog post documenting the architecture-evolution narrative + key decisions (cache-truth roadmap, Lua single-thread ceiling, Docker Mac NAT cap, recon failure recovery) (~2-3 days). Total replacement cost ~3-5 days vs ~7-10 weeks original.
+
+  3a. Pattern A core (~3–5 wk) — UNCHANGED, this is the real architectural learning
   D1   schema migration: add orders.reserved_until + orders.payment_intent_id; new status `awaiting_payment`
   D2   domain state machine: pending → awaiting_payment → paid | expired | failed
   D3   POST /api/v1/book becomes a reservation (TTL 10–15 min); response includes payment_intent metadata
@@ -66,25 +70,39 @@ Phase 3 (demo readiness, ~9–13 wk total) — Pattern A + live mission control 
   D6   reservation expiry sweeper (mirrors A5 watchdog shape): scan `awaiting_payment` past `reserved_until`, transition → expired, revert Redis inventory via revert.lua
   D7   payment_worker stops being a saga consumer for the happy path. Saga compensator scope narrows to {expired, payment_failed}.
 
-  3b. Demo polish (~6–8 wk; D12 runs in parallel with 3a)
-  D8   frontend bootstrap: `web/` workspace (Next.js + Stripe Elements + MockStripeAdapter for credential-free demo)
-  D9   load-test refresh: k6 scenario script for the two-step flow; baseline capture
-  D10  demo recording: ~5-minute video walkthrough (now richer because D11/D13 are in scope) — mission-control view of normal flow → push spike load → watch Stage 1 collapse → same load on Stage 4 → reservation/payment/webhook flow → expiry sweep → saga compensation example
+  3b. Minimal demo polish (~1 wk total — replaces original 6–8 wk plan)
+  D8-minimal   Minimal Next.js page in `web/` workspace: Stripe Elements payment form + reservation status / countdown display, mounted with `client_secret` from D4. NO admin dashboard, NO React Flow pipeline animation, NO comparison charts. Single-page, demo-purpose only. Uses MockStripeAdapter so demo runs without Stripe credentials. (~3-5 days)
+  D9-minimal   k6 scenario script for the two-step reservation+payment flow; one baseline capture under `docs/benchmarks/`. Skip the multi-stage comparison runs that the original D9 implied — those land in D12. (~1 day)
+  D10-minimal  Asciinema terminal recording (~2-3 minutes): `make demo-up` → curl reservation → curl payment → curl `/api/v1/orders/:id` showing the state transitions. Plus an embedded link in README. NO video editing, NO mission-control overlay. (~1 day)
 
-  D11  live mission-control dashboard (~1–2 wk)
-       Backend: `GET /api/v1/admin/stream` (SSE). Polls own `/metrics` every 250ms, diffs, pushes deltas to all subscribers + initial-snapshot on connect. Gated on `ENABLE_ADMIN_DEMO=true` (separate from `ENABLE_PPROF`; off in prod).
-       Frontend (in `web/` workspace from D8): live counters (inventory remaining, orders by status, stream depth, DLQ count, watchdog/recon recent activity, p99 sliding window) + **animated pipeline diagram** built with React Flow — orders rendered as dots flowing Redis → worker → DB → outbox → Kafka → payment → confirmed/failed. The animation IS the demo's killer visual.
-
-  D12  4-version multi-cmd comparison harness (~4 wk; can start in parallel with 3a)
+  D12  4-version multi-cmd comparison harness (~4 wk) — UNCHANGED, this is THE senior-interview talking point
        Same `internal/` packages, different fx wirings under separate `cmd/` entries — Clean Architecture as the answer:
        - `cmd/booking-cli-stage1/` — API → Postgres `SELECT FOR UPDATE`. No Redis, no Kafka, no async, no saga. Pure synchronous baseline. Estimated 30 LOC main.go.
        - `cmd/booking-cli-stage2/` — API → Redis Lua atomic deduct → SYNCHRONOUS DB write. Inventory in Redis but no async buffering.
        - `cmd/booking-cli-stage3/` — API → Redis Lua → `orders:stream` → worker → DB. Async + worker pool, but no event-driven downstream (no Kafka outbox, no payment service, no saga).
        - `cmd/booking-cli-stage4/` — current `cmd/booking-cli/` as canonical Stage 4. No rename; just add the version label.
        Each binary registers Prometheus default labels with constant `version_tag={stage1..stage4}` so Grafana can split by version. Each implements only `POST /api/v1/book` for the comparison; full feature set stays on Stage 4. `docker-compose` gets a `comparison` profile spinning up all four on ports 8081–8084. Shared Postgres + Redis instances with namespace isolation (per-stage Postgres database, per-stage Redis DB index). k6 takes `--target=http://localhost:8081` argument; results stored under `docs/benchmarks/comparisons/<timestamp>/{stage1,stage2,stage3,stage4}/`.
+       **Output: a markdown comparison report (`docs/benchmarks/comparisons/<ts>/comparison.md`) with a table + collapsed plots — NOT a React frontend.** The Recharts visualization originally in D13 is dropped; the markdown comparison stands on its own as interview material.
 
-  D13  frontend comparison view (~1–2 wk; depends on D12)
-       Reads benchmark archive JSON from `docs/benchmarks/comparisons/`. Side-by-side time-series charts (RPS over time, p99 latency, error rate, conversion) with Recharts/Chart.js. Annotated callouts: "Stage 1 collapses at 4K RPS due to PG row-lock contention", "Stage 2 stops scaling at 11K RPS because synchronous DB write becomes the bottleneck", etc. Optional `Run benchmark now` button: POSTs to `/api/v1/admin/benchmark?stage=N&duration=60s` → backend triggers k6 against the selected stage → streams progress via the same SSE channel as D11.
+  3c. Portfolio narrative (~3–5 days; runs in parallel with D8-D10 minimal)
+  D14  README architecture diagram — mermaid sequence diagram(s) showing: (a) the four-stage architecture evolution (Stage 1 → Stage 4), and (b) the Pattern A reservation→payment→webhook flow with saga compensation. Embed in main README + cross-link from PROJECT_SPEC. (~1 day)
+  D15  Engineering blog post — long-form narrative on the architecture-evolution arc:
+       - Why Stage 1 doesn't scale (PG row-lock contention)
+       - Why we added Redis (Lua atomic deduct) and what it costs
+       - The cache-truth roadmap (PR-A through PR-D — why "cache as truth" was wrong, what we learned from the FLUSHALL incident)
+       - Lua single-thread ceiling at 8,330 acc/s and how to think about the next 10×
+       - Docker Mac NAT cap discovery (Phase 5 / O3.2)
+       - Recon failure recovery story (saga + watchdog + drift detector layers)
+       Target: 2-3k words, GitHub-flavored markdown, lives at `docs/blog/architecture-evolution.md`. (~2-3 days)
+
+### Explicitly DEFERRED / DROPPED from Phase 3
+
+| ID | Original scope | Why dropped |
+| :-- | :-- | :-- |
+| D11 | Live mission-control SSE dashboard (React Flow pipeline animation) | High build cost (~1-2 wk), low interview signal. Senior reviewers don't watch demos; they read code + benchmarks. The visual story is told via D14 mermaid diagrams + D15 blog post + D12 comparison.md instead. |
+| D13 | Frontend comparison view (Recharts side-by-side) | Same rationale. The markdown comparison report from D12 is interview-suitable on its own; an HTML chart adds polish but no signal. |
+| D9 (original full scope) | Multi-stage k6 comparison + per-stage baselines | Folded into D12 — comparison.md captures all per-stage runs at once. Standalone D9-minimal keeps just the Pattern A two-step baseline. |
+| D10 (original full scope) | 5-minute video walkthrough with mission-control overlay | Replaced by D10-minimal asciinema. Senior interview viewers prefer asciinema (proves CLI literacy + reproducibility) over edited video (proves nothing about engineering). |
 
 Phase 4 (production-hardening, ~2–3 wk) — only after Pattern A demo lands
   P1  Redis HA (A9) — Sentinel + FailoverClient
