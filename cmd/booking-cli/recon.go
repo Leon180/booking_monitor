@@ -14,10 +14,41 @@ import (
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
+
+// safeSweep runs `sweep(ctx)` under a defer recover() so a panic
+// inside Sweep doesn't kill the surrounding loop goroutine. The panic
+// is converted to a returned error AND a labelled prometheus counter
+// (`sweep_goroutine_panics_total{sweeper}`) — without the counter, a
+// recovered panic in a long-lived loop is invisible to operators
+// (process stays up, /metrics keeps serving last-known gauge values,
+// `up{}` stays 1 → TargetDown does not fire).
+//
+// Why a helper rather than inlining defer recover() in each loop:
+// the same shape is needed in runSweepLoop (recon) AND runDriftLoop
+// (drift detector), and the same observability discipline (counter
+// + ERROR log + return-as-error so the existing `err != nil &&
+// ctx.Err() == nil` branch fires) applies to both.
+func safeSweep(
+	ctx context.Context,
+	sweeper string,
+	sweep func(context.Context) error,
+	logger *mlog.Logger,
+) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			observability.RecordSweepPanic(sweeper)
+			logger.L().Error(sweeper+": sweep goroutine recovered from panic",
+				tag.Error(fmt.Errorf("panic: %v", rec)))
+			err = fmt.Errorf("%s: panic recovered: %v", sweeper, rec)
+		}
+	}()
+	return sweep(ctx)
+}
 
 // runRecon is the `recon` subcommand entry — the reconciler that
 // resolves orders stuck in Charging by querying the payment gateway.
@@ -197,14 +228,7 @@ func runRecOnceBoth(
 	driftFailed := make(chan bool, 1)
 
 	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				logger.L().Error("recon: sweep goroutine panicked",
-					tag.Error(fmt.Errorf("panic: %v", rec)))
-				reconFailed <- true
-			}
-		}()
-		err := r.Sweep(ctx)
+		err := safeSweep(ctx, "once_recon", r.Sweep, logger)
 		failed := err != nil && ctx.Err() == nil
 		if failed {
 			logger.L().Error("recon: sweep failed", tag.Error(err))
@@ -212,14 +236,7 @@ func runRecOnceBoth(
 		reconFailed <- failed
 	}()
 	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				logger.L().Error("inventory drift: sweep goroutine panicked",
-					tag.Error(fmt.Errorf("panic: %v", rec)))
-				driftFailed <- true
-			}
-		}()
-		err := d.Sweep(ctx)
+		err := safeSweep(ctx, "once_drift", d.Sweep, logger)
 		failed := err != nil && ctx.Err() == nil
 		if failed {
 			logger.L().Error("inventory drift: sweep failed", tag.Error(err))
@@ -271,7 +288,7 @@ func runSweepLoop(
 	// gets a fresh chance. Suppressed when the parent ctx is
 	// cancelled (graceful SIGTERM); see runSweepOnce comment for
 	// the `ctx.Err() == nil` rationale.
-	if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
+	if err := safeSweep(ctx, "recon", r.Sweep, logger); err != nil && ctx.Err() == nil {
 		logger.L().Error("recon: boot sweep failed (continuing)", tag.Error(err))
 	}
 
@@ -281,7 +298,7 @@ func runSweepLoop(
 			logger.L().Info("recon: loop exiting", tag.Error(ctx.Err()))
 			return
 		case <-ticker.C:
-			if err := r.Sweep(ctx); err != nil && ctx.Err() == nil {
+			if err := safeSweep(ctx, "recon", r.Sweep, logger); err != nil && ctx.Err() == nil {
 				logger.L().Error("recon: sweep failed (continuing)", tag.Error(err))
 			}
 		}
@@ -305,7 +322,7 @@ func runDriftLoop(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	if err := d.Sweep(ctx); err != nil && ctx.Err() == nil {
+	if err := safeSweep(ctx, "inventory_drift", d.Sweep, logger); err != nil && ctx.Err() == nil {
 		logger.L().Error("inventory drift: boot sweep failed (continuing)", tag.Error(err))
 	}
 
@@ -315,7 +332,7 @@ func runDriftLoop(
 			logger.L().Info("inventory drift: loop exiting", tag.Error(ctx.Err()))
 			return
 		case <-ticker.C:
-			if err := d.Sweep(ctx); err != nil && ctx.Err() == nil {
+			if err := safeSweep(ctx, "inventory_drift", d.Sweep, logger); err != nil && ctx.Err() == nil {
 				logger.L().Error("inventory drift: sweep failed (continuing)", tag.Error(err))
 			}
 		}

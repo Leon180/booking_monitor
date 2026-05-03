@@ -504,6 +504,75 @@ groups:
           summary: "Inventory drift between Redis and DB ({{ $labels.direction }})"
           description: "Inventory drift detector flagged events with direction={{ $labels.direction }}. Investigate: (1) cache_missing → check rehydrate ran on last app start; (2) cache_high → look for saga compensator desync since last sweep; (3) cache_low_excess → check worker_consumer_lag and recon_resolved_total{outcome=\"max_age_exceeded\"} for inventory-leaking force-fails. Use logs `component=inventory_drift` for affected event_ids."
 
+      - alert: InventoryDriftListEventsErrors
+        # PR-D follow-up — fires when the drift detector's per-sweep
+        # ListAvailable(events) query is failing. While this fires,
+        # the detector is BLIND to drift on the DB side: every sweep
+        # aborts before per-event checks, the gauge is reset to 0
+        # (intentional — see metric godoc), and InventoryDriftDetected
+        # cannot fire because there is nothing to detect. Severity
+        # critical: this is the "we can't tell if there's drift"
+        # signal, structurally identical to ReconFindStuckErrors and
+        # SagaWatchdogFindStuckErrors.
+        #
+        # `for: 2m` matches the same-shape sweep-query-failure alerts.
+        expr: rate(inventory_drift_list_events_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorydriftlisteventserrors"
+          summary: "Inventory drift detector cannot list events — drift detection is blind"
+          description: "ListAvailable query failing for 2m+. The detector cannot scan for drift; inventory_drifted_events_count is held at 0 but does NOT mean healthy. Likely cause: DB outage, DB pool exhaustion, query timeout. Cross-check `pg_pool_*` and DB connectivity from the recon container."
+
+      - alert: InventoryDriftCacheReadErrors
+        # PR-D follow-up — fires when per-event Redis GET failures
+        # accumulate during drift sweeps. Distinct from
+        # InventoryDriftListEventsErrors: there the WHOLE sweep aborts;
+        # here the sweep continues, just with partial visibility (some
+        # events skipped). Warning, not critical, because the gauge IS
+        # being computed, just on a partial event set.
+        #
+        # `for: 5m` is more lenient than the list-events alert — Redis
+        # blips on individual events are realistic background noise; we
+        # only care about sustained patterns. The structured log line
+        # `events_skipped` per sweep is the diagnostic field.
+        expr: rate(inventory_drift_cache_read_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorydriftcachereaderrors"
+          summary: "Inventory drift detector hitting Redis read failures"
+          description: "Per-event GetInventory failing for 5m+. Drift sweeps continue with partial visibility (events_skipped > 0 in logs). Likely cause: Redis pool exhaustion (cross-check `redis_client_pool_timeouts_total`), Redis CPU saturation, or specific keys timing out (cross-check `redis_slowlog_length`)."
+
+      - alert: SweepGoroutinePanic
+        # Catches the silent-failure scenario where a periodic sweeper
+        # goroutine (Reconciler / InventoryDriftDetector / SagaWatchdog)
+        # panics, is rescued by the loop's defer recover(), and resumes
+        # — but the panic itself is the architectural signal.
+        #
+        # Why this alert exists: in healthy production this counter MUST
+        # stay 0. Any non-zero rate means a deterministic bug is
+        # surfacing. Without this alert, the recover() would silence the
+        # panic completely (process stays up, /metrics keeps serving,
+        # `up{}` stays 1, TargetDown does NOT fire) — exactly the
+        # silent-failure shape the silent-failure-hunter agent flagged
+        # for the loop-without-recover variant.
+        #
+        # `for: 0s` (no soak) — single panics matter; this is not a
+        # rate-based alert, it's a "did this ever happen" alert.
+        # `severity: critical` — operator must investigate before the
+        # bug compounds into something worse.
+        expr: increase(sweep_goroutine_panics_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sweepgoroutinepanic"
+          summary: "Sweeper goroutine panicked ({{ $labels.sweeper }})"
+          description: "Goroutine for sweeper={{ $labels.sweeper }} panicked and was recovered by the loop's defer. Process is still running but a deterministic bug has surfaced. Pull the recon container logs filtered for `recovered from panic` to see the panic value + stack trace, then file a bug. Recovery is automatic; this alert exists so the panic doesn't go unnoticed."
+
       - alert: TargetDown
         # Meta-alert: fires when Prometheus has been unable to scrape a
         # target for 2 minutes. Without this, a worker process that

@@ -57,6 +57,9 @@ silence / inhibit / notification log.
 - [RedisXAddFailures](#redisxaddfailures)
 - [ConsumerGroupRecreated](#consumergrouprecreated)
 - [InventoryDriftDetected](#inventorydriftdetected)
+- [InventoryDriftListEventsErrors](#inventorydriftlisteventserrors)
+- [InventoryDriftCacheReadErrors](#inventorydriftcachereaderrors)
+- [SweepGoroutinePanic](#sweepgoroutinepanic)
 - [KafkaConsumerStuck](#kafkaconsumerstuck)
 
 ### Meta (scrape health)
@@ -475,6 +478,76 @@ Redis < DB by more than tolerance. Steady-state drift is positive (in-flight boo
 **Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
 
 **Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+
+---
+
+## InventoryDriftListEventsErrors
+
+**Symptom.** `rate(inventory_drift_list_events_errors_total[5m]) > 0 for 2m`. Severity `critical`. The drift detector's per-sweep `EventRepository.ListAvailable` query is failing — the detector is **blind on the DB side** until this clears. While this fires, `inventory_drifted_events_count` is held at 0 (intentional — see metric godoc) and `InventoryDriftDetected` cannot fire because there is nothing to detect.
+
+**Diagnosis.**
+
+1. **Is the DB reachable from the recon container?** `docker compose logs recon | grep -i "list events\|postgres"`. The drift detector logs `component=inventory_drift` at WARN/ERROR for these failures.
+2. **Is the recon container's DB pool saturated?** Cross-check `pg_pool_in_use` — if pinned at the configured max, the COUNT/LIST queries are queued behind hot-path traffic.
+3. **Is migration 000007's partial index missing?** Drift detector uses `ListAvailable` (full event scan), NOT the outbox partial index, so the `events` table indexes are what matter here. Verify `idx_events_available` etc. exist via `\d events`.
+
+**Action.**
+
+- DB outage: fix the DB (separate ticket); alert clears within one scrape after recovery.
+- Pool saturated: bump `DB_MAX_OPEN_CONNS` for the recon process (it shares the same env as the API but a separate pool).
+- Specific timeout pattern: check the `events` table's row count and existing indexes; ListAvailable should be fast on any healthy schema.
+
+**Escalation.** Always pages alongside `TargetDown` if the DB outage is total — if both fire, focus on `TargetDown` first.
+
+---
+
+## InventoryDriftCacheReadErrors
+
+**Symptom.** `rate(inventory_drift_cache_read_errors_total[5m]) > 0 for 5m`. Severity `warning`. Per-event Redis GET failures during drift sweeps. **Distinct from `InventoryDriftListEventsErrors`**: there the WHOLE sweep aborts; here the sweep continues with partial visibility (some events skipped, others checked). The structured log line `events_skipped` per sweep is the diagnostic field.
+
+**Diagnosis.**
+
+1. **Is the Redis client pool exhausted?** `redis_client_pool_timeouts_total` rate > 0 → bump `REDIS_POOL_SIZE` for the recon container.
+2. **Is Redis CPU saturated?** `redis_cpu_*` rates close to 1.0 sustained → the booking hot path is competing for the same Redis with the drift detector. Either accept the partial visibility or shard.
+3. **Specific keys timing out?** `redis_slowlog_length` > 0 + the affected event_ids in the `component=inventory_drift` log lines.
+
+**Action.**
+
+- Pool exhaustion: bump pool size; restart recon container.
+- Redis CPU saturation: this alert is the SECOND-order signal; the booking hot path will be visibly slow first. Address that root cause.
+- Specific slow keys: use the event_ids from logs to inspect Redis directly.
+
+**Escalation.** Doesn't usually page on its own (warning severity). If it persists past one Redis restart cycle, escalate to whoever owns Redis infrastructure.
+
+---
+
+## SweepGoroutinePanic
+
+**Symptom.** `increase(sweep_goroutine_panics_total[5m]) > 0 for 0s`. Severity `critical`. A periodic-sweeper goroutine (Reconciler / InventoryDriftDetector / SagaWatchdog) panicked and was rescued by the loop's `defer recover()`. Process is still running, but a deterministic bug surfaced.
+
+**Why this is critical (no soak window).** In healthy production this counter MUST stay 0. Without this alert, a recovered panic would be invisible — process stays up, /metrics keeps serving, `up{}` stays 1, `TargetDown` does NOT fire. The panic itself is the architectural signal; it doesn't need to recur to be page-worthy.
+
+**Diagnosis.**
+
+1. **Pull the panic value + stack trace.** The recovery path logs at ERROR level with the panic value and tag.Error. Filter:
+   ```
+   docker compose logs recon | grep -A 30 "recovered from panic"
+   ```
+   The grep window of 30 lines should cover the stack trace zap printed alongside the recover error. If you don't see a stack, check `docker compose logs --tail=200 recon` for the runtime's stderr panic dump (it prints separately from zap when the goroutine is mid-frame).
+
+2. **Identify which sweeper.** The alert's `sweeper` label is also in the log line's `error` field. `recon` / `inventory_drift` / `saga_watchdog` correspond to the loop sweepers; `once_recon` / `once_drift` correspond to the `--once` mode (k8s CronJob host).
+
+3. **Reproduce locally.** The cause is by definition deterministic if it panicked once. Stand up the same DB / Redis state, run `booking-cli recon --once`, observe the panic.
+
+**Action.**
+
+- File a bug with the panic value, stack trace, and sweeper label. The recovery is automatic; this alert exists so the panic doesn't go unnoticed.
+- Until fixed, the loop continues running but every Sweep with the same trigger will re-panic and re-bump the counter. If the panic is on a SPECIFIC event / order (not deterministic on every Sweep), the counter rises slowly; if it's on every Sweep, the counter rises at the sweep cadence rate.
+- **Do NOT remove the recover()**. It is the safety net; without it the loop dies silently and you'd discover the problem hours later via stale gauges.
+
+**Escalation.** Always page; this is a "we have a bug" signal, not a "dependency is down" signal.
+
+**Background.** This alert was added as part of the cache-truth roadmap follow-up. The silent-failure-hunter agent flagged the loop-without-recover scenario: a panic in `runSweepLoop` would kill the goroutine entirely, the metrics listener would keep serving stale values, and operators would see "recon container is healthy" while every sweep had stopped firing. The fix is twofold: defer recover() in the loop body (so the loop survives) AND a dedicated counter (so the recover isn't itself silent).
 
 ---
 
