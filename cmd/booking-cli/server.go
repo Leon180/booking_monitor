@@ -19,6 +19,7 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/outbox"
+	"booking_monitor/internal/application/payment"
 	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/bootstrap"
@@ -31,6 +32,7 @@ import (
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
+	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
@@ -62,6 +64,21 @@ func runServer(_ *cobra.Command, _ []string) {
 
 		fx.Provide(observability.NewWorkerMetrics),
 		fx.Provide(observability.NewBookingMetrics),
+
+		// Payment service wiring for the HTTP server. D4 added the
+		// /api/v1/orders/:id/pay endpoint, which depends on
+		// payment.Service. The legacy payment_worker subcommand
+		// (cmd/booking-cli/payment.go) provides the same Service in
+		// its own fx graph; here we duplicate the wiring because the
+		// server process needs an in-process Service (no Kafka
+		// consumer, just the synchronous CreatePaymentIntent path).
+		// Both wirings share the same MockGateway adapter — D4-D7
+		// don't promote the gateway to a singleton service yet, that
+		// happens with real Stripe integration in a later PR.
+		fx.Provide(
+			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentGateway))),
+			payment.NewService,
+		),
 		// Worker fx wiring lives here (not in application/module.go)
 		// because the worker subpackage imports `application` for shared
 		// types (UnitOfWork, Repositories, NewOrderCreatedEvent), so an
