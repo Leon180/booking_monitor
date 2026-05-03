@@ -51,6 +51,23 @@ type BookingConfig struct {
 	// for the duration of the sale window — plan to override per-event
 	// once D8 lands.
 	ReservationWindow time.Duration `yaml:"reservation_window" env:"BOOKING_RESERVATION_WINDOW" env-default:"15m"`
+
+	// DefaultTicketPriceCents is the per-ticket charge amount /pay
+	// (D4) uses when constructing the PaymentIntent's amount.
+	// Per-event / per-section pricing lands in D8 with admin section
+	// CRUD (the `event_sections` table from migration 000012 already
+	// has the schema room — D4 just doesn't read it yet).
+	//
+	// 2000 cents = US$20 mirrors typical concert / event-ticket
+	// pricing for our flash-sale simulation. int64 because
+	// float-money is the OWASP-listed representation-error
+	// anti-pattern; Stripe's API also takes amount in smallest unit
+	// (cents) as int.
+	DefaultTicketPriceCents int64 `yaml:"default_ticket_price_cents" env:"BOOKING_DEFAULT_TICKET_PRICE_CENTS" env-default:"2000"`
+
+	// DefaultCurrency is the ISO 4217 three-letter code used for the
+	// PaymentIntent. Lowercase per Stripe convention.
+	DefaultCurrency string `yaml:"default_currency" env:"BOOKING_DEFAULT_CURRENCY" env-default:"usd"`
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the

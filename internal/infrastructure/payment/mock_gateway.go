@@ -37,6 +37,14 @@ type MockGateway struct {
 	// success; non-nil means failed (and the SAME error is returned on
 	// every retry — callers must see a stable verdict).
 	results sync.Map // map[uuid.UUID]error
+
+	// intents caches the first-call PaymentIntent per orderID for the
+	// CreatePaymentIntent path. Mirrors `results` in shape: subsequent
+	// calls with the same orderID return the cached intent verbatim,
+	// honouring the PaymentIntentCreator idempotency contract that
+	// real Stripe / Adyen adapters enforce via their `Idempotency-Key`
+	// header.
+	intents sync.Map // map[uuid.UUID]domain.PaymentIntent
 }
 
 // NewMockGateway creates a new mock gateway with default settings.
@@ -144,11 +152,80 @@ func (g *MockGateway) GetStatus(ctx context.Context, orderID uuid.UUID) (domain.
 	return domain.ChargeStatusDeclined, nil
 }
 
-// Ensure MockGateway implements both port halves AND the combined
+// CreatePaymentIntent simulates the Stripe-shape PaymentIntent
+// creation flow. Returns the same PaymentIntent on repeat calls with
+// the same orderID — the gateway-side idempotency contract that
+// makes /pay (D4) safe to retry without an application-layer cache.
+//
+// The intent ID + ClientSecret are randomly generated on the first
+// call and cached. Real Stripe IDs are short opaque strings of the
+// form `pi_<26 hex chars>`; we mimic that with the orderID's hex
+// (without dashes) as a deterministic seed so logs / DB rows are
+// easy to correlate by hand. ClientSecret follows Stripe's
+// `pi_<intent>_secret_<random>` convention.
+//
+// Why ctx is honoured even on a cheap (cache hit) path: same
+// rationale as GetStatus — a real adapter would call
+// `POST /v1/payment_intents` over HTTP and respect ctx.Done().
+// Caller writes propagate the timeout boundary; we don't break it.
+func (g *MockGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.PaymentIntent{}, err
+	}
+
+	// Idempotency short-circuit: same orderID → same intent. Stripe
+	// behaviour. The amount/currency from this call are validated
+	// against the cached intent so a buggy caller passing different
+	// amounts on retry surfaces loudly rather than silently using the
+	// first call's amount.
+	if cached, ok := g.intents.Load(orderID); ok {
+		intent := cached.(domain.PaymentIntent)
+		if intent.AmountCents != amountCents || intent.Currency != currency {
+			return domain.PaymentIntent{}, errors.New("CreatePaymentIntent: cached intent has different amount/currency — caller passed inconsistent params on retry")
+		}
+		return intent, nil
+	}
+
+	// First-time creation. Mock latency analogous to Charge so /pay
+	// p95 numbers in benchmarks aren't unrealistically fast.
+	latencyDelay := g.MaxLatency - g.MinLatency
+	if latencyDelay <= 0 {
+		latencyDelay = 1
+	}
+	latency := g.MinLatency + time.Duration(rand.Int64N(int64(latencyDelay))) //nolint:gosec // G404 — math/rand is correct for simulated latency in a mock
+	select {
+	case <-time.After(latency):
+	case <-ctx.Done():
+		// Don't cache on cancellation — same rule as Charge.
+		return domain.PaymentIntent{}, ctx.Err()
+	}
+
+	// Mock IDs derived deterministically from orderID so a developer
+	// reading the DB / logs can correlate without a lookup table.
+	// Real Stripe IDs are random; this is mock-specific.
+	orderHex := orderID.String()
+	intent := domain.PaymentIntent{
+		ID:           "pi_" + orderHex,
+		ClientSecret: "pi_" + orderHex + "_secret_" + uuid.NewString(),
+		AmountCents:  amountCents,
+		Currency:     currency,
+	}
+	if actual, loaded := g.intents.LoadOrStore(orderID, intent); loaded {
+		// Race: another goroutine stored first. Return their value
+		// for consistency — both should be byte-identical except for
+		// ClientSecret's random tail (which is fine; both are valid
+		// secrets for the same intent in our mock model).
+		return actual.(domain.PaymentIntent), nil
+	}
+	return intent, nil
+}
+
+// Ensure MockGateway implements all three port halves AND the combined
 // legacy interface. Compile-time check — the assignment fails to
 // type-check if any required method is missing.
 var (
-	_ domain.PaymentCharger      = (*MockGateway)(nil)
-	_ domain.PaymentStatusReader = (*MockGateway)(nil)
-	_ domain.PaymentGateway      = (*MockGateway)(nil)
+	_ domain.PaymentCharger        = (*MockGateway)(nil)
+	_ domain.PaymentStatusReader   = (*MockGateway)(nil)
+	_ domain.PaymentIntentCreator  = (*MockGateway)(nil)
+	_ domain.PaymentGateway        = (*MockGateway)(nil)
 )

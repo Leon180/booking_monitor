@@ -201,13 +201,14 @@ type StuckFailed struct {
 //     full time.Time for human-friendly display via DTOs and for
 //     business logic that compares times directly.
 type Order struct {
-	id            uuid.UUID
-	eventID       uuid.UUID
-	userID        int
-	quantity      int
-	status        OrderStatus
-	createdAt     time.Time
-	reservedUntil time.Time // Pattern A — zero value for legacy A4 / pre-D3 rows
+	id              uuid.UUID
+	eventID         uuid.UUID
+	userID          int
+	quantity        int
+	status          OrderStatus
+	createdAt       time.Time
+	reservedUntil   time.Time // Pattern A — zero value for legacy A4 / pre-D3 rows
+	paymentIntentID string    // Pattern A — set by /pay (D4); empty until the client initiates payment
 }
 
 // NewOrder constructs a fresh pending order. The caller supplies the
@@ -312,15 +313,21 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 // rows whose `reserved_until` column is NULL. Callers reading the
 // accessor get the zero time.Time which marshals as RFC3339
 // "0001-01-01T00:00:00Z" — visibly distinct from a real reservation.
-func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time, reservedUntil time.Time) Order {
+//
+// paymentIntentID is empty for orders that haven't gone through /pay
+// (D4) yet. After /pay it carries the gateway-assigned id (Stripe
+// shape: "pi_3xxx..."). Used by the D5 webhook handler to look up
+// the order by intent id when the gateway POSTs back.
+func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time, reservedUntil time.Time, paymentIntentID string) Order {
 	return Order{
-		id:            id,
-		userID:        userID,
-		eventID:       eventID,
-		quantity:      quantity,
-		status:        status,
-		createdAt:     createdAt,
-		reservedUntil: reservedUntil,
+		id:              id,
+		userID:          userID,
+		eventID:         eventID,
+		quantity:        quantity,
+		status:          status,
+		createdAt:       createdAt,
+		reservedUntil:   reservedUntil,
+		paymentIntentID: paymentIntentID,
 	}
 }
 
@@ -463,6 +470,7 @@ func (o Order) Quantity() int            { return o.quantity }
 func (o Order) Status() OrderStatus      { return o.status }
 func (o Order) CreatedAt() time.Time     { return o.createdAt }
 func (o Order) ReservedUntil() time.Time { return o.reservedUntil }
+func (o Order) PaymentIntentID() string  { return o.paymentIntentID }
 
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
@@ -532,4 +540,28 @@ type OrderRepository interface {
 	MarkPaid(ctx context.Context, id uuid.UUID) error            // AwaitingPayment → Paid (terminal)
 	MarkExpired(ctx context.Context, id uuid.UUID) error         // AwaitingPayment → Expired
 	MarkPaymentFailed(ctx context.Context, id uuid.UUID) error   // AwaitingPayment → PaymentFailed
+
+	// SetPaymentIntentID persists the gateway-assigned PaymentIntent id
+	// onto an order. Race-safe: the SQL UPDATE includes
+	// `WHERE status = 'awaiting_payment' AND
+	//        (payment_intent_id IS NULL OR payment_intent_id = $2)`
+	// so concurrent /pay calls with the same gateway-idempotent intent
+	// (which our PaymentIntentCreator contract guarantees) end up with
+	// the same row state, and a /pay call against an order that's been
+	// flipped (Paid / Expired / PaymentFailed by webhook or sweeper)
+	// safely 0-rows-affected → ErrOrderNotFound.
+	//
+	// Returns:
+	//   - nil                  intent id persisted (or already set to the same value)
+	//   - ErrOrderNotFound     no awaiting-payment row matched (gone or
+	//                          status-flipped between read and write)
+	//   - other errors         wrapped DB failure
+	//
+	// Why no domain-level WithPaymentIntent transition: setting the
+	// intent doesn't change order status (status stays AwaitingPayment
+	// until the D5 webhook flips it to Paid or PaymentFailed); it's
+	// just a column write. Doing it at the SQL level lets the DB
+	// enforce the awaiting_payment + IS NULL predicate atomically
+	// without a read-then-write race.
+	SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error
 }

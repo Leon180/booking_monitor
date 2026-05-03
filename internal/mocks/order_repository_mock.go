@@ -230,3 +230,17 @@ func (mr *MockOrderRepositoryMockRecorder) MarkPaymentFailed(ctx, id any) *gomoc
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPaymentFailed", reflect.TypeOf((*MockOrderRepository)(nil).MarkPaymentFailed), ctx, id)
 }
+
+// SetPaymentIntentID mocks base method.
+func (m *MockOrderRepository) SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetPaymentIntentID", ctx, id, paymentIntentID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetPaymentIntentID indicates an expected call of SetPaymentIntentID.
+func (mr *MockOrderRepositoryMockRecorder) SetPaymentIntentID(ctx, id, paymentIntentID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPaymentIntentID", reflect.TypeOf((*MockOrderRepository)(nil).SetPaymentIntentID), ctx, id, paymentIntentID)
+}

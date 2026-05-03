@@ -147,3 +147,57 @@ func (mr *MockPaymentGatewayMockRecorder) GetStatus(ctx, orderID any) *gomock.Ca
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStatus", reflect.TypeOf((*MockPaymentGateway)(nil).GetStatus), ctx, orderID)
 }
+
+// CreatePaymentIntent mocks base method.
+func (m *MockPaymentGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency)
+	ret0, _ := ret[0].(domain.PaymentIntent)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreatePaymentIntent indicates an expected call of CreatePaymentIntent.
+func (mr *MockPaymentGatewayMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentGateway)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency)
+}
+
+// MockPaymentIntentCreator is a mock of PaymentIntentCreator interface.
+type MockPaymentIntentCreator struct {
+	ctrl     *gomock.Controller
+	recorder *MockPaymentIntentCreatorMockRecorder
+	isgomock struct{}
+}
+
+// MockPaymentIntentCreatorMockRecorder is the mock recorder for MockPaymentIntentCreator.
+type MockPaymentIntentCreatorMockRecorder struct {
+	mock *MockPaymentIntentCreator
+}
+
+// NewMockPaymentIntentCreator creates a new mock instance.
+func NewMockPaymentIntentCreator(ctrl *gomock.Controller) *MockPaymentIntentCreator {
+	mock := &MockPaymentIntentCreator{ctrl: ctrl}
+	mock.recorder = &MockPaymentIntentCreatorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockPaymentIntentCreator) EXPECT() *MockPaymentIntentCreatorMockRecorder {
+	return m.recorder
+}
+
+// CreatePaymentIntent mocks base method.
+func (m *MockPaymentIntentCreator) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency)
+	ret0, _ := ret[0].(domain.PaymentIntent)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreatePaymentIntent indicates an expected call of CreatePaymentIntent.
+func (mr *MockPaymentIntentCreatorMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentIntentCreator)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency)
+}

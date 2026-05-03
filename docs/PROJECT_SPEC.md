@@ -327,6 +327,42 @@ The fingerprint is hex-encoded `SHA-256` of the raw request body bytes. No JSON 
 
 Error responses go through `api/booking/errors.go :: mapError`, which matches sentinel errors via `errors.Is` and returns a safe public message. Raw DB / driver errors are logged server-side with correlation IDs but **never** echoed to the client.
 
+### POST /api/v1/orders/:id/pay
+Initiate payment for a Pattern A reservation (D4 — Stripe-shape `PaymentIntent` flow).
+
+```json
+// Request
+// (empty body — order_id comes from the path; future versions may
+// accept a `payment_method_id` once we wire real Stripe Elements)
+
+// 200 OK — gateway-issued PaymentIntent
+{
+  "order_id": "019dd493-480a-7499-b208-812c930b152e",
+  "payment_intent_id": "pi_3dd493-480a-7499-b208-812c930b152e",
+  "client_secret": "pi_3dd493-...-secret-019dd494-...",
+  "amount_cents": 2000,
+  "currency": "usd"
+}
+// 400 Bad Request — malformed UUID in path
+{ "error": "invalid order id" }
+// 404 Not Found — no order with that id
+{ "error": "resource not found" }
+// 409 Conflict — order isn't in awaiting_payment (already Paid / Expired / etc.)
+{ "error": "order is not awaiting payment" }
+// 409 Conflict — reserved_until elapsed (D6 sweeper hasn't run yet)
+{ "error": "reservation expired" }
+// 500 Internal Server Error (gateway / DB transient failure)
+{ "error": "internal server error" }
+```
+
+The client uses `client_secret` with Stripe Elements (or our mock equivalent) to confirm the payment client-side. Money actually moves when the D5 webhook (`POST /webhook/payment`) fires — at that point the order flips `awaiting_payment → paid`. If the customer never confirms, the D6 reservation expiry sweeper flips `awaiting_payment → expired` past `reserved_until`, and the saga compensator reverts inventory.
+
+**Idempotent at the gateway boundary.** Repeat POSTs to `/pay` with the same `order_id` return the SAME `PaymentIntent` — the gateway treats `order_id` as the idempotency key (Stripe's `Idempotency-Key` header convention; our mock implements the same via `sync.Map`). Clients don't need to cache or retry-guard themselves. The application layer therefore skips the N4-style `Idempotency-Key` middleware on this route — adding it would just be ceremony.
+
+**Pricing today.** D4 hardcodes `amount_cents = quantity * BOOKING_DEFAULT_TICKET_PRICE_CENTS` (default 2000, US$20) and `currency = BOOKING_DEFAULT_CURRENCY` (default "usd"). Per-event/per-section pricing lands in D8 with admin section CRUD — the `event_sections` table from migration 000012 already has the schema room.
+
+**Race-safety.** The persist step uses an SQL predicate `WHERE status = 'awaiting_payment' AND (payment_intent_id IS NULL OR payment_intent_id = $2)`. If the D5 webhook flips the order to `paid` between our `GetByID` and `UPDATE`, the predicate 0-rows-affected → 404 surfaces back; the `paid` row is preserved. Same shape closes the D6 sweeper race (`expired`).
+
 ### GET /api/v1/orders/:id
 Poll the terminal status of a booking. The id is the UUID v7 returned by `POST /api/v1/book`.
 

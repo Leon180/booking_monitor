@@ -83,7 +83,7 @@ func watchdogHarness(t *testing.T, comp saga.Compensator) (*saga.Watchdog, *mock
 func reconstructFailedOrder(t *testing.T, id uuid.UUID) domain.Order {
 	t.Helper()
 	return domain.ReconstructOrder(
-		id, 1, uuid.New(), 1, domain.OrderStatusFailed, time.Now().Add(-2*time.Hour), time.Time{},
+		id, 1, uuid.New(), 1, domain.OrderStatusFailed, time.Now().Add(-2*time.Hour), time.Time{}, "",
 	)
 }
 
@@ -163,7 +163,7 @@ func TestSweep_AlreadyCompensated_RaceWonByConsumer(t *testing.T) {
 	repo.EXPECT().FindStuckFailed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return([]domain.StuckFailed{{ID: id, Age: 5 * time.Minute}}, nil)
 	// GetByID returns Compensated — saga consumer beat us
-	compensated := domain.ReconstructOrder(id, 1, uuid.New(), 1, domain.OrderStatusCompensated, time.Now().Add(-2*time.Hour), time.Time{})
+	compensated := domain.ReconstructOrder(id, 1, uuid.New(), 1, domain.OrderStatusCompensated, time.Now().Add(-2*time.Hour), time.Time{}, "")
 	repo.EXPECT().GetByID(gomock.Any(), id).Return(compensated, nil)
 
 	require.NoError(t, w.Sweep(context.Background()))

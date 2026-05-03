@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	paymentapp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
 )
 
@@ -38,6 +39,19 @@ func mapError(err error) (status int, publicMsg string) {
 	case errors.Is(err, domain.ErrEventNotFound),
 		errors.Is(err, domain.ErrOrderNotFound):
 		return http.StatusNotFound, "resource not found"
+
+	case errors.Is(err, domain.ErrInvalidOrderID):
+		return http.StatusBadRequest, "invalid order id"
+
+	// D4 Pattern A /pay errors. Both surface as 409 Conflict because
+	// they describe a state mismatch the client could resolve by
+	// re-reading the order or re-booking; not a 4xx-malformed-input
+	// problem.
+	case errors.Is(err, paymentapp.ErrOrderNotAwaitingPayment):
+		return http.StatusConflict, "order is not awaiting payment"
+
+	case errors.Is(err, paymentapp.ErrReservationExpired):
+		return http.StatusConflict, "reservation expired"
 
 	case errors.Is(err, context.Canceled):
 		return http.StatusServiceUnavailable, "request canceled"
