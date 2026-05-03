@@ -5,8 +5,16 @@ import "booking_monitor/internal/domain"
 // OrderResponseFromDomain converts a domain.Order into the API
 // response DTO. Performs the in-memory copy that decouples wire
 // contract from domain shape.
+//
+// D3: ReservedUntil is set to a *time.Time only when the domain Order
+// carries a non-zero reservedUntil (Pattern A reservations). Legacy
+// A4 rows pre-D3 have a zero reservedUntil and the field is omitted
+// from the response (omitempty + nil pointer). This keeps the wire
+// shape backwards-compatible: existing clients still parse the same
+// JSON; new clients that branch on `if "reserved_until" in resp` can
+// reliably distinguish Pattern A from legacy.
 func OrderResponseFromDomain(o domain.Order) OrderResponse {
-	return OrderResponse{
+	resp := OrderResponse{
 		ID:        o.ID(),
 		EventID:   o.EventID(),
 		UserID:    o.UserID(),
@@ -14,6 +22,11 @@ func OrderResponseFromDomain(o domain.Order) OrderResponse {
 		Status:    string(o.Status()),
 		CreatedAt: o.CreatedAt(),
 	}
+	if !o.ReservedUntil().IsZero() {
+		ru := o.ReservedUntil()
+		resp.ReservedUntil = &ru
+	}
+	return resp
 }
 
 // EventResponseFromDomain converts a domain.Event into the API

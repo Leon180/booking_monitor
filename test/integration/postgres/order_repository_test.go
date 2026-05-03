@@ -84,6 +84,23 @@ func newOrder(t *testing.T, eventID uuid.UUID, userID, qty int) domain.Order {
 	return o
 }
 
+// newReservation is the Pattern A counterpart of newOrder. Constructs
+// a domain Order via `domain.NewReservation` (status=AwaitingPayment,
+// reservedUntil set). Used by tests that exercise the D3+ reservation
+// flow.
+func newReservation(t *testing.T, eventID uuid.UUID, userID, qty int) domain.Order {
+	t.Helper()
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+	// 15-minute window — same as production default. UTC so the
+	// round-trip through Postgres (TIMESTAMPTZ) doesn't introduce
+	// off-by-timezone surprises.
+	reservedUntil := time.Now().Add(15 * time.Minute).UTC()
+	o, err := domain.NewReservation(id, userID, eventID, qty, reservedUntil)
+	require.NoError(t, err)
+	return o
+}
+
 // TestOrderRepository_CreateAndGetByID: round-trip an order via Create
 // + GetByID. Verifies all fields rehydrate correctly through the row
 // mapper.
@@ -106,6 +123,49 @@ func TestOrderRepository_CreateAndGetByID(t *testing.T) {
 	assert.Equal(t, o.EventID(), got.EventID())
 	assert.Equal(t, o.Quantity(), got.Quantity())
 	assert.Equal(t, domain.OrderStatusPending, got.Status())
+	assert.True(t, got.ReservedUntil().IsZero(),
+		"legacy NewOrder path persists NULL into orders.reserved_until — round-trip must hand back zero time")
+}
+
+// TestOrderRepository_CreateReservation_RoundTrip: Pattern A flow —
+// the reservation TTL must survive Create → GetByID without precision
+// loss or NULL-collapse. Specifically pins:
+//
+//   - the row layer maps `time.Time` → `sql.NullTime{Valid: true, Time:...}`
+//     for non-zero Pattern A orders (NULL would silently lose the TTL);
+//   - the SQL INSERT writes `reserved_until` (the column was added
+//     in 000012 but BookingService didn't write to it pre-D3 — this
+//     test would have been red against pre-D3 code);
+//   - the SELECT scan rehydrates a non-zero time via NullTime.Time.
+//
+// Without this, a regression that drops `reserved_until` from the
+// INSERT statement (or the scan list) would silently downgrade every
+// Pattern A reservation to "no TTL" — the D6 expiry sweeper would
+// then never find them, and inventory would soft-lock forever.
+func TestOrderRepository_CreateReservation_RoundTrip(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 2)
+
+	created, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+	require.Equal(t, o.ID(), created.ID())
+	// The reservedUntil round-tripped through orderRowFromDomain on
+	// the way INTO Postgres, so the returned domain.Order should still
+	// carry it.
+	assert.WithinDuration(t, o.ReservedUntil(), created.ReservedUntil(), time.Second,
+		"Create return value must preserve reservedUntil; 1s tolerance for Postgres µs precision rounding")
+
+	got, err := repo.GetByID(ctx, o.ID())
+	require.NoError(t, err)
+	assert.Equal(t, domain.OrderStatusAwaitingPayment, got.Status())
+	require.False(t, got.ReservedUntil().IsZero(),
+		"Pattern A row must NOT rehydrate as zero — that would mean the column is NULL or scanInto dropped it")
+	assert.WithinDuration(t, o.ReservedUntil(), got.ReservedUntil(), time.Second,
+		"Pattern A reservedUntil must survive INSERT → SELECT round-trip; 1s tolerance for Postgres TIMESTAMPTZ precision")
 }
 
 // TestOrderRepository_GetByID_NotFound: missing id returns

@@ -18,7 +18,7 @@ func TestNewOrderCreatedEvent(t *testing.T) {
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	orderID := uuid.New()
 	eventID := uuid.New()
-	o := domain.ReconstructOrder(orderID, 7, eventID, 3, domain.OrderStatusPending, created)
+	o := domain.ReconstructOrder(orderID, 7, eventID, 3, domain.OrderStatusPending, created, time.Time{})
 
 	got := application.NewOrderCreatedEvent(o)
 
@@ -77,7 +77,7 @@ func TestOrderCreatedEvent_WireFormatStable(t *testing.T) {
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	orderID := uuid.New()
 	ev := application.NewOrderCreatedEvent(domain.ReconstructOrder(
-		orderID, 7, uuid.New(), 3, domain.OrderStatusPending, created,
+		orderID, 7, uuid.New(), 3, domain.OrderStatusPending, created, time.Time{},
 	))
 
 	bytes, err := json.Marshal(ev)

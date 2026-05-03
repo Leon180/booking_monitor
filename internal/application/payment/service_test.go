@@ -32,7 +32,7 @@ func makeOrder(t *testing.T, ev *application.OrderCreatedEvent, status domain.Or
 	t.Helper()
 	orderID, err := uuid.NewV7()
 	require.NoError(t, err)
-	return domain.ReconstructOrder(orderID, 1, ev.EventID, 1, status, time.Now())
+	return domain.ReconstructOrder(orderID, 1, ev.EventID, 1, status, time.Now(), time.Time{})
 }
 
 func newEvent(t *testing.T) *application.OrderCreatedEvent {

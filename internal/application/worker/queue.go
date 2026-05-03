@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -48,6 +49,23 @@ type QueuedBookingMessage struct {
 	UserID   int       // External user reference (this service does not own users)
 	EventID  uuid.UUID // FK to events.id
 	Quantity int
+
+	// ReservedUntil is the Pattern A reservation TTL — the timestamp
+	// past which the D6 expiry sweeper will mark the order Expired and
+	// revert Redis inventory. Computed by BookingService as `time.Now()
+	// + window`, threaded through Lua deduct as a unix-seconds integer,
+	// re-parsed back to time.Time at the queue boundary so the worker
+	// gets a strongly-typed value to write into orders.reserved_until.
+	//
+	// Always UTC, always non-zero (the producer rejects zero values
+	// before the Lua script runs and parseMessage rejects them at the
+	// stream boundary). Worker code can rely on `!IsZero() && After(now)`
+	// at message-receive time, modulo Kafka-style delivery-delay
+	// pathologies (a multi-minute redelivery on a 15-minute reservation
+	// is theoretically observable but not actually a correctness
+	// problem — the row would just be inserted with a near-past TTL
+	// and the D6 sweeper would resolve it on the next tick).
+	ReservedUntil time.Time
 }
 
 //go:generate mockgen -source=queue.go -destination=../mocks/queue_mock.go -package=mocks

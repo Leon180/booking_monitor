@@ -49,6 +49,11 @@ func (s *SpyingMetrics) RecordInventoryConflict() {
 func TestOrderMessageProcessor_Process(t *testing.T) {
 	nopLogger := mlog.NewNop()
 	validEventID := uuid.New()
+	// validReservedUntil — a future TTL the Pattern A factory will accept.
+	// 15 minutes mirrors the production BookingConfig default; tests just
+	// need "comfortably in the future" so timing skew across slow CI runs
+	// doesn't flip a row from valid to expired before NewReservation runs.
+	validReservedUntil := time.Now().Add(15 * time.Minute)
 
 	tests := []struct {
 		name          string
@@ -58,7 +63,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			msg:  &worker.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(msg *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -95,7 +100,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -106,7 +111,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -118,7 +123,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
 					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
@@ -136,7 +141,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &worker.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — gomock will fail the test if any
 				// repo call fires, asserting fail-fast.
@@ -152,7 +157,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// must NOT slip a zero-UUID order through). Same fail-fast
 			// expectation as the other malformed cases.
 			name: "Malformed message — zero OrderID short-circuits before tx",
-			msg:  &worker.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, UserID: 1, Quantity: 1},
+			msg:  &worker.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
 			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
 				// Deliberately empty — fail-fast assertion.
 			},

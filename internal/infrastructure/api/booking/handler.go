@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	bookingapp "booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/event"
@@ -40,6 +41,14 @@ import (
 // rest of the API surface — bumping `/api/v1` to `/api/v2` only needs
 // this prefix changed.
 const orderSelfLinkPrefix = "/api/v1/orders/"
+
+// orderPayLinkSuffix is appended to orderSelfLinkPrefix + orderID to
+// produce the D4 payment endpoint
+// (POST /api/v1/orders/:id/pay). D3 emits this URL in the booking
+// response; D4 implements the handler. Until then, the route 404s —
+// the link is forward-looking but the wire contract is set now so
+// clients written against D3 don't need to be redeployed at D4.
+const orderPayLinkSuffix = "/pay"
 
 // mustMarshal panics on json.Marshal error. Reserved for fixed-shape
 // DTO structs whose fields are all directly-marshalable types — the
@@ -164,16 +173,30 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	// 202 Accepted — Redis-side deduct succeeded (the load-shed
-	// gate); the rest of the lifecycle (DB persist, payment charge,
-	// saga) is async. The client polls `GET /api/v1/orders/:id` for
-	// the terminal status.
+	// 202 Accepted — D3 (Pattern A): Redis-side reservation succeeded
+	// (the load-shed gate). The worker is in flight to persist the
+	// row as `awaiting_payment` with `reserved_until` set. The client
+	// must call `Links.Pay` (POST /api/v1/orders/:id/pay) within
+	// `expires_in_seconds` to actually charge — the legacy
+	// auto-charge worker is bypassed for Pattern A. The `self` link
+	// remains available for status polling throughout.
+	expiresIn := int(time.Until(order.ReservedUntil()).Seconds())
+	if expiresIn < 0 {
+		// Defensive: a clock-skew or absurdly-late delivery could push
+		// this negative. Floor at 0 so the wire field is never a
+		// confusing negative duration; the absolute reserved_until
+		// remains authoritative.
+		expiresIn = 0
+	}
 	c.Data(http.StatusAccepted, "application/json", mustMarshal(dto.BookingAcceptedResponse{
-		OrderID: order.ID(),
-		Status:  dto.BookingStatusProcessing,
-		Message: "booking accepted, awaiting confirmation",
+		OrderID:          order.ID(),
+		Status:           dto.BookingStatusReserved,
+		Message:          "reservation accepted; complete payment before reserved_until",
+		ReservedUntil:    order.ReservedUntil().UTC(),
+		ExpiresInSeconds: expiresIn,
 		Links: dto.BookingLinks{
 			Self: orderSelfLinkPrefix + order.ID().String(),
+			Pay:  orderSelfLinkPrefix + order.ID().String() + orderPayLinkSuffix,
 		},
 	}))
 }

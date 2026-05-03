@@ -29,12 +29,12 @@ var (
 )
 
 // argsPool reuses []interface{} slices for Redis Lua script calls.
-// Each DeductInventory call needs 4 args (count, event_id, user_id,
-// order_id); RevertInventory needs 1. We pool a 4-element slice
-// (the common case) and sub-slice for smaller calls.
+// Each DeductInventory call needs 5 args (count, event_id, user_id,
+// order_id, reserved_until_unix); RevertInventory needs 1. We pool
+// a 5-element slice (the common case) and sub-slice for smaller calls.
 var argsPool = sync.Pool{
 	New: func() interface{} {
-		s := make([]interface{}, 4)
+		s := make([]interface{}, 5)
 		return &s
 	},
 }
@@ -194,7 +194,7 @@ func (r *redisInventoryRepository) GetInventory(ctx context.Context, eventID uui
 	return val, true, nil
 }
 
-func (r *redisInventoryRepository) DeductInventory(ctx context.Context, orderID uuid.UUID, eventID uuid.UUID, userID int, count int) (bool, error) {
+func (r *redisInventoryRepository) DeductInventory(ctx context.Context, orderID uuid.UUID, eventID uuid.UUID, userID int, count int, reservedUntil time.Time) (bool, error) {
 	key := inventoryKey(eventID)
 	keys := []string{key}
 
@@ -202,12 +202,17 @@ func (r *redisInventoryRepository) DeductInventory(ctx context.Context, orderID 
 	// The int→interface{} boxing still escapes, but the slice header doesn't.
 	// eventID + orderID are passed as canonical UUID strings so the Lua
 	// script can include them in the produced stream message verbatim.
+	// reservedUntil is converted to UTC unix seconds: Lua's number type
+	// is IEEE-754 double which is exact for any int64 ≤ 2^53; unix
+	// seconds (~10 digits) is comfortably within that range, so no
+	// precision loss. The worker re-parses with time.Unix(_, 0).UTC().
 	argsPtr := argsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count
 	args[1] = eventID.String()
 	args[2] = userID
 	args[3] = orderID.String()
+	args[4] = reservedUntil.UTC().Unix()
 	defer argsPool.Put(argsPtr)
 
 	script, ok := r.scripts["deduct"]

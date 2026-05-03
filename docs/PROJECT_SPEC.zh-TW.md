@@ -270,18 +270,23 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 ## 5. API 文件
 
 ### POST /api/v1/book
-訂票。
+為某活動預訂票券(D3 — Pattern A 預訂流程)。
 ```json
 // Request
 { "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
 // Headers: Idempotency-Key: <ASCII 可印字元、<= 128 字元>(選填)
 
-// 202 Accepted — Redis 端扣減成功;後續流程是非同步的
+// 202 Accepted — Redis 預訂成功;client 必須在 reserved_until 之前完成付款
 {
   "order_id": "019dd493-480a-7499-b208-812c930b152e",
-  "status": "processing",
-  "message": "booking accepted, awaiting confirmation",
-  "links": { "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e" }
+  "status": "reserved",
+  "message": "reservation accepted; complete payment before reserved_until",
+  "reserved_until": "2026-05-03T18:30:00Z",
+  "expires_in_seconds": 900,
+  "links": {
+    "self": "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e",
+    "pay":  "/api/v1/orders/019dd493-480a-7499-b208-812c930b152e/pay"
+  }
 }
 // 409 Conflict — 售完
 { "error": "sold out" }
@@ -295,7 +300,9 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 { "error": "internal server error" }
 ```
 
-成功時回的是 `202 Accepted` — 對非同步管線是誠實的。Redis 端的庫存扣減成功了(load-shed gate),訂單意圖已經進佇列;DB 持久化 + 付款 + saga 還在進行中。Client 用 `order_id` 對 `GET /api/v1/orders/:id` 輪詢最終狀態。`order_id` 是 UUIDv7,在 API 邊界由 `BookingService.BookTicket` 鑄造,然後沿 Redis stream → worker `domain.NewOrder(id, ...)` → DB orders.id → outbox → Kafka order.created → payment + saga 一路串到底。PEL 重送會復用同一個 id;PR-47 之前 worker 在每次重送都鑄一個新 uuid,client 拿到的 id 會跟 DB 的 id 對不起來。
+成功時回的是 `202 Accepted` — 對非同步管線是誠實的。Pattern A 語意:Redis 端的庫存「被預訂」(不再自動扣款),worker 非同步把訂單寫入 DB,狀態 `awaiting_payment` + `reserved_until = NOW() + BOOKING_RESERVATION_WINDOW`(預設 15m)。Client 必須在 `reserved_until` 之前 POST 到 `links.pay`(D4 端點,目前回 404 — D4 才實作)才會真的扣款;否則 D6 的過期 sweeper 會把訂單轉為 `expired` 並透過 saga compensator 回補庫存。Client 用 `order_id` 對 `GET /api/v1/orders/:id` 輪詢即時狀態。`order_id` 是 UUIDv7,在 API 邊界由 `BookingService.BookTicket` 鑄造,然後沿 Lua deduct → Redis stream(包含 `reserved_until` 的 unix 秒)→ worker `domain.NewReservation(id, ...)` → DB orders.id + orders.reserved_until → 輪詢一路串到底。PEL 重送會復用同一個 id;PR-47 之前 worker 在每次重送都鑄一個新 uuid,client 拿到的 id 會跟 DB 的 id 對不起來。
+
+**D3 wire-format 說明。** 舊版的 `status: "processing"` 值仍以 export 常數的形式留在 codebase,給仍綁定 D3 之前語意的 in-flight client 做向後相容,但新部署的 server 一律回 `status: "reserved"`。Pattern A 跳過了舊的自動扣款路徑(Pending → Charging → Confirmed);payment_worker 仍會消費 `order.created`,但因為它在 `status != Pending` 時提前 return,在 Pattern A 的場景下會優雅地不做事(沒有重複扣款風險)。D7 會清掉這條死路徑(payment_worker 訂閱 + Pattern A 的 outbox emit)。
 
 **Idempotency-Key 契約(N4)** — Stripe 風格的 fingerprint 驗證:
 
