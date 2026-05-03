@@ -94,6 +94,38 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
   - Code touchpoints: [`redis_queue.go`](../internal/infrastructure/cache/redis_queue.go) Subscribe loop, [`uow.go`](../internal/infrastructure/persistence/postgres/uow.go) Tx pattern, [`redis.conf`](../deploy/redis/redis.conf) persistence config
   - Industry: Alibaba [Apsara­DB for Redis flash sales](https://www.alibabacloud.com/help/en/redis/use-cases/use-apsaradb-for-redis-to-build-a-business-system-that-can-handle-flash-sales), Stripe [Idempotency keys](https://stripe.com/blog/idempotency), [redis/redis discussions/13680](https://github.com/redis/redis/discussions/13680) (NOGROUP recovery thread), [Dapr components-contrib#3219](https://github.com/dapr/components-contrib/issues/3219) (NOGROUP-after-restart)
 
+### Section-level inventory sharding (Phase 3+, conditional) (2026-05-03)
+
+- **Contract.** Events are coarse-grained containers; each event holds multiple sections (price tiers / seating areas). The real sharding axis for inventory is `(event_id, section_id)`, not `event_id`. Single-key Lua serialisation caps `accepted_bookings/s` per `(event_id, section_id)` pair at ~8,330 — a physical ceiling proven empirically by the VU scaling stress test ([blog post](blog/2026-05-lua-single-thread-ceiling.zh-TW.md) has the full derivation).
+
+- **Two-layer plan** (industry consensus across Alibaba Singles' Day, Ticketmaster Verified Fan, China Railway 12306, JD.com flash sales):
+  - **Layer 1 — Section-level sharding (business axis, default for all multi-section events).** Each event × section gets its own Redis key namespace, e.g. `event:{uuid}:section:{section_id}:qty`. Each section has independent sold-out detection — no cross-shard SUM. Schema-level concern only; no extra Redis instances needed at this layer.
+  - **Layer 2 — Hot-section quota pre-allocation (infra axis, only for hot sections).** For sections expected to be saturated (Taylor Swift VIP front row, JD.com Singles' Day iPhone), pre-split the quota across N Redis instances, with a router service routing to whichever instance still has free quota. Each shard sees its own sold-out independently; "section completely sold out" is a binary AND across N shards.
+
+- **Why quota pre-allocation ≫ generic hash sub-sharding.** Hash sub-sharding requires SUM across N shards to detect sold-out — real cross-shard consistency cost. Quota pre-allocation lets each shard see its own state — sold-out is per-shard, only "entire section sold out" needs aggregation (and that's a cheap binary AND).
+
+- **Industry references.**
+  - Alibaba Singles' Day SKU sharding (hot SKUs pre-allocated quotas across multiple Redis)
+  - Ticketmaster Verified Fan (event × ticket type as Layer 1; high-demand events split traffic at Layer 2)
+  - China Railway 12306 (train + seat-class as Layer 1; hot trains' hot classes split via "inventory routing table")
+  - JD.com flash sale (SKU + hot SKU pre-allocated to N nodes)
+
+- **Trigger conditions (when to do Layer 1).**
+  1. Business need surfaces million-ticket-per-event scenarios
+  2. Business need shifts to "sub-second × selling out" (vs current "12 seconds is fine")
+  3. Multiple concurrent events saturate a single Redis instance's CPU (sustained ~80%)
+
+- **Required preparation in Pattern A (D1-D7).** Add `section_id` to `events` and `orders` schema even though we won't shard yet. This makes Layer 1 a routing change rather than a schema migration. **Low-cost, high future-value design choice — should ship in Phase 3 regardless of sharding decision.**
+
+- **Layer 2 is portfolio-demo grade.** Implementing one hot section's quota router + N Redis instances + a benchmark confirming N× linear scaling is the concrete answer to the standard "how do you handle hot keys" architecture question. Worth doing as a standalone PR after Pattern A and CHANGELOG-driven v0.5.0 / v1.0.0 milestones — **not crammed into the Phase 3 main line**.
+
+- **What this is NOT.** Not a justification for generic hash sharding (the textbook version that nobody uses standalone). Not a justification for Redis Cluster as a first move (cluster mode adds Lua single-slot constraints; only worth it after Layer 1 + Layer 2 saturate). Not a contradiction of the saturation-profile finding that single-instance Redis is the right choice for our current scale ([PR #71](https://github.com/Leon180/booking_monitor/pull/71)).
+
+- **Related docs.**
+  - Derivation: [`docs/blog/2026-05-lua-single-thread-ceiling.zh-TW.md`](blog/2026-05-lua-single-thread-ceiling.zh-TW.md)
+  - Empirical evidence: [`docs/saturation-profile/`](saturation-profile/), [`docs/benchmarks/20260502_132335_compare_c500_vu_scaling/`](benchmarks/)
+  - Cache-truth contract this builds on: [Cache-truth architecture entry](#cache-truth-architecture-redis-as-ephemeral-db-as-source-of-truth-2026-05-03)
+
 ---
 
 ## Testing

@@ -75,6 +75,7 @@ Different from the [bilingual contract](../../.claude/CLAUDE.md) that covers AGE
 | Post (zh-TW primary) | English companion | Status | Topic | Pairs with |
 | :-- | :-- | :-- | :-- | :-- |
 | [2026-05-cache-truth-architecture.zh-TW.md](2026-05-cache-truth-architecture.zh-TW.md) | [EN](2026-05-cache-truth-architecture.md) | published | Why Redis is ephemeral, not durable. The FLUSHALL incident, the 411/1000 silent message loss, and the 5-PR closure. | [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) |
+| [2026-05-lua-single-thread-ceiling.zh-TW.md](2026-05-lua-single-thread-ceiling.zh-TW.md) | [EN](2026-05-lua-single-thread-ceiling.md) | published | The Lua single-thread ceiling at 8,330 acc/s. Why Redis CPU isn't the problem; why the next 10× requires two-layer sharding (section-level + hot-section quota router); why generic hash sharding is the wrong frame. | [VU stress benchmark](../benchmarks/), [saturation profile](../saturation-profile/) |
 
 ### Planned (per [Phase 3 roadmap D15](../post_phase2_roadmap.md))
 
