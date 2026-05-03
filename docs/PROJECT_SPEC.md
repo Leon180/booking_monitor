@@ -128,7 +128,7 @@ The split between `domain` and `application` packages is per-port: domain-side i
 
 ### PostgreSQL (port 5433)
 
-The schema below reflects the **post-migration-000011 state**. Migration 000008 (PR #34) swapped all primary keys from `SERIAL` to caller-generated `UUID` (UUIDv7 — RFC 9562, time-prefixed); 000009 added the `order_status_history` audit log; 000010/000011 added the `updated_at` column on `orders` and the partial index that powers reconciler + saga-watchdog sweeps.
+The schema below reflects the **post-migration-000012 state**. Migration 000008 (PR #34) swapped all primary keys from `SERIAL` to caller-generated `UUID` (UUIDv7 — RFC 9562, time-prefixed); 000009 added the `order_status_history` audit log; 000010/000011 added the `updated_at` column on `orders` and the partial index that powers reconciler + saga-watchdog sweeps. **000012 (Phase 3 D1 — Pattern A schema) introduced `event_sections`, `orders.section_id`, `orders.reserved_until`, `orders.payment_intent_id`, and `events.reservation_window_seconds` to support the upcoming reservation + payment + webhook flow + multi-section model.**
 
 ```sql
 -- events: Source of truth for inventory
@@ -137,12 +137,33 @@ CREATE TABLE events (
     name VARCHAR(255) NOT NULL,
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
-    version INT DEFAULT 0
+    version INT DEFAULT 0,
+    reservation_window_seconds INT NOT NULL DEFAULT 900  -- added in 000012; per-event reservation TTL default (15 min)
 );
 -- Re-added by migration 000008's UUID swap (originally from 000003):
 ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
 -- No longer seeded by default. Tests use h.SeedEvent / domain.NewEvent.
+
+-- event_sections: Per-event price-tier / area sections (added in 000012)
+-- Phase 3 D1 — schema scaffolding for the section-level sharding axis
+-- documented in `docs/architectural_backlog.md` § Section-level inventory
+-- sharding. The application layer treats each `(event_id, section_id)`
+-- as the real inventory aggregate; `events.total_tickets` becomes a
+-- denormalised summary that future PRs may compute from sections.
+CREATE TABLE event_sections (
+    id UUID PRIMARY KEY,           -- UUIDv7, caller-generated
+    event_id UUID NOT NULL,        -- FK target (no DB-level constraint; same rationale as orders.event_id)
+    name VARCHAR(255) NOT NULL,    -- e.g., "VIP", "搖滾區", "二樓 A 區"
+    total_tickets INT NOT NULL,
+    available_tickets INT NOT NULL,
+    version INT DEFAULT 0,
+    CONSTRAINT check_section_available_tickets_non_negative
+        CHECK (available_tickets >= 0),
+    CONSTRAINT uq_section_name_per_event
+        UNIQUE (event_id, name)
+);
+CREATE INDEX idx_event_sections_event_id ON event_sections (event_id);
 
 -- orders: Booking transaction log
 CREATE TABLE orders (
@@ -150,9 +171,13 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK target (no DB-level constraint; see note below)
     user_id INT NOT NULL,          -- external user reference; this service does not own the users table
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated
+    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated (legacy) + awaiting_payment | paid | expired | payment_failed (added by D2 alongside 000012; D1 migration is schema-only, D2 ships the Go state-machine)
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- added in 000010 for recon/watchdog age comparisons
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- added in 000010 for recon/watchdog age comparisons
+    -- Pattern A columns (added in 000012 / Phase 3 D1):
+    section_id UUID NULL,                            -- FK target (no DB-level constraint); NULL for legacy pre-Pattern-A orders
+    reserved_until TIMESTAMPTZ NULL,                 -- per-order reservation TTL fact; NULL for terminal-status orders
+    payment_intent_id VARCHAR(255) NULL              -- Stripe-shape payment intent id; set by POST /orders/:id/pay
 );
 -- Re-added in 000008 (originally 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
@@ -161,6 +186,17 @@ CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
 CREATE INDEX idx_orders_status_updated_at_partial
     ON orders (status, updated_at)
  WHERE status IN ('charging', 'pending', 'failed');
+-- Added in 000012 — powers the reservation expiry sweeper (D6):
+CREATE INDEX idx_orders_awaiting_payment_reserved_until
+    ON orders (status, reserved_until)
+ WHERE status = 'awaiting_payment';
+-- Added in 000012 — supports per-section availability checks for the
+-- future Layer 1 sharding router. Partial because terminal-status
+-- orders dominate the table; the active working set is small.
+CREATE INDEX idx_orders_section_id_active
+    ON orders (section_id, status)
+ WHERE section_id IS NOT NULL
+   AND status NOT IN ('paid', 'compensated', 'expired', 'payment_failed', 'confirmed', 'failed');
 
 -- events_outbox: Transactional outbox for event publishing
 CREATE TABLE events_outbox (
@@ -196,7 +232,7 @@ CREATE INDEX idx_order_status_history_occurred
 
 **Note on `orders.event_id`:** there is no DB-level FK constraint to `events(id)`. Domain validation enforces the relationship at the application boundary (`domain.NewOrder` requires `eventID` to be the id of a real event) and integration tests pin the partial-unique-index re-buy contract; the absence of the FK is deliberate and documented in migration 000008.
 
-### Migration History (11 files in `deploy/postgres/migrations/`)
+### Migration History (12 files in `deploy/postgres/migrations/`)
 
 | # | Purpose |
 |---|---------|
@@ -211,6 +247,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000009 | **`order_status_history` audit table** (PR #40) — every transitionStatus call writes a history row atomically with the UPDATE via a CTE. Includes two indexes: `(order_id, occurred_at)` for per-order timelines + `(occurred_at)` for time-window scans. |
 | 000010 | **A4 charging two-phase intent log** (PR #45) — adds `orders.updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` + partial index `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')` to power the reconciler's `FindStuckCharging` sweep. |
 | 000011 | **A5 saga watchdog index widening** (PR #49) — re-creates the 000010 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed')` so the saga-watchdog `FindStuckFailed` sweep shares the same index plan as the reconciler. |
+| 000012 | **Phase 3 D1 — Pattern A schema** — adds `event_sections` table (multi-section model + Layer 1 sharding axis); `events.reservation_window_seconds` (admin-configurable TTL default, 900s = 15 min); `orders.section_id` (NULLable; new code paths set it; legacy rows stay NULL); `orders.reserved_until` (per-order TTL fact); `orders.payment_intent_id` (Stripe-shape, set during POST /orders/:id/pay); partial index `idx_orders_awaiting_payment_reserved_until` for the reservation expiry sweeper (D6); partial index `idx_orders_section_id_active` for the future Layer 1 sharding router. **Schema-only — D2 ships the matching Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`). No DB-level FK on `section_id` and no CHECK on the new statuses; same rationale as 000008 / 000010 (application enforces). |
 
 ### Redis
 
