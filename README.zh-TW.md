@@ -6,13 +6,25 @@
 
 ## 系統架構
 
+目前的 production 樣貌(Stage 4 — 演進過程見下方[架構演進](#架構演進)):
+
+```mermaid
+flowchart LR
+    Client((Client)) --> Nginx[Nginx<br/>限流]
+    Nginx --> API[Gin API]
+    API -->|Lua DECRBY + XADD| Redis[(Redis<br/>庫存 + stream)]
+    Redis -.->|XReadGroup| Worker
+    Worker -->|UoW: INSERT order<br/>+ events_outbox| PG[(Postgres<br/>事實來源)]
+    PG -.->|advisory-lock<br/>leader relay| Kafka{{Kafka}}
+    Kafka -.->|order.created| Payment[Payment Worker]
+    Payment -.->|fail| Kafka
+    Kafka -.->|order.failed| Saga[Saga<br/>Compensator]
+    Saga --> Redis
+    Saga --> PG
 ```
-Client -> Nginx (限流) -> Gin API -> Redis Lua (原子扣減)
-  -> Redis Stream -> Worker -> PostgreSQL 交易 [Order + Outbox]
-    -> OutboxRelay -> Kafka (order.created)
-      -> PaymentWorker -> 成功: confirmed | 失敗: order.failed
-        -> SagaCompensator -> 回滾 DB 與 Redis 庫存
-```
+
+> 實線箭頭 = 同步熱路徑 · 虛線箭頭 = 非同步 / event-driven
+> Cache-truth 契約見 [v0.4.0 release notes](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0):Redis 為 ephemeral、Postgres 為事實來源、漂移會被偵測並命名。
 
 **設計風格**:Domain-Driven Design + Clean Architecture(Modular Monolith)
 
@@ -44,6 +56,101 @@ internal/
   bootstrap/              # logger + tracer + DI 基礎元件的 fx 綁定
 deploy/                   # Postgres migrations(11 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
 ```
+
+### 架構演進
+
+目前的 Stage 4 不是一次到位的。每一層都是為了解決上一層 benchmark 量化出來的瓶頸 — 下面四個階段的演進就是可以照著 [Releases page](https://github.com/Leon180/booking_monitor/releases) 一個 commit 一個 commit 走過去的故事。
+
+**Stage 1 — 同步 baseline。** API → Postgres `SELECT FOR UPDATE`。在 1k req/s 以下就因為 row-lock 爭用飽和。[v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) 的 C500 benchmark 紀錄了這個天花板。
+
+```mermaid
+flowchart LR
+    C1((Client)) --> A1[API]
+    A1 -->|SELECT FOR UPDATE<br/>+ INSERT| P1[(Postgres)]
+```
+
+**Stage 2 — Redis 熱路徑,DB 仍同步寫入。** 在 Redis 上做 Lua 原子扣減,row-lock 爭用消失,但同步 DB INSERT 變成新的瓶頸。
+
+```mermaid
+flowchart LR
+    C2((Client)) --> A2[API]
+    A2 -->|Lua DECRBY| R2[(Redis)]
+    A2 -->|sync INSERT| P2[(Postgres)]
+```
+
+**Stage 3 — 透過 Redis Streams + worker pool 走非同步。** Lua deduct 把訊息送進 stream;worker pool 非同步消化。Redis 一回 ok,客戶端就拿到 HTTP 202。
+
+```mermaid
+flowchart LR
+    C3((Client)) --> A3[API]
+    A3 -->|Lua DECRBY + XADD| R3[(Redis)]
+    R3 -.->|stream| W3[Worker]
+    W3 -->|INSERT| P3[(Postgres)]
+```
+
+**Stage 4 — 完整 event-driven(目前)。** Worker 在一個 UoW 裡同時寫 order 跟 outbox;advisory-lock 選出來的 leader relay 推訊息到 Kafka;payment service + saga compensator 是各自獨立的 consumer。就是 [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) 釋出、再經過 [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) 強化的這個架構。
+
+```mermaid
+flowchart LR
+    C4((Client)) --> A4[API]
+    A4 -->|Lua DECRBY + XADD| R4[(Redis)]
+    R4 -.->|stream| W4[Worker]
+    W4 -->|UoW: order + outbox| P4[(Postgres)]
+    P4 -.->|relay| K4{{Kafka}}
+    K4 -.-> Pay4[Payment]
+    K4 -.-> S4[Saga]
+```
+
+四個 stage 的 `cmd/booking-cli-stage{1,2,3,4}/` 比較 harness([`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md) 的 D12)是 Phase 3 的計畫項目 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。
+
+### Pattern A 流程(計畫中 — Phase 3a)
+
+下一個里程碑會把 `POST /book` 拆成預訂 + 明確的 `POST /pay` + `POST /webhook/payment`,讓訂票流程進入 Stripe Checkout / KKTIX 的形狀。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API
+    participant R as Redis
+    participant W as Worker
+    participant P as Postgres
+    participant GW as Payment<br/>Gateway
+    participant SW as Expiry<br/>Sweeper
+
+    rect rgb(240, 248, 255)
+    Note over C,P: 預訂(D1-D3)
+    C->>+API: POST /book {event_id, qty}
+    API->>+R: Lua DECRBY + XADD
+    R-->>-API: ok
+    API-->>-C: 202 {order_id, awaiting_payment,<br/>reserved_until, payment_intent}
+    R-->>W: XReadGroup
+    W->>P: INSERT order status=awaiting_payment
+    end
+
+    alt 客戶在 TTL 內付款(D4-D5)
+        rect rgb(245, 255, 245)
+        C->>+API: POST /orders/:id/pay
+        API->>+GW: CreatePaymentIntent
+        GW-->>-API: client_secret
+        API-->>-C: client_secret
+        Note over C,GW: 客戶端完成 Stripe Elements
+        GW->>+API: POST /webhook/payment (signed)
+        API->>API: 驗簽 + 冪等檢查
+        API->>P: status awaiting_payment → paid
+        API-->>-GW: 200
+        end
+    else TTL 過期未付款(D6)
+        rect rgb(255, 245, 245)
+        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until < NOW()
+        P-->>SW: 卡住的列
+        SW->>R: revert.lua INCRBY
+        SW->>P: status awaiting_payment → expired
+        end
+    end
+```
+
+這個流程做完時會打 `v0.5.0` tag。
 
 ## 特色
 
