@@ -329,7 +329,17 @@ func (h *bookingHandler) HandleCreatePaymentIntent(c *gin.Context) {
 
 	intent, err := h.paymentService.CreatePaymentIntent(ctx, orderID)
 	if err != nil {
-		log.Error(ctx, "CreatePaymentIntent failed", tag.OrderID(orderID), tag.Error(err))
+		// Sentinel errors are expected business outcomes (404 / 409),
+		// not internal failures — log at Warn so they don't pollute
+		// the Error-level dashboards / pages. Any other error is a
+		// real internal failure (gateway 500, DB outage, etc.) and
+		// stays at Error. Mirrors the HandleBook log-level split for
+		// domain.ErrSoldOut.
+		if isExpectedPayError(err) {
+			log.Warn(ctx, "CreatePaymentIntent rejected", tag.OrderID(orderID), tag.Error(err))
+		} else {
+			log.Error(ctx, "CreatePaymentIntent failed", tag.OrderID(orderID), tag.Error(err))
+		}
 		status, publicMsg := mapError(err)
 		c.Data(status, "application/json", mustMarshal(dto.ErrorResponse{Error: publicMsg}))
 		return

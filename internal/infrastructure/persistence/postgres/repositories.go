@@ -566,6 +566,7 @@ func (r *postgresOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid
 // onto an order. Race-safe: the SQL UPDATE includes
 //
 //	WHERE status = 'awaiting_payment'
+//	  AND reserved_until > NOW()
 //	  AND (payment_intent_id IS NULL OR payment_intent_id = $2)
 //
 // so:
@@ -581,16 +582,27 @@ func (r *postgresOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid
 //     write so the row's status doesn't get rolled back accidentally
 //     (status stays Paid; the /pay client gets an error and can
 //     re-fetch via GET /orders/:id to see the actual state).
+//   - A reservation that elapsed during the gateway round-trip
+//     (service.go validates reserved_until at read time, then
+//     ~50-200ms of gateway latency, then this UPDATE) is rejected
+//     by `reserved_until > NOW()`. Without this clause, an order
+//     could land in "AwaitingPayment with payment_intent_id but
+//     reserved_until already past" — D6's sweeper would expire it,
+//     but the client meanwhile might call confirm-payment via
+//     Stripe Elements and the D5 webhook would mark it Paid,
+//     creating a "user paid for an expired reservation" UX bug.
+//     Defensive belt-and-suspenders to the service-level check.
 //   - A different intent_id arriving (which should be impossible
 //     under PaymentIntentCreator's idempotency contract — same
 //     orderID always returns the same intent — but defensively
-//     handled) is rejected by the second clause.
+//     handled) is rejected by the third clause.
 func (r *postgresOrderRepository) SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error {
 	res, err := r.exec.ExecContext(ctx, `
 		UPDATE orders
 		   SET payment_intent_id = $2
 		 WHERE id = $1
 		   AND status = 'awaiting_payment'
+		   AND reserved_until > NOW()
 		   AND (payment_intent_id IS NULL OR payment_intent_id = $2)
 	`, id, paymentIntentID)
 	if err != nil {

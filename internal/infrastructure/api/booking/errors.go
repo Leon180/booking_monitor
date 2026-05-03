@@ -64,3 +64,18 @@ func mapError(err error) (status int, publicMsg string) {
 	// and return a generic message.
 	return http.StatusInternalServerError, "internal server error"
 }
+
+// isExpectedPayError reports whether err is one of the
+// /pay-specific business outcomes the handler should log at Warn
+// (not Error). Keeps log dashboards clean: 404 / 409 paths are
+// expected client-side state transitions, not internal failures.
+//
+// Pinned in errors.go (not handler.go) to live alongside the
+// authoritative mapError so a future sentinel addition updates both
+// in one place.
+func isExpectedPayError(err error) bool {
+	return errors.Is(err, domain.ErrOrderNotFound) ||
+		errors.Is(err, domain.ErrInvalidOrderID) ||
+		errors.Is(err, paymentapp.ErrOrderNotAwaitingPayment) ||
+		errors.Is(err, paymentapp.ErrReservationExpired)
+}

@@ -828,3 +828,46 @@ func TestOrderRepository_SetPaymentIntentID_OrderNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrOrderNotFound)
 }
+
+// TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation:
+// the SQL predicate now includes `reserved_until > NOW()`. An order
+// that's still in `awaiting_payment` (the D6 sweeper hasn't run yet)
+// but past its reservedUntil must reject the persist write. Closes
+// the silent-failure-hunter F2 finding from D4 review: without this
+// guard, the gateway round-trip latency could land a payment_intent_id
+// on an already-expired reservation, leading to a "user paid for an
+// expired reservation" UX bug once the D5 webhook fires.
+func TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	// Insert an awaiting-payment order whose reserved_until is already
+	// past at write time. We can't go through `newReservation`
+	// (NewReservation rejects past times), so we construct the row
+	// via Reconstruct + Create directly. This is the integration-test
+	// equivalent of the production scenario where:
+	//   1. service.CreatePaymentIntent reads order, validates reservedUntil > now (passes)
+	//   2. gateway round-trip takes ~200ms
+	//   3. SetPaymentIntentID call fires after reservedUntil has elapsed.
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+	expiredTime := time.Now().Add(-1 * time.Minute)
+	o := domain.ReconstructOrder(id, 9, eventID, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredTime, "")
+	_, err = repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	err = repo.SetPaymentIntentID(ctx, id, "pi_too_late")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
+		"expired-reservation order must reject the persist write — closes the gateway-round-trip-elapsed-window race")
+
+	// Verify the row's payment_intent_id is still NULL (the rejected
+	// UPDATE didn't accidentally write).
+	got, err := repo.GetByID(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.PaymentIntentID(),
+		"rejected SetPaymentIntentID must NOT write the column")
+}

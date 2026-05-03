@@ -311,16 +311,30 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 
 	if err := s.orderRepo.SetPaymentIntentID(ctx, orderID, intent.ID); err != nil {
 		// ErrOrderNotFound here means the row got flipped between our
-		// GetByID and the UPDATE (most likely the webhook beat us, or
-		// the D6 sweeper ran). Surface verbatim so the handler can
-		// return 409 with a clear explanation. Other errors wrap.
+		// GetByID and the UPDATE (most likely the webhook beat us, the
+		// D6 sweeper ran, OR — post-fixup — reserved_until elapsed
+		// during the gateway round-trip and the SQL predicate's new
+		// `reserved_until > NOW()` guard rejected the write).
+		// Surface verbatim so the handler can return 404 / 409 with
+		// a clear explanation.
 		if errors.Is(err, domain.ErrOrderNotFound) {
-			s.log.Info(ctx, "CreatePaymentIntent: order flipped status between read and write",
-				tag.OrderID(orderID))
+			s.log.Info(ctx, "CreatePaymentIntent: order state changed between read and write",
+				tag.OrderID(orderID),
+				mlog.String("gateway_intent_id", intent.ID),
+			)
 			return domain.PaymentIntent{}, err
 		}
-		s.log.Error(ctx, "CreatePaymentIntent: SetPaymentIntentID failed",
-			tag.OrderID(orderID), tag.Error(err))
+		// Transient persist failure (DB outage, ctx cancellation,
+		// etc.) AFTER the gateway has already registered the intent.
+		// Logging gateway_intent_id here is operationally critical:
+		// the next /pay retry will get the SAME intent (gateway-side
+		// idempotency) but if retries don't happen, an operator can
+		// recover the intent from logs without querying the gateway.
+		s.log.Error(ctx, "CreatePaymentIntent: SetPaymentIntentID failed AFTER gateway succeeded",
+			tag.OrderID(orderID),
+			mlog.String("gateway_intent_id", intent.ID),
+			tag.Error(err),
+		)
 		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent persist: %w", err)
 	}
 
