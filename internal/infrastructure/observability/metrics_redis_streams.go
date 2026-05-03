@@ -84,3 +84,30 @@ var RedisDLQRoutedTotal = promauto.NewCounterVec(
 	},
 	[]string{"reason"},
 )
+
+// ConsumerGroupRecreatedTotal counts NOGROUP self-heal events — every
+// time the worker's XReadGroup returned NOGROUP and we ran
+// `XGROUP CREATE ... $` to recover. The recovery preserves availability
+// (worker keeps consuming new messages) at the cost of silently dropping
+// any messages that were enqueued in the window between the group's
+// disappearance and the recreation moment.
+//
+// In a healthy production system this counter MUST stay at 0. Any
+// non-zero rate is an architectural failure signal — the most likely
+// causes are:
+//   - operator ran FLUSHALL on the production Redis (don't)
+//   - operator deleted the consumer group via XGROUP DESTROY (don't)
+//   - Redis crashed and AOF wasn't enabled (PR-B intentionally turned
+//     off AOF; the plan is "rehydrate inventory from DB on restart" —
+//     but in-flight stream messages have no DB analog and will be lost)
+//
+// See `docs/architectural_backlog.md` § "Cache-truth architecture" for
+// the full reasoning. Paired with the `ConsumerGroupRecreated` alert
+// in `deploy/prometheus/alerts.yml` so the operator gets paged
+// instead of seeing silent data loss.
+var ConsumerGroupRecreatedTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "consumer_group_recreated_total",
+		Help: "Total number of NOGROUP self-heal events on the orders:stream consumer group. MUST stay 0 in healthy production; any > 0 means messages may have been silently dropped.",
+	},
+)

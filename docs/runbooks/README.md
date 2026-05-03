@@ -55,6 +55,7 @@ silence / inhibit / notification log.
 - [RedisXAckFailures](#redisxackfailures)
 - [RedisRevertFailures](#redisrevertfailures)
 - [RedisXAddFailures](#redisxaddfailures)
+- [ConsumerGroupRecreated](#consumergrouprecreated)
 - [KafkaConsumerStuck](#kafkaconsumerstuck)
 
 ### Meta (scrape health)
@@ -348,6 +349,51 @@ silence / inhibit / notification log.
 **Symptom.** `redis_xadd_failures_total` rate > 0 for 5m. Severity `warning`. The booking hot path is intermittently failing to enqueue orders.
 
 **Action.** User-visible 5xx may also be elevated. Standard Redis health triage.
+
+---
+
+## ConsumerGroupRecreated
+
+**Symptom.** `increase(consumer_group_recreated_total[5m]) > 0`. Severity **critical**, fires immediately on the first occurrence (no soak). The worker's NOGROUP self-heal triggered, meaning the Redis Streams consumer group `orders:group` was destroyed and recreated. **Messages enqueued in the destruction → recreation window have been silently dropped** — the recreation uses `XGROUP CREATE ... $` which starts from the current end of stream.
+
+**Why this is critical-severity (and `for: 0s`).** In healthy production this counter MUST stay 0. The consumer group is created at startup and Redis Streams never auto-deletes it. Any `> 0` means SOMETHING destroyed it — possible causes ranked by likelihood:
+
+1. Operator ran `FLUSHALL` on production Redis (don't — `make reset-db` was fixed in PR #73 to use precise DEL specifically for this reason)
+2. Operator ran `XGROUP DESTROY orders:stream orders:group`
+3. Redis crashed without AOF (we have AOF off by design — see `docs/architectural_backlog.md` § Cache-truth architecture). The rehydrate path covers inventory state; in-flight stream messages have NO DB analog and ARE lost on a Redis crash.
+
+**Diagnosis (in order):**
+
+1. **Cross-check the booking funnel for missing orders.** Run in Prometheus:
+   ```promql
+   # Bookings that reached the API + got 202 in last 1h
+   sum(increase(bookings_total{status="success"}[1h]))
+   ```
+   Then count DB orders created in the same window:
+   ```sql
+   SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '1 hour';
+   ```
+   If `bookings_total - DB_orders_count > 0`, that's the silent-drop count. Under normal operation the two should match within seconds (worker drains the stream).
+
+2. **Identify the trigger.** Check Redis logs:
+   ```
+   docker compose logs redis | grep -E "FLUSHALL|XGROUP|shutdown"
+   ```
+   And app logs around the alert time:
+   ```
+   docker compose logs --tail=500 app | grep -E "NOGROUP|ConsumerGroup"
+   ```
+
+3. **Confirm the recovery worked.** The worker should have logged a WARN line: `XReadGroup Error: NOGROUP. Attempting to recreate group — messages enqueued before recovery may have been silently skipped`. After that log, the worker should be back to normal `info` logs of order processing.
+
+**Action:**
+
+- **If silent-drop count > 0:** affected users have HTTP 202 responses with `order_id`s that aren't in the DB. They'll never get a `confirmed` or `failed` status — `GET /orders/:id` returns 404 indefinitely. Reach out via business channels OR provide a self-service retry path (out of scope for this runbook; product decision).
+- **If silent-drop count == 0:** the NOGROUP fired but no messages were in flight at the moment. Acknowledge the alert and document the trigger so it doesn't recur (e.g., update operator runbook to never run FLUSHALL on prod).
+
+**Escalation.** If silent-drop count is in 4+ digits OR the trigger is unclear (no FLUSHALL / XGROUP DESTROY in logs), escalate to whoever owns Redis infrastructure — there may be a Redis bug, network partition, or unauthorized access.
+
+**Background.** This alert was added in PR-C of the cache-truth architecture roadmap. The 411-of-1000 silent-message-loss case that drove it is documented in `docs/architectural_backlog.md` § "Cache-truth architecture". The metric fires on **both** the main Subscribe loop AND the PEL recovery path (`processPending`), so this alert covers all entry points.
 
 ---
 

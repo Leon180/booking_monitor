@@ -196,7 +196,24 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 			// is succeeding every time — observable as premature pod
 			// restarts during operational group resets.
 			if strings.Contains(err.Error(), "NOGROUP") {
-				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group...",
+				// Loud signal: NOGROUP in healthy production should be
+				// IMPOSSIBLE — the consumer group is created at startup
+				// and Redis Streams never auto-deletes it. If we see
+				// NOGROUP, something destroyed it (FLUSHALL, manual
+				// XGROUP DESTROY, Redis crash without AOF). The counter
+				// + alert rule (`ConsumerGroupRecreated` in alerts.yml)
+				// ensure the operator hears about it; the structured
+				// log provides the timestamp + worker_id for triage.
+				//
+				// IMPORTANT: the recreation uses `$` (current end of
+				// stream), which means messages enqueued BETWEEN the
+				// destruction and this recovery moment are silently
+				// skipped. There is no `0` alternative that's correct
+				// — `0` would replay all historical messages as
+				// duplicates. The right answer is "don't let NOGROUP
+				// happen", which the alert enforces.
+				q.metrics.RecordConsumerGroupRecreated()
+				q.logger.Warn(ctx, "XReadGroup Error: NOGROUP. Attempting to recreate group — messages enqueued before recovery may have been silently skipped",
 					mlog.Int("consecutive_errors", consecutiveErrors))
 				if ensureErr := q.EnsureGroup(ctx); ensureErr != nil {
 					q.logger.Error(ctx, "Failed to recreate group", tag.Error(ensureErr))
@@ -509,6 +526,23 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
 				return nil
+			}
+			// Symmetric NOGROUP handling with the main Subscribe loop:
+			// if the consumer group disappeared between worker boot
+			// (EnsureGroup at startup) and processPending (called as
+			// the first action of Subscribe), the PEL recovery path
+			// hits NOGROUP first. Without this branch, the metric
+			// would only fire on the SECOND pass (when Subscribe's
+			// main loop hits the same error). Increment here so the
+			// `ConsumerGroupRecreated` alert covers BOTH entry points.
+			//
+			// We don't recreate the group here — return the error so
+			// Subscribe logs "Failed to process pending messages" and
+			// continues to the main loop, which will recreate. The
+			// metric is the load-bearing signal; the recreation order
+			// doesn't matter operationally.
+			if strings.Contains(err.Error(), "NOGROUP") {
+				q.metrics.RecordConsumerGroupRecreated()
 			}
 			return fmt.Errorf("processPending XReadGroup: %w", err)
 		}

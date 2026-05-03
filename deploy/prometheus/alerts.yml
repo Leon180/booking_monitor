@@ -401,6 +401,59 @@ groups:
           summary: "Redis XADD failures on orders stream"
           description: "redis_xadd_failures_total averaging {{ $value }} errors/sec over 5m. The booking hot path is intermittently failing to enqueue orders into Redis Streams. User-visible 5xx rate may also be elevated. Check Redis health and AOF state."
 
+      - alert: ConsumerGroupRecreated
+        # Fires whenever the worker self-heals a NOGROUP error. The recovery
+        # mechanism preserves availability (worker keeps consuming new
+        # messages) BUT silently drops messages that were enqueued in the
+        # window between the consumer group's destruction and the recreation
+        # moment — XGROUP CREATE uses `$` (current end of stream) which
+        # skips them.
+        #
+        # In a healthy production system this counter MUST stay at 0. The
+        # consumer group is created at startup and Redis Streams never
+        # auto-deletes it. Any > 0 means SOMEONE destroyed it:
+        #   - operator ran FLUSHALL on production Redis
+        #   - operator ran XGROUP DESTROY
+        #   - Redis crashed and we have AOF off (PR-B: intentional, but
+        #     the trade-off is "in-flight stream messages are lost on
+        #     Redis crash" — the rehydrate path only covers inventory
+        #     state, not in-flight messages)
+        #
+        # `for: 0s` (no soaking) — even ONE recreation is bad enough to
+        # page; we want to know about it immediately so the operator can
+        # check whether messages were lost.
+        #
+        # `increase[5m]` (not 1m) — Prometheus's default eval cadence is
+        # 1m. With a 1m increase window + 1m eval cadence, a single spike
+        # can land in the window-expiry gap and be silently missed (the
+        # smoke test for this alert reproduced exactly that). 5m gives
+        # comfortable overlap between successive evaluations to ensure
+        # any single increment is caught for at least one eval cycle.
+        # The trade-off: alert sticks around for ~5m after the increment,
+        # which is the actual desired behaviour (operator has time to ACK
+        # before it auto-clears).
+        #
+        # NO `sum()` aggregation — the expression evaluates per time
+        # series, which means in a multi-instance deploy each pod that
+        # experiences NOGROUP fires its own alert. This is INTENTIONAL
+        # at the project's current single-instance scale: one alert per
+        # affected pod is easier to triage than one aggregated "some pod
+        # had NOGROUP" alert. When multi-pod deploys happen, revisit:
+        # `sum(increase(consumer_group_recreated_total[5m])) > 0` would
+        # fire one alert per FLUSHALL across all pods.
+        #
+        # See `docs/architectural_backlog.md` § "Cache-truth architecture"
+        # for the full reasoning + the scoped 4-PR plan that this alert
+        # is part of (PR-C).
+        expr: increase(consumer_group_recreated_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#consumergrouprecreated"
+          summary: "Worker self-healed NOGROUP — messages may have been silently dropped"
+          description: "Worker hit NOGROUP and recreated the consumer group. Any messages enqueued between the group's destruction and the recreation moment were silently skipped. Investigate: (1) did operations run FLUSHALL or XGROUP DESTROY? (2) did Redis restart without AOF? (3) cross-check `bookings_total` vs `orders` table count to detect drift."
+
       - alert: TargetDown
         # Meta-alert: fires when Prometheus has been unable to scrape a
         # target for 2 minutes. Without this, a worker process that
