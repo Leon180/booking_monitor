@@ -124,7 +124,7 @@ Types: order.created, order.failed
 
 ### PostgreSQL(對外 port 5433)
 
-下面的 schema 反映的是 **migration 000011 之後的狀態**。Migration 000008(PR #34)把所有 primary key 從 `SERIAL` 換成 caller-generated 的 `UUID`(UUIDv7 — RFC 9562,前綴帶時間戳);000009 加入 `order_status_history` 審計記錄表;000010/000011 加入 `orders.updated_at` 欄位以及驅動 reconciler + saga-watchdog sweep 的部分索引。
+下面的 schema 反映的是 **migration 000012 之後的狀態**。Migration 000008(PR #34)把所有 primary key 從 `SERIAL` 換成 caller-generated 的 `UUID`(UUIDv7 — RFC 9562,前綴帶時間戳);000009 加入 `order_status_history` 審計記錄表;000010/000011 加入 `orders.updated_at` 欄位以及驅動 reconciler + saga-watchdog sweep 的部分索引。**000012(Phase 3 D1 — Pattern A schema)加入 `event_sections`、`orders.section_id`、`orders.reserved_until`、`orders.payment_intent_id` 跟 `events.reservation_window_seconds`,為接下來的 reservation + payment + webhook 流程跟 multi-section 模型鋪路。**
 
 ```sql
 -- events: 庫存的事實來源
@@ -133,12 +133,32 @@ CREATE TABLE events (
     name VARCHAR(255) NOT NULL,
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
-    version INT DEFAULT 0
+    version INT DEFAULT 0,
+    reservation_window_seconds INT NOT NULL DEFAULT 900  -- 000012 加入;每場活動的 reservation TTL 預設值(15 分鐘)
 );
 -- 由 000008 的 UUID 換 PK 過程重新加入(原本來自 000003):
 ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
 -- 預設不再 seed。測試用 h.SeedEvent / domain.NewEvent。
+
+-- event_sections: 每場活動的票價區域 / 區段(000012 加入)
+-- Phase 3 D1 — section-level sharding 軸的 schema 鋪路,設計細節記在
+-- `docs/architectural_backlog.md` § Section-level inventory sharding。
+-- application 層把每個 `(event_id, section_id)` 視為真實的庫存 aggregate;
+-- `events.total_tickets` 變成可由 sections 計算出來的 denormalised 摘要。
+CREATE TABLE event_sections (
+    id UUID PRIMARY KEY,           -- UUIDv7,呼叫端產生
+    event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;跟 orders.event_id 同樣理由)
+    name VARCHAR(255) NOT NULL,    -- 例如 "VIP"、"搖滾區"、"二樓 A 區"
+    total_tickets INT NOT NULL,
+    available_tickets INT NOT NULL,
+    version INT DEFAULT 0,
+    CONSTRAINT check_section_available_tickets_non_negative
+        CHECK (available_tickets >= 0),
+    CONSTRAINT uq_section_name_per_event
+        UNIQUE (event_id, name)
+);
+CREATE INDEX idx_event_sections_event_id ON event_sections (event_id);
 
 -- orders: 訂單交易紀錄
 CREATE TABLE orders (
@@ -146,9 +166,13 @@ CREATE TABLE orders (
     event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;見下方備註)
     user_id INT NOT NULL,          -- 外部使用者參照;此服務不擁有 users 表
     quantity INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated
+    status VARCHAR(50) NOT NULL,   -- pending | charging | confirmed | failed | compensated(legacy)+ awaiting_payment | paid | expired | payment_failed(由 D2 跟 000012 一起加入;D1 migration 只動 schema,D2 才上 Go state-machine)
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- 000010 加入,給 recon/watchdog 做 age 比較
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- 000010 加入,給 recon/watchdog 做 age 比較
+    -- Pattern A 欄位(000012 / Phase 3 D1 加入):
+    section_id UUID NULL,                            -- FK 目標(沒有 DB-level 約束);Pattern A 之前的 legacy 訂單為 NULL
+    reserved_until TIMESTAMPTZ NULL,                 -- 每筆訂單的 reservation TTL 事實值;終止狀態的訂單為 NULL
+    payment_intent_id VARCHAR(255) NULL              -- Stripe-shape payment intent id;由 POST /orders/:id/pay 設定
 );
 -- 由 000008 重新加入(原本 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
@@ -157,6 +181,16 @@ CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
 CREATE INDEX idx_orders_status_updated_at_partial
     ON orders (status, updated_at)
  WHERE status IN ('charging', 'pending', 'failed');
+-- 000012 加入 — 驅動 reservation 過期 sweeper(D6):
+CREATE INDEX idx_orders_awaiting_payment_reserved_until
+    ON orders (status, reserved_until)
+ WHERE status = 'awaiting_payment';
+-- 000012 加入 — 給未來 Layer 1 sharding router 做 per-section 可用性檢查。
+-- Partial 是因為終止狀態的訂單佔大宗,正在進行中的工作集很小。
+CREATE INDEX idx_orders_section_id_active
+    ON orders (section_id, status)
+ WHERE section_id IS NOT NULL
+   AND status NOT IN ('paid', 'compensated', 'expired', 'payment_failed', 'confirmed', 'failed');
 
 -- events_outbox: 事件發布的交易型 outbox
 CREATE TABLE events_outbox (
@@ -191,7 +225,7 @@ CREATE INDEX idx_order_status_history_occurred
 
 **`orders.event_id` 備註:** 沒有 DB-level FK 約束指向 `events(id)`。Domain 驗證在 application 邊界強制這個關係(`domain.NewOrder` 要求 `eventID` 是真正存在的 event id),整合測試也固定了 partial-unique-index 重複購買的契約;沒有 FK 是刻意決定,並在 migration 000008 內部記錄。
 
-### Migration 歷史(`deploy/postgres/migrations/` 內共 11 個檔案)
+### Migration 歷史(`deploy/postgres/migrations/` 內共 12 個檔案)
 
 | # | 內容 |
 |---|------|
@@ -206,6 +240,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000009 | **`order_status_history` 審計記錄表**(PR #40)— 每次 transitionStatus 透過 CTE 跟 UPDATE 一起原子寫入歷史列。包含兩個索引:`(order_id, occurred_at)` 給單一訂單時間軸用 + `(occurred_at)` 給時間範圍 scan 用。 |
 | 000010 | **A4 charging 兩階段意圖紀錄**(PR #45)— 為 `orders` 加上 `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` 與部分索引 `idx_orders_status_updated_at_partial ON orders(status, updated_at) WHERE status IN ('charging', 'pending')`,驅動 reconciler 的 `FindStuckCharging` sweep。 |
 | 000011 | **A5 saga watchdog 索引擴大**(PR #49)— 重建 000010 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed')`,讓 saga-watchdog 的 `FindStuckFailed` sweep 跟 reconciler 共用同一個 index plan。 |
+| 000012 | **Phase 3 D1 — Pattern A schema** — 加入 `event_sections` 資料表(multi-section 模型 + Layer 1 sharding 軸);`events.reservation_window_seconds`(可由 admin 調整的 TTL 預設值,900s = 15 分鐘);`orders.section_id`(可空值;新流程會設值,legacy 列維持 NULL);`orders.reserved_until`(每筆訂單的 TTL 事實值);`orders.payment_intent_id`(Stripe-shape,由 POST /orders/:id/pay 設值);部分索引 `idx_orders_awaiting_payment_reserved_until` 給 reservation 過期 sweeper(D6)用;部分索引 `idx_orders_section_id_active` 給未來 Layer 1 sharding router 用。**只動 schema — 對應的 Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`)**由 D2 接著上**。`section_id` 沒有 DB-level FK,新狀態也沒有 CHECK;跟 000008 / 000010 一樣由應用層強制。 |
 
 ### Redis
 
