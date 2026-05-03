@@ -527,6 +527,23 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 			if errors.Is(err, redis.Nil) {
 				return nil
 			}
+			// Symmetric NOGROUP handling with the main Subscribe loop:
+			// if the consumer group disappeared between worker boot
+			// (EnsureGroup at startup) and processPending (called as
+			// the first action of Subscribe), the PEL recovery path
+			// hits NOGROUP first. Without this branch, the metric
+			// would only fire on the SECOND pass (when Subscribe's
+			// main loop hits the same error). Increment here so the
+			// `ConsumerGroupRecreated` alert covers BOTH entry points.
+			//
+			// We don't recreate the group here — return the error so
+			// Subscribe logs "Failed to process pending messages" and
+			// continues to the main loop, which will recreate. The
+			// metric is the load-bearing signal; the recreation order
+			// doesn't matter operationally.
+			if strings.Contains(err.Error(), "NOGROUP") {
+				q.metrics.RecordConsumerGroupRecreated()
+			}
 			return fmt.Errorf("processPending XReadGroup: %w", err)
 		}
 

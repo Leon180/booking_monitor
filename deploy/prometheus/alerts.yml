@@ -433,6 +433,15 @@ groups:
         # which is the actual desired behaviour (operator has time to ACK
         # before it auto-clears).
         #
+        # NO `sum()` aggregation — the expression evaluates per time
+        # series, which means in a multi-instance deploy each pod that
+        # experiences NOGROUP fires its own alert. This is INTENTIONAL
+        # at the project's current single-instance scale: one alert per
+        # affected pod is easier to triage than one aggregated "some pod
+        # had NOGROUP" alert. When multi-pod deploys happen, revisit:
+        # `sum(increase(consumer_group_recreated_total[5m])) > 0` would
+        # fire one alert per FLUSHALL across all pods.
+        #
         # See `docs/architectural_backlog.md` § "Cache-truth architecture"
         # for the full reasoning + the scoped 4-PR plan that this alert
         # is part of (PR-C).

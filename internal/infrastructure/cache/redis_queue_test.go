@@ -288,6 +288,41 @@ func TestRedisOrderQueue_Subscribe_NOGROUPRecreatesGroupAndIncrementsMetric(t *t
 	assert.Equal(t, "orders:group", groups[0].Name)
 }
 
+// TestRedisOrderQueue_Subscribe_NOGROUPInProcessPendingAlsoIncrements
+// pins the symmetric-metric contract: NOGROUP can surface from EITHER
+// the main XReadGroup loop OR `processPending` (the PEL recovery path
+// that runs first when Subscribe starts). The metric must fire from
+// both. Without this test, a regression that only handles NOGROUP in
+// the main loop would leave the PEL-side path silent — exactly the
+// silent-failure-hunter HIGH #1 finding addressed by this PR.
+func TestRedisOrderQueue_Subscribe_NOGROUPInProcessPendingAlsoIncrements(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+	metrics := &recordingQueueMetrics{}
+
+	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), metrics, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Stream + group exist first.
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+	// Wipe everything BEFORE Subscribe runs — processPending will be
+	// the first to hit the missing group, not the main XReadGroup
+	// loop. That's the exact scenario the silent-failure-hunter flagged.
+	rdb.FlushAll(ctx)
+
+	handler := func(_ context.Context, _ *worker.QueuedBookingMessage) error { return nil }
+	_ = queue.Subscribe(ctx, handler) // ctx-deadline exits the loop
+
+	assert.GreaterOrEqual(t, metrics.consumerGroupRecreated, uint64(1),
+		"NOGROUP detected in processPending (PEL recovery) MUST also "+
+			"increment the metric — without this, the recovery path "+
+			"silently slips past the alert")
+}
+
 // recordingQueueMetrics is a deliberately small QueueMetrics impl for
 // test-side counter assertions. We don't reach for testify mocks because
 // the assertion shape (just "was X called at least N times") is simpler
