@@ -249,10 +249,9 @@ func NewOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int) (Order,
 // client calls /pay (D4) → webhook flips to Paid (D5) OR D6 sweeper
 // flips to Expired".
 //
-// The legacy `NewOrder` factory is kept for the legacy A4 path
-// (BookingService still uses it pre-D3) and for tests that exercise
-// the legacy state machine. Once D7 narrows saga scope and removes
-// the legacy edges, NewOrder will go away.
+// The legacy `NewOrder` factory is kept for the legacy A4 path used
+// by tests that exercise the legacy state machine. Once D7 narrows
+// saga scope and removes the legacy edges, NewOrder will go away.
 //
 // Why a separate factory rather than `NewOrder` + `MarkAwaitingPayment`:
 // the reservation has additional invariants (reservedUntil must be a
@@ -260,6 +259,14 @@ func NewOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int) (Order,
 // reservedUntil through `NewOrder` would mean "this argument is
 // optional / zero for legacy" — fragile contract. Two factories,
 // each with its own invariant set, is cleaner.
+//
+// Implementation note: `time.Now()` is captured ONCE at the top of
+// the function so the invariant check (`reservedUntil > now`) and the
+// `createdAt` assignment use the same wallclock value. Two
+// `time.Now()` calls (one for the check, one for createdAt) could
+// straddle a clock tick, leaving an Order whose createdAt is later
+// than its reservedUntil even though the invariant "passed" — a
+// nanosecond-scale TOCTOU but visible in stress tests.
 func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, reservedUntil time.Time) (Order, error) {
 	if id == uuid.Nil {
 		return Order{}, ErrInvalidOrderID
@@ -273,11 +280,13 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 	if quantity <= 0 {
 		return Order{}, ErrInvalidQuantity
 	}
+	// Snap `now` once. See doc-comment for the TOCTOU rationale.
+	now := time.Now()
 	// reservedUntil must be a real, future time. Zero value is invalid
 	// (callers passing time.Time{} as a placeholder); past times mean
 	// the reservation is already expired before it lands in DB —
 	// indicates a clock-skew or upstream-bug condition we should reject.
-	if reservedUntil.IsZero() || !reservedUntil.After(time.Now()) {
+	if reservedUntil.IsZero() || !reservedUntil.After(now) {
 		return Order{}, ErrInvalidReservedUntil
 	}
 	return Order{
@@ -286,7 +295,7 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 		eventID:       eventID,
 		quantity:      quantity,
 		status:        OrderStatusAwaitingPayment,
-		createdAt:     time.Now(),
+		createdAt:     now,
 		reservedUntil: reservedUntil,
 	}, nil
 }
