@@ -30,14 +30,27 @@ import (
 type RetryPolicy func(err error) bool
 
 // DefaultRetryPolicy is the policy used by the production
-// booking pipeline: malformed-input errors from `domain.NewOrder`
-// (UserID<=0, zero EventID, non-positive Quantity) are deterministic
-// and skip the retry budget; everything else is treated as transient
-// and retried.
+// booking pipeline: malformed-input errors from `domain.NewReservation`
+// (Pattern A factory) are deterministic and skip the retry budget;
+// everything else is treated as transient and retried. The full set
+// of malformed sentinels lives at `domain.IsMalformedOrderInput`:
+//   - ErrInvalidOrderID (zero UUID)
+//   - ErrInvalidUserID (≤ 0)
+//   - ErrInvalidEventID (zero UUID)
+//   - ErrInvalidOrderTicketTypeID (zero UUID — D4.1)
+//   - ErrInvalidQuantity (≤ 0)
+//   - ErrInvalidReservedUntil (zero / past — D3)
+//   - ErrInvalidAmountCents (≤ 0 — D4.1)
+//   - ErrInvalidCurrency (not 3-letter ASCII — D4.1)
 //
 // `domain.IsMalformedOrderInput` IS the source of truth for which
 // sentinels classify a message as permanently unprocessable; this
 // function just inverts it (retryable = NOT malformed).
+//
+// Note: parseMessage errors at the queue boundary (before the handler
+// runs) take a different path — they go straight to DLQ via
+// `dlqReasonMalformedParse` without consulting this policy. See
+// internal/infrastructure/cache/redis_queue.go::parseMessage.
 func DefaultRetryPolicy() RetryPolicy {
 	return func(err error) bool {
 		return !domain.IsMalformedOrderInput(err)

@@ -28,14 +28,30 @@ var (
 	errUnexpectedLuaResult  = errors.New("redis: unexpected lua result")
 )
 
-// argsPool reuses []interface{} slices for Redis Lua script calls.
-// Each DeductInventory call needs 8 args (count, event_id, user_id,
-// order_id, reserved_until_unix, ticket_type_id, amount_cents,
-// currency — D4.1); RevertInventory needs 1. We pool an 8-element
-// slice (the common case) and sub-slice for smaller calls.
-var argsPool = sync.Pool{
+// Lua-call arg pools — separate per script so a future schema change
+// to one path can't accidentally leak stale slot values to another.
+// Pre-D4.1 a single 8-element pool was shared via sub-slicing for the
+// 1-arg revert path; that worked, but it was a latent edit-trap (a
+// future contributor adding a 9th arg to deduct without re-auditing
+// revert's [:1] sub-slice would silently send stale data). Splitting
+// the pools makes the per-script arg shape impossible to confuse.
+
+// deductArgsPool sizes the pooled slice to match deduct.lua's ARGV
+// count exactly (8: count, event_id, user_id, order_id,
+// reserved_until_unix, ticket_type_id, amount_cents, currency).
+var deductArgsPool = sync.Pool{
 	New: func() interface{} {
 		s := make([]interface{}, 8)
+		return &s
+	},
+}
+
+// revertArgsPool is a 1-element slice for revert.lua's single ARGV
+// (count). Separate from deductArgsPool so the two pools never share
+// a backing array.
+var revertArgsPool = sync.Pool{
+	New: func() interface{} {
+		s := make([]interface{}, 1)
 		return &s
 	},
 }
@@ -213,12 +229,21 @@ func (r *redisInventoryRepository) DeductInventory(
 	// The int→interface{} boxing still escapes, but the slice header doesn't.
 	// eventID + orderID + ticketTypeID are passed as canonical UUID strings
 	// so the Lua script can include them in the produced stream message
-	// verbatim. reservedUntil is converted to UTC unix seconds: Lua's
-	// number type is IEEE-754 double which is exact for any int64 ≤ 2^53;
-	// unix seconds (~10 digits) and amount_cents (~10 digits even at
-	// $90T) are comfortably within that range, so no precision loss. The
-	// worker re-parses with time.Unix(_, 0).UTC() / strconv.ParseInt.
-	argsPtr := argsPool.Get().(*[]interface{})
+	// verbatim. reservedUntil is converted to UTC unix seconds before the
+	// call.
+	//
+	// Wire-encoding note: go-redis's EvalSha serialises every interface{}
+	// arg via RESP bulk-string encoding — int64 / int go through
+	// `strconv.FormatInt`, time.Time via formatter, etc. The Lua script
+	// receives every ARGV as a string and passes them through to XADD
+	// without calling `tonumber()` (the deduct.lua doesn't do arithmetic
+	// on user_id / order_id / amount_cents — only on count, where DECRBY
+	// itself parses). The consumer side `parseMessage` re-parses each
+	// field with the matching `strconv.*` call. No floating-point
+	// conversion is involved at any step, so the IEEE-754 exact-int
+	// range (≤ 2^53) is irrelevant — the fields round-trip bit-exact
+	// for any int64.
+	argsPtr := deductArgsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count
 	args[1] = eventID.String()
@@ -228,7 +253,7 @@ func (r *redisInventoryRepository) DeductInventory(
 	args[5] = ticketTypeID.String()
 	args[6] = amountCents
 	args[7] = currency
-	defer argsPool.Put(argsPtr)
+	defer deductArgsPool.Put(argsPtr)
 
 	script, ok := r.scripts["deduct"]
 	if !ok {
@@ -253,11 +278,12 @@ func (r *redisInventoryRepository) DeductInventory(
 func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
 	keys := []string{inventoryKey(eventID), "saga:reverted:" + compensationID}
 
-	// Reuse pooled args slice (sub-slice to 1 element for revert).
-	argsPtr := argsPool.Get().(*[]interface{})
-	args := (*argsPtr)[:1]
+	// Dedicated 1-element pool — see revertArgsPool comment for why
+	// it's split from the deduct path.
+	argsPtr := revertArgsPool.Get().(*[]interface{})
+	args := *argsPtr
 	args[0] = count
-	defer argsPool.Put(argsPtr)
+	defer revertArgsPool.Put(argsPtr)
 
 	script, ok := r.scripts["revert"]
 	if !ok {

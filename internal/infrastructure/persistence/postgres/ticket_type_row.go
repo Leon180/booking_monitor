@@ -22,6 +22,15 @@ import (
 // to match the project's existing convention for VARCHAR fields where
 // `""` is operationally equivalent to NULL (the field is display-only,
 // no business logic branches on it).
+//
+// NULL-vs-empty-string convention for area_label (operational note):
+// the application layer always writes NULL when the domain has `""`,
+// and reads NULL → `""`. If an admin / direct-SQL tool inserts
+// `area_label = ''` (not NULL), `toDomain` reads it back as `""` —
+// behaviorally identical from the domain's perspective. BUT a
+// reporting query like `WHERE area_label IS NULL` would miss those
+// `''` rows. If you need "all rows with no area assigned", the
+// canonical predicate is `WHERE area_label IS NULL OR area_label = ''`.
 type ticketTypeRow struct {
 	ID               uuid.UUID
 	EventID          uuid.UUID
@@ -83,6 +92,7 @@ func (r ticketTypeRow) toDomain() domain.TicketType {
 }
 
 func ticketTypeRowFromDomain(t domain.TicketType) ticketTypeRow {
+	areaLabel := t.AreaLabel()
 	row := ticketTypeRow{
 		ID:               t.ID(),
 		EventID:          t.EventID(),
@@ -91,7 +101,7 @@ func ticketTypeRowFromDomain(t domain.TicketType) ticketTypeRow {
 		Currency:         t.Currency(),
 		TotalTickets:     t.TotalTickets(),
 		AvailableTickets: t.AvailableTickets(),
-		AreaLabel:        sql.NullString{String: t.AreaLabel(), Valid: t.AreaLabel() != ""},
+		AreaLabel:        sql.NullString{String: areaLabel, Valid: areaLabel != ""},
 		Version:          t.Version(),
 	}
 	if v := t.SaleStartsAt(); v != nil {

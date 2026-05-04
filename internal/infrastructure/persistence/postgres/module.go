@@ -45,5 +45,6 @@ var Module = fx.Module("postgres",
 	fx.Decorate(
 		NewEventRepositoryTracingDecorator,
 		NewOrderRepositoryTracingDecorator,
+		NewTicketTypeRepositoryTracingDecorator,
 	),
 )

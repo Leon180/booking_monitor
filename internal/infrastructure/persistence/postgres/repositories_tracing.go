@@ -334,3 +334,60 @@ func (d *orderRepositoryTracingDecorator) SetPaymentIntentID(ctx context.Context
 	}
 	return err
 }
+
+// --- TicketTypeRepositoryDecorator (D4.1) ---
+
+type ticketTypeRepositoryTracingDecorator struct {
+	next domain.TicketTypeRepository
+}
+
+func NewTicketTypeRepositoryTracingDecorator(next domain.TicketTypeRepository) domain.TicketTypeRepository {
+	return &ticketTypeRepositoryTracingDecorator{next: next}
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) Create(ctx context.Context, t domain.TicketType) (domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "CreateTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", t.ID().String()),
+		attribute.String("event_id", t.EventID().String()),
+	))
+	defer span.End()
+
+	created, err := d.next.Create(ctx, t)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return created, err
+}
+
+// GetByID is on the booking hot path (BookingService.BookTicket
+// derives event_id + price snapshot from the ticket_type lookup), so
+// the span is load-bearing for tail-latency analysis — without it,
+// the gap between "API received request" and "Lua deduct" would be
+// invisible in Jaeger waterfalls.
+func (d *ticketTypeRepositoryTracingDecorator) GetByID(ctx context.Context, id uuid.UUID) (domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetTicketTypeByID", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+	))
+	defer span.End()
+
+	t, err := d.next.GetByID(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return t, err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "ListTicketTypesByEventID", trace.WithAttributes(
+		attribute.String("event_id", eventID.String()),
+	))
+	defer span.End()
+
+	tt, err := d.next.ListByEventID(ctx, eventID)
+	if err != nil {
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.Int("count", len(tt)))
+	}
+	return tt, err
+}

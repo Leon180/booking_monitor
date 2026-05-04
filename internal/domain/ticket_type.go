@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +12,16 @@ import (
 
 var (
 	ErrTicketTypeNotFound = errors.New("ticket type not found")
+
+	// ErrTicketTypeNameTaken is returned by TicketTypeRepository.Create
+	// when a ticket type with the same `name` already exists for the
+	// given `event_id`. Surfaced from postgres via the
+	// `uq_ticket_type_name_per_event` unique-constraint violation
+	// (PG error code 23505). Mirrors `domain.ErrUserAlreadyBought` —
+	// callers branch on `errors.Is(err, ErrTicketTypeNameTaken)` for
+	// 409 Conflict mapping at the API boundary, instead of string-
+	// matching the raw postgres error.
+	ErrTicketTypeNameTaken = errors.New("ticket type name already exists for this event")
 
 	// Invariant violations from NewTicketType.
 	ErrInvalidTicketTypeID         = errors.New("ticket_type id must not be the zero UUID")
@@ -21,7 +32,7 @@ var (
 	ErrInvalidTicketTypeTotal      = errors.New("ticket_type total_tickets must be positive")
 	ErrInvalidTicketTypeAvailable  = errors.New("ticket_type available_tickets must be in [0, total_tickets]")
 	ErrInvalidTicketTypeSaleWindow = errors.New("ticket_type sale_ends_at must be after sale_starts_at")
-	ErrInvalidTicketTypePerUser    = errors.New("ticket_type per_user_limit must be positive when set")
+	ErrInvalidTicketTypePerUser    = errors.New("ticket_type per_user_limit must be positive and ≤ 2^31-1")
 )
 
 // TicketType is the KKTIX-aligned 票種 aggregate (D4.1). Pricing,
@@ -138,7 +149,13 @@ func NewTicketType(
 	if saleStartsAt != nil && saleEndsAt != nil && !saleEndsAt.After(*saleStartsAt) {
 		return TicketType{}, ErrInvalidTicketTypeSaleWindow
 	}
-	if perUserLimit != nil && *perUserLimit <= 0 {
+	// perUserLimit constraints: positive AND fits in int32 (the DB
+	// column is `INT`; the persistence layer narrows to int32 on write,
+	// so a value > MaxInt32 would silently truncate without this guard).
+	// Realistic caps are typically ≤ 100, so this is paranoia — the
+	// cost is one branch per ticket-type creation (not in the booking
+	// hot path).
+	if perUserLimit != nil && (*perUserLimit <= 0 || *perUserLimit > math.MaxInt32) {
 		return TicketType{}, ErrInvalidTicketTypePerUser
 	}
 	return TicketType{

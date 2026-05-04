@@ -14,11 +14,18 @@
 -- ARGV[7]: amount_cents         (D4.1 — price snapshot at book time;
 --                                priceCents × quantity, computed in
 --                                BookingService against the live
---                                ticket_type lookup. Lua's number type
---                                is IEEE-754 double — exact for any
---                                int64 ≤ 2^53, so amount_cents up to
---                                ~9 quadrillion cents is safe; way
---                                above any realistic ticket price)
+--                                ticket_type lookup. Passed as a
+--                                decimal string (RESP encoding from
+--                                go-redis: int64 → strconv.FormatInt
+--                                → bulk string). The Lua script never
+--                                calls tonumber() on it — ARGV[7]
+--                                stays a string, gets handed to XADD
+--                                verbatim, and the consumer parses
+--                                with strconv.ParseInt. No floating-
+--                                point arithmetic involved on either
+--                                side, so the IEEE-754 exact-int range
+--                                is irrelevant; the field round-trips
+--                                bit-exact for any int64.)
 -- ARGV[8]: currency             (D4.1 — 3-letter lowercase ISO 4217;
 --                                already normalised by BookingService
 --                                via NewReservation invariants)

@@ -706,6 +706,17 @@ func (r *postgresTicketTypeRepository) Create(ctx context.Context, t domain.Tick
 		row.PerUserLimit, row.AreaLabel,
 		row.Version,
 	); err != nil {
+		// 23505 = unique_violation. The only unique constraint on
+		// event_ticket_types is `uq_ticket_type_name_per_event`
+		// (event_id, name), so a 23505 here means an admin tried to
+		// create two ticket types with the same name for the same
+		// event. Map to the typed sentinel so the API boundary can
+		// branch with `errors.Is(err, domain.ErrTicketTypeNameTaken)`
+		// without string-matching the postgres error.
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.TicketType{}, domain.ErrTicketTypeNameTaken
+		}
 		return domain.TicketType{}, fmt.Errorf("ticketTypeRepository.Create: %w", err)
 	}
 	return row.toDomain(), nil
@@ -726,13 +737,23 @@ func (r *postgresTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID
 // ordered by id (UUIDv7 → time-prefixed → insertion order). Empty
 // result is a nil slice, not an error — events with no ticket types
 // are valid pre-D4.1 rows during the migration window.
+//
+// Semantic caveat: this query does NOT verify event existence. A
+// non-existent eventID returns `(nil, nil)` — operationally
+// indistinguishable from "event exists but has no ticket types yet."
+// API endpoints that need 404-on-missing-event must call
+// EventRepository.GetByID first (see future GET /api/v1/events/:id
+// handler). Once D4.1 migration window closes and every event always
+// has ≥ 1 ticket type, this assumption can tighten to "empty list
+// implies event-not-found" — but only after the legacy-row floor
+// hits zero in production.
 func (r *postgresTicketTypeRepository) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
 	rows, err := r.exec.QueryContext(ctx,
 		"SELECT "+ticketTypeColumns+" FROM event_ticket_types WHERE event_id = $1 ORDER BY id ASC", eventID)
 	if err != nil {
 		return nil, fmt.Errorf("ticketTypeRepository.ListByEventID query (event=%s): %w", eventID, err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() { _ = rows.Close() }() // close error is non-actionable; iter err already checked below
 
 	var out []domain.TicketType
 	for rows.Next() {
