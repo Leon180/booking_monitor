@@ -49,7 +49,7 @@ func compensatorHarness(t *testing.T) (saga.Compensator, *mocks.MockOrderReposit
 // invariant validation since rehydrated orders represent persisted state.
 func reconstructOrder(t *testing.T, id uuid.UUID, eventID uuid.UUID, status domain.OrderStatus) domain.Order {
 	t.Helper()
-	return domain.ReconstructOrder(id, 1, eventID, 1, status, time.Now().Add(-1*time.Hour), time.Time{}, "")
+	return domain.ReconstructOrder(id, 1, eventID, uuid.Nil, 1, status, time.Now().Add(-1*time.Hour), time.Time{}, "", 0, "")
 }
 
 // runUowThrough is a helper that returns a gomock action which invokes

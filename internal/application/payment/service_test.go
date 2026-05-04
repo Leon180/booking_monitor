@@ -45,7 +45,7 @@ func makeOrder(t *testing.T, ev *application.OrderCreatedEvent, status domain.Or
 	t.Helper()
 	orderID, err := uuid.NewV7()
 	require.NoError(t, err)
-	return domain.ReconstructOrder(orderID, 1, ev.EventID, 1, status, time.Now(), time.Time{}, "")
+	return domain.ReconstructOrder(orderID, 1, ev.EventID, uuid.Nil, 1, status, time.Now(), time.Time{}, "", 0, "")
 }
 
 func newEvent(t *testing.T) *application.OrderCreatedEvent {
@@ -277,7 +277,7 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 func makeAwaitingPaymentOrder(t *testing.T, orderID, eventID uuid.UUID, quantity int) domain.Order {
 	t.Helper()
 	reservedUntil := time.Now().Add(15 * time.Minute)
-	return domain.ReconstructOrder(orderID, 1, eventID, quantity, domain.OrderStatusAwaitingPayment, time.Now(), reservedUntil, "")
+	return domain.ReconstructOrder(orderID, 1, eventID, uuid.Nil, quantity, domain.OrderStatusAwaitingPayment, time.Now(), reservedUntil, "", 0, "")
 }
 
 func newPaymentService(t *testing.T) (*gomock.Controller, payment.Service, *mocks.MockPaymentGateway, *mocks.MockOrderRepository) {
@@ -362,7 +362,7 @@ func TestCreatePaymentIntent_RejectsNonAwaitingPaymentStatuses(t *testing.T) {
 			defer ctrl.Finish()
 
 			orderID := uuid.New()
-			order := domain.ReconstructOrder(orderID, 1, uuid.New(), 1, tc.status, time.Now(), time.Now().Add(15*time.Minute), "")
+			order := domain.ReconstructOrder(orderID, 1, uuid.New(), uuid.Nil, 1, tc.status, time.Now(), time.Now().Add(15*time.Minute), "", 0, "")
 			repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
 
 			_, err := svc.CreatePaymentIntent(context.Background(), orderID)
@@ -378,7 +378,7 @@ func TestCreatePaymentIntent_RejectsExpiredReservation(t *testing.T) {
 
 	orderID := uuid.New()
 	expiredAt := time.Now().Add(-1 * time.Minute)
-	order := domain.ReconstructOrder(orderID, 1, uuid.New(), 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredAt, "")
+	order := domain.ReconstructOrder(orderID, 1, uuid.New(), uuid.Nil, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredAt, "", 0, "")
 	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
 
 	_, err := svc.CreatePaymentIntent(context.Background(), orderID)

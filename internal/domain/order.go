@@ -20,6 +20,9 @@ var (
 	ErrInvalidEventID       = errors.New("order event_id must not be the zero UUID")
 	ErrInvalidQuantity      = errors.New("order quantity must be positive")
 	ErrInvalidReservedUntil = errors.New("order reserved_until must be a non-zero time in the future")
+	ErrInvalidAmountCents       = errors.New("order amount_cents must be positive")
+	ErrInvalidCurrency          = errors.New("order currency must be a 3-letter ISO 4217 code")
+	ErrInvalidOrderTicketTypeID = errors.New("order ticket_type_id must not be the zero UUID")
 
 	// ErrInvalidTransition is returned by Order.Mark* (and their
 	// repository-side counterparts) when the source state doesn't
@@ -91,7 +94,10 @@ func IsMalformedOrderInput(err error) bool {
 		errors.Is(err, ErrInvalidUserID) ||
 		errors.Is(err, ErrInvalidEventID) ||
 		errors.Is(err, ErrInvalidQuantity) ||
-		errors.Is(err, ErrInvalidReservedUntil)
+		errors.Is(err, ErrInvalidReservedUntil) ||
+		errors.Is(err, ErrInvalidAmountCents) ||
+		errors.Is(err, ErrInvalidCurrency) ||
+		errors.Is(err, ErrInvalidOrderTicketTypeID)
 }
 
 type OrderStatus string
@@ -209,6 +215,25 @@ type Order struct {
 	createdAt       time.Time
 	reservedUntil   time.Time // Pattern A — zero value for legacy A4 / pre-D3 rows
 	paymentIntentID string    // Pattern A — set by /pay (D4); empty until the client initiates payment
+
+	// D4.1 — KKTIX-aligned ticket type reference + price snapshot at
+	// book time. ticketTypeID points at the TicketType the customer
+	// selected; amountCents + currency are frozen from that ticket
+	// type's price at book time so /pay reads them directly without
+	// re-querying the ticket_type (industry SOP — Stripe Checkout,
+	// Shopify, Eventbrite all snapshot the price onto the order/cart
+	// at create time so the customer pays what they were quoted, even
+	// if the merchant edits the price mid-checkout).
+	//
+	// All three are zero-valued for legacy / pre-D4.1 rows. The
+	// persistence layer nullifies them in the DB (orders.ticket_type_id
+	// / amount_cents / currency are NULLable) so legacy orders read
+	// back with zero. amountCents is expressed in the ticket_type's
+	// currency's minor unit (1 USD = 100 cents) — same convention as
+	// Stripe.
+	ticketTypeID uuid.UUID
+	amountCents  int64
+	currency     string
 }
 
 // NewOrder constructs a fresh pending order. The caller supplies the
@@ -268,7 +293,7 @@ func NewOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int) (Order,
 // straddle a clock tick, leaving an Order whose createdAt is later
 // than its reservedUntil even though the invariant "passed" — a
 // nanosecond-scale TOCTOU but visible in stress tests.
-func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, reservedUntil time.Time) (Order, error) {
+func NewReservation(id uuid.UUID, userID int, eventID, ticketTypeID uuid.UUID, quantity int, reservedUntil time.Time, amountCents int64, currency string) (Order, error) {
 	if id == uuid.Nil {
 		return Order{}, ErrInvalidOrderID
 	}
@@ -277,6 +302,9 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 	}
 	if eventID == uuid.Nil {
 		return Order{}, ErrInvalidEventID
+	}
+	if ticketTypeID == uuid.Nil {
+		return Order{}, ErrInvalidOrderTicketTypeID
 	}
 	if quantity <= 0 {
 		return Order{}, ErrInvalidQuantity
@@ -290,16 +318,39 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 	if reservedUntil.IsZero() || !reservedUntil.After(now) {
 		return Order{}, ErrInvalidReservedUntil
 	}
+	// D4.1 price snapshot invariants. amountCents must be strictly
+	// positive — zero or negative price is a free / refund order, which
+	// is out of scope (we don't model promotional 0-price tickets yet;
+	// when we do, that's a `discount_cents` column, not a 0 amount).
+	// Currency is validated as a 3-letter ASCII code; full ISO 4217
+	// membership check is deferred (cost-benefit unfavourable for the
+	// first PR — same rationale as orders.status not having a CHECK
+	// constraint in the DB).
+	if amountCents <= 0 {
+		return Order{}, ErrInvalidAmountCents
+	}
+	// Normalise currency to lowercase before validating shape. Stripe
+	// (and KKTIX) require lowercase ISO 4217 codes; centralising
+	// normalisation at the factory means storage / outbox / gateway
+	// see one canonical form regardless of case at the wire boundary.
+	currency = NormalizeCurrency(currency)
+	if !isValidCurrencyCode(currency) {
+		return Order{}, ErrInvalidCurrency
+	}
 	return Order{
 		id:            id,
 		userID:        userID,
 		eventID:       eventID,
+		ticketTypeID:  ticketTypeID,
 		quantity:      quantity,
 		status:        OrderStatusAwaitingPayment,
 		createdAt:     now,
 		reservedUntil: reservedUntil,
+		amountCents:   amountCents,
+		currency:      currency,
 	}, nil
 }
+
 
 // ReconstructOrder rehydrates an Order from a persisted row. Skips
 // the invariant validation in NewOrder / NewReservation because the
@@ -318,16 +369,24 @@ func NewReservation(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, r
 // (D4) yet. After /pay it carries the gateway-assigned id (Stripe
 // shape: "pi_3xxx..."). Used by the D5 webhook handler to look up
 // the order by intent id when the gateway POSTs back.
-func ReconstructOrder(id uuid.UUID, userID int, eventID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time, reservedUntil time.Time, paymentIntentID string) Order {
+//
+// ticketTypeID, amountCents, currency are zero-valued for legacy /
+// pre-D4.1 rows (orders.ticket_type_id / amount_cents / currency are
+// NULLable in the DB; postgres row scan code translates SQL NULL to
+// (uuid.Nil, 0, "")).
+func ReconstructOrder(id uuid.UUID, userID int, eventID, ticketTypeID uuid.UUID, quantity int, status OrderStatus, createdAt time.Time, reservedUntil time.Time, paymentIntentID string, amountCents int64, currency string) Order {
 	return Order{
 		id:              id,
 		userID:          userID,
 		eventID:         eventID,
+		ticketTypeID:    ticketTypeID,
 		quantity:        quantity,
 		status:          status,
 		createdAt:       createdAt,
 		reservedUntil:   reservedUntil,
 		paymentIntentID: paymentIntentID,
+		amountCents:     amountCents,
+		currency:        currency,
 	}
 }
 
@@ -465,12 +524,32 @@ func (o Order) MarkPaymentFailed() (Order, error) {
 // etc.).
 func (o Order) ID() uuid.UUID            { return o.id }
 func (o Order) EventID() uuid.UUID       { return o.eventID }
+func (o Order) TicketTypeID() uuid.UUID  { return o.ticketTypeID }
 func (o Order) UserID() int              { return o.userID }
 func (o Order) Quantity() int            { return o.quantity }
 func (o Order) Status() OrderStatus      { return o.status }
 func (o Order) CreatedAt() time.Time     { return o.createdAt }
 func (o Order) ReservedUntil() time.Time { return o.reservedUntil }
 func (o Order) PaymentIntentID() string  { return o.paymentIntentID }
+func (o Order) AmountCents() int64       { return o.amountCents }
+func (o Order) Currency() string         { return o.currency }
+
+// HasPriceSnapshot reports whether this Order carries a D4.1 price
+// snapshot (amount_cents > 0 AND currency != ""). Use this instead of
+// `o.AmountCents() > 0` checks at call sites that need to distinguish
+// "legacy / pre-D4.1 row" (read back as 0/"" via NULL coercion in the
+// persistence layer) from "real D4.1 reservation."
+//
+// Why this exists: SQL NULL on `orders.amount_cents` and `orders.currency`
+// collapses to (0, "") on the domain side via `ReconstructOrder`. A
+// downstream consumer that branches on `if o.AmountCents() == 0` would
+// silently treat "legacy order with NULL price" the same as "free
+// promotional ticket" once D4.1 introduces the latter. The
+// `HasPriceSnapshot` accessor names the intent so call sites are
+// explicit about which case they're in.
+func (o Order) HasPriceSnapshot() bool {
+	return o.amountCents > 0 && o.currency != ""
+}
 
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {

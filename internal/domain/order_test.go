@@ -2,6 +2,7 @@ package domain_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,27 +86,42 @@ func TestNewReservation(t *testing.T) {
 
 	validOrderID := uuid.New()
 	validEventID := uuid.New()
+	validTicketTypeID := uuid.New()
 	futureTTL := time.Now().Add(15 * time.Minute)
+	const validAmount int64 = 2000
+	const validCurrency = "usd"
 
 	tests := []struct {
 		name          string
 		orderID       uuid.UUID
 		userID        int
 		eventID       uuid.UUID
+		ticketTypeID  uuid.UUID
 		quantity      int
 		reservedUntil time.Time
+		amountCents   int64
+		currency      string
 		wantErr       error
 	}{
-		{name: "Valid 15-min reservation", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 1, reservedUntil: futureTTL},
-		{name: "Valid 1-hour reservation", orderID: uuid.New(), userID: 42, eventID: uuid.New(), quantity: 3, reservedUntil: time.Now().Add(time.Hour)},
+		{name: "Valid 15-min reservation", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency},
+		// Currency input "TWD" — NewReservation lowercases to "twd"; the
+		// assertion below pins that the stored value is the normalised form.
+		{name: "Valid 1-hour reservation", orderID: uuid.New(), userID: 42, eventID: uuid.New(), ticketTypeID: uuid.New(), quantity: 3, reservedUntil: time.Now().Add(time.Hour), amountCents: 5000, currency: "TWD"},
 		// Same invariants as NewOrder.
-		{name: "Zero orderID rejected", orderID: uuid.Nil, userID: 1, eventID: validEventID, quantity: 1, reservedUntil: futureTTL, wantErr: domain.ErrInvalidOrderID},
-		{name: "Zero userID rejected", orderID: validOrderID, userID: 0, eventID: validEventID, quantity: 1, reservedUntil: futureTTL, wantErr: domain.ErrInvalidUserID},
-		{name: "Zero eventID rejected", orderID: validOrderID, userID: 1, eventID: uuid.Nil, quantity: 1, reservedUntil: futureTTL, wantErr: domain.ErrInvalidEventID},
-		{name: "Zero quantity rejected", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 0, reservedUntil: futureTTL, wantErr: domain.ErrInvalidQuantity},
+		{name: "Zero orderID rejected", orderID: uuid.Nil, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidOrderID},
+		{name: "Zero userID rejected", orderID: validOrderID, userID: 0, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidUserID},
+		{name: "Zero eventID rejected", orderID: validOrderID, userID: 1, eventID: uuid.Nil, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidEventID},
+		{name: "Zero ticketTypeID rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: uuid.Nil, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidOrderTicketTypeID},
+		{name: "Zero quantity rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 0, reservedUntil: futureTTL, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidQuantity},
 		// Pattern A-specific invariants.
-		{name: "Zero reservedUntil rejected", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 1, reservedUntil: time.Time{}, wantErr: domain.ErrInvalidReservedUntil},
-		{name: "Past reservedUntil rejected", orderID: validOrderID, userID: 1, eventID: validEventID, quantity: 1, reservedUntil: time.Now().Add(-1 * time.Minute), wantErr: domain.ErrInvalidReservedUntil},
+		{name: "Zero reservedUntil rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: time.Time{}, amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidReservedUntil},
+		{name: "Past reservedUntil rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: time.Now().Add(-1 * time.Minute), amountCents: validAmount, currency: validCurrency, wantErr: domain.ErrInvalidReservedUntil},
+		// D4.1 price snapshot invariants.
+		{name: "Zero amountCents rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: 0, currency: validCurrency, wantErr: domain.ErrInvalidAmountCents},
+		{name: "Negative amountCents rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: -100, currency: validCurrency, wantErr: domain.ErrInvalidAmountCents},
+		{name: "Empty currency rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: "", wantErr: domain.ErrInvalidCurrency},
+		{name: "Bad-length currency rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: "USDD", wantErr: domain.ErrInvalidCurrency},
+		{name: "Non-letter currency rejected", orderID: validOrderID, userID: 1, eventID: validEventID, ticketTypeID: validTicketTypeID, quantity: 1, reservedUntil: futureTTL, amountCents: validAmount, currency: "U2D", wantErr: domain.ErrInvalidCurrency},
 	}
 
 	for _, tt := range tests {
@@ -113,7 +129,7 @@ func TestNewReservation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := domain.NewReservation(tt.orderID, tt.userID, tt.eventID, tt.quantity, tt.reservedUntil)
+			got, err := domain.NewReservation(tt.orderID, tt.userID, tt.eventID, tt.ticketTypeID, tt.quantity, tt.reservedUntil, tt.amountCents, tt.currency)
 
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)
@@ -125,10 +141,14 @@ func TestNewReservation(t *testing.T) {
 			assert.Equal(t, tt.orderID, got.ID())
 			assert.Equal(t, tt.userID, got.UserID())
 			assert.Equal(t, tt.eventID, got.EventID())
+			assert.Equal(t, tt.ticketTypeID, got.TicketTypeID())
 			assert.Equal(t, tt.quantity, got.Quantity())
 			assert.Equal(t, domain.OrderStatusAwaitingPayment, got.Status(),
 				"NewReservation must produce AwaitingPayment, NOT Pending — that's what makes it Pattern A")
 			assert.Equal(t, tt.reservedUntil, got.ReservedUntil())
+			assert.Equal(t, tt.amountCents, got.AmountCents(), "amountCents must round-trip from input")
+			assert.Equal(t, strings.ToLower(tt.currency), got.Currency(),
+				"currency must be normalised to lowercase before persistence (Stripe + KKTIX convention)")
 			assert.False(t, got.CreatedAt().IsZero(), "CreatedAt is factory-assigned")
 		})
 	}
@@ -143,7 +163,7 @@ func TestNewReservation(t *testing.T) {
 func TestNewReservation_IsMalformedOrderInput_Classification(t *testing.T) {
 	t.Parallel()
 
-	_, err := domain.NewReservation(uuid.New(), 1, uuid.New(), 1, time.Time{})
+	_, err := domain.NewReservation(uuid.New(), 1, uuid.New(), uuid.New(), 1, time.Time{}, 2000, "usd")
 	require.Error(t, err)
 	assert.True(t, domain.IsMalformedOrderInput(err),
 		"ErrInvalidReservedUntil must be classified as malformed input so the worker DLQ classifier short-circuits the retry budget")
@@ -371,7 +391,7 @@ func TestOrder_Transitions_IllegalSource(t *testing.T) {
 			// Reconstruct an order with the test's source status.
 			id := uuid.New()
 			eventID := uuid.New()
-			o := domain.ReconstructOrder(id, 1, eventID, 1, tt.from, time.Now(), time.Time{}, "")
+			o := domain.ReconstructOrder(id, 1, eventID, uuid.Nil, 1, tt.from, time.Now(), time.Time{}, "", 0, "")
 			got, err := tt.do(o)
 			assert.ErrorIs(t, err, tt.expectErr)
 			// The receiver-side guarantee: failed transitions return a
@@ -391,7 +411,7 @@ func TestReconstructOrder_BypassesInvariants(t *testing.T) {
 	id := uuid.New()
 	eventID := uuid.New()
 	created := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
-	got := domain.ReconstructOrder(id, 1, eventID, 0, domain.OrderStatusFailed, created, time.Time{}, "")
+	got := domain.ReconstructOrder(id, 1, eventID, uuid.Nil, 0, domain.OrderStatusFailed, created, time.Time{}, "", 0, "")
 
 	assert.Equal(t, id, got.ID())
 	assert.Equal(t, 0, got.Quantity(), "Reconstruct should not validate quantity")

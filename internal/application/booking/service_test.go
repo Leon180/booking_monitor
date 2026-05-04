@@ -32,21 +32,33 @@ func TestBookingService_BookTicket(t *testing.T) {
 	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 
 	eventID := uuid.New()
+	ticketTypeID := uuid.New()
+
+	// Reusable ticket type for the success/sold-out paths. D4.1
+	// BookTicket calls ticketTypeRepo.GetByID first to derive the
+	// event_id + price snapshot, so every "happy enough to reach
+	// DeductInventory" case mocks this lookup. Price + currency match
+	// the ex-BookingConfig defaults (US$20).
+	tt := domain.ReconstructTicketType(
+		ticketTypeID, eventID, "Default Ticket", 2000, "usd",
+		100, 100, nil, nil, nil, "", 0,
+	)
 
 	tests := []struct {
 		name          string
 		userID        int
-		eventID       uuid.UUID
+		ticketTypeID  uuid.UUID
 		quantity      int
-		mockSetup     func(*mocks.MockOrderRepository, *mocks.MockInventoryRepository)
+		mockSetup     func(*mocks.MockOrderRepository, *mocks.MockTicketTypeRepository, *mocks.MockInventoryRepository)
 		expectedError error
 	}{
 		{
-			name:     "Success",
-			userID:   1,
-			eventID:  eventID,
-			quantity: 2,
-			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
+			name:         "Success",
+			userID:       1,
+			ticketTypeID: ticketTypeID,
+			quantity:     2,
+			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
+				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
 				// D3 (Pattern A): BookingService now passes reservedUntil
 				// (a future time.Time) as the 6th arg. We match gomock.Any()
 				// on the orderID + reservedUntil positions because both are
@@ -58,11 +70,12 @@ func TestBookingService_BookTicket(t *testing.T) {
 			expectedError: nil,
 		},
 		{
-			name:     "Sold Out (Redis)",
-			userID:   1,
-			eventID:  eventID,
-			quantity: 5,
-			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
+			name:         "Sold Out (Redis)",
+			userID:       1,
+			ticketTypeID: ticketTypeID,
+			quantity:     5,
+			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
+				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
 				// Redis returns false (Sold Out)
 				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5, gomock.Any()).Return(false, nil)
 			},
@@ -72,14 +85,29 @@ func TestBookingService_BookTicket(t *testing.T) {
 			// Duplicate purchase is now enforced by DB UNIQUE constraint (not Redis).
 			// At the BookingService level, Redis just returns success — the worker handles the duplicate.
 			// This test verifies that a Redis error is propagated correctly.
-			name:     "Redis Error",
-			userID:   1,
-			eventID:  eventID,
-			quantity: 1,
-			mockSetup: func(o *mocks.MockOrderRepository, i *mocks.MockInventoryRepository) {
+			name:         "Redis Error",
+			userID:       1,
+			ticketTypeID: ticketTypeID,
+			quantity:     1,
+			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
+				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
 				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1, gomock.Any()).Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
+		},
+		{
+			// D4.1 new path: ticket_type lookup miss surfaces a 404-style
+			// sentinel BEFORE Redis is touched. Confirms BookingService
+			// rejects on ticket_type lookup failure (no DeductInventory
+			// expectation — gomock fails the test if it fires).
+			name:         "Ticket Type Not Found",
+			userID:       1,
+			ticketTypeID: ticketTypeID,
+			quantity:     1,
+			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
+				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(domain.TicketType{}, domain.ErrTicketTypeNotFound)
+			},
+			expectedError: domain.ErrTicketTypeNotFound,
 		},
 	}
 
@@ -90,17 +118,18 @@ func TestBookingService_BookTicket(t *testing.T) {
 
 			// Setup Mocks
 			mockOrderRepo := mocks.NewMockOrderRepository(ctrl)
+			mockTicketTypeRepo := mocks.NewMockTicketTypeRepository(ctrl)
 			mockInventoryRepo := mocks.NewMockInventoryRepository(ctrl)
 
 			if tt.mockSetup != nil {
-				tt.mockSetup(mockOrderRepo, mockInventoryRepo)
+				tt.mockSetup(mockOrderRepo, mockTicketTypeRepo, mockInventoryRepo)
 			}
 
 			// Service
-			service := booking.NewService(mockOrderRepo, mockInventoryRepo, testBookingConfig())
+			service := booking.NewService(mockOrderRepo, mockTicketTypeRepo, mockInventoryRepo, testBookingConfig())
 
 			// Execute
-			order, err := service.BookTicket(ctx, tt.userID, tt.eventID, tt.quantity)
+			order, err := service.BookTicket(ctx, tt.userID, tt.ticketTypeID, tt.quantity)
 
 			// Assert
 			if tt.expectedError != nil {
@@ -133,6 +162,11 @@ func TestBookingService_BookTicket(t *testing.T) {
 func TestBookingService_BookTicket_RejectsInvariantViolations(t *testing.T) {
 	ctx := mlog.NewContext(context.Background(), mlog.NewNop(), "")
 	eventID := uuid.New()
+	ticketTypeID := uuid.New()
+	tt := domain.ReconstructTicketType(
+		ticketTypeID, eventID, "Default Ticket", 2000, "usd",
+		100, 100, nil, nil, nil, "", 0,
+	)
 
 	cases := []struct {
 		name        string
@@ -146,21 +180,25 @@ func TestBookingService_BookTicket_RejectsInvariantViolations(t *testing.T) {
 		{name: "quantity negative rejected", userID: 1, quantity: -3, expectedErr: domain.ErrInvalidQuantity},
 	}
 
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
 			mockOrderRepo := mocks.NewMockOrderRepository(ctrl)
+			mockTicketTypeRepo := mocks.NewMockTicketTypeRepository(ctrl)
 			mockInventoryRepo := mocks.NewMockInventoryRepository(ctrl)
-			// CRITICAL: NO DeductInventory expectation — the alignment
-			// fix must reject BEFORE Redis is touched. gomock fails the
-			// test if DeductInventory fires unexpectedly.
+			// D4.1 — ticket_type lookup happens BEFORE the invariant
+			// check that NewReservation runs (because eventID + price
+			// come from the lookup). So GetByID is called even in the
+			// rejection paths. NO DeductInventory expectation though —
+			// the alignment fix must reject BEFORE Redis is touched.
+			mockTicketTypeRepo.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
 
-			service := booking.NewService(mockOrderRepo, mockInventoryRepo, testBookingConfig())
-			order, err := service.BookTicket(ctx, tt.userID, eventID, tt.quantity)
+			service := booking.NewService(mockOrderRepo, mockTicketTypeRepo, mockInventoryRepo, testBookingConfig())
+			order, err := service.BookTicket(ctx, tc.userID, ticketTypeID, tc.quantity)
 
-			assert.ErrorIs(t, err, tt.expectedErr,
+			assert.ErrorIs(t, err, tc.expectedErr,
 				"invariant violation must surface the corresponding domain sentinel before Redis is touched")
 			assert.Equal(t, domain.Order{}, order)
 		})

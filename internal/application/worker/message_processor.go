@@ -12,6 +12,28 @@ import (
 	"booking_monitor/internal/log/tag"
 )
 
+// !!! D4.1 IN PROGRESS — DO NOT DEPLOY THIS COMMIT TO ANY ENVIRONMENT
+//
+// This commit lands the D4.1 foundation (domain TicketType + Order price
+// snapshot fields). The wire-format complement — `deduct.lua` + the
+// `parseMessage` adapter in `infrastructure/cache/redis_queue.go` — has
+// NOT been updated to thread `ticket_type_id` / `amount_cents` /
+// `currency` from the Lua-side XADD into the QueuedBookingMessage.
+//
+// Effect at runtime: every booking message reaching `Process` below has
+// `msg.TicketTypeID == uuid.Nil`, `msg.AmountCents == 0`,
+// `msg.Currency == ""`. `domain.NewReservation` rejects with
+// `ErrInvalidOrderTicketTypeID` (then `ErrInvalidAmountCents`); the DLQ
+// classifier short-circuits to first-attempt DLQ. The HTTP 202
+// reservation response is returned, Redis inventory is deducted, and
+// the order silently never lands in DB.
+//
+// The follow-up commit on this PR (Lua + parseMessage + persistence
+// TicketTypeRepository impl + payment service rewrite) closes the gap.
+// Until that lands: docker-compose / staging deploy is unsafe, even
+// though `go test -race ./...` is green (unit tests bypass the wire
+// format).
+
 // MessageProcessor processes a single order message from the queue.
 // Separated from Service so cross-cutting concerns (metrics,
 // tracing) can be layered as decorators without the circular-callback
@@ -69,7 +91,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 	// retries this is stable; pre-PR-47 the worker minted a fresh
 	// uuid per redelivery so the client's id and DB's id diverged on
 	// retry.
-	newOrder, err := domain.NewReservation(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity, msg.ReservedUntil)
+	newOrder, err := domain.NewReservation(msg.OrderID, msg.UserID, msg.EventID, msg.TicketTypeID, msg.Quantity, msg.ReservedUntil, msg.AmountCents, msg.Currency)
 	if err != nil {
 		p.logger.Error(ctx, "Malformed order message",
 			tag.MsgID(msg.MessageID), tag.Error(err))

@@ -19,7 +19,7 @@ func TestOrderResponseFromDomain(t *testing.T) {
 	orderID := uuid.New()
 	eventID := uuid.New()
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		orderID, 7, eventID, 3, domain.OrderStatusConfirmed, created, time.Time{}, "",
+		orderID, 7, eventID, uuid.Nil, 3, domain.OrderStatusConfirmed, created, time.Time{}, "", 0, "",
 	))
 	// D3: legacy A4 row (zero reservedUntil) must NOT carry a
 	// reserved_until pointer in the wire response — pinned via the
@@ -49,7 +49,7 @@ func TestOrderResponseFromDomain_PatternA_ReservedUntilEmitted(t *testing.T) {
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	reservedUntil := created.Add(15 * time.Minute)
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		uuid.New(), 7, uuid.New(), 1, domain.OrderStatusAwaitingPayment, created, reservedUntil, "",
+		uuid.New(), 7, uuid.New(), uuid.Nil, 1, domain.OrderStatusAwaitingPayment, created, reservedUntil, "", 0, "",
 	))
 
 	require.NotNil(t, got.ReservedUntil,
@@ -79,8 +79,8 @@ func TestListBookingsResponseFromDomain(t *testing.T) {
 	id1 := uuid.New()
 	id2 := uuid.New()
 	orders := []domain.Order{
-		domain.ReconstructOrder(id1, 7, uuid.New(), 1, domain.OrderStatusPending, now, time.Time{}, ""),
-		domain.ReconstructOrder(id2, 8, uuid.New(), 5, domain.OrderStatusConfirmed, now, time.Time{}, ""),
+		domain.ReconstructOrder(id1, 7, uuid.New(), uuid.Nil, 1, domain.OrderStatusPending, now, time.Time{}, "", 0, ""),
+		domain.ReconstructOrder(id2, 8, uuid.New(), uuid.Nil, 5, domain.OrderStatusConfirmed, now, time.Time{}, "", 0, ""),
 	}
 
 	got := dto.ListBookingsResponseFromDomain(orders, 17, 2, 10)

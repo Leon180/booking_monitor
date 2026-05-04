@@ -66,6 +66,17 @@ type QueuedBookingMessage struct {
 	// problem — the row would just be inserted with a near-past TTL
 	// and the D6 sweeper would resolve it on the next tick).
 	ReservedUntil time.Time
+
+	// TicketTypeID + AmountCents + Currency — D4.1 KKTIX-aligned
+	// 票種 + price snapshot. BookingService looked up the chosen
+	// ticket_type, derived the event_id + price_cents + currency,
+	// computed amount_cents = price_cents × quantity, and frozen
+	// these values onto the stream message so the worker doesn't
+	// re-query (the worker is the async path; querying twice would
+	// race against admin price edits).
+	TicketTypeID uuid.UUID
+	AmountCents  int64
+	Currency     string
 }
 
 //go:generate mockgen -source=queue.go -destination=../mocks/queue_mock.go -package=mocks

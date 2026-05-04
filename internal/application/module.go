@@ -37,11 +37,12 @@ var Module = fx.Module("application",
 	fx.Provide(
 		func(
 			orderRepo domain.OrderRepository,
+			ticketTypeRepo domain.TicketTypeRepository,
 			inventoryRepo domain.InventoryRepository,
 			cfg *config.Config,
 			metrics booking.Metrics,
 		) booking.Service {
-			base := booking.NewService(orderRepo, inventoryRepo, cfg)
+			base := booking.NewService(orderRepo, ticketTypeRepo, inventoryRepo, cfg)
 			return booking.NewMetricsDecorator(
 				booking.NewTracingDecorator(base),
 				metrics,
