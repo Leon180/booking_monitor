@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -88,10 +89,12 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// 2. Add a message and claim it (simulate pending). event_id is a
 	// UUID string post-PR-34; user_id stays int (external reference).
 	// reserved_until added in D3 — Pattern A reservation TTL field that
-	// parseMessage now requires. The value just needs to be a positive
-	// unix timestamp for parseMessage to accept it.
+	// parseMessage requires. ticket_type_id / amount_cents / currency
+	// added in D4.1 — KKTIX 票種 + price snapshot, all parseMessage now
+	// rejects on absence (the wire format must mirror deduct.lua exactly).
 	eventUUID := uuid.New().String()
 	orderUUID := uuid.New().String()
+	ticketTypeUUID := uuid.New().String()
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
@@ -100,6 +103,9 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 			"event_id":       eventUUID,
 			"quantity":       "1",
 			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
+			"ticket_type_id": ticketTypeUUID,
+			"amount_cents":   "2000",
+			"currency":       "usd",
 		},
 	}).Result()
 
@@ -145,13 +151,19 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
 	nopLogger := mlog.NewNop()
 
-	queue := NewRedisOrderQueue(rdb, nil, nopLogger, testConfig("worker-1"), worker.NoopQueueMetrics(), nil)
+	// Truly unrecoverable malformed message (no event_id field) — exercise
+	// the malformed_unrecoverable label path. The legacy-revert path is
+	// covered separately below.
+	inv := &fakeInventoryRevert{}
+	metrics := &recordingQueueMetrics{}
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), metrics, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
 
-	// Add MALFORMED message (missing fields)
+	// Add MALFORMED message (missing fields, including event_id — so
+	// parseLegacyRevertHints CANNOT extract anything).
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{"foo": "bar"},
@@ -171,6 +183,140 @@ func TestRedisOrderQueue_ParseMessage_Error(t *testing.T) {
 	// Should be moved to DLQ
 	len, _ := rdb.XLen(context.Background(), "orders:dlq").Result()
 	assert.Equal(t, int64(1), len)
+
+	// D4.1 follow-up (Codex P1) — when revert hints unparseable,
+	// inventory is NOT reverted (we don't know what to revert) and the
+	// label is `malformed_unrecoverable` so ops can spot the inventory
+	// leak. Pinning that the metric label is the load-bearing signal.
+	assert.Equal(t, 0, inv.revertCallCount,
+		"unrecoverable parse-fail (no event_id) MUST NOT call RevertInventory — there's nothing to revert against")
+	assert.Equal(t, uint64(1), metrics.dlqRoutes["malformed_unrecoverable"],
+		"unrecoverable parse-fail must emit dlqReasonMalformedUnrecoverable so ops can correlate inventory drift")
+}
+
+// TestRedisOrderQueue_ParseMessage_LegacyRevertedHints pins the
+// rolling-upgrade safety net (Codex P1): a pre-D4.1 stream message
+// missing the new fields (ticket_type_id / amount_cents / currency)
+// still has event_id + quantity (D3 stable), so parseLegacyRevertHints
+// salvages those, RevertInventory restores the Redis decrement, and
+// the DLQ label is `malformed_reverted_legacy` (distinct from
+// `malformed_unrecoverable` so an expected rolling-upgrade taper
+// doesn't page).
+func TestRedisOrderQueue_ParseMessage_LegacyRevertedHints(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+
+	inv := &fakeInventoryRevert{}
+	metrics := &recordingQueueMetrics{}
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), metrics, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+
+	// Pre-D4.1 shape: has event_id + quantity, but lacks the three D4.1
+	// mandatory fields. parseMessage will reject; handleParseFailure
+	// must fall back to revert-via-hints.
+	legacyEventID := uuid.New()
+	rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: "orders:stream",
+		Values: map[string]interface{}{
+			"order_id": uuid.New().String(),
+			"user_id":  "1",
+			"event_id": legacyEventID.String(),
+			"quantity": "3",
+			// no ticket_type_id / amount_cents / currency / reserved_until
+		},
+	})
+
+	_ = queue.Subscribe(ctx, func(_ context.Context, _ *worker.QueuedBookingMessage) error {
+		t.Fatal("handler must NOT be invoked when parseMessage rejects the message")
+		return nil
+	})
+
+	// 1. DLQ trace preserved.
+	dlqLen, _ := rdb.XLen(context.Background(), "orders:dlq").Result()
+	assert.Equal(t, int64(1), dlqLen)
+
+	// 2. RevertInventory was called with the legacy hints.
+	assert.Equal(t, 1, inv.revertCallCount, "legacy parse-fail must call RevertInventory exactly once")
+	assert.Equal(t, legacyEventID, inv.lastRevertEventID, "RevertInventory must use the event_id extracted from the raw message")
+	assert.Equal(t, 3, inv.lastRevertQty, "RevertInventory must use the quantity extracted from the raw message")
+
+	// 3. DLQ label is the legacy-recovery one, not the unrecoverable
+	// one. This is the load-bearing operational distinction from the
+	// alert side: a `malformed_reverted_legacy` taper is the expected
+	// rolling-upgrade shape, while `malformed_unrecoverable` is a
+	// producer regression that warrants paging.
+	assert.Equal(t, uint64(1), metrics.dlqRoutes["malformed_reverted_legacy"],
+		"legacy parse-fail with successful revert must use dlqReasonMalformedRevertedLegacy")
+	assert.Equal(t, uint64(0), metrics.dlqRoutes["malformed_unrecoverable"],
+		"legacy parse-fail with successful revert MUST NOT emit malformed_unrecoverable")
+}
+
+// TestRedisOrderQueue_ParseMessage_LegacyHintsButRevertFails verifies
+// the contract that mirrors handleFailure: when legacy hints ARE
+// recoverable but RevertInventory itself fails (Redis outage during
+// compensation), the message MUST stay in PEL — neither ACK'd nor
+// DLQ'd — so the next consumer pass can retry the (idempotent) revert
+// once Redis recovers. ACK + DLQ here would permanently leak Redis
+// inventory under any transient revert failure (the original Codex P1
+// pattern, just from a different entry point).
+func TestRedisOrderQueue_ParseMessage_LegacyHintsButRevertFails(t *testing.T) {
+	s := miniredis.RunT(t)
+	defer s.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	nopLogger := mlog.NewNop()
+
+	inv := &fakeInventoryRevert{revertErr: errors.New("redis: ECONNREFUSED")}
+	metrics := &recordingQueueMetrics{}
+	queue := NewRedisOrderQueue(rdb, inv, nopLogger, testConfig("worker-1"), metrics, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
+
+	// Legacy-shape message that COULD be reverted, except RevertInventory
+	// is going to fail.
+	rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: "orders:stream",
+		Values: map[string]interface{}{
+			"order_id": uuid.New().String(),
+			"user_id":  "1",
+			"event_id": uuid.New().String(),
+			"quantity": "1",
+		},
+	})
+
+	_ = queue.Subscribe(ctx, func(_ context.Context, _ *worker.QueuedBookingMessage) error {
+		t.Fatal("handler must NOT be invoked when parseMessage rejects the message")
+		return nil
+	})
+
+	// Subscribe loop will re-read the message from the PEL across the
+	// 500ms ctx window, so revertCallCount can be > 1. The contract
+	// being pinned is "revert was attempted at least once and the
+	// failure metric is being emitted" — not the exact retry count
+	// (that depends on PEL block timeout + ctx deadline timing).
+	assert.GreaterOrEqual(t, inv.revertCallCount, 1, "legacy hints WERE recoverable so RevertInventory was attempted")
+	// RevertFailure metric counts every failed attempt.
+	assert.GreaterOrEqual(t, metrics.revertFailures, uint64(1),
+		"failed RevertInventory must increment revert_failures so the operator alert path fires")
+
+	// CRITICAL: message MUST stay in PEL — no DLQ entry, no DLQ-route
+	// metric. Mirrors handleFailure's contract that revert failure
+	// leaves the message claimable for the next consumer pass.
+	assert.Equal(t, uint64(0), metrics.dlqRoutes["malformed_unrecoverable"],
+		"failed revert MUST NOT emit a DLQ-route metric — the message stays in PEL for retry")
+	assert.Equal(t, uint64(0), metrics.dlqRoutes["malformed_reverted_legacy"],
+		"failed revert MUST NOT emit a DLQ-route metric")
+	dlqLen, _ := rdb.XLen(context.Background(), "orders:dlq").Result()
+	assert.Equal(t, int64(0), dlqLen,
+		"failed revert MUST NOT write to DLQ — leaving the message in PEL is the load-bearing inventory-leak guard")
 }
 
 // TestRedisOrderQueue_Subscribe_MalformedFastPath verifies that handler
@@ -204,7 +350,11 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
 
 	// Push a structurally-valid stream entry (parseMessage will succeed)
-	// — invariant validation happens later, inside the handler.
+	// — invariant validation happens later, inside the handler. D4.1 added
+	// ticket_type_id / amount_cents / currency to the wire format; all
+	// three are required by parseMessage so the entry would otherwise
+	// fail at the queue boundary (a different code path than the one
+	// this test exercises).
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
@@ -213,6 +363,9 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 			"event_id":       uuid.New().String(),
 			"quantity":       "1",
 			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
+			"ticket_type_id": uuid.New().String(),
+			"amount_cents":   "2000",
+			"currency":       "usd",
 		},
 	})
 
@@ -243,17 +396,32 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 // fakeInventoryRevert is a minimal domain.InventoryRepository stub for
 // tests that only exercise the revert path. SetInventory / DeductInventory
 // are not relevant here and panic if called (keeps the test honest).
-type fakeInventoryRevert struct{ reverted bool }
+//
+// The exported fields capture the LAST RevertInventory call so D4.1
+// follow-up tests can assert that legacy parse-fail compensation
+// reverted the right inventory key + quantity (Codex P1).
+type fakeInventoryRevert struct {
+	reverted          bool
+	revertCallCount   int
+	lastRevertEventID uuid.UUID
+	lastRevertQty     int
+	lastRevertCompID  string
+	revertErr         error // nil → success; non-nil → simulate Redis failure
+}
 
 func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
 	panic("SetInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int, _ time.Time) (bool, error) {
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ int, _ int, _ time.Time, _ int64, _ string) (bool, error) {
 	panic("DeductInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {
+func (f *fakeInventoryRevert) RevertInventory(_ context.Context, eventID uuid.UUID, quantity int, compensationID string) error {
 	f.reverted = true
-	return nil
+	f.revertCallCount++
+	f.lastRevertEventID = eventID
+	f.lastRevertQty = quantity
+	f.lastRevertCompID = compensationID
+	return f.revertErr
 }
 func (f *fakeInventoryRevert) GetInventory(_ context.Context, _ uuid.UUID) (int, bool, error) {
 	panic("GetInventory not expected in this test")

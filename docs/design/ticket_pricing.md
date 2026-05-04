@@ -280,7 +280,48 @@ PaymentService.CreatePaymentIntent(order_id):
 
 → schema 預留 `currency` 欄位,但只用一個值。 真有需求再擴展成 M:N。
 
-## 9. 引用來源(可驗證)
+## 9. 為什麼是 `int64`,不是 `uint32` / `decimal.Decimal`
+
+D4.1 把 `price_cents` 與 `amount_cents` 都選 `int64`(Postgres `BIGINT`、Go `int64`)。記在這裡是因為 review 時被問過兩次,留 paper trail 給未來自己跟 reviewer。
+
+### 為什麼不是 `uint32`(理由的真實權重)
+
+| 排序 | 理由 | 權重 |
+|---|---|---|
+| 1 | Stripe / PayPal / Square / Adyen 的 Go SDK 整套用 `int64` | 整 ecosystem 對齊,沒 cast hell |
+| 2 | 預留 sign 給 refund / discount / negative line item | 未來不用 schema migration |
+| 3 | Overflow 上限從 ~9 quintillion 降到 4.29B | 安全邊際 — 企業大宗訂單 / season pass 邊緣情境會碰到 |
+| 4 | `int64(amountCents)` cast 撒滿 codebase | bug surface ↑ |
+| 5 | Struct memory(`amountCents` 4B vs 8B) | 在這個 Order struct 裡 net zero(被 alignment padding 吃掉),但**不是通則** — 別處的 struct 可能差一倍 |
+| 6 | DB column(`INTEGER` 4B vs `BIGINT` 8B) | 1M 筆 = 4MB,10M 筆 = 40MB,100M 筆 = 400MB。Index size + cache hit rate 在大 scale 有感,但**不是現階段瓶頸** |
+| 7 | ALU cycle | 現代 x86_64/arm64 上 int32 / int64 的 ADD/MUL/CMP 都 single µop, single cycle, 同 throughput 同 latency。**完全可忽略** |
+
+`uint32` 在 server-side Go 不是 perf 問題,是 type-design / interop 問題。
+
+### 為什麼不是 `decimal.Decimal`
+
+| 場景 | 我們的情境 | Decimal 適合? |
+|---|---|---|
+| 整數 minor unit(USD cents / TWD 元) | ✅ | 用 int64 即可 |
+| 不同 currency 的 minor digit 數量不同(USD 2、JPY 0、KWD 3) | 🟡 schema-only D4.1,D8+ 才碰 | 解法是「currency_info 表 + int64 minor unit」(Stripe 做法),不是 Decimal |
+| Tax / discount / 比例計算(`0.0825 × $19.99`) | 不在 scope | 真要做時 Decimal 是正解 |
+| 累積 rounding chain(多筆退款 / 拆單) | 不在 scope | 真要做時 Decimal 是正解 |
+| 高頻熱路徑(8K+ books/sec) | ✅ | int64 的 native 算術 vs Decimal 的 heap allocation + 比較 overhead — int64 贏 |
+
+→ 結論:**現在用 int64,真的需要 Money 抽象時(multi-currency 不同 minor unit 或 tax/discount 進入 scope),引入 `domain.Money` value object**(Eric Evans IDDD + Fowler PoEAA §6 Money 模式),底層仍可繼續用 int64 ,屆時是 value-object extraction,不是 primitive 換型。
+
+### Reviewer 補的兩個 caveat(留作 future 注意點)
+
+1. **Struct alignment 不是通則** — `int64 → uint32` 在 *這個* Order struct 是 net zero(相鄰 `currency string` 需 8B align,uint32 後面被 4B padding 補回),但其他 struct(例如 `(uint32, bool)`)會差一倍。Layout 取決於相鄰欄位。
+2. **JSON 2^53 上限** — fiat 貨幣金額不可能碰到(2^53 cents = $90 兆),但若未來引入 satoshi(1 BTC = 10^8 satoshi)/ micropayment 累計,JS client 解 JSON 會失精度。屆時 wire format 要改 string-encoded decimal(Shopify 風格),不是 number。
+
+### 8K req/s 的 Lua 上限是「本專案實測」,不是 Redis 通則
+
+我們的 [`deduct.lua`](../../internal/infrastructure/cache/lua/deduct.lua) 不是輕量 EVAL — 含 SCRIPT EXISTS、多個 DECRBY、XADD 到 stream、4-6 ARGV string conversion、多型 return value。實測 ~8,330/s 是這組 script 的 single-thread serialization 上限。
+
+簡單的 EVAL `GET key` 通常 50K-100K ops/sec。引用我們的 8K 數字時要明確說「本專案 deduct.lua 路徑實測」,不要套到別系統。
+
+## 10. 引用來源(可驗證)
 
 - [Pretix Item / Quota / Seat 原始碼](https://github.com/pretix/pretix/blob/master/src/pretix/base/models/items.py)
 - [Stripe Products and Prices doc](https://stripe.com/docs/products-prices/overview)

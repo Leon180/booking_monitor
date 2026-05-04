@@ -19,7 +19,7 @@ func TestOrderResponseFromDomain(t *testing.T) {
 	orderID := uuid.New()
 	eventID := uuid.New()
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		orderID, 7, eventID, 3, domain.OrderStatusConfirmed, created, time.Time{}, "",
+		orderID, 7, eventID, uuid.Nil, 3, domain.OrderStatusConfirmed, created, time.Time{}, "", 0, "",
 	))
 	// D3: legacy A4 row (zero reservedUntil) must NOT carry a
 	// reserved_until pointer in the wire response — pinned via the
@@ -49,7 +49,7 @@ func TestOrderResponseFromDomain_PatternA_ReservedUntilEmitted(t *testing.T) {
 	created := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	reservedUntil := created.Add(15 * time.Minute)
 	got := dto.OrderResponseFromDomain(domain.ReconstructOrder(
-		uuid.New(), 7, uuid.New(), 1, domain.OrderStatusAwaitingPayment, created, reservedUntil, "",
+		uuid.New(), 7, uuid.New(), uuid.Nil, 1, domain.OrderStatusAwaitingPayment, created, reservedUntil, "", 0, "",
 	))
 
 	require.NotNil(t, got.ReservedUntil,
@@ -63,13 +63,48 @@ func TestEventResponseFromDomain(t *testing.T) {
 	id := uuid.New()
 	got := dto.EventResponseFromDomain(domain.ReconstructEvent(
 		id, "Concert", 100, 42, 5,
-	))
+	), nil)
 
 	assert.Equal(t, id, got.ID)
 	assert.Equal(t, "Concert", got.Name)
 	assert.Equal(t, 100, got.TotalTickets)
 	assert.Equal(t, 42, got.AvailableTickets, "AvailableTickets and TotalTickets must not be swapped")
 	assert.Equal(t, 5, got.Version)
+	// D4.1: ticket_types is always materialised (zero-length slice for
+	// nil input), never nil — JSON renders as `"ticket_types": []`,
+	// not as a missing key, so clients can iterate without nil-check.
+	assert.NotNil(t, got.TicketTypes, `ticket_types must be a real (zero-length) slice when no ticket types — JSON contract pin`)
+	assert.Empty(t, got.TicketTypes)
+}
+
+// TestEventResponseFromDomain_WithTicketTypes pins the D4.1 mapper
+// path: a domain event + a single default ticket_type maps to the
+// wire shape with ticket_types[0] populated, all optional fields
+// omitted (nil saleStartsAt etc. → omitempty hides them in JSON).
+func TestEventResponseFromDomain_WithTicketTypes(t *testing.T) {
+	t.Parallel()
+
+	eventID := uuid.New()
+	ttID := uuid.New()
+	tt := domain.ReconstructTicketType(
+		ttID, eventID, "Default", 2000, "usd",
+		100, 100, nil, nil, nil, "", 0,
+	)
+	got := dto.EventResponseFromDomain(
+		domain.ReconstructEvent(eventID, "Concert", 100, 100, 0),
+		[]domain.TicketType{tt},
+	)
+
+	require.Len(t, got.TicketTypes, 1)
+	assert.Equal(t, ttID, got.TicketTypes[0].ID)
+	assert.Equal(t, eventID, got.TicketTypes[0].EventID)
+	assert.Equal(t, "Default", got.TicketTypes[0].Name)
+	assert.Equal(t, int64(2000), got.TicketTypes[0].PriceCents)
+	assert.Equal(t, "usd", got.TicketTypes[0].Currency)
+	assert.Nil(t, got.TicketTypes[0].SaleStartsAt, "nil sale_starts_at on the domain side must round-trip as nil so omitempty hides the field")
+	assert.Nil(t, got.TicketTypes[0].SaleEndsAt)
+	assert.Nil(t, got.TicketTypes[0].PerUserLimit)
+	assert.Equal(t, "", got.TicketTypes[0].AreaLabel)
 }
 
 func TestListBookingsResponseFromDomain(t *testing.T) {
@@ -79,8 +114,8 @@ func TestListBookingsResponseFromDomain(t *testing.T) {
 	id1 := uuid.New()
 	id2 := uuid.New()
 	orders := []domain.Order{
-		domain.ReconstructOrder(id1, 7, uuid.New(), 1, domain.OrderStatusPending, now, time.Time{}, ""),
-		domain.ReconstructOrder(id2, 8, uuid.New(), 5, domain.OrderStatusConfirmed, now, time.Time{}, ""),
+		domain.ReconstructOrder(id1, 7, uuid.New(), uuid.Nil, 1, domain.OrderStatusPending, now, time.Time{}, "", 0, ""),
+		domain.ReconstructOrder(id2, 8, uuid.New(), uuid.Nil, 5, domain.OrderStatusConfirmed, now, time.Time{}, "", 0, ""),
 	}
 
 	got := dto.ListBookingsResponseFromDomain(orders, 17, 2, 10)

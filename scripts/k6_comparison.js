@@ -55,9 +55,18 @@ export function setup() {
     // "accepted bookings / s through the booking hot path". Both
     // numbers are operationally meaningful; collapsing them into
     // a single headline was the bug, not the pool size.
+    //
+    // D4.1: POST /api/v1/events now requires `price_cents` + `currency`
+    // (the auto-provisioned default ticket_type's price snapshot).
+    // The response surfaces `ticket_types[]` with the new ticket_type's
+    // id — the iteration body POSTs against `ticket_type_id`, NOT
+    // `event_id` (KKTIX 票種 model — pricing + inventory live on the
+    // ticket_type entity).
     const payload = JSON.stringify({
         name: `Comparison Benchmark ${Date.now()}`,
         total_tickets: 500000,
+        price_cents: 2000,
+        currency: 'usd',
     });
 
     const res = http.post(`${BASE_URL}/events`, payload, {
@@ -68,14 +77,19 @@ export function setup() {
         throw new Error(`Setup failed: ${res.status} ${res.body}`);
     }
 
+    const body = res.json();
+    if (!body.ticket_types || body.ticket_types.length === 0) {
+        throw new Error(`Setup failed: response missing ticket_types[] — D4.1 contract regression? body=${res.body}`);
+    }
+
     check(res, { 'setup event created': (r) => r.status === 201 });
-    return { eventID: res.json().id };
+    return { ticketTypeID: body.ticket_types[0].id };
 }
 
 export default function (data) {
     const payload = JSON.stringify({
         user_id: randomIntBetween(1, 9999999),
-        event_id: data.eventID,
+        ticket_type_id: data.ticketTypeID,
         quantity: 1,
     });
 

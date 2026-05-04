@@ -104,7 +104,7 @@ func makeChargingOrder(t *testing.T, id uuid.UUID) domain.Order {
 	t.Helper()
 	eventID, err := uuid.NewV7()
 	require.NoError(t, err)
-	return domain.ReconstructOrder(id, 1, eventID, 1, domain.OrderStatusCharging, time.Now().Add(-30*time.Second), time.Time{}, "")
+	return domain.ReconstructOrder(id, 1, eventID, uuid.Nil, 1, domain.OrderStatusCharging, time.Now().Add(-30*time.Second), time.Time{}, "", 0, "")
 }
 
 // expectFailOrder wires the GetByID + UoW.Do path that recon.failOrder

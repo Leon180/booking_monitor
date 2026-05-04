@@ -96,7 +96,12 @@ func newReservation(t *testing.T, eventID uuid.UUID, userID, qty int) domain.Ord
 	// round-trip through Postgres (TIMESTAMPTZ) doesn't introduce
 	// off-by-timezone surprises.
 	reservedUntil := time.Now().Add(15 * time.Minute).UTC()
-	o, err := domain.NewReservation(id, userID, eventID, qty, reservedUntil)
+	// D4.1: NewReservation now requires ticket_type_id + amount_cents
+	// + currency. Tests use a synthetic ticket_type_id (no FK in DB)
+	// and the same default price as ex-BookingConfig (US$20 → 2000c).
+	ticketTypeID, err := uuid.NewV7()
+	require.NoError(t, err)
+	o, err := domain.NewReservation(id, userID, eventID, ticketTypeID, qty, reservedUntil, 2000, "usd")
 	require.NoError(t, err)
 	return o
 }
@@ -855,7 +860,7 @@ func TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation(t *testing
 	id, err := uuid.NewV7()
 	require.NoError(t, err)
 	expiredTime := time.Now().Add(-1 * time.Minute)
-	o := domain.ReconstructOrder(id, 9, eventID, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredTime, "")
+	o := domain.ReconstructOrder(id, 9, eventID, uuid.Nil, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredTime, "", 0, "")
 	_, err = repo.Create(ctx, o)
 	require.NoError(t, err)
 

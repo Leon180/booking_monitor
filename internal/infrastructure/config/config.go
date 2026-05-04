@@ -52,22 +52,25 @@ type BookingConfig struct {
 	// once D8 lands.
 	ReservationWindow time.Duration `yaml:"reservation_window" env:"BOOKING_RESERVATION_WINDOW" env-default:"15m"`
 
-	// DefaultTicketPriceCents is the per-ticket charge amount /pay
-	// (D4) uses when constructing the PaymentIntent's amount.
-	// Per-event / per-section pricing lands in D8 with admin section
-	// CRUD (the `event_sections` table from migration 000012 already
-	// has the schema room — D4 just doesn't read it yet).
+	// D4.1 NOTE: pre-D4.1 BookingConfig also held
+	// `DefaultTicketPriceCents` + `DefaultCurrency` — every payment
+	// used a single global default. D4.1 retired both: prices live on
+	// the `event_ticket_types` table (KKTIX 票種 model), are picked by
+	// `BookingService.BookTicket` from the chosen ticket_type at book
+	// time, and are snapshotted onto `orders.amount_cents` /
+	// `orders.currency`. `PaymentService.CreatePaymentIntent` then
+	// reads them off the order via `order.AmountCents()` /
+	// `order.Currency()`. The customer pays exactly what they were
+	// quoted, even if the merchant edits the ticket_type's price
+	// mid-checkout. See `docs/design/ticket_pricing.md` for the
+	// schema-level rationale.
 	//
-	// 2000 cents = US$20 mirrors typical concert / event-ticket
-	// pricing for our flash-sale simulation. int64 because
-	// float-money is the OWASP-listed representation-error
-	// anti-pattern; Stripe's API also takes amount in smallest unit
-	// (cents) as int.
-	DefaultTicketPriceCents int64 `yaml:"default_ticket_price_cents" env:"BOOKING_DEFAULT_TICKET_PRICE_CENTS" env-default:"2000"`
-
-	// DefaultCurrency is the ISO 4217 three-letter code used for the
-	// PaymentIntent. Lowercase per Stripe convention.
-	DefaultCurrency string `yaml:"default_currency" env:"BOOKING_DEFAULT_CURRENCY" env-default:"usd"`
+	// `BOOKING_DEFAULT_TICKET_PRICE_CENTS` and `BOOKING_DEFAULT_CURRENCY`
+	// env vars are no longer read. cleanenv ignores unknown env vars
+	// silently, but `LoadConfig` calls `checkDeprecatedEnv` after
+	// parsing to log a stderr warning if either is still set in the
+	// process environment — turning the silent misconfig into a loud
+	// signal for operators migrating from pre-D4.1 deployment configs.
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the
@@ -444,7 +447,45 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 
+	checkDeprecatedEnv()
+
 	return cfg, nil
+}
+
+// deprecatedEnvVars is the registry of env vars that USED to be read
+// by an earlier release and are now silently ignored by `cleanenv`
+// (which doesn't error on unknown keys). Each entry maps the env name
+// to a short operator-facing message describing what replaced it.
+//
+// Why this exists: a fresh-build deploy where the operator's
+// `.env` / configmap / EnvironmentFile still sets one of these is
+// otherwise undetectable at runtime — the variable is parsed by no
+// struct field, no validator complains, and the process starts with
+// the wrong-by-default behaviour. Logging at startup turns the silent
+// misconfig into a loud warning.
+//
+// Convention: when removing a field that previously had `env:"X"`,
+// add an entry here for at least one major release so operators
+// migrating from older docker-compose / Helm charts get a signal.
+var deprecatedEnvVars = map[string]string{
+	"BOOKING_DEFAULT_TICKET_PRICE_CENTS": "removed in D4.1; price is now per `event_ticket_types` row (KKTIX 票種 model). Set price via POST /api/v1/events { price_cents } at event creation time.",
+	"BOOKING_DEFAULT_CURRENCY":           "removed in D4.1; currency is now per `event_ticket_types` row (KKTIX 票種 model). Set currency via POST /api/v1/events { currency } at event creation time.",
+}
+
+// checkDeprecatedEnv writes a Stderr warning for any deprecated env
+// var that's still set in the process environment. Stderr (NOT the
+// structured log) because LoadConfig runs BEFORE the logger is wired,
+// and we want this signal to be unconditionally visible in any
+// container log even on a misconfigured logging stack.
+//
+// Empty values are treated as unset (`os.Getenv` returns "" for both
+// "absent" and "explicitly empty" — they're operationally equivalent).
+func checkDeprecatedEnv() {
+	for name, replacement := range deprecatedEnvVars {
+		if val := os.Getenv(name); val != "" {
+			fmt.Fprintf(os.Stderr, "[config] WARN: env var %s=%q is deprecated and IGNORED — %s\n", name, val, replacement)
+		}
+	}
 }
 
 // Validate checks that required-at-startup fields are present. It

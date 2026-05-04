@@ -66,7 +66,7 @@ func main() {
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
 	stressCmd.Flags().String("base-url", stressDefaultBaseURL, "Target base URL (scheme://host:port)")
-	stressCmd.Flags().String("event-id", "", "Event UUID (v7) to book against — required, obtain via POST /api/v1/events")
+	stressCmd.Flags().String("ticket-type-id", "", "TicketType UUID (v7) to book against — required, obtain from `ticket_types[0].id` in the POST /api/v1/events response (D4.1+)")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
 	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd, sagaWatchdogCmd)

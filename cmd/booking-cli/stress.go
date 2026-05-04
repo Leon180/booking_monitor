@@ -20,7 +20,9 @@ import (
 // binary is a one-off tool, not a server process reading config.
 const (
 	stressDefaultBaseURL = "http://localhost:8080"
-	// stressDefaultEventID was an int=1 before PR 34. Post-UUID-migration
+	// stressDefaultEventID was an int=1 before PR 34, then a UUID v7 string.
+	// D4.1+ uses --ticket-type-id (KKTIX 票種 model — pricing + inventory live
+	// on the ticket_type entity, NOT the event entity). Post-UUID-migration
 	// the operator MUST supply a real UUID v7 obtained via
 	// POST /api/v1/events — there is no useful default.
 	stressDefaultUserRangeMax = 10000
@@ -37,19 +39,19 @@ func runStress(cmd *cobra.Command, _ []string) {
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	totalRequests, _ := cmd.Flags().GetInt("requests")
 	baseURL, _ := cmd.Flags().GetString("base-url")
-	eventIDStr, _ := cmd.Flags().GetString("event-id")
+	ticketTypeIDStr, _ := cmd.Flags().GetString("ticket-type-id")
 	userRange, _ := cmd.Flags().GetInt("user-range")
 
-	if eventIDStr == "" {
-		fmt.Fprintln(os.Stderr, "stress: --event-id is required (UUID v7 — create one via POST /api/v1/events first)")
+	if ticketTypeIDStr == "" {
+		fmt.Fprintln(os.Stderr, "stress: --ticket-type-id is required (UUID v7 — D4.1: obtain from `ticket_types[0].id` in the POST /api/v1/events response)")
 		os.Exit(1)
 	}
 
 	targetURL := strings.TrimRight(baseURL, "/") + apiV1Prefix + "/book"
-	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s (event=%s, user_range=%d)\n",
-		concurrency, totalRequests, targetURL, eventIDStr, userRange)
+	fmt.Printf("Starting stress test: %d workers, %d requests, target: %s (ticket_type=%s, user_range=%d)\n",
+		concurrency, totalRequests, targetURL, ticketTypeIDStr, userRange)
 
-	startStressTest(concurrency, totalRequests, targetURL, eventIDStr, userRange)
+	startStressTest(concurrency, totalRequests, targetURL, ticketTypeIDStr, userRange)
 }
 
 // startStressTest orchestrates the load burst. jobs is pre-filled +
@@ -57,7 +59,7 @@ func runStress(cmd *cobra.Command, _ []string) {
 // signal. startChan is a release barrier: every worker blocks on it
 // and they all unblock together, which is what flash-sale traffic
 // actually looks like at the wire.
-func startStressTest(concurrency, totalRequests int, url string, eventID string, userRange int) {
+func startStressTest(concurrency, totalRequests int, url string, ticketTypeID string, userRange int) {
 	var successCount, failCount int64
 	var wg sync.WaitGroup
 
@@ -71,7 +73,7 @@ func startStressTest(concurrency, totalRequests int, url string, eventID string,
 
 	wg.Add(concurrency)
 	for range concurrency {
-		go stressWorker(jobs, startChan, &wg, &successCount, &failCount, url, eventID, userRange)
+		go stressWorker(jobs, startChan, &wg, &successCount, &failCount, url, ticketTypeID, userRange)
 	}
 
 	// Sleep gives workers time to block on <-startChan so they start
@@ -96,17 +98,18 @@ func startStressTest(concurrency, totalRequests int, url string, eventID string,
 // Blocks on startChan first so every worker fires its first request
 // at approximately the same instant as its peers.
 //
-// eventID is the UUID v7 string supplied via --event-id; user_id is
-// generated per request from a small int range to spread load across
-// distinct users (the orders.user_id column is still INT — the
-// UUID migration was scoped to internally-owned aggregates).
+// ticketTypeID is the UUID v7 string supplied via --ticket-type-id
+// (D4.1+ — KKTIX 票種 model); user_id is generated per request from a
+// small int range to spread load across distinct users (the
+// orders.user_id column is still INT — the UUID migration was scoped
+// to internally-owned aggregates).
 func stressWorker(
 	jobs <-chan struct{},
 	startChan <-chan struct{},
 	wg *sync.WaitGroup,
 	successCount, failCount *int64,
 	url string,
-	eventID string,
+	ticketTypeID string,
 	userRange int,
 ) {
 	defer wg.Done()
@@ -122,10 +125,14 @@ func stressWorker(
 
 	for range jobs {
 		// json.Marshal cannot fail for this fixed shape.
+		// D4.1: BookingRequest takes ticket_type_id (NOT event_id) —
+		// KKTIX 票種 model puts pricing + inventory on the ticket_type
+		// entity. The customer-facing wire field tracks the booking
+		// service's internal lookup target.
 		reqBody, _ := json.Marshal(map[string]any{
-			"user_id":  rand.IntN(userRange) + 1, //nolint:gosec // G404 — load-generator user spread, not security-sensitive
-			"event_id": eventID,
-			"quantity": 1,
+			"user_id":        rand.IntN(userRange) + 1, //nolint:gosec // G404 — load-generator user spread, not security-sensitive
+			"ticket_type_id": ticketTypeID,
+			"quantity":       1,
 		})
 
 		resp, err := client.Post(url, "application/json", bytes.NewBuffer(reqBody))

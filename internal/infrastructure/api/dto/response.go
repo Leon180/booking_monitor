@@ -19,23 +19,75 @@ import (
 // reservedUntil) marshal without the field rather than as RFC3339
 // "0001-01-01T00:00:00Z" — clients can reliably check
 // `if "reserved_until" in response` to branch Pattern A from legacy.
+//
+// D4.1 (KKTIX 票種 alignment): adds `TicketTypeID` + `AmountCents` +
+// `Currency` (the price snapshot frozen at book time). Lets a polling
+// client display "you reserved 2 × VIP Early Bird at US$20.00 each"
+// without separately calling `/pay`. All three use omitempty so
+// legacy / pre-D4.1 rows (where the persistence layer coerces SQL
+// NULL to zero values) emit a clean response shape without
+// suggesting a ticket_type / price exists when it doesn't.
+//
+// `TicketTypeID` is `*uuid.UUID` (not bare `uuid.UUID`) so the JSON
+// encoder can emit nothing for legacy rows — `uuid.UUID` is a fixed-
+// size byte array whose zero value (uuid.Nil) marshals as
+// `"00000000-..."`, which is operationally indistinguishable from a
+// real id. Pointer is the idiomatic Go shape for "this field may
+// not exist."
 type OrderResponse struct {
 	ID            uuid.UUID  `json:"id"`
 	EventID       uuid.UUID  `json:"event_id"`
+	TicketTypeID  *uuid.UUID `json:"ticket_type_id,omitempty"`
 	UserID        int        `json:"user_id"`
 	Quantity      int        `json:"quantity"`
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"created_at"`
 	ReservedUntil *time.Time `json:"reserved_until,omitempty"`
+	AmountCents   int64      `json:"amount_cents,omitempty"`
+	Currency      string     `json:"currency,omitempty"`
 }
 
 // EventResponse is the wire shape of an event in API responses.
+//
+// D4.1: adds `ticket_types[]`. Populated by `POST /api/v1/events`
+// (creates the event + one default ticket_type) and any future
+// `GET /api/v1/events/:id` that loads the event detail. Single-element
+// for D4.1 default; multi-element after D8 multi-ticket-type-per-event.
+// Empty slice (NOT omitted) when an event has no ticket types yet —
+// makes "this event isn't bookable" operationally observable in the
+// JSON without a separate flag field.
 type EventResponse struct {
-	ID               uuid.UUID `json:"id"`
-	Name             string    `json:"name"`
-	TotalTickets     int       `json:"total_tickets"`
-	AvailableTickets int       `json:"available_tickets"`
-	Version          int       `json:"version"`
+	ID               uuid.UUID            `json:"id"`
+	Name             string               `json:"name"`
+	TotalTickets     int                  `json:"total_tickets"`
+	AvailableTickets int                  `json:"available_tickets"`
+	Version          int                  `json:"version"`
+	TicketTypes      []TicketTypeResponse `json:"ticket_types"`
+}
+
+// TicketTypeResponse is the wire shape of a ticket_type (KKTIX 票種)
+// nested under an event. Mirrors `domain.TicketType` field layout but
+// exposes only the fields the client cares about — `version` is
+// internal optimistic-concurrency state, not surfaced.
+//
+// Optional fields (`sale_starts_at`, `sale_ends_at`, `per_user_limit`,
+// `area_label`) use omitempty so a default ticket_type with no sale
+// window / no limit / no area emits a clean `{id, name, price_cents,
+// currency, total_tickets, available_tickets}` object — clients can
+// reliably check `if "sale_starts_at" in tt` to know whether the
+// operator set the field, distinct from "set but expired."
+type TicketTypeResponse struct {
+	ID               uuid.UUID  `json:"id"`
+	EventID          uuid.UUID  `json:"event_id"`
+	Name             string     `json:"name"`
+	PriceCents       int64      `json:"price_cents"`
+	Currency         string     `json:"currency"`
+	TotalTickets     int        `json:"total_tickets"`
+	AvailableTickets int        `json:"available_tickets"`
+	SaleStartsAt     *time.Time `json:"sale_starts_at,omitempty"`
+	SaleEndsAt       *time.Time `json:"sale_ends_at,omitempty"`
+	PerUserLimit     *int       `json:"per_user_limit,omitempty"`
+	AreaLabel        string     `json:"area_label,omitempty"`
 }
 
 // ListBookingsResponse is the wire shape of GET /api/v1/history.

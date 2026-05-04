@@ -189,8 +189,8 @@ func (r *postgresOrderRepository) WithTx(tx *sql.Tx) *postgresOrderRepository {
 func (r *postgresOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	row := orderRowFromDomain(order)
 	if _, err := r.exec.ExecContext(ctx,
-		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, reserved_until, payment_intent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt, row.ReservedUntil, row.PaymentIntentID); err != nil {
+		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, reserved_until, payment_intent_id, ticket_type_id, amount_cents, currency) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt, row.ReservedUntil, row.PaymentIntentID, row.TicketTypeID, row.AmountCents, row.Currency); err != nil {
 		var pgErr *pq.Error
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			return domain.Order{}, domain.ErrUserAlreadyBought
@@ -674,6 +674,190 @@ func (r *postgresOutboxRepository) ListPending(ctx context.Context, limit int) (
 func (r *postgresOutboxRepository) MarkProcessed(ctx context.Context, id uuid.UUID) error {
 	if _, err := r.exec.ExecContext(ctx, "UPDATE events_outbox SET processed_at = NOW() WHERE id = $1", id); err != nil {
 		return fmt.Errorf("outboxRepository.MarkProcessed id=%s: %w", id, err)
+	}
+	return nil
+}
+
+// --- TicketTypeRepository (D4.1) ---
+
+type postgresTicketTypeRepository struct {
+	exec dbExecutor
+}
+
+// NewPostgresTicketTypeRepository returns the long-lived non-tx repo.
+// Mirrors NewPostgresEventRepository; the fx provider in module.go
+// re-exposes this under `domain.TicketTypeRepository` for application-
+// layer consumers, and PostgresUnitOfWork can call WithTx on it.
+func NewPostgresTicketTypeRepository(db *sql.DB) *postgresTicketTypeRepository {
+	return &postgresTicketTypeRepository{exec: db}
+}
+
+func (r *postgresTicketTypeRepository) WithTx(tx *sql.Tx) *postgresTicketTypeRepository {
+	return &postgresTicketTypeRepository{exec: tx}
+}
+
+func (r *postgresTicketTypeRepository) Create(ctx context.Context, t domain.TicketType) (domain.TicketType, error) {
+	row := ticketTypeRowFromDomain(t)
+	if _, err := r.exec.ExecContext(ctx,
+		"INSERT INTO event_ticket_types ("+ticketTypeColumns+") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+		row.ID, row.EventID, row.Name, row.PriceCents, row.Currency,
+		row.TotalTickets, row.AvailableTickets,
+		row.SaleStartsAt, row.SaleEndsAt,
+		row.PerUserLimit, row.AreaLabel,
+		row.Version,
+	); err != nil {
+		// 23505 = unique_violation. The only unique constraint on
+		// event_ticket_types is `uq_ticket_type_name_per_event`
+		// (event_id, name), so a 23505 here means an admin tried to
+		// create two ticket types with the same name for the same
+		// event. Map to the typed sentinel so the API boundary can
+		// branch with `errors.Is(err, domain.ErrTicketTypeNameTaken)`
+		// without string-matching the postgres error.
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return domain.TicketType{}, domain.ErrTicketTypeNameTaken
+		}
+		return domain.TicketType{}, fmt.Errorf("ticketTypeRepository.Create: %w", err)
+	}
+	return row.toDomain(), nil
+}
+
+func (r *postgresTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.TicketType, error) {
+	var row ticketTypeRow
+	if err := row.scanInto(r.exec.QueryRowContext(ctx, "SELECT "+ticketTypeColumns+" FROM event_ticket_types WHERE id = $1", id)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.TicketType{}, domain.ErrTicketTypeNotFound
+		}
+		return domain.TicketType{}, fmt.Errorf("ticketTypeRepository.GetByID id=%s: %w", id, err)
+	}
+	return row.toDomain(), nil
+}
+
+// Delete removes a ticket type by id. Idempotent (DELETE on a missing
+// row returns rowsAffected=0, which we don't surface as an error —
+// the compensation path may run after an earlier partial delete).
+// See domain.TicketTypeRepository.Delete doc for the rationale.
+//
+// Forensics note: rowsAffected is intentionally NOT read or logged
+// here. The repository layer is observability-unaware by design (the
+// tracing decorator adds spans; metrics layer adds db_pool / db
+// stats); adding a debug log per delete from inside the repo would
+// fight that convention and produce a per-ticket-type-delete debug
+// line in production. Operators investigating compensation behaviour
+// can correlate via the higher-level event_service Warn/Error logs
+// (which DO carry tag.TicketTypeID + tag.EventID) plus the postgres-
+// side query metrics.
+func (r *postgresTicketTypeRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	if _, err := r.exec.ExecContext(ctx, "DELETE FROM event_ticket_types WHERE id = $1", id); err != nil {
+		return fmt.Errorf("ticketTypeRepository.Delete id=%s: %w", id, err)
+	}
+	return nil
+}
+
+// ListByEventID returns all ticket types belonging to an event,
+// ordered by id (UUIDv7 → time-prefixed → insertion order). Empty
+// result is a nil slice, not an error — events with no ticket types
+// are valid pre-D4.1 rows during the migration window.
+//
+// Semantic caveat: this query does NOT verify event existence. A
+// non-existent eventID returns `(nil, nil)` — operationally
+// indistinguishable from "event exists but has no ticket types yet."
+// API endpoints that need 404-on-missing-event must call
+// EventRepository.GetByID first (see future GET /api/v1/events/:id
+// handler). Once D4.1 migration window closes and every event always
+// has ≥ 1 ticket type, this assumption can tighten to "empty list
+// implies event-not-found" — but only after the legacy-row floor
+// hits zero in production.
+func (r *postgresTicketTypeRepository) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
+	rows, err := r.exec.QueryContext(ctx,
+		"SELECT "+ticketTypeColumns+" FROM event_ticket_types WHERE event_id = $1 ORDER BY id ASC", eventID)
+	if err != nil {
+		return nil, fmt.Errorf("ticketTypeRepository.ListByEventID query (event=%s): %w", eventID, err)
+	}
+	defer func() { _ = rows.Close() }() // close error is non-actionable; iter err already checked below
+
+	var out []domain.TicketType
+	for rows.Next() {
+		var row ticketTypeRow
+		if err := row.scanInto(rows); err != nil {
+			return nil, fmt.Errorf("ticketTypeRepository.ListByEventID scan: %w", err)
+		}
+		out = append(out, row.toDomain())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ticketTypeRepository.ListByEventID iter: %w", err)
+	}
+	return out, nil
+}
+
+// DecrementTicket atomically deducts inventory on the event_ticket_types
+// row. The `available_tickets >= $2` predicate makes the decrement
+// atomic under concurrent writers — a row affected of 0 means either
+// (a) the row was over-drawn (the dominant case) or (b) the id has no
+// row. We conflate both into ErrTicketTypeSoldOut to match the Event
+// repository's pattern (case (b) is a data-corruption rarity that
+// shouldn't appear in normal flows; a follow-up GetByID would distinguish
+// it but at the cost of an extra round-trip on the hot path).
+//
+// D4.1: this is the new SoT for inventory decrements. The legacy
+// EventRepository.DecrementTicket is preserved for backward compat
+// (events.available_tickets is frozen — no longer written by the
+// worker as of D4.1 follow-up) and will be removed in a follow-up
+// migration.
+func (r *postgresTicketTypeRepository) DecrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	res, err := r.exec.ExecContext(ctx,
+		"UPDATE event_ticket_types SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2",
+		id, quantity)
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.DecrementTicket exec (ticket_type=%s, qty=%d): %w", id, quantity, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.DecrementTicket rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return domain.ErrTicketTypeSoldOut
+	}
+	return nil
+}
+
+// SumAvailableByEventID is the per-event aggregate that replaces the
+// frozen `events.available_tickets` reader paths post-D4.1 follow-up
+// (rehydrate + inventory drift detection). The query is COALESCE'd to
+// 0 because SUM over zero rows would return NULL — which would scan
+// into Go's int as 0 anyway, but COALESCE makes the intent explicit
+// and protects against driver-version differences on NULL→int scans.
+func (r *postgresTicketTypeRepository) SumAvailableByEventID(ctx context.Context, eventID uuid.UUID) (int, error) {
+	var sum int
+	if err := r.exec.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(available_tickets), 0) FROM event_ticket_types WHERE event_id = $1",
+		eventID,
+	).Scan(&sum); err != nil {
+		return 0, fmt.Errorf("ticketTypeRepository.SumAvailableByEventID event_id=%s: %w", eventID, err)
+	}
+	return sum, nil
+}
+
+// IncrementTicket restores inventory. Used by saga compensation. The
+// `+ $2 <= total_tickets` predicate prevents over-restore — symmetric
+// with EventRepository.IncrementTicket. The schema's
+// `check_ticket_type_available_tickets_non_negative` CHECK constraint
+// is a defense-in-depth backup; the SQL guard surfaces over-restore as
+// rowsAffected==0 (a wrapped error caller can act on) instead of a raw
+// constraint-violation panic.
+func (r *postgresTicketTypeRepository) IncrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	res, err := r.exec.ExecContext(ctx,
+		"UPDATE event_ticket_types SET available_tickets = available_tickets + $2 WHERE id = $1 AND available_tickets + $2 <= total_tickets",
+		id, quantity)
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket exec (ticket_type=%s, qty=%d): %w", id, quantity, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket: ticket_type %s not found or exceeds total tickets", id)
 	}
 	return nil
 }

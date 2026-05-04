@@ -32,17 +32,22 @@ const (
 	dlqKey    = "orders:dlq"
 
 	// XADD payload field names — must match the keys `deduct.lua`
-	// writes via `XADD orders:stream * order_id $orderID user_id
-	// $userID event_id $eventID quantity $quantity reserved_until
-	// $unix`. parseMessage / parsePending / moveToDLQ all use these
-	// constants instead of inline literals. fieldReservedUntil added
-	// in D3 — Pattern A reservation TTL flows producer → stream →
-	// worker DB INSERT in one atomic chain.
+	// writes via XADD. parseMessage / parsePending / moveToDLQ all use
+	// these constants instead of inline literals.
+	//   - fieldReservedUntil added in D3 (Pattern A reservation TTL).
+	//   - fieldTicketTypeID + fieldAmountCents + fieldCurrency added in
+	//     D4.1 (KKTIX 票種 + price snapshot at book time).
+	// Producer (deduct.lua) and consumer (parseMessage) MUST stay
+	// aligned — adding a field on one side without the other shifts
+	// every D4.1 booking to DLQ via NewReservation invariant rejection.
 	fieldOrderID       = "order_id"
 	fieldUserID        = "user_id"
 	fieldEventID       = "event_id"
 	fieldQuantity      = "quantity"
 	fieldReservedUntil = "reserved_until"
+	fieldTicketTypeID  = "ticket_type_id"
+	fieldAmountCents   = "amount_cents"
+	fieldCurrency      = "currency"
 
 	// DLQ payload extra fields — wire contract with whatever
 	// downstream consumer reads `orders:dlq` for forensics. Same
@@ -63,9 +68,11 @@ const (
 	// pre-warm list in `internal/infrastructure/observability/metrics.go`
 	// init(). Promote to const so a typo (e.g. "malformed_classifed")
 	// can't drift a single emit-site away from the pre-warmed series.
-	dlqReasonMalformedParse      = "malformed_parse"
-	dlqReasonMalformedClassified = "malformed_classified"
-	dlqReasonExhaustedRetries    = "exhausted_retries"
+	dlqReasonMalformedParse           = "malformed_parse"
+	dlqReasonMalformedClassified      = "malformed_classified"
+	dlqReasonExhaustedRetries         = "exhausted_retries"
+	dlqReasonMalformedRevertedLegacy  = "malformed_reverted_legacy"
+	dlqReasonMalformedUnrecoverable   = "malformed_unrecoverable"
 )
 
 type redisOrderQueue struct {
@@ -249,13 +256,22 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 				if err != nil {
 					q.logger.Error(ctx, "Malformed message — routing to DLQ",
 						tag.Error(err), tag.MsgID(msg.ID))
-					// If DLQ write fails, leave message in PEL; it'll
-					// be retried on the next cycle. Better to grow PEL
-					// under DLQ outage than silently lose the trace.
-					if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
+					// Best-effort revert + DLQ. handleParseFailure mirrors
+					// handleFailure's contract: returns (reason, true) when
+					// compensation completed (Redis revert + DLQ write both
+					// succeeded, OR hints were unrecoverable so revert was
+					// skipped); returns ("", false) when revert OR DLQ
+					// failed and the message should stay in PEL for retry.
+					// Distinct DLQ labels (reverted_legacy / unrecoverable)
+					// let ops correlate expected rolling-upgrade drain vs
+					// producer regression.
+					reason, ok := q.handleParseFailure(ctx, msg, err)
+					if !ok {
+						// Compensation incomplete — leave in PEL. Same
+						// shape as handleFailure-returned-false.
 						continue
 					}
-					q.metrics.RecordDLQRoute(dlqReasonMalformedParse)
+					q.metrics.RecordDLQRoute(reason)
 					q.ackOrLog(ctx, msg.ID)
 					continue
 				}
@@ -348,6 +364,84 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 		}
 	}
 	return lastErr, false
+}
+
+// handleParseFailure runs the compensation path for a message that
+// failed at parseMessage (queue boundary, before the handler ever ran).
+// Pre-fix this path ACK'd the message without reverting Redis inventory,
+// leaking 1 inventory unit per dropped pre-D4.1 in-flight message during
+// rolling upgrade (Codex P1).
+//
+// Mirrors `handleFailure`'s contract — does revert + moveToDLQ together
+// inside the helper, returns (reason, ok). The caller ACKs only when
+// ok=true; otherwise the message stays in PEL and the next consumer
+// pass retries compensation.
+//
+// Strategy:
+//   - Try `parseLegacyRevertHints` to extract event_id + quantity from
+//     the raw msg.Values. These two fields predate D4.1, so they're
+//     present even on legacy messages that fail parseMessage on the new
+//     D4.1 fields (ticket_type_id / amount_cents / currency).
+//   - Hints unrecoverable: revert is impossible (we don't know what to
+//     revert against), so retry can't fix it either — DLQ + ACK with
+//     `malformed_unrecoverable`. Inventory leak unavoidable; ops alert
+//     on the distinct label.
+//   - Hints OK + revert succeeds + DLQ succeeds: ACK with
+//     `malformed_reverted_legacy`.
+//   - Hints OK + revert FAILS: leave in PEL (return "", false) — same
+//     contract as handleFailure. revert.lua's msgID SETNX guard makes
+//     repeated reverts idempotent, so PEL retry converges. DLQ + ACK
+//     here would permanently leak inventory under a transient Redis
+//     blip (Codex P1 second-round finding).
+//   - Hints OK + revert succeeds + DLQ fails: leave in PEL. Revert was
+//     idempotent so the next pass noops it; only the DLQ write retries.
+func (q *redisOrderQueue) handleParseFailure(ctx context.Context, rawMsg redis.XMessage, parseErr error) (string, bool) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), q.failureTimeout)
+	defer cancel()
+
+	eventID, qty, hintsOK := parseLegacyRevertHints(rawMsg)
+	if !hintsOK {
+		// Truly malformed — no event_id / quantity to revert against.
+		// Retry can't fix it (parse will fail forever AND we still
+		// don't know what to revert), so DLQ + ACK is the least-bad
+		// outcome. The alternative (block PEL forever) would stop
+		// processing legitimate messages on the same partition.
+		// Inventory leak is unavoidable; the metric label exists
+		// specifically so ops can spot this case.
+		q.logger.Warn(ctx, "parse failed AND legacy revert hints unrecoverable — inventory leak unavoidable",
+			tag.MsgID(rawMsg.ID), tag.Error(parseErr))
+		if dlqErr := q.moveToDLQ(bgCtx, rawMsg, parseErr); dlqErr != nil {
+			q.logger.Error(ctx, "moveToDLQ failed for unrecoverable parse-fail — leaving message in PEL",
+				tag.Error(dlqErr), tag.MsgID(rawMsg.ID))
+			return "", false
+		}
+		return dlqReasonMalformedUnrecoverable, true
+	}
+
+	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, eventID, qty, rawMsg.ID); revertErr != nil {
+		q.metrics.RecordRevertFailure()
+		q.logger.Error(ctx, "RevertInventory failed during parse-fail compensation — leaving message in PEL for retry",
+			tag.Error(revertErr), tag.MsgID(rawMsg.ID), tag.EventID(eventID), tag.Quantity(qty))
+		// Symmetric with handleFailure: revert is idempotent (revert.lua
+		// + msgID SETNX), so PEL retry is safe. ACK + DLQ would
+		// permanently leak Redis inventory under a transient revert
+		// failure — that was the original P1 we're fixing, just from
+		// a different entry point.
+		return "", false
+	}
+
+	if dlqErr := q.moveToDLQ(bgCtx, rawMsg, parseErr); dlqErr != nil {
+		// Inventory was reverted (idempotent), only DLQ write failed.
+		// PEL retry will re-run handleParseFailure: RevertInventory
+		// will noop on the SETNX guard, then DLQ write retries.
+		q.logger.Error(ctx, "moveToDLQ failed after successful revert — leaving message in PEL for retry",
+			tag.Error(dlqErr), tag.MsgID(rawMsg.ID))
+		return "", false
+	}
+
+	q.logger.Info(ctx, "parse-fail compensation: Redis inventory reverted via legacy hints",
+		tag.MsgID(rawMsg.ID), tag.EventID(eventID), tag.Quantity(qty), tag.Error(parseErr))
+	return dlqReasonMalformedRevertedLegacy, true
 }
 
 // handleFailure runs the compensation path for an exhausted-retry message:
@@ -448,6 +542,51 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 	return nil
 }
 
+// parseLegacyRevertHints extracts only `event_id` + `quantity` from a
+// raw stream message, best-effort. Used by the parse-fail path to
+// retire Redis inventory before the message is DLQ'd: a hard parse
+// failure (e.g. missing D4.1 fields on a pre-D4.1 in-flight message)
+// originally ACK'd the message without reverting, leaking 1 inventory
+// unit per dropped message (Codex P1).
+//
+// Why these two fields specifically: `event_id` (the inventory key)
+// and `quantity` (the amount Lua DECRBY'd) are the minimum needed by
+// `InventoryRepository.RevertInventory`. They have been present on
+// every message produced by `deduct.lua` since D3 — pre-D4.1 OR
+// post-D4.1 — so this helper is stable across the rolling-upgrade
+// window that motivates the fix.
+//
+// Returns ok=false when EITHER field is missing or unparseable. In
+// that case the message goes to DLQ with `dlqReasonMalformedUnrecoverable`
+// — we don't know what to revert, so we preserve the trace and leave
+// the inventory drift for ops to chase via metric correlation.
+//
+// No validation beyond UUID parse + qty > 0: this is forensic recovery,
+// not happy-path parsing. parseMessage's stricter checks already ran
+// and rejected the message; this helper just tries to salvage what's
+// needed for compensation.
+func parseLegacyRevertHints(msg redis.XMessage) (eventID uuid.UUID, qty int, ok bool) {
+	eventIDStr, isStr := msg.Values[fieldEventID].(string)
+	if !isStr {
+		return uuid.Nil, 0, false
+	}
+	parsedEventID, err := uuid.Parse(eventIDStr)
+	if err != nil || parsedEventID == uuid.Nil {
+		return uuid.Nil, 0, false
+	}
+
+	qtyStr, isStr := msg.Values[fieldQuantity].(string)
+	if !isStr {
+		return uuid.Nil, 0, false
+	}
+	parsedQty, err := strconv.Atoi(qtyStr)
+	if err != nil || parsedQty <= 0 {
+		return uuid.Nil, 0, false
+	}
+
+	return parsedEventID, parsedQty, true
+}
+
 func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 	// Values is map[string]interface{}. The Lua producer writes
 	// order_id / user_id / event_id / quantity as strings; we reject
@@ -477,6 +616,36 @@ func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 	reservedUntilStr, ok := msg.Values[fieldReservedUntil].(string)
 	if !ok {
 		return nil, fmt.Errorf("missing %s", fieldReservedUntil)
+	}
+
+	// D4.1 fields — present on every message produced by the
+	// post-D4.1 deduct.lua. Their absence indicates either (a) the
+	// stream still holds in-flight pre-D4.1 messages from a rolling
+	// upgrade, or (b) a producer-side wire-format regression. Both
+	// cases are deterministic-failure → DLQ.
+	//
+	// Routing pedantry: parseMessage errors do NOT pass through the
+	// `domain.IsMalformedOrderInput` classifier (that's only for
+	// errors raised inside `orderMessageProcessor.Process` via
+	// `domain.NewReservation` invariants). parseMessage is the layer
+	// BEFORE the processor — when it fails, the queue's Subscribe
+	// loop catches the error and routes directly to
+	// `moveToDLQ(dlqReasonMalformedParse)` on the first attempt. No
+	// retry budget is burned. The two label families are
+	// operationally distinct:
+	//   - dlqReasonMalformedParse:      wire-format failure (queue boundary)
+	//   - dlqReasonMalformedClassified: domain invariant rejection (handler)
+	ticketTypeIDStr, ok := msg.Values[fieldTicketTypeID].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing %s", fieldTicketTypeID)
+	}
+	amountCentsStr, ok := msg.Values[fieldAmountCents].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing %s", fieldAmountCents)
+	}
+	currency, ok := msg.Values[fieldCurrency].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing %s", fieldCurrency)
 	}
 
 	// OrderID is a UUID v7 string minted in the API handler since
@@ -517,13 +686,52 @@ func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 		return nil, fmt.Errorf("invalid %s: %d (must be a positive unix timestamp)", fieldReservedUntil, reservedUnix)
 	}
 
+	// D4.1 — ticket_type_id is a UUID v7 (caller-generated by the
+	// admin / event service). Reject zero UUID at the boundary so the
+	// DLQ entry is labelled `malformed_parse` (wire-format bug class)
+	// rather than `malformed_classified` (domain invariant rejection
+	// class) — operationally distinct: a `malformed_parse` spike on a
+	// rolling upgrade is the expected transitional drain of pre-D4.1
+	// PEL entries; a `malformed_classified` spike is a producer
+	// regression worth paging on.
+	ticketTypeID, err := uuid.Parse(ticketTypeIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldTicketTypeID, ticketTypeIDStr, err)
+	}
+	if ticketTypeID == uuid.Nil {
+		return nil, fmt.Errorf("invalid %s: zero UUID", fieldTicketTypeID)
+	}
+	// amount_cents is an int64 string emitted by the Lua producer (Lua
+	// numbers serialise via tostring; for an integer-valued IEEE-754
+	// double that's the canonical decimal form). Reject anything
+	// non-positive — domain factory enforces the same invariant, but
+	// catching at the boundary spares the tx open + roll-back.
+	amountCents, err := strconv.ParseInt(amountCentsStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", fieldAmountCents, amountCentsStr, err)
+	}
+	if amountCents <= 0 {
+		return nil, fmt.Errorf("invalid %s: %d (must be positive)", fieldAmountCents, amountCents)
+	}
+	// currency is already lowercase 3-letter at this point (the domain
+	// factory normalised it before the Lua call). We don't re-validate
+	// the shape here — domain.NewReservation will reject anything
+	// malformed. Empty-string is a wire-format regression though, so
+	// catch it.
+	if currency == "" {
+		return nil, fmt.Errorf("invalid %s: empty", fieldCurrency)
+	}
+
 	return &worker.QueuedBookingMessage{
 		MessageID:     msg.ID, // redis.XMessage.ID — opaque transport handle for ACK
 		OrderID:       orderID,
 		UserID:        userID,
 		EventID:       eventID,
+		TicketTypeID:  ticketTypeID,
 		Quantity:      qty,
 		ReservedUntil: time.Unix(reservedUnix, 0).UTC(),
+		AmountCents:   amountCents,
+		Currency:      currency,
 	}, nil
 }
 
@@ -579,11 +787,19 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 			orderMsg, err := parseMessage(msg)
 			if err != nil {
 				q.logger.Error(ctx, "Malformed pending message", tag.MsgID(msg.ID), tag.Error(err))
-				// DLQ unreachable → leave in PEL; next recovery cycle retries.
-				if dlqErr := q.moveToDLQ(ctx, msg, err); dlqErr != nil {
+				// Same best-effort revert path as the main loop. PEL
+				// recovery is the more common spot for legacy-message
+				// drain because pre-D4.1 messages from a rolling
+				// upgrade tend to be in-flight (already claimed) when
+				// the new worker takes over.
+				reason, ok := q.handleParseFailure(ctx, msg, err)
+				if !ok {
+					// Compensation incomplete (revert OR DLQ failed) —
+					// leave in PEL. Next processPending cycle retries
+					// (revert.lua msgID SETNX makes it idempotent).
 					continue
 				}
-				q.metrics.RecordDLQRoute(dlqReasonMalformedParse)
+				q.metrics.RecordDLQRoute(reason)
 				q.ackOrLog(ctx, msg.ID)
 				continue
 			}

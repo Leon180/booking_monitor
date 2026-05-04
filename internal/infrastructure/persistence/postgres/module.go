@@ -31,10 +31,12 @@ var Module = fx.Module("postgres",
 		NewPostgresEventRepository,
 		NewPostgresOrderRepository,
 		NewPostgresOutboxRepository,
+		NewPostgresTicketTypeRepository,
 		// Domain-port adapters — used by application services.
 		func(r *postgresEventRepository) domain.EventRepository { return r },
 		func(r *postgresOrderRepository) domain.OrderRepository { return r },
 		func(r *postgresOutboxRepository) domain.OutboxRepository { return r },
+		func(r *postgresTicketTypeRepository) domain.TicketTypeRepository { return r },
 
 		NewPostgresUnitOfWork,
 		NewPostgresDistributedLock,
@@ -43,5 +45,6 @@ var Module = fx.Module("postgres",
 	fx.Decorate(
 		NewEventRepositoryTracingDecorator,
 		NewOrderRepositoryTracingDecorator,
+		NewTicketTypeRepositoryTracingDecorator,
 	),
 )

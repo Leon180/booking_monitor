@@ -45,16 +45,18 @@ func (m *recordingDriftMetrics) ObserveSweepDuration(s float64) {
 // itself. Tolerance defaults to 5; each test can override via the
 // constructor argument.
 type driftHarness struct {
-	d         *recon.InventoryDriftDetector
-	events    *mocks.MockEventRepository
-	inventory *mocks.MockInventoryRepository
-	metrics   *recordingDriftMetrics
+	d          *recon.InventoryDriftDetector
+	events     *mocks.MockEventRepository
+	ticketType *mocks.MockTicketTypeRepository
+	inventory  *mocks.MockInventoryRepository
+	metrics    *recordingDriftMetrics
 }
 
 func newDriftHarness(t *testing.T, tolerance int) *driftHarness {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	events := mocks.NewMockEventRepository(ctrl)
+	ticketType := mocks.NewMockTicketTypeRepository(ctrl)
 	inv := mocks.NewMockInventoryRepository(ctrl)
 	metrics := newRecordingDriftMetrics()
 
@@ -62,8 +64,8 @@ func newDriftHarness(t *testing.T, tolerance int) *driftHarness {
 		SweepInterval:     50 * time.Millisecond,
 		AbsoluteTolerance: tolerance,
 	}
-	d := recon.NewInventoryDriftDetector(events, inv, cfg, metrics, mlog.NewNop())
-	return &driftHarness{d: d, events: events, inventory: inv, metrics: metrics}
+	d := recon.NewInventoryDriftDetector(events, ticketType, inv, cfg, metrics, mlog.NewNop())
+	return &driftHarness{d: d, events: events, ticketType: ticketType, inventory: inv, metrics: metrics}
 }
 
 // eventWithAvail builds a domain.Event with a known UUID + availableTickets
@@ -74,6 +76,16 @@ func eventWithAvail(t *testing.T, avail int) domain.Event {
 	id, err := uuid.NewV7()
 	require.NoError(t, err)
 	return domain.ReconstructEvent(id, "test event", 1000, avail, 0)
+}
+
+// expectDBQty registers the SumAvailableByEventID expectation. D4.1
+// follow-up: the drift detector now reads dbQty from event_ticket_types
+// (frozen events.available_tickets is no longer SoT). Test fixtures
+// pass `dbQty` explicitly so a future divergence between
+// `eventWithAvail` (legacy column) and the SUM (new SoT) shows up as
+// a deliberate test-side decision rather than implicit equality.
+func (h *driftHarness) expectDBQty(ctx context.Context, e domain.Event, dbQty int) {
+	h.ticketType.EXPECT().SumAvailableByEventID(ctx, e.ID()).Return(dbQty, nil)
 }
 
 func TestDriftSweep_NoEvents_ZeroGaugeNoCalls(t *testing.T) {
@@ -98,6 +110,7 @@ func TestDriftSweep_WithinTolerance_NoFlag(t *testing.T) {
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(97, true, nil)
+	h.expectDBQty(ctx, e, 100)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 0, h.metrics.driftedEvents, "within tolerance → not flagged")
@@ -113,6 +126,7 @@ func TestDriftSweep_CacheLowExcess_FlagsCacheLowExcess(t *testing.T) {
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(50, true, nil)
+	h.expectDBQty(ctx, e, 100)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 1, h.metrics.driftedEvents)
@@ -129,6 +143,7 @@ func TestDriftSweep_CacheHigh_AlwaysFlags(t *testing.T) {
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(110, true, nil)
+	h.expectDBQty(ctx, e, 100)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 1, h.metrics.driftedEvents)
@@ -146,6 +161,7 @@ func TestDriftSweep_CacheKeyAbsent_FlagsCacheMissing(t *testing.T) {
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(0, false, nil)
+	h.expectDBQty(ctx, e, 100)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 1, h.metrics.driftedEvents)
@@ -167,6 +183,7 @@ func TestDriftSweep_CachePresentButZero_FlagsCacheLowExcess(t *testing.T) {
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(0, true, nil)
+	h.expectDBQty(ctx, e, 100)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 1, h.metrics.driftedEvents)
@@ -187,8 +204,11 @@ func TestDriftSweep_MultipleEvents_AggregatesCounts(t *testing.T) {
 
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{clean, low, high}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, clean.ID()).Return(99, true, nil)  // within tolerance
+	h.expectDBQty(ctx, clean, 100)
 	h.inventory.EXPECT().GetInventory(ctx, low.ID()).Return(20, true, nil)    // cache_low_excess (drift=30)
+	h.expectDBQty(ctx, low, 50)
 	h.inventory.EXPECT().GetInventory(ctx, high.ID()).Return(15, true, nil)   // cache_high (drift=-5)
+	h.expectDBQty(ctx, high, 10)
 
 	require.NoError(t, h.d.Sweep(ctx))
 	assert.Equal(t, 2, h.metrics.driftedEvents, "two events flagged out of three")
@@ -231,6 +251,7 @@ func TestDriftSweep_PerEventCacheError_ContinuesSweep(t *testing.T) {
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e1, e2}, nil)
 	h.inventory.EXPECT().GetInventory(ctx, e1.ID()).Return(0, false, errors.New("redis transient"))
 	h.inventory.EXPECT().GetInventory(ctx, e2.ID()).Return(50, true, nil)
+	h.expectDBQty(ctx, e2, 50) // e1 short-circuits at GetInventory; only e2 reaches the SUM
 
 	require.NoError(t, h.d.Sweep(ctx),
 		"per-event cache failure should not abort the whole sweep")

@@ -167,7 +167,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	order, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
+	order, err := h.service.BookTicket(ctx, req.UserID, req.TicketTypeID, req.Quantity)
 	if err != nil {
 		// Log the raw error with full context server-side, then
 		// translate to a sanitized public message via mapError so
@@ -175,7 +175,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		log.Error(ctx, "BookTicket failed",
 			tag.Error(err),
 			tag.UserID(req.UserID),
-			tag.EventID(req.EventID),
+			tag.TicketTypeID(req.TicketTypeID),
 			tag.Quantity(req.Quantity),
 		)
 		status, publicMsg := mapError(err)
@@ -270,19 +270,21 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 		return
 	}
 
-	event, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets)
+	result, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets, req.PriceCents, req.Currency)
 	if err != nil {
 		log.Error(ctx, "CreateEvent failed",
 			tag.Error(err),
 			log.String("name", req.Name),
 			log.Int("total_tickets", req.TotalTickets),
+			log.Int64("price_cents", req.PriceCents),
+			log.String("currency", req.Currency),
 		)
 		status, public := mapError(err)
 		c.JSON(status, dto.ErrorResponse{Error: public})
 		return
 	}
 
-	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(event))
+	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(result.Event, result.TicketTypes))
 }
 
 func (h *bookingHandler) HandleViewEvent(c *gin.Context) {

@@ -32,7 +32,16 @@ import (
 //   - v2 (PR 34):     IDs migrated from int to UUID v7. Producer
 //     serialises IDs as RFC 4122 strings; consumers that expected int
 //     fail to unmarshal — coordinate the bump.
-const OrderEventVersion = 2
+//   - v3 (D4.1 follow-up): adds `ticket_type_id` (uuid) to both
+//     OrderCreatedEvent and OrderFailedEvent so the saga compensator
+//     can route IncrementTicket calls to the correct event_ticket_types
+//     row instead of the legacy events.available_tickets column. The
+//     field is additive — old consumers that ignore unknown JSON fields
+//     keep working — but the version bump signals to forward-compatible
+//     consumers (e.g. the saga compensator's legacy-fallback branch)
+//     that the field IS expected to be present, so a uuid.Nil value is
+//     a recovery-required signal rather than a normal pre-D4.1 message.
+const OrderEventVersion = 3
 
 // OrderCreatedEvent is the wire-format payload published to the
 // Kafka `order.created` topic and consumed by the payment service.
@@ -49,26 +58,37 @@ const OrderEventVersion = 2
 //     pre-existing semantic gap; out of scope for the rule-7 audit.
 //   - `Version` — bumped to 2 with the UUID migration.
 type OrderCreatedEvent struct {
-	OrderID   uuid.UUID `json:"id"`
-	Status    string    `json:"status"`
-	UserID    int       `json:"user_id"`
-	EventID   uuid.UUID `json:"event_id"`
-	Quantity  int       `json:"quantity"`
-	Amount    float64   `json:"amount"`
-	CreatedAt time.Time `json:"created_at"`
-	Version   int       `json:"version"`
+	OrderID      uuid.UUID `json:"id"`
+	Status       string    `json:"status"`
+	UserID       int       `json:"user_id"`
+	EventID      uuid.UUID `json:"event_id"`
+	TicketTypeID uuid.UUID `json:"ticket_type_id"`
+	Quantity     int       `json:"quantity"`
+	Amount       float64   `json:"amount"`
+	CreatedAt    time.Time `json:"created_at"`
+	Version      int       `json:"version"`
 }
 
 // OrderFailedEvent is the wire-format payload published to
 // `order.failed` (saga compensation trigger).
+//
+// `TicketTypeID` is required by the D4.1+ saga compensator to drive
+// `TicketTypeRepository.IncrementTicket` against the correct
+// event_ticket_types row. A `uuid.Nil` value indicates the producer
+// emitted a pre-v3 (legacy) event still in flight on Kafka during a
+// rolling upgrade; the compensator falls back to a per-event lookup
+// (ListByEventID, single-ticket-type case) before logging a recovery
+// error. See `saga.compensator.HandleOrderFailed` for the three-path
+// resolution.
 type OrderFailedEvent struct {
-	EventID  uuid.UUID `json:"event_id"`
-	OrderID  uuid.UUID `json:"order_id"`
-	UserID   int       `json:"user_id"`
-	Quantity int       `json:"quantity"`
-	FailedAt time.Time `json:"failed_at"`
-	Reason   string    `json:"reason"`
-	Version  int       `json:"version"`
+	EventID      uuid.UUID `json:"event_id"`
+	OrderID      uuid.UUID `json:"order_id"`
+	UserID       int       `json:"user_id"`
+	TicketTypeID uuid.UUID `json:"ticket_type_id"`
+	Quantity     int       `json:"quantity"`
+	FailedAt     time.Time `json:"failed_at"`
+	Reason       string    `json:"reason"`
+	Version      int       `json:"version"`
 }
 
 // NewOrderCreatedEvent translates a domain.Order to the producer-side
@@ -80,14 +100,15 @@ type OrderFailedEvent struct {
 // See the package-level note above.
 func NewOrderCreatedEvent(o domain.Order) OrderCreatedEvent {
 	return OrderCreatedEvent{
-		OrderID:   o.ID(),
-		Status:    string(o.Status()),
-		UserID:    o.UserID(),
-		EventID:   o.EventID(),
-		Quantity:  o.Quantity(),
-		Amount:    0,
-		CreatedAt: o.CreatedAt(),
-		Version:   OrderEventVersion,
+		OrderID:      o.ID(),
+		Status:       string(o.Status()),
+		UserID:       o.UserID(),
+		EventID:      o.EventID(),
+		TicketTypeID: o.TicketTypeID(),
+		Quantity:     o.Quantity(),
+		Amount:       0,
+		CreatedAt:    o.CreatedAt(),
+		Version:      OrderEventVersion,
 	}
 }
 
@@ -98,13 +119,14 @@ func NewOrderCreatedEvent(o domain.Order) OrderCreatedEvent {
 // only the prior event payload.
 func NewOrderFailedEvent(from OrderCreatedEvent, reason string) OrderFailedEvent {
 	return OrderFailedEvent{
-		EventID:  from.EventID,
-		OrderID:  from.OrderID,
-		UserID:   from.UserID,
-		Quantity: from.Quantity,
-		FailedAt: time.Now(),
-		Reason:   reason,
-		Version:  OrderEventVersion,
+		EventID:      from.EventID,
+		OrderID:      from.OrderID,
+		UserID:       from.UserID,
+		TicketTypeID: from.TicketTypeID,
+		Quantity:     from.Quantity,
+		FailedAt:     time.Now(),
+		Reason:       reason,
+		Version:      OrderEventVersion,
 	}
 }
 
@@ -118,12 +140,13 @@ func NewOrderFailedEvent(from OrderCreatedEvent, reason string) OrderFailedEvent
 // schema violation.
 func NewOrderFailedEventFromOrder(o domain.Order, reason string) OrderFailedEvent {
 	return OrderFailedEvent{
-		EventID:  o.EventID(),
-		OrderID:  o.ID(),
-		UserID:   o.UserID(),
-		Quantity: o.Quantity(),
-		FailedAt: time.Now(),
-		Reason:   reason,
-		Version:  OrderEventVersion,
+		EventID:      o.EventID(),
+		OrderID:      o.ID(),
+		UserID:       o.UserID(),
+		TicketTypeID: o.TicketTypeID(),
+		Quantity:     o.Quantity(),
+		FailedAt:     time.Now(),
+		Reason:       reason,
+		Version:      OrderEventVersion,
 	}
 }

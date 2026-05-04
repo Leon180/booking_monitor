@@ -12,6 +12,7 @@ import (
 
 	"booking_monitor/internal/application"
 	bookingapp "booking_monitor/internal/application/booking"
+	appevent "booking_monitor/internal/application/event"
 	paymentapp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/booking"
@@ -32,17 +33,29 @@ func init() { gin.SetMode(gin.TestMode) }
 //
 // Lives in booking_test (not the production binary) so its panics on
 // nil callbacks are test-time-only failures.
+//
+// D4.1 contract pin: BookTicket's second UUID arg is `ticketTypeID`,
+// NOT `eventID` (signature changed PR-D4.1). The compile-time
+// `var _ bookingapp.Service = (*stubBookingService)(nil)` assertion
+// below catches future signature drift — a stub that goes stale would
+// otherwise compile silently because both arg shapes are uuid.UUID.
 type stubBookingService struct {
-	bookFn    func(ctx context.Context, userID int, eventID uuid.UUID, qty int) (domain.Order, error)
+	bookFn    func(ctx context.Context, userID int, ticketTypeID uuid.UUID, qty int) (domain.Order, error)
 	getFn     func(ctx context.Context, id uuid.UUID) (domain.Order, error)
 	historyFn func(ctx context.Context, page, size int, status *domain.OrderStatus) ([]domain.Order, int, error)
 }
 
-func (s *stubBookingService) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, qty int) (domain.Order, error) {
+// Compile-time assertion that the stub implements the production
+// interface. Without this, a future signature change to
+// bookingapp.Service would compile here silently because Go's
+// structural typing accepts any (uuid.UUID, uuid.UUID) ordering.
+var _ bookingapp.Service = (*stubBookingService)(nil)
+
+func (s *stubBookingService) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.UUID, qty int) (domain.Order, error) {
 	if s.bookFn == nil {
 		panic("BookTicket called without bookFn")
 	}
-	return s.bookFn(ctx, userID, eventID, qty)
+	return s.bookFn(ctx, userID, ticketTypeID, qty)
 }
 
 func (s *stubBookingService) GetOrder(ctx context.Context, id uuid.UUID) (domain.Order, error) {
@@ -72,14 +85,18 @@ func (s *stubBookingService) GetBookingHistory(ctx context.Context, page, size i
 // future event.Service interface expansion — the compile error is the
 // useful signal.
 type stubEventService struct {
-	createFn func(ctx context.Context, name string, totalTickets int) (domain.Event, error)
+	createFn func(ctx context.Context, name string, totalTickets int, priceCents int64, currency string) (appevent.CreateEventResult, error)
 }
 
-func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTickets int) (domain.Event, error) {
+// Compile-time guard against signature drift — same defensive pattern
+// as `var _ bookingapp.Service = (*stubBookingService)(nil)`.
+var _ appevent.Service = (*stubEventService)(nil)
+
+func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTickets int, priceCents int64, currency string) (appevent.CreateEventResult, error) {
 	if s.createFn == nil {
-		return domain.Event{}, errors.New("CreateEvent called without createFn")
+		return appevent.CreateEventResult{}, errors.New("CreateEvent called without createFn")
 	}
-	return s.createFn(ctx, name, totalTickets)
+	return s.createFn(ctx, name, totalTickets, priceCents, currency)
 }
 
 // stubPaymentService is the D4 counterpart to stubBookingService /
@@ -162,7 +179,7 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	// set. We pin a specific TTL so the response-side assertions can
 	// match exactly rather than against gomock-Any-style tolerances.
 	wantReservedUntil := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
-	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusAwaitingPayment, time.Now(), wantReservedUntil, "")
+	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, uuid.Nil, 1, domain.OrderStatusAwaitingPayment, time.Now(), wantReservedUntil, "", 0, "")
 	svc := &stubBookingService{
 		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
 			return wantOrder, nil
@@ -170,7 +187,11 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	}
 	r := newRouter(svc)
 
-	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	// D4.1: BookingRequest takes `ticket_type_id` (not `event_id`).
+	// Customer chose a specific ticket_type from the event's
+	// ticket_types[] surface; BookingService derives event_id + price
+	// from the lookup.
+	body := `{"user_id":1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -194,6 +215,41 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 		"D3: links.pay must point at the D4 payment endpoint — clients use this to initiate Stripe checkout")
 }
 
+// TestHandleBook_NegativeUserID_Returns400 closes Codex P2: pre-fix,
+// `binding:"required"` on UserID only rejected the int zero-value, so
+// `-1` slipped through into BookingService → domain.NewReservation
+// returned ErrInvalidUserID, but mapError didn't translate that
+// sentinel and it surfaced as 500. Two-layer fix:
+//
+//  1. Layer-1 binding tag `min=1` on UserID — Gin rejects at bind time.
+//     This test exercises Layer 1: the service stub MUST NOT be called.
+//  2. Layer-2 mapError sentinels (TestMapError_DomainSentinels covers
+//     them at unit level).
+//
+// The masking concern (negative user_id + non-existent ticket_type_id
+// returning 404 instead of 400) is also closed by Layer 1 because Gin
+// rejects before the service runs at all.
+func TestHandleBook_NegativeUserID_Returns400(t *testing.T) {
+	t.Parallel()
+
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
+			t.Fatal("BookingService.BookTicket MUST NOT be called for negative user_id — Gin binding (min=1) rejects at bind time")
+			return domain.Order{}, nil
+		},
+	}
+	r := newRouter(svc)
+
+	body := `{"user_id":-1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"negative user_id must surface as 400 — pre-fix it leaked as 500 via the missing ErrInvalidUserID mapError case (Codex P2)")
+}
+
 // TestHandleBook_SoldOut pins the 409 sold-out path. Status code +
 // sanitized error message via mapError.
 func TestHandleBook_SoldOut(t *testing.T) {
@@ -206,7 +262,7 @@ func TestHandleBook_SoldOut(t *testing.T) {
 	}
 	r := newRouter(svc)
 
-	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	body := `{"user_id":1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -231,7 +287,7 @@ func TestHandleGetOrder_OK(t *testing.T) {
 	svc := &stubBookingService{
 		getFn: func(_ context.Context, gotID uuid.UUID) (domain.Order, error) {
 			assert.Equal(t, id, gotID, "handler must propagate the path-param uuid verbatim")
-			return domain.ReconstructOrder(id, 7, eventID, 2, domain.OrderStatusConfirmed, created, time.Time{}, ""), nil
+			return domain.ReconstructOrder(id, 7, eventID, uuid.Nil, 2, domain.OrderStatusConfirmed, created, time.Time{}, "", 0, ""), nil
 		},
 	}
 	r := newRouter(svc)
@@ -378,18 +434,25 @@ func TestHandleCreateEvent_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	wantID := uuid.New()
+	wantTTID := uuid.New()
 	created := domain.ReconstructEvent(wantID, "Concert", 100, 100, 0)
+	createdTT := domain.ReconstructTicketType(
+		wantTTID, wantID, "Default", 2000, "usd",
+		100, 100, nil, nil, nil, "", 0,
+	)
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, name string, total int) (domain.Event, error) {
+		createFn: func(_ context.Context, name string, total int, priceCents int64, currency string) (appevent.CreateEventResult, error) {
 			assert.Equal(t, "Concert", name)
 			assert.Equal(t, 100, total)
-			return created, nil
+			assert.Equal(t, int64(2000), priceCents, "handler must thread price_cents through to the service verbatim")
+			assert.Equal(t, "usd", currency, "handler must thread currency through to the service verbatim")
+			return appevent.CreateEventResult{Event: created, TicketTypes: []domain.TicketType{createdTT}}, nil
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
 
-	body := `{"name":"Concert","total_tickets":100}`
+	body := `{"name":"Concert","total_tickets":100,"price_cents":2000,"currency":"usd"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -403,6 +466,12 @@ func TestHandleCreateEvent_HappyPath(t *testing.T) {
 	assert.Equal(t, 100, got.TotalTickets,
 		"DTO must echo total_tickets — guards against a name/totalTickets arg-swap regression at the service call site")
 	assert.Equal(t, 100, got.AvailableTickets, "fresh event must have AvailableTickets == TotalTickets")
+	// D4.1: response must surface the auto-created ticket_type so the
+	// client can immediately POST /book with ticket_types[0].id.
+	require.Len(t, got.TicketTypes, 1, "POST /events must include the default ticket_type in the response so clients have an id to book against")
+	assert.Equal(t, wantTTID, got.TicketTypes[0].ID)
+	assert.Equal(t, int64(2000), got.TicketTypes[0].PriceCents)
+	assert.Equal(t, "usd", got.TicketTypes[0].Currency)
 }
 
 // TestHandleCreateEvent_InvalidBody: malformed JSON → 400 from the
@@ -412,9 +481,9 @@ func TestHandleCreateEvent_InvalidBody(t *testing.T) {
 
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
+		createFn: func(_ context.Context, _ string, _ int, _ int64, _ string) (appevent.CreateEventResult, error) {
 			t.Fatal("CreateEvent must not be called when the body fails to bind")
-			return domain.Event{}, nil
+			return appevent.CreateEventResult{}, nil
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
@@ -437,13 +506,13 @@ func TestHandleCreateEvent_ServiceError(t *testing.T) {
 
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
-			return domain.Event{}, errors.New("postgres: relation \"events\" does not exist")
+		createFn: func(_ context.Context, _ string, _ int, _ int64, _ string) (appevent.CreateEventResult, error) {
+			return appevent.CreateEventResult{}, errors.New("postgres: relation \"events\" does not exist")
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
 
-	body := `{"name":"Concert","total_tickets":100}`
+	body := `{"name":"Concert","total_tickets":100,"price_cents":2000,"currency":"usd"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

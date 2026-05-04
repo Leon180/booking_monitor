@@ -11,19 +11,16 @@ import (
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
 type service struct {
-	gateway       domain.PaymentGateway
-	orderRepo     domain.OrderRepository
-	uow           application.UnitOfWork
-	log           *mlog.Logger
-	priceCents    int64  // BookingConfig.DefaultTicketPriceCents — D8 will replace with per-section
-	currency      string // BookingConfig.DefaultCurrency
-	now           func() time.Time // injectable for tests; production uses time.Now
+	gateway   domain.PaymentGateway
+	orderRepo domain.OrderRepository
+	uow       application.UnitOfWork
+	log       *mlog.Logger
+	now       func() time.Time // injectable for tests; production uses time.Now
 }
 
 // NewService takes the logger as an explicit dependency instead of
@@ -35,22 +32,27 @@ type service struct {
 // The failure-path tx (UpdateStatus + outbox Create) reaches its
 // repos through the Do closure parameter.
 //
-// D4 adds cfg for /pay's per-ticket price + currency lookup.
+// D4.1 NOTE: pre-D4.1 this constructor accepted `cfg *config.Config`
+// for `BookingConfig.DefaultTicketPriceCents` + `DefaultCurrency` —
+// every payment used the global default price. D4.1 reads price +
+// currency directly from `order.AmountCents()` / `order.Currency()`
+// (the snapshot frozen at book time by `domain.NewReservation`), so
+// the config dependency is gone. The customer pays exactly what they
+// were quoted, even if the merchant edits the ticket_type's price
+// between book and pay (industry SOP — Stripe Checkout / Shopify /
+// Eventbrite all freeze price at order create time).
 func NewService(
 	gateway domain.PaymentGateway,
 	orderRepo domain.OrderRepository,
 	uow application.UnitOfWork,
-	cfg *config.Config,
 	logger *mlog.Logger,
 ) Service {
 	return &service{
-		gateway:    gateway,
-		orderRepo:  orderRepo,
-		uow:        uow,
-		log:        logger.With(mlog.String("component", "payment_service")),
-		priceCents: cfg.Booking.DefaultTicketPriceCents,
-		currency:   cfg.Booking.DefaultCurrency,
-		now:        time.Now,
+		gateway:   gateway,
+		orderRepo: orderRepo,
+		uow:       uow,
+		log:       logger.With(mlog.String("component", "payment_service")),
+		now:       time.Now,
 	}
 }
 
@@ -295,14 +297,31 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 		return domain.PaymentIntent{}, ErrReservationExpired
 	}
 
-	// int64 multiplication. Quantity is int but bounded by the API
-	// (positive int from BookTicket invariant); priceCents is int64;
-	// product is int64. Overflow is theoretical at our scale
-	// (quantity * 2000 cents) but the int64 type makes the headroom
-	// honest.
-	amount := int64(order.Quantity()) * s.priceCents
+	// D4.1 — read the snapshot frozen on the Order at book time
+	// (`BookingService.BookTicket` computed `amount_cents = priceCents
+	// × quantity` and stored it on the order). The customer pays what
+	// they were quoted, even if the merchant edits the ticket_type's
+	// price mid-checkout. See `docs/design/ticket_pricing.md` for the
+	// schema-level rationale.
+	//
+	// `HasPriceSnapshot()` is a data-integrity guard, NOT a status
+	// guard — it catches legacy rows / migration gaps where the
+	// snapshot is missing. Wrapped as `ErrOrderMissingPriceSnapshot`
+	// (NOT `ErrOrderNotAwaitingPayment`) so the handler logs at Error
+	// (data bug pages on-call) instead of Warn (routine state
+	// transition).
+	if !order.HasPriceSnapshot() {
+		s.log.Error(ctx, "CreatePaymentIntent rejected: order missing D4.1 price snapshot",
+			tag.OrderID(orderID),
+			mlog.Int64("amount_cents", order.AmountCents()),
+			mlog.String("currency", order.Currency()),
+		)
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent: order %s missing price snapshot (legacy row?): %w", orderID, ErrOrderMissingPriceSnapshot)
+	}
+	amount := order.AmountCents()
+	currency := order.Currency()
 
-	intent, err := s.gateway.CreatePaymentIntent(ctx, orderID, amount, s.currency)
+	intent, err := s.gateway.CreatePaymentIntent(ctx, orderID, amount, currency)
 	if err != nil {
 		s.log.Error(ctx, "CreatePaymentIntent: gateway failed",
 			tag.OrderID(orderID), tag.Error(err))
@@ -342,7 +361,7 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 		tag.OrderID(orderID),
 		mlog.String("payment_intent_id", intent.ID),
 		mlog.Int64("amount_cents", amount),
-		mlog.String("currency", s.currency),
+		mlog.String("currency", currency),
 	)
 	return intent, nil
 }

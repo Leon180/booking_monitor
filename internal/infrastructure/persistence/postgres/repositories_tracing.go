@@ -334,3 +334,116 @@ func (d *orderRepositoryTracingDecorator) SetPaymentIntentID(ctx context.Context
 	}
 	return err
 }
+
+// --- TicketTypeRepositoryDecorator (D4.1) ---
+
+type ticketTypeRepositoryTracingDecorator struct {
+	next domain.TicketTypeRepository
+}
+
+func NewTicketTypeRepositoryTracingDecorator(next domain.TicketTypeRepository) domain.TicketTypeRepository {
+	return &ticketTypeRepositoryTracingDecorator{next: next}
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) Create(ctx context.Context, t domain.TicketType) (domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "CreateTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", t.ID().String()),
+		attribute.String("event_id", t.EventID().String()),
+	))
+	defer span.End()
+
+	created, err := d.next.Create(ctx, t)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return created, err
+}
+
+// GetByID is on the booking hot path (BookingService.BookTicket
+// derives event_id + price snapshot from the ticket_type lookup), so
+// the span is load-bearing for tail-latency analysis — without it,
+// the gap between "API received request" and "Lua deduct" would be
+// invisible in Jaeger waterfalls.
+func (d *ticketTypeRepositoryTracingDecorator) GetByID(ctx context.Context, id uuid.UUID) (domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "GetTicketTypeByID", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+	))
+	defer span.End()
+
+	t, err := d.next.GetByID(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return t, err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) Delete(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DeleteTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.Delete(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "ListTicketTypesByEventID", trace.WithAttributes(
+		attribute.String("event_id", eventID.String()),
+	))
+	defer span.End()
+
+	tt, err := d.next.ListByEventID(ctx, eventID)
+	if err != nil {
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.Int("count", len(tt)))
+	}
+	return tt, err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) DecrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DecrementTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.DecrementTicket(ctx, id, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) IncrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "IncrementTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.IncrementTicket(ctx, id, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) SumAvailableByEventID(ctx context.Context, eventID uuid.UUID) (int, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SumAvailableByEventIDTicketType", trace.WithAttributes(
+		attribute.String("event_id", eventID.String()),
+	))
+	defer span.End()
+
+	sum, err := d.next.SumAvailableByEventID(ctx, eventID)
+	if err != nil {
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.Int("sum", sum))
+	}
+	return sum, err
+}

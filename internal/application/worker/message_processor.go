@@ -69,7 +69,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 	// retries this is stable; pre-PR-47 the worker minted a fresh
 	// uuid per redelivery so the client's id and DB's id diverged on
 	// retry.
-	newOrder, err := domain.NewReservation(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity, msg.ReservedUntil)
+	newOrder, err := domain.NewReservation(msg.OrderID, msg.UserID, msg.EventID, msg.TicketTypeID, msg.Quantity, msg.ReservedUntil, msg.AmountCents, msg.Currency)
 	if err != nil {
 		p.logger.Error(ctx, "Malformed order message",
 			tag.MsgID(msg.MessageID), tag.Error(err))
@@ -80,14 +80,23 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
 		// Redis view is ahead of DB (compensation path will fix it).
-		if err := repos.Event.DecrementTicket(ctx, msg.EventID, msg.Quantity); err != nil {
-			if errors.Is(err, domain.ErrSoldOut) {
-				p.logger.Warn(ctx, "Inventory conflict: Redis approved but DB sold out",
-					tag.MsgID(msg.MessageID), tag.EventID(msg.EventID))
+		//
+		// D4.1 follow-up: decrements the per-ticket-type counter
+		// (`event_ticket_types.available_tickets`) instead of the legacy
+		// `events.available_tickets`. The ticket_types row is the SoT
+		// the API surfaces as `ticket_types[].available_tickets`; the
+		// pre-fix path decremented `events` only, leaving the visible
+		// counter frozen at totalTickets (Codex P1 — counter drift).
+		// `events.available_tickets` is now frozen post-D4.1; a
+		// follow-up migration removes the column entirely.
+		if err := repos.TicketType.DecrementTicket(ctx, msg.TicketTypeID, msg.Quantity); err != nil {
+			if errors.Is(err, domain.ErrTicketTypeSoldOut) {
+				p.logger.Warn(ctx, "Inventory conflict: Redis approved but ticket_type sold out in DB",
+					tag.MsgID(msg.MessageID), tag.EventID(msg.EventID), tag.TicketTypeID(msg.TicketTypeID))
 				return err
 			}
-			p.logger.Error(ctx, "Failed to decrement ticket in DB",
-				tag.MsgID(msg.MessageID), tag.Error(err))
+			p.logger.Error(ctx, "Failed to decrement ticket_type in DB",
+				tag.MsgID(msg.MessageID), tag.TicketTypeID(msg.TicketTypeID), tag.Error(err))
 			return err
 		}
 

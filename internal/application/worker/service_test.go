@@ -49,27 +49,41 @@ func (s *SpyingMetrics) RecordInventoryConflict() {
 func TestOrderMessageProcessor_Process(t *testing.T) {
 	nopLogger := mlog.NewNop()
 	validEventID := uuid.New()
+	// D4.1 — KKTIX-aligned ticket type id rides on every QueuedBookingMessage
+	// alongside event_id. Tests use a synthetic id since this contract
+	// doesn't enforce FK existence.
+	validTicketTypeID := uuid.New()
 	// validReservedUntil — a future TTL the Pattern A factory will accept.
 	// 15 minutes mirrors the production BookingConfig default; tests just
 	// need "comfortably in the future" so timing skew across slow CI runs
 	// doesn't flip a row from valid to expired before NewReservation runs.
 	validReservedUntil := time.Now().Add(15 * time.Minute)
 
+	type mockBundle struct {
+		event      *mocks.MockEventRepository
+		order      *mocks.MockOrderRepository
+		ticketType *mocks.MockTicketTypeRepository
+		outbox     *mocks.MockOutboxRepository
+		uow        *mocks.MockUnitOfWork
+	}
+
 	tests := []struct {
 		name          string
 		msg           *worker.QueuedBookingMessage
-		setupMocks    func(*worker.QueuedBookingMessage, *mocks.MockEventRepository, *mocks.MockOrderRepository, *mocks.MockOutboxRepository, *mocks.MockUnitOfWork)
+		setupMocks    func(*worker.QueuedBookingMessage, *mockBundle)
 		expectedError error
 	}{
 		{
 			name: "Success",
-			msg:  &worker.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(msg *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
-					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
+			msg:  &worker.QueuedBookingMessage{MessageID: "1-0", OrderID: uuid.New(), EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(msg *worker.QueuedBookingMessage, m *mockBundle) {
+				m.uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: m.order, Event: m.event, Outbox: m.outbox, TicketType: m.ticketType})
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
+				// D4.1 follow-up: worker decrements ticket_type, NOT
+				// the legacy events.available_tickets column.
+				m.ticketType.EXPECT().DecrementTicket(gomock.Any(), validTicketTypeID, 1).Return(nil)
+				m.order.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.Order{})).DoAndReturn(func(_ context.Context, o domain.Order) (domain.Order, error) {
 					// PR-47 contract pin: the worker MUST pass the
 					// caller-minted msg.OrderID into NewOrder rather
 					// than re-mint internally. Without this assertion,
@@ -81,7 +95,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 						"worker must propagate msg.OrderID end-to-end (not re-mint)")
 					return o, nil
 				})
-				outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
+				m.outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
 					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType())
 					assert.Equal(t, domain.OutboxStatusPending, e.Status())
 					// Verify the order's UUID id + the schema version
@@ -92,6 +106,11 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					require.NoError(t, json.Unmarshal(e.Payload(), &eventPayload))
 					assert.NotEqual(t, uuid.Nil, eventPayload.OrderID, "outbox payload must include the order's UUID")
 					assert.Equal(t, validEventID, eventPayload.EventID, "outbox payload event_id must match input")
+					// D4.1 follow-up: ticket_type_id MUST propagate
+					// into the wire payload so the saga compensator can
+					// route IncrementTicket to the right ticket_type
+					// (Codex P1).
+					assert.Equal(t, validTicketTypeID, eventPayload.TicketTypeID, "outbox payload ticket_type_id must match input (D4.1 wire format v3)")
 					assert.Equal(t, application.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
 					return e, nil
 				})
@@ -100,36 +119,40 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 		},
 		{
 			name: "Inventory Sold Out (DB Conflict)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
-					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
+			msg:  &worker.QueuedBookingMessage{MessageID: "2-0", OrderID: uuid.New(), EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(_ *worker.QueuedBookingMessage, m *mockBundle) {
+				m.uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: m.order, Event: m.event, Outbox: m.outbox, TicketType: m.ticketType})
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(domain.ErrSoldOut)
+				// D4.1 follow-up: sold-out is now signalled by
+				// ErrTicketTypeSoldOut from the ticket_type repo, NOT
+				// by ErrSoldOut from the events repo. Symmetric
+				// classification — same DLQ outcome, different sentinel.
+				m.ticketType.EXPECT().DecrementTicket(gomock.Any(), validTicketTypeID, 1).Return(domain.ErrTicketTypeSoldOut)
 			},
-			expectedError: domain.ErrSoldOut,
+			expectedError: domain.ErrTicketTypeSoldOut,
 		},
 		{
 			name: "Duplicate Purchase (DB Constraint)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
-					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
+			msg:  &worker.QueuedBookingMessage{MessageID: "3-0", OrderID: uuid.New(), EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(_ *worker.QueuedBookingMessage, m *mockBundle) {
+				m.uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: m.order, Event: m.event, Outbox: m.outbox, TicketType: m.ticketType})
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, domain.ErrUserAlreadyBought)
+				m.ticketType.EXPECT().DecrementTicket(gomock.Any(), validTicketTypeID, 1).Return(nil)
+				m.order.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, domain.ErrUserAlreadyBought)
 			},
 			expectedError: domain.ErrUserAlreadyBought,
 		},
 		{
 			name: "DB Error (Create Order)",
-			msg:  &worker.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
-				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
-					return fn(&application.Repositories{Order: ora, Event: era, Outbox: outbox})
+			msg:  &worker.QueuedBookingMessage{MessageID: "4-0", OrderID: uuid.New(), EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(_ *worker.QueuedBookingMessage, m *mockBundle) {
+				m.uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+					return fn(&application.Repositories{Order: m.order, Event: m.event, Outbox: m.outbox, TicketType: m.ticketType})
 				})
-				era.EXPECT().DecrementTicket(gomock.Any(), validEventID, 1).Return(nil)
-				ora.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
+				m.ticketType.EXPECT().DecrementTicket(gomock.Any(), validTicketTypeID, 1).Return(nil)
+				m.order.EXPECT().Create(gomock.Any(), gomock.Any()).Return(domain.Order{}, errors.New("db connection failed"))
 			},
 			expectedError: errors.New("db connection failed"),
 		},
@@ -141,8 +164,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// processor MUST NOT open a tx or call DecrementTicket
 			// when the message itself is malformed.
 			name: "Malformed message — invalid UserID short-circuits before tx",
-			msg:  &worker.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, UserID: 0, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "5-0", OrderID: uuid.New(), EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 0, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(_ *worker.QueuedBookingMessage, _ *mockBundle) {
 				// Deliberately empty — gomock will fail the test if any
 				// repo call fires, asserting fail-fast.
 			},
@@ -157,8 +180,8 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			// must NOT slip a zero-UUID order through). Same fail-fast
 			// expectation as the other malformed cases.
 			name: "Malformed message — zero OrderID short-circuits before tx",
-			msg:  &worker.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil},
-			setupMocks: func(_ *worker.QueuedBookingMessage, era *mocks.MockEventRepository, ora *mocks.MockOrderRepository, outbox *mocks.MockOutboxRepository, uow *mocks.MockUnitOfWork) {
+			msg:  &worker.QueuedBookingMessage{MessageID: "6-0", OrderID: uuid.Nil, EventID: validEventID, TicketTypeID: validTicketTypeID, UserID: 1, Quantity: 1, ReservedUntil: validReservedUntil, AmountCents: 2000, Currency: "usd"},
+			setupMocks: func(_ *worker.QueuedBookingMessage, _ *mockBundle) {
 				// Deliberately empty — fail-fast assertion.
 			},
 			expectedError: domain.ErrInvalidOrderID,
@@ -170,21 +193,24 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			mockEventRepo := mocks.NewMockEventRepository(ctrl)
-			mockOrderRepo := mocks.NewMockOrderRepository(ctrl)
-			mockUoW := mocks.NewMockUnitOfWork(ctrl)
-			mockOutbox := mocks.NewMockOutboxRepository(ctrl)
-
-			if tt.setupMocks != nil {
-				tt.setupMocks(tt.msg, mockEventRepo, mockOrderRepo, mockOutbox, mockUoW)
+			m := &mockBundle{
+				event:      mocks.NewMockEventRepository(ctrl),
+				order:      mocks.NewMockOrderRepository(ctrl),
+				ticketType: mocks.NewMockTicketTypeRepository(ctrl),
+				outbox:     mocks.NewMockOutboxRepository(ctrl),
+				uow:        mocks.NewMockUnitOfWork(ctrl),
 			}
 
-			p := worker.NewOrderMessageProcessor(mockUoW, nopLogger)
+			if tt.setupMocks != nil {
+				tt.setupMocks(tt.msg, m)
+			}
+
+			p := worker.NewOrderMessageProcessor(m.uow, nopLogger)
 			err := p.Process(context.Background(), tt.msg)
 
 			if tt.expectedError != nil {
 				assert.Error(t, err)
-				if errors.Is(tt.expectedError, domain.ErrSoldOut) || errors.Is(tt.expectedError, domain.ErrUserAlreadyBought) {
+				if errors.Is(tt.expectedError, domain.ErrTicketTypeSoldOut) || errors.Is(tt.expectedError, domain.ErrSoldOut) || errors.Is(tt.expectedError, domain.ErrUserAlreadyBought) {
 					assert.ErrorIs(t, err, tt.expectedError)
 				} else {
 					assert.Contains(t, err.Error(), tt.expectedError.Error())
