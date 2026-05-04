@@ -189,8 +189,8 @@ func (r *postgresOrderRepository) WithTx(tx *sql.Tx) *postgresOrderRepository {
 func (r *postgresOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	row := orderRowFromDomain(order)
 	if _, err := r.exec.ExecContext(ctx,
-		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, reserved_until) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt, row.ReservedUntil); err != nil {
+		"INSERT INTO orders (id, event_id, user_id, quantity, status, created_at, reserved_until, payment_intent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+		row.ID, row.EventID, row.UserID, row.Quantity, row.Status, row.CreatedAt, row.ReservedUntil, row.PaymentIntentID); err != nil {
 		var pgErr *pq.Error
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			return domain.Order{}, domain.ErrUserAlreadyBought
@@ -560,6 +560,66 @@ func (r *postgresOrderRepository) MarkExpired(ctx context.Context, id uuid.UUID)
 // inventory.
 func (r *postgresOrderRepository) MarkPaymentFailed(ctx context.Context, id uuid.UUID) error {
 	return r.transitionStatus(ctx, id, domain.OrderStatusPaymentFailed, domain.OrderStatusAwaitingPayment)
+}
+
+// SetPaymentIntentID persists the gateway-assigned PaymentIntent id
+// onto an order. Race-safe: the SQL UPDATE includes
+//
+//	WHERE status = 'awaiting_payment'
+//	  AND reserved_until > NOW()
+//	  AND (payment_intent_id IS NULL OR payment_intent_id = $2)
+//
+// so:
+//   - Concurrent /pay calls with the SAME intent_id (gateway is
+//     idempotent on orderID per PaymentIntentCreator's contract)
+//     end up with the same row state. The second UPDATE is a
+//     no-op-equivalent (`SET col = same_value`), still 1 row affected.
+//   - A /pay call against an order that's been flipped (Paid /
+//     Expired / PaymentFailed by webhook or sweeper) safely 0-rows-
+//     affected → ErrOrderNotFound. The webhook race is the live
+//     concern here: webhook flips status to Paid milliseconds before
+//     our /pay UPDATE lands; the predicate rejects the late /pay
+//     write so the row's status doesn't get rolled back accidentally
+//     (status stays Paid; the /pay client gets an error and can
+//     re-fetch via GET /orders/:id to see the actual state).
+//   - A reservation that elapsed during the gateway round-trip
+//     (service.go validates reserved_until at read time, then
+//     ~50-200ms of gateway latency, then this UPDATE) is rejected
+//     by `reserved_until > NOW()`. Without this clause, an order
+//     could land in "AwaitingPayment with payment_intent_id but
+//     reserved_until already past" — D6's sweeper would expire it,
+//     but the client meanwhile might call confirm-payment via
+//     Stripe Elements and the D5 webhook would mark it Paid,
+//     creating a "user paid for an expired reservation" UX bug.
+//     Defensive belt-and-suspenders to the service-level check.
+//   - A different intent_id arriving (which should be impossible
+//     under PaymentIntentCreator's idempotency contract — same
+//     orderID always returns the same intent — but defensively
+//     handled) is rejected by the third clause.
+func (r *postgresOrderRepository) SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error {
+	res, err := r.exec.ExecContext(ctx, `
+		UPDATE orders
+		   SET payment_intent_id = $2
+		 WHERE id = $1
+		   AND status = 'awaiting_payment'
+		   AND reserved_until > NOW()
+		   AND (payment_intent_id IS NULL OR payment_intent_id = $2)
+	`, id, paymentIntentID)
+	if err != nil {
+		return fmt.Errorf("orderRepository.SetPaymentIntentID id=%s: %w", id, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orderRepository.SetPaymentIntentID rows id=%s: %w", id, err)
+	}
+	if rowsAffected == 0 {
+		// 0 rows = order doesn't exist, status isn't awaiting_payment,
+		// or already has a different intent_id. ErrOrderNotFound is
+		// the closest existing sentinel; the application service can
+		// re-read the order to disambiguate if needed.
+		return domain.ErrOrderNotFound
+	}
+	return nil
 }
 
 // --- OutboxRepository ---

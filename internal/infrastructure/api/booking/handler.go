@@ -24,6 +24,7 @@ import (
 
 	bookingapp "booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/event"
+	paymentapp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
 	"booking_monitor/internal/infrastructure/api/middleware"
@@ -74,11 +75,13 @@ type BookingHandler interface {
 	HandleListBookings(c *gin.Context)
 	HandleCreateEvent(c *gin.Context)
 	HandleViewEvent(c *gin.Context)
+	HandleCreatePaymentIntent(c *gin.Context)
 }
 
 type bookingHandler struct {
-	service      bookingapp.Service
-	eventService event.Service
+	service        bookingapp.Service
+	eventService   event.Service
+	paymentService paymentapp.Service
 }
 
 // NewBookingHandler constructs the booking handler. The idempotency
@@ -86,8 +89,18 @@ type bookingHandler struct {
 // the handler in server.go), so the handler itself no longer
 // depends on `domain.IdempotencyRepository` — its surface is purely
 // business-logic dependencies.
-func NewBookingHandler(service bookingapp.Service, eventService event.Service) BookingHandler {
-	return &bookingHandler{service: service, eventService: eventService}
+//
+// D4 adds paymentService for the /api/v1/orders/:id/pay endpoint.
+// Eventually D5 will add a webhook handler — that one's wire is
+// async / non-Service-shaped enough that it'll likely live in its
+// own subpackage rather than extending booking. Hence we don't
+// promote `api/payment/` yet.
+func NewBookingHandler(service bookingapp.Service, eventService event.Service, paymentService paymentapp.Service) BookingHandler {
+	return &bookingHandler{
+		service:        service,
+		eventService:   eventService,
+		paymentService: paymentService,
+	}
 }
 
 func (h *bookingHandler) HandleListBookings(c *gin.Context) {
@@ -278,6 +291,69 @@ func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "View event", "event_id": c.Param("id")})
 }
 
+// HandleCreatePaymentIntent is the Pattern A /pay (D4) entry point.
+// Body is empty (the order_id comes from the path). The response
+// carries the gateway-issued PaymentIntent's id + client_secret +
+// amount + currency — the client uses the client_secret with Stripe
+// Elements (or our mock equivalent) to actually move money.
+//
+// HTTP mapping:
+//
+//	200 OK                  intent created (or retrieved — idempotent)
+//	400 Bad Request         malformed UUID in path
+//	404 Not Found           order doesn't exist
+//	409 Conflict            order isn't AwaitingPayment, or reservation expired
+//	500 Internal Server     transient gateway / DB failure
+//
+// Why 200 (not 201): the gateway-side intent might be a replay (same
+// orderID → same intent), so "Created" semantics aren't quite right.
+// Stripe's own /v1/payment_intents returns 200 on retrieve and 201 on
+// initial create; we collapse both to 200 because our mock doesn't
+// distinguish (and clients shouldn't depend on the difference for
+// idempotent retries).
+//
+// Idempotency middleware is NOT attached to this route. The gateway
+// itself is idempotent on orderID (per the PaymentIntentCreator
+// contract), so /pay is safe to retry without an application-side
+// cache. Adding the middleware would just be ceremony.
+func (h *bookingHandler) HandleCreatePaymentIntent(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	idStr := c.Param("id")
+	orderID, err := uuid.Parse(idStr)
+	if err != nil {
+		log.Warn(ctx, "invalid order_id in /pay path", tag.Error(err))
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "invalid order id"})
+		return
+	}
+
+	intent, err := h.paymentService.CreatePaymentIntent(ctx, orderID)
+	if err != nil {
+		// Sentinel errors are expected business outcomes (404 / 409),
+		// not internal failures — log at Warn so they don't pollute
+		// the Error-level dashboards / pages. Any other error is a
+		// real internal failure (gateway 500, DB outage, etc.) and
+		// stays at Error. Mirrors the HandleBook log-level split for
+		// domain.ErrSoldOut.
+		if isExpectedPayError(err) {
+			log.Warn(ctx, "CreatePaymentIntent rejected", tag.OrderID(orderID), tag.Error(err))
+		} else {
+			log.Error(ctx, "CreatePaymentIntent failed", tag.OrderID(orderID), tag.Error(err))
+		}
+		status, publicMsg := mapError(err)
+		c.Data(status, "application/json", mustMarshal(dto.ErrorResponse{Error: publicMsg}))
+		return
+	}
+
+	c.Data(http.StatusOK, "application/json", mustMarshal(dto.PaymentIntentResponse{
+		OrderID:         orderID,
+		PaymentIntentID: intent.ID,
+		ClientSecret:    intent.ClientSecret,
+		AmountCents:     intent.AmountCents,
+		Currency:        intent.Currency,
+	}))
+}
+
 // RegisterRoutes wires the booking endpoints under a versioned router
 // group (typically /api/v1). Operational endpoints (/livez, /readyz)
 // live in the ops subpackage and register at the engine root, NOT
@@ -289,10 +365,12 @@ func (h *bookingHandler) HandleViewEvent(c *gin.Context) {
 // future POST /cancel, POST /refund, etc.) need it. Idempotent reads
 // (GET /history, GET /events/:id, GET /orders/:id) and event setup
 // (POST /events — admin-side, low collision risk) skip the cache
-// lookup entirely.
+// lookup entirely. /pay also skips because the gateway is idempotent
+// on orderID — see HandleCreatePaymentIntent doc for the rationale.
 func RegisterRoutes(r *gin.RouterGroup, handler BookingHandler, idempotencyRepo domain.IdempotencyRepository) {
 	r.POST("/book", middleware.Idempotency(idempotencyRepo), handler.HandleBook)
 	r.GET("/orders/:id", handler.HandleGetOrder)
+	r.POST("/orders/:id/pay", handler.HandleCreatePaymentIntent)
 	r.GET("/history", handler.HandleListBookings)
 	r.POST("/events", handler.HandleCreateEvent)
 	r.GET("/events/:id", handler.HandleViewEvent)

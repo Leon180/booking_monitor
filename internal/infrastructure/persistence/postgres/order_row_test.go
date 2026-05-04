@@ -16,7 +16,7 @@ func TestOrderRow_FromDomain_AllFieldsCopied(t *testing.T) {
 	createdAt := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	id := uuid.New()
 	eventID := uuid.New()
-	o := domain.ReconstructOrder(id, 7, eventID, 3, domain.OrderStatusConfirmed, createdAt, time.Time{})
+	o := domain.ReconstructOrder(id, 7, eventID, 3, domain.OrderStatusConfirmed, createdAt, time.Time{}, "")
 
 	got := orderRowFromDomain(o)
 
@@ -38,7 +38,7 @@ func TestOrderRow_FromDomain_PatternA_ReservedUntilCopied(t *testing.T) {
 	// to a Valid sql.NullTime so the INSERT writes the actual TTL.
 	createdAt := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	reservedUntil := createdAt.Add(15 * time.Minute)
-	o := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 1, domain.OrderStatusAwaitingPayment, createdAt, reservedUntil)
+	o := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 1, domain.OrderStatusAwaitingPayment, createdAt, reservedUntil, "")
 
 	got := orderRowFromDomain(o)
 
@@ -50,7 +50,7 @@ func TestOrderRow_ToDomain_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	createdAt := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
-	original := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 3, domain.OrderStatusPending, createdAt, time.Time{})
+	original := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 3, domain.OrderStatusPending, createdAt, time.Time{}, "")
 
 	roundTripped := orderRowFromDomain(original).toDomain()
 
@@ -68,7 +68,7 @@ func TestOrderRow_ToDomain_PatternA_RoundTrip(t *testing.T) {
 	// symmetric across the row layer.
 	createdAt := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
 	reservedUntil := createdAt.Add(15 * time.Minute)
-	original := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 2, domain.OrderStatusAwaitingPayment, createdAt, reservedUntil)
+	original := domain.ReconstructOrder(uuid.New(), 7, uuid.New(), 2, domain.OrderStatusAwaitingPayment, createdAt, reservedUntil, "")
 
 	roundTripped := orderRowFromDomain(original).toDomain()
 

@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"booking_monitor/internal/application"
 	bookingapp "booking_monitor/internal/application/booking"
+	paymentapp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/dto"
@@ -80,6 +82,31 @@ func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTi
 	return s.createFn(ctx, name, totalTickets)
 }
 
+// stubPaymentService is the D4 counterpart to stubBookingService /
+// stubEventService — controllable via per-test fn fields. Implements
+// the full payment.Service interface (ProcessOrder + CreatePaymentIntent)
+// even though only handler_test.go's /pay tests exercise the latter.
+// Unset fn fields fall back to "this method wasn't expected for this
+// test" sentinel errors so missing setup surfaces loudly.
+type stubPaymentService struct {
+	processFn       func(ctx context.Context, event *application.OrderCreatedEvent) error
+	createIntentFn  func(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error)
+}
+
+func (s *stubPaymentService) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
+	if s.processFn == nil {
+		return errors.New("ProcessOrder called without processFn")
+	}
+	return s.processFn(ctx, event)
+}
+
+func (s *stubPaymentService) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error) {
+	if s.createIntentFn == nil {
+		return domain.PaymentIntent{}, errors.New("CreatePaymentIntent called without createIntentFn")
+	}
+	return s.createIntentFn(ctx, orderID)
+}
+
 // noopIdempotencyRepo is the zero-behaviour repo passed to the route
 // registration. The booking handler test file does NOT exercise the
 // idempotency contract — that lives in
@@ -97,14 +124,22 @@ func (noopIdempotencyRepo) Set(_ context.Context, _ string, _ *domain.Idempotenc
 }
 
 func newRouter(svc bookingapp.Service) *gin.Engine {
-	return newRouterWithEvents(svc, &stubEventService{})
+	return newRouterWith(svc, &stubEventService{}, &stubPaymentService{})
 }
 
 // newRouterWithEvents is the variant for tests that need to drive the
-// event handler. The two-arg form keeps the existing single-arg
-// newRouter callers unchanged.
+// event handler. Three-arg form delegates to the canonical
+// newRouterWith helper with a stub payment service.
 func newRouterWithEvents(svc bookingapp.Service, evt *stubEventService) *gin.Engine {
-	h := booking.NewBookingHandler(svc, evt)
+	return newRouterWith(svc, evt, &stubPaymentService{})
+}
+
+// newRouterWith is the canonical wiring used by every router-helper
+// in the test file. Each handler-dependency is a stub the test can
+// drive selectively (any unset fn fields panic on call — surfaces
+// missing setup loudly). Added in D4 alongside HandleCreatePaymentIntent.
+func newRouterWith(svc bookingapp.Service, evt *stubEventService, pay *stubPaymentService) *gin.Engine {
+	h := booking.NewBookingHandler(svc, evt, pay)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	booking.RegisterRoutes(v1, h, noopIdempotencyRepo{})
@@ -127,7 +162,7 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	// set. We pin a specific TTL so the response-side assertions can
 	// match exactly rather than against gomock-Any-style tolerances.
 	wantReservedUntil := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
-	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusAwaitingPayment, time.Now(), wantReservedUntil)
+	wantOrder := domain.ReconstructOrder(wantOrderID, 1, wantEventID, 1, domain.OrderStatusAwaitingPayment, time.Now(), wantReservedUntil, "")
 	svc := &stubBookingService{
 		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
 			return wantOrder, nil
@@ -196,7 +231,7 @@ func TestHandleGetOrder_OK(t *testing.T) {
 	svc := &stubBookingService{
 		getFn: func(_ context.Context, gotID uuid.UUID) (domain.Order, error) {
 			assert.Equal(t, id, gotID, "handler must propagate the path-param uuid verbatim")
-			return domain.ReconstructOrder(id, 7, eventID, 2, domain.OrderStatusConfirmed, created, time.Time{}), nil
+			return domain.ReconstructOrder(id, 7, eventID, 2, domain.OrderStatusConfirmed, created, time.Time{}, ""), nil
 		},
 	}
 	r := newRouter(svc)
@@ -439,4 +474,123 @@ func TestHandleViewEvent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, id.String(), got["event_id"], "handler must echo the path-param id verbatim")
 	assert.Equal(t, "View event", got["message"])
+}
+
+// TestHandlePay_Success pins the canonical 200 response shape on /pay.
+// Status code + every PaymentIntentResponse field. Without this, a
+// silent rename of `client_secret` (Stripe Elements would break) or
+// `amount_cents` (UI countdown displays would break) ships unnoticed.
+func TestHandlePay_Success(t *testing.T) {
+	t.Parallel()
+
+	orderID := uuid.Must(uuid.NewV7())
+	wantIntent := domain.PaymentIntent{
+		ID:           "pi_3test_abcdef",
+		ClientSecret: "pi_3test_abcdef_secret_xyz",
+		AmountCents:  4000,
+		Currency:     "usd",
+	}
+	pay := &stubPaymentService{
+		createIntentFn: func(_ context.Context, gotID uuid.UUID) (domain.PaymentIntent, error) {
+			assert.Equal(t, orderID, gotID, "handler must propagate path-param uuid verbatim")
+			return wantIntent, nil
+		},
+	}
+	r := newRouterWith(&stubBookingService{}, &stubEventService{}, pay)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/"+orderID.String()+"/pay", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "/pay success must return 200 OK")
+	var got dto.PaymentIntentResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, orderID, got.OrderID, "response must echo the path-param order_id")
+	assert.Equal(t, "pi_3test_abcdef", got.PaymentIntentID, "payment_intent_id must round-trip from gateway")
+	assert.Equal(t, "pi_3test_abcdef_secret_xyz", got.ClientSecret, "client_secret must round-trip; clients use it with Stripe Elements")
+	assert.Equal(t, int64(4000), got.AmountCents)
+	assert.Equal(t, "usd", got.Currency)
+}
+
+// TestHandlePay_InvalidUUID: path-level UUID parse failure → 400.
+// Defense-in-depth even though Gin's path-param matching mostly
+// catches this; a future router change that routes ":id" more
+// loosely shouldn't slip through to the service.
+func TestHandlePay_InvalidUUID(t *testing.T) {
+	t.Parallel()
+
+	r := newRouterWith(&stubBookingService{}, &stubEventService{}, &stubPaymentService{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/not-a-uuid/pay", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "invalid UUID in path must surface as 400")
+}
+
+// TestHandlePay_OrderNotFound: 404 when service returns ErrOrderNotFound.
+// Pins the mapError translation so a refactor to the error chain
+// can't silently drop the 404 mapping (would surface as 500 to clients).
+func TestHandlePay_OrderNotFound(t *testing.T) {
+	t.Parallel()
+
+	pay := &stubPaymentService{
+		createIntentFn: func(_ context.Context, _ uuid.UUID) (domain.PaymentIntent, error) {
+			return domain.PaymentIntent{}, domain.ErrOrderNotFound
+		},
+	}
+	r := newRouterWith(&stubBookingService{}, &stubEventService{}, pay)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/"+uuid.New().String()+"/pay", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandlePay_NotAwaitingPayment: 409 when the order is in any
+// status other than awaiting_payment. The service returns
+// payment.ErrOrderNotAwaitingPayment; mapError translates to 409.
+func TestHandlePay_NotAwaitingPayment(t *testing.T) {
+	t.Parallel()
+
+	pay := &stubPaymentService{
+		createIntentFn: func(_ context.Context, _ uuid.UUID) (domain.PaymentIntent, error) {
+			// Use the actual sentinel from the payment package — this
+			// pins that handler_test imports the right symbol so a
+			// rename cascades.
+			return domain.PaymentIntent{}, paymentapp.ErrOrderNotAwaitingPayment
+		},
+	}
+	r := newRouterWith(&stubBookingService{}, &stubEventService{}, pay)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/"+uuid.New().String()+"/pay", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	var got dto.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "order is not awaiting payment", got.Error)
+}
+
+// TestHandlePay_ReservationExpired: 409 when reservation TTL elapsed.
+func TestHandlePay_ReservationExpired(t *testing.T) {
+	t.Parallel()
+
+	pay := &stubPaymentService{
+		createIntentFn: func(_ context.Context, _ uuid.UUID) (domain.PaymentIntent, error) {
+			return domain.PaymentIntent{}, paymentapp.ErrReservationExpired
+		},
+	}
+	r := newRouterWith(&stubBookingService{}, &stubEventService{}, pay)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/"+uuid.New().String()+"/pay", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	var got dto.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "reservation expired", got.Error)
 }

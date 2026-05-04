@@ -91,3 +91,15 @@ func (h *tracingBookingHandler) HandleViewEvent(c *gin.Context) {
 
 	recordHTTPResult(span, c.Writer.Status())
 }
+
+func (h *tracingBookingHandler) HandleCreatePaymentIntent(c *gin.Context) {
+	ctx := c.Request.Context()
+	ctx, span := otel.Tracer("api").Start(ctx, "HandleCreatePaymentIntent")
+	defer span.End()
+
+	c.Request = c.Request.WithContext(ctx)
+
+	h.handler.HandleCreatePaymentIntent(c)
+
+	recordHTTPResult(span, c.Writer.Status())
+}

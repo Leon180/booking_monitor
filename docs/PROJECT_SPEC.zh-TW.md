@@ -320,6 +320,42 @@ Fingerprint 是把原始 request body bytes 做 hex `SHA-256`。**不做** JSON 
 
 錯誤回應都會通過 `api/booking/errors.go :: mapError`:透過 `errors.Is` 比對 sentinel 錯誤後,回傳一個安全的公開訊息。原始的 DB / driver 錯誤只會記錄在伺服器端(帶 correlation ID),**絕不**回給 client。
 
+### POST /api/v1/orders/:id/pay
+為 Pattern A 預訂發起付款(D4 — Stripe-shape `PaymentIntent` 流程)。
+
+```json
+// Request
+//(Body 留空 — order_id 從 path 來;未來版本接上真的 Stripe Elements
+//   時可能會帶 `payment_method_id`)
+
+// 200 OK — gateway 發出的 PaymentIntent
+{
+  "order_id": "019dd493-480a-7499-b208-812c930b152e",
+  "payment_intent_id": "pi_3dd493-480a-7499-b208-812c930b152e",
+  "client_secret": "pi_3dd493-...-secret-019dd494-...",
+  "amount_cents": 2000,
+  "currency": "usd"
+}
+// 400 Bad Request — path 上的 UUID 格式錯誤
+{ "error": "invalid order id" }
+// 404 Not Found — 找不到這筆訂單
+{ "error": "resource not found" }
+// 409 Conflict — 訂單不在 awaiting_payment 狀態(已 Paid / Expired 等)
+{ "error": "order is not awaiting payment" }
+// 409 Conflict — reserved_until 已過(D6 sweeper 還沒掃)
+{ "error": "reservation expired" }
+// 500 Internal Server Error(gateway / DB 暫時故障)
+{ "error": "internal server error" }
+```
+
+Client 拿 `client_secret` 餵進 Stripe Elements(或我們的 mock 等價物)在前端確認付款。錢實際移動是在 D5 webhook(`POST /webhook/payment`)觸發時 — 那一刻訂單會 `awaiting_payment → paid`。如果 client 一直沒確認,D6 的預訂過期 sweeper 會把超過 `reserved_until` 的訂單翻成 `expired`,saga compensator 回補庫存。
+
+**在 gateway 邊界保證冪等。** 對同一個 `order_id` 重複 POST `/pay` 會拿到**完全一樣**的 `PaymentIntent` — gateway 把 `order_id` 當 idempotency key 用(Stripe 的 `Idempotency-Key` header 慣例;我們的 mock 用 `sync.Map` 實作同一語意)。Client 不需要自己快取或加重試守衛。應用層也因此**沒有**為這條 route 掛 N4 風格的 `Idempotency-Key` middleware — 加了只是多此一舉。
+
+**目前的訂價。** D4 把 `amount_cents` 寫死成 `quantity * BOOKING_DEFAULT_TICKET_PRICE_CENTS`(預設 2000,US$20),`currency` 寫死成 `BOOKING_DEFAULT_CURRENCY`(預設 "usd")。每場活動 / 每個區域的訂價要等 D8(admin section CRUD)才會接上 — migration 000012 加的 `event_sections` 表已經有對應的 schema 欄位,只是 D4 還沒讀。
+
+**Race-safety。** 寫回 DB 的步驟用 SQL predicate `WHERE status = 'awaiting_payment' AND (payment_intent_id IS NULL OR payment_intent_id = $2)`。如果 D5 的 webhook 在我們的 `GetByID` 跟 `UPDATE` 之間把訂單翻成 `paid`,predicate 會 0-rows-affected → 404 回傳給 client;`paid` 那筆狀態被保住。同樣的形狀也擋掉 D6 sweeper 的競賽(`expired`)。
+
 ### GET /api/v1/orders/:id
 用 id 輪詢一筆訂票的最終狀態。id 是 `POST /api/v1/book` 回應裡的 UUID v7。
 

@@ -155,3 +155,34 @@ type BookingLinks struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
+
+// PaymentIntentResponse is the wire shape returned by
+// POST /api/v1/orders/:id/pay (D4). Pairs with the Stripe Elements
+// pattern: client gets `client_secret` and uses it to confirm payment
+// client-side; the actual money movement lands via the D5 webhook.
+//
+// Why these fields:
+//   - `OrderID` echoes the path param so logs / tracing have a single
+//     correlation handle without parsing the URL.
+//   - `PaymentIntentID` is persisted to the order row and used by the
+//     D5 webhook handler to look up the order. Stripe shape:
+//     "pi_3xxx...".
+//   - `ClientSecret` is the sensitive token Stripe Elements consumes
+//     to confirm payment. NOT persisted on our side — Stripe's
+//     recommended posture is "client gets it once via API, server
+//     re-fetches via Retrieve if needed". Our mock returns the same
+//     secret for repeat retrieves to model that.
+//   - `AmountCents` + `Currency` echo what the gateway agreed to
+//     charge. Useful for the client to render "you'll be charged
+//     $20.00 USD" without recomputing from order quantity.
+//
+// Idempotency: repeat POSTs to /pay return the same intent (gateway
+// is idempotent on orderID). Clients don't need to cache or retry-
+// guard themselves.
+type PaymentIntentResponse struct {
+	OrderID         uuid.UUID `json:"order_id"`
+	PaymentIntentID string    `json:"payment_intent_id"`
+	ClientSecret    string    `json:"client_secret"`
+	AmountCents     int64     `json:"amount_cents"`
+	Currency        string    `json:"currency"`
+}

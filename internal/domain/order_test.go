@@ -371,7 +371,7 @@ func TestOrder_Transitions_IllegalSource(t *testing.T) {
 			// Reconstruct an order with the test's source status.
 			id := uuid.New()
 			eventID := uuid.New()
-			o := domain.ReconstructOrder(id, 1, eventID, 1, tt.from, time.Now(), time.Time{})
+			o := domain.ReconstructOrder(id, 1, eventID, 1, tt.from, time.Now(), time.Time{}, "")
 			got, err := tt.do(o)
 			assert.ErrorIs(t, err, tt.expectErr)
 			// The receiver-side guarantee: failed transitions return a
@@ -391,7 +391,7 @@ func TestReconstructOrder_BypassesInvariants(t *testing.T) {
 	id := uuid.New()
 	eventID := uuid.New()
 	created := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
-	got := domain.ReconstructOrder(id, 1, eventID, 0, domain.OrderStatusFailed, created, time.Time{})
+	got := domain.ReconstructOrder(id, 1, eventID, 0, domain.OrderStatusFailed, created, time.Time{}, "")
 
 	assert.Equal(t, id, got.ID())
 	assert.Equal(t, 0, got.Quantity(), "Reconstruct should not validate quantity")

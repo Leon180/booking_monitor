@@ -120,17 +120,84 @@ type PaymentStatusReader interface {
 	GetStatus(ctx context.Context, orderID uuid.UUID) (ChargeStatus, error)
 }
 
-// PaymentGateway is the legacy combined port retained for adapters
-// that implement both sides. New consumers should depend on the
-// narrower PaymentCharger or PaymentStatusReader directly. Kept here
-// (not deleted) because MockGateway in the test infrastructure is the
-// single adapter today and naturally implements both — splitting the
-// adapter into two types just to satisfy a "narrow port at the
-// adapter" rule would add ceremony without payoff.
+// PaymentIntent is the gateway-issued reservation that lets a client
+// (typically Stripe Elements in the browser) actually move money. It
+// pairs with the Pattern A flow: BookTicket reserves inventory →
+// /pay creates a PaymentIntent → client uses ClientSecret to confirm
+// payment → webhook flips the order to Paid (D5).
+//
+// Why a struct rather than `(intentID, clientSecret string)`:
+// extensible without breaking adapters (adding `Status` for
+// `requires_action` / `succeeded` / `requires_payment_method` is a
+// future Stripe nuance), and keeps gateway implementations honest
+// about returning amount/currency that match what was requested.
+type PaymentIntent struct {
+	// ID is the gateway-assigned identifier (Stripe shape: "pi_3xxx...").
+	// Persisted to `orders.payment_intent_id` so the D5 webhook handler
+	// can match incoming events back to the order. The gateway MUST
+	// return the SAME ID for repeat calls with the same orderID — this
+	// is the gateway-side idempotency contract that makes /pay
+	// retry-safe without per-request idempotency keys at our layer.
+	ID string
+
+	// ClientSecret is the sensitive token Stripe Elements uses to
+	// confirm the payment client-side. Returned in API responses but
+	// NOT persisted to DB — Stripe's recommended posture is to fetch
+	// it via Retrieve on subsequent reads rather than store it.
+	// (Real-world: storing client_secret means it leaks in DB dumps;
+	// retrieving from gateway gives a single security perimeter.)
+	ClientSecret string
+
+	// AmountCents is the smallest-unit amount the intent will charge.
+	// Stripe convention: USD $10.00 = 1000 cents. int64 because
+	// floats in money-handling code is the OWASP-listed anti-pattern.
+	AmountCents int64
+
+	// Currency is the ISO 4217 three-letter code ("USD", "TWD", etc.)
+	// in lowercase per Stripe convention.
+	Currency string
+}
+
+// PaymentIntentCreator is the Pattern A write port — creates a
+// PaymentIntent at the gateway. The application service for /pay (D4)
+// is the sole consumer; the reconciler / saga / payment-worker do NOT
+// receive this port.
+//
+// IDEMPOTENCY CONTRACT — same shape as PaymentCharger's:
+// implementations MUST treat orderID as the gateway-side idempotency
+// key. Repeat CreatePaymentIntent calls with the same orderID MUST
+// return the SAME `PaymentIntent` value (same ID, same ClientSecret,
+// same AmountCents, same Currency) — they MUST NOT register a second
+// intent with the gateway. Real Stripe adapters pass orderID as the
+// `Idempotency-Key` header on `POST /v1/payment_intents`.
+//
+// This contract makes /pay safe to retry without our application
+// layer maintaining its own idempotency cache: the gateway IS the
+// cache. The application service can call CreatePaymentIntent every
+// time and rely on the gateway returning the cached intent.
+type PaymentIntentCreator interface {
+	CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (PaymentIntent, error)
+}
+
+// PaymentGateway is the combined port retained for adapters that
+// implement all three sides (Charge / GetStatus / CreatePaymentIntent).
+// New consumers should depend on the narrowest port that fits their
+// needs (PaymentCharger / PaymentStatusReader / PaymentIntentCreator).
+// Kept here (not deleted) because MockGateway in the test infrastructure
+// is the single adapter today and naturally implements all three —
+// splitting the adapter into separate types just to satisfy a "narrow
+// port at the adapter" rule would add ceremony without payoff.
 //
 // Real Stripe / Adyen / Braintree adapters in production would
-// likewise implement both sides on a single struct.
+// likewise implement multiple sides on a single struct.
+//
+// D7 cleanup: once the legacy A4 flow is decommissioned, PaymentCharger
+// + PaymentStatusReader can be removed from the gateway entirely,
+// leaving only PaymentIntentCreator (+ a future PaymentIntentReader
+// for D5 webhook verification). The aggregated interface here makes
+// that future shrink visible — D7 just removes embeds.
 type PaymentGateway interface {
 	PaymentCharger
 	PaymentStatusReader
+	PaymentIntentCreator
 }

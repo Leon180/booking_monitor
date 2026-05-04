@@ -5,20 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
 
 type service struct {
-	gateway   domain.PaymentGateway
-	orderRepo domain.OrderRepository
-	uow       application.UnitOfWork
-	log       *mlog.Logger
+	gateway       domain.PaymentGateway
+	orderRepo     domain.OrderRepository
+	uow           application.UnitOfWork
+	log           *mlog.Logger
+	priceCents    int64  // BookingConfig.DefaultTicketPriceCents — D8 will replace with per-section
+	currency      string // BookingConfig.DefaultCurrency
+	now           func() time.Time // injectable for tests; production uses time.Now
 }
 
 // NewService takes the logger as an explicit dependency instead of
@@ -29,17 +34,23 @@ type service struct {
 // (GetByID) and the success-path UpdateStatus run OUTSIDE uow.Do.
 // The failure-path tx (UpdateStatus + outbox Create) reaches its
 // repos through the Do closure parameter.
+//
+// D4 adds cfg for /pay's per-ticket price + currency lookup.
 func NewService(
 	gateway domain.PaymentGateway,
 	orderRepo domain.OrderRepository,
 	uow application.UnitOfWork,
+	cfg *config.Config,
 	logger *mlog.Logger,
 ) Service {
 	return &service{
-		gateway:   gateway,
-		orderRepo: orderRepo,
-		uow:       uow,
-		log:       logger.With(mlog.String("component", "payment_service")),
+		gateway:    gateway,
+		orderRepo:  orderRepo,
+		uow:        uow,
+		log:        logger.With(mlog.String("component", "payment_service")),
+		priceCents: cfg.Booking.DefaultTicketPriceCents,
+		currency:   cfg.Booking.DefaultCurrency,
+		now:        time.Now,
 	}
 }
 
@@ -216,4 +227,122 @@ func (s *service) ProcessOrder(ctx context.Context, event *application.OrderCrea
 
 	s.log.Info(ctx, "Payment successful", tag.OrderID(event.OrderID))
 	return nil
+}
+
+// CreatePaymentIntent is the Pattern A /pay (D4) entry point. See
+// the Service interface doc for the high-level contract.
+//
+// Step-by-step:
+//
+//  1. Read the order. 404 if it doesn't exist.
+//  2. Validate status == AwaitingPayment. Anything else (Paid /
+//     Expired / PaymentFailed / Compensated / Pending / Charging /
+//     Confirmed / Failed) → ErrOrderNotAwaitingPayment. The /pay
+//     contract is "from a fresh reservation, you can pay once" —
+//     re-payment of a Paid order is not a thing in our model.
+//  3. Validate reserved_until > now. If the reservation has lapsed
+//     (D6 sweeper hasn't run yet but the wall clock is past TTL),
+//     return ErrReservationExpired. Charging here would soft-lock
+//     inventory beyond what the user was promised.
+//  4. Compute amount = quantity * priceCents (config). Currency from
+//     config too. Per-event/section pricing lands in D8.
+//  5. Call gateway.CreatePaymentIntent. Per the
+//     PaymentIntentCreator idempotency contract, repeat calls with
+//     the same orderID return the same PaymentIntent — making /pay
+//     retry-safe at the gateway boundary without an application-
+//     side cache.
+//  6. Persist intent.ID via repo.SetPaymentIntentID. The race-safe
+//     SQL predicate handles the webhook-flips-status race: if the
+//     webhook (D5) flipped status to Paid milliseconds before our
+//     write lands, the UPDATE 0-rows-affected → ErrOrderNotFound
+//     surfaces back; the client can re-fetch the order to see the
+//     actual state.
+//  7. Return the PaymentIntent.
+//
+// Why no UoW transaction: the only write is SetPaymentIntentID
+// (single statement, race-safe at SQL level). The gateway call is
+// not in a tx (external IO), and there's no outbox emission. A UoW
+// would be ceremony.
+func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error) {
+	if orderID == uuid.Nil {
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent: %w", domain.ErrInvalidOrderID)
+	}
+
+	order, err := s.orderRepo.GetByID(ctx, orderID)
+	if err != nil {
+		// ErrOrderNotFound passes through unwrapped so the handler's
+		// errors.Is mapping catches it cleanly. Other errors get
+		// wrapped for log clarity.
+		if errors.Is(err, domain.ErrOrderNotFound) {
+			return domain.PaymentIntent{}, err
+		}
+		s.log.Error(ctx, "CreatePaymentIntent: GetByID failed",
+			tag.OrderID(orderID), tag.Error(err))
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent get order: %w", err)
+	}
+
+	if order.Status() != domain.OrderStatusAwaitingPayment {
+		s.log.Info(ctx, "CreatePaymentIntent rejected: order not in AwaitingPayment",
+			tag.OrderID(orderID), tag.Status(string(order.Status())))
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent status=%s: %w", order.Status(), ErrOrderNotAwaitingPayment)
+	}
+
+	if !order.ReservedUntil().After(s.now()) {
+		s.log.Info(ctx, "CreatePaymentIntent rejected: reservation expired",
+			tag.OrderID(orderID),
+			mlog.String("reserved_until", order.ReservedUntil().Format(time.RFC3339)),
+		)
+		return domain.PaymentIntent{}, ErrReservationExpired
+	}
+
+	// int64 multiplication. Quantity is int but bounded by the API
+	// (positive int from BookTicket invariant); priceCents is int64;
+	// product is int64. Overflow is theoretical at our scale
+	// (quantity * 2000 cents) but the int64 type makes the headroom
+	// honest.
+	amount := int64(order.Quantity()) * s.priceCents
+
+	intent, err := s.gateway.CreatePaymentIntent(ctx, orderID, amount, s.currency)
+	if err != nil {
+		s.log.Error(ctx, "CreatePaymentIntent: gateway failed",
+			tag.OrderID(orderID), tag.Error(err))
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent gateway: %w", err)
+	}
+
+	if err := s.orderRepo.SetPaymentIntentID(ctx, orderID, intent.ID); err != nil {
+		// ErrOrderNotFound here means the row got flipped between our
+		// GetByID and the UPDATE (most likely the webhook beat us, the
+		// D6 sweeper ran, OR — post-fixup — reserved_until elapsed
+		// during the gateway round-trip and the SQL predicate's new
+		// `reserved_until > NOW()` guard rejected the write).
+		// Surface verbatim so the handler can return 404 / 409 with
+		// a clear explanation.
+		if errors.Is(err, domain.ErrOrderNotFound) {
+			s.log.Info(ctx, "CreatePaymentIntent: order state changed between read and write",
+				tag.OrderID(orderID),
+				mlog.String("gateway_intent_id", intent.ID),
+			)
+			return domain.PaymentIntent{}, err
+		}
+		// Transient persist failure (DB outage, ctx cancellation,
+		// etc.) AFTER the gateway has already registered the intent.
+		// Logging gateway_intent_id here is operationally critical:
+		// the next /pay retry will get the SAME intent (gateway-side
+		// idempotency) but if retries don't happen, an operator can
+		// recover the intent from logs without querying the gateway.
+		s.log.Error(ctx, "CreatePaymentIntent: SetPaymentIntentID failed AFTER gateway succeeded",
+			tag.OrderID(orderID),
+			mlog.String("gateway_intent_id", intent.ID),
+			tag.Error(err),
+		)
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent persist: %w", err)
+	}
+
+	s.log.Info(ctx, "CreatePaymentIntent: intent created + persisted",
+		tag.OrderID(orderID),
+		mlog.String("payment_intent_id", intent.ID),
+		mlog.Int64("amount_cents", amount),
+		mlog.String("currency", s.currency),
+	)
+	return intent, nil
 }

@@ -13,30 +13,39 @@ import (
 // PR 33 for the row-pattern rationale; PR 34 changes ID + EventID
 // from int (SERIAL) to uuid.UUID (UUID v7, factory-generated). D3
 // adds ReservedUntil for Pattern A reservations (NULL for legacy
-// rows, hence sql.NullTime — zero-value time on the domain side).
+// rows, hence sql.NullTime — zero-value time on the domain side). D4
+// adds PaymentIntentID for Pattern A reservations after /pay (NULL
+// before the client initiates payment, hence sql.NullString — empty
+// string on the domain side).
 type orderRow struct {
-	ID            uuid.UUID
-	EventID       uuid.UUID
-	UserID        int // STAYS int — external user reference
-	Quantity      int
-	Status        string
-	CreatedAt     time.Time
-	ReservedUntil sql.NullTime
+	ID              uuid.UUID
+	EventID         uuid.UUID
+	UserID          int // STAYS int — external user reference
+	Quantity        int
+	Status          string
+	CreatedAt       time.Time
+	ReservedUntil   sql.NullTime
+	PaymentIntentID sql.NullString
 }
 
 // orderColumns is the canonical SELECT column list for orders. Used
 // by GetByID + ListOrders so adding a column happens in one place.
-// D3 adds reserved_until for Pattern A reservations.
-const orderColumns = "id, event_id, user_id, quantity, status, created_at, reserved_until"
+// D3 adds reserved_until for Pattern A reservations; D4 adds
+// payment_intent_id (set by /pay).
+const orderColumns = "id, event_id, user_id, quantity, status, created_at, reserved_until, payment_intent_id"
 
 func (r *orderRow) scanInto(s rowScanner) error {
-	return s.Scan(&r.ID, &r.EventID, &r.UserID, &r.Quantity, &r.Status, &r.CreatedAt, &r.ReservedUntil)
+	return s.Scan(&r.ID, &r.EventID, &r.UserID, &r.Quantity, &r.Status, &r.CreatedAt, &r.ReservedUntil, &r.PaymentIntentID)
 }
 
 func (r orderRow) toDomain() domain.Order {
 	var reservedUntil time.Time
 	if r.ReservedUntil.Valid {
 		reservedUntil = r.ReservedUntil.Time
+	}
+	var paymentIntentID string
+	if r.PaymentIntentID.Valid {
+		paymentIntentID = r.PaymentIntentID.String
 	}
 	return domain.ReconstructOrder(
 		r.ID,
@@ -46,6 +55,7 @@ func (r orderRow) toDomain() domain.Order {
 		domain.OrderStatus(r.Status),
 		r.CreatedAt,
 		reservedUntil,
+		paymentIntentID,
 	)
 }
 
@@ -64,6 +74,13 @@ func orderRowFromDomain(o domain.Order) orderRow {
 	// epoch value.
 	if !o.ReservedUntil().IsZero() {
 		row.ReservedUntil = sql.NullTime{Time: o.ReservedUntil(), Valid: true}
+	}
+	// Same NULL-on-empty rule for payment_intent_id: NULL until /pay
+	// (D4) sets it. Empty-string-on-domain-side, NULL-in-DB symmetry
+	// keeps the absence operationally observable
+	// (`WHERE payment_intent_id IS NULL` works as expected).
+	if o.PaymentIntentID() != "" {
+		row.PaymentIntentID = sql.NullString{String: o.PaymentIntentID(), Valid: true}
 	}
 	return row
 }

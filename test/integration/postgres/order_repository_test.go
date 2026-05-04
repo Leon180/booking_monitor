@@ -713,3 +713,161 @@ func TestOrderRepository_FindStuckCharging_LimitRespected(t *testing.T) {
 	assert.Len(t, stuck, 2,
 		"LIMIT must cap the result at the requested batch size")
 }
+
+// TestOrderRepository_SetPaymentIntentID_HappyPath: a valid
+// AwaitingPayment order with NULL payment_intent_id accepts a fresh
+// intent id, the value persists, and a follow-up GetByID rehydrates
+// it on the domain.Order.
+func TestOrderRepository_SetPaymentIntentID_HappyPath(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetPaymentIntentID(ctx, o.ID(), "pi_3happypath"))
+
+	got, err := repo.GetByID(ctx, o.ID())
+	require.NoError(t, err)
+	assert.Equal(t, "pi_3happypath", got.PaymentIntentID(),
+		"SetPaymentIntentID must persist the value; GetByID must rehydrate it via the row layer's NullString mapping")
+	assert.Equal(t, domain.OrderStatusAwaitingPayment, got.Status(),
+		"SetPaymentIntentID MUST NOT change status — only the webhook (D5) or sweeper (D6) flips status")
+}
+
+// TestOrderRepository_SetPaymentIntentID_Idempotent: setting the same
+// intent_id twice succeeds (race-safe contract) without error. Models
+// the gateway-idempotent retry path: client calls /pay twice, gateway
+// returns the same intent both times, our application service blindly
+// calls SetPaymentIntentID both times. Second call must not surface
+// ErrOrderNotFound.
+func TestOrderRepository_SetPaymentIntentID_Idempotent(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetPaymentIntentID(ctx, o.ID(), "pi_idem"))
+	require.NoError(t, repo.SetPaymentIntentID(ctx, o.ID(), "pi_idem"),
+		"second call with same intent_id must succeed (idempotent path) — predicate `OR payment_intent_id = $2`")
+}
+
+// TestOrderRepository_SetPaymentIntentID_RejectsDifferentIntent:
+// defensive — under PaymentIntentCreator's idempotency contract this
+// can't happen, but we pin it so a buggy adapter can't silently
+// overwrite a stored intent.
+func TestOrderRepository_SetPaymentIntentID_RejectsDifferentIntent(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetPaymentIntentID(ctx, o.ID(), "pi_first"))
+
+	err = repo.SetPaymentIntentID(ctx, o.ID(), "pi_second")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
+		"different intent_id on a row that already has one must 0-rows-affected → ErrOrderNotFound")
+
+	got, err := repo.GetByID(ctx, o.ID())
+	require.NoError(t, err)
+	assert.Equal(t, "pi_first", got.PaymentIntentID(),
+		"original intent_id must NOT be overwritten by a rejected SetPaymentIntentID call")
+}
+
+// TestOrderRepository_SetPaymentIntentID_RejectsNonAwaitingPayment:
+// pins the status guard. Setting an intent on a Pending or Paid order
+// must reject — modeling the webhook-flips-status race that lets the
+// predicate close the door cleanly.
+func TestOrderRepository_SetPaymentIntentID_RejectsNonAwaitingPayment(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	pending := newOrder(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, pending)
+	require.NoError(t, err)
+
+	err = repo.SetPaymentIntentID(ctx, pending.ID(), "pi_should_not_apply")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
+		"Pending order must reject SetPaymentIntentID — only AwaitingPayment qualifies")
+
+	awaiting := newReservation(t, eventID, 8, 1)
+	_, err = repo.Create(ctx, awaiting)
+	require.NoError(t, err)
+	require.NoError(t, repo.MarkPaid(ctx, awaiting.ID()))
+
+	err = repo.SetPaymentIntentID(ctx, awaiting.ID(), "pi_too_late")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
+		"Paid order (webhook already landed) must reject SetPaymentIntentID")
+}
+
+// TestOrderRepository_SetPaymentIntentID_OrderNotFound: bogus uuid
+// → ErrOrderNotFound. Both "no such row" and "row exists but
+// predicate failed" surface the same sentinel; that's by design.
+func TestOrderRepository_SetPaymentIntentID_OrderNotFound(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	err := repo.SetPaymentIntentID(context.Background(), uuid.New(), "pi_nope")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound)
+}
+
+// TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation:
+// the SQL predicate now includes `reserved_until > NOW()`. An order
+// that's still in `awaiting_payment` (the D6 sweeper hasn't run yet)
+// but past its reservedUntil must reject the persist write. Closes
+// the silent-failure-hunter F2 finding from D4 review: without this
+// guard, the gateway round-trip latency could land a payment_intent_id
+// on an already-expired reservation, leading to a "user paid for an
+// expired reservation" UX bug once the D5 webhook fires.
+func TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	// Insert an awaiting-payment order whose reserved_until is already
+	// past at write time. We can't go through `newReservation`
+	// (NewReservation rejects past times), so we construct the row
+	// via Reconstruct + Create directly. This is the integration-test
+	// equivalent of the production scenario where:
+	//   1. service.CreatePaymentIntent reads order, validates reservedUntil > now (passes)
+	//   2. gateway round-trip takes ~200ms
+	//   3. SetPaymentIntentID call fires after reservedUntil has elapsed.
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+	expiredTime := time.Now().Add(-1 * time.Minute)
+	o := domain.ReconstructOrder(id, 9, eventID, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredTime, "")
+	_, err = repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	err = repo.SetPaymentIntentID(ctx, id, "pi_too_late")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
+		"expired-reservation order must reject the persist write — closes the gateway-round-trip-elapsed-window race")
+
+	// Verify the row's payment_intent_id is still NULL (the rejected
+	// UPDATE didn't accidentally write).
+	got, err := repo.GetByID(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.PaymentIntentID(),
+		"rejected SetPaymentIntentID must NOT write the column")
+}

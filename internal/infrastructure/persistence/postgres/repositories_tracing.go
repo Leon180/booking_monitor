@@ -318,3 +318,19 @@ func (d *orderRepositoryTracingDecorator) MarkPaymentFailed(ctx context.Context,
 	}
 	return err
 }
+
+func (d *orderRepositoryTracingDecorator) SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error {
+	// payment_intent_id is intentionally NOT recorded as a span
+	// attribute — Stripe-shape ids embed account context that we
+	// shouldn't leak into traces / log aggregators by default.
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SetPaymentIntentID", trace.WithAttributes(
+		attribute.String("order_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.SetPaymentIntentID(ctx, id, paymentIntentID)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
