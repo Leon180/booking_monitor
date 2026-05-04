@@ -15,22 +15,15 @@ import (
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
-	"booking_monitor/internal/infrastructure/config"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/mocks"
 )
 
-// testPaymentConfig builds a *config.Config carrying just the
-// BookingConfig the payment service reads at NewService time. Kept
-// minimal so tests don't have to think about unrelated subsystems.
-func testPaymentConfig() *config.Config {
-	return &config.Config{
-		Booking: config.BookingConfig{
-			DefaultTicketPriceCents: 2000,
-			DefaultCurrency:         "usd",
-		},
-	}
-}
+// D4.1 — payment.NewService no longer takes *config.Config; price +
+// currency now ride on the Order via `order.AmountCents()` /
+// `order.Currency()` (snapshotted at book time by NewReservation).
+// Test fixtures construct orders with a meaningful price snapshot via
+// makeAwaitingPaymentOrder's `amountCents` / `currency` args.
 
 // makeOrder produces a Pending order matching the supplied event so the
 // idempotency-check GetByID has something realistic to return.
@@ -85,7 +78,7 @@ func TestProcessOrder_RejectsZeroOrderID(t *testing.T) {
 	gw := mocks.NewMockPaymentGateway(ctrl)
 	repo := mocks.NewMockOrderRepository(ctrl)
 	uow := mocks.NewMockUnitOfWork(ctrl)
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
 	err := svc.ProcessOrder(context.Background(), &application.OrderCreatedEvent{OrderID: uuid.Nil, Amount: 1})
 
@@ -99,7 +92,7 @@ func TestProcessOrder_RejectsNegativeAmount(t *testing.T) {
 	gw := mocks.NewMockPaymentGateway(ctrl)
 	repo := mocks.NewMockOrderRepository(ctrl)
 	uow := mocks.NewMockUnitOfWork(ctrl)
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
 	ev := newEvent(t)
 	ev.Amount = -1
@@ -123,7 +116,7 @@ func TestProcessOrder_AlreadyConfirmedSkipsCharge(t *testing.T) {
 	// gateway.Charge MUST NOT be called for an already-processed order.
 	// gomock fails the test if any unexpected call fires.
 
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 	assert.NoError(t, svc.ProcessOrder(context.Background(), ev))
 }
 
@@ -147,7 +140,7 @@ func TestProcessOrder_HappyPath(t *testing.T) {
 		repo.EXPECT().MarkConfirmed(gomock.Any(), ev.OrderID).Return(nil),
 	)
 
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 	assert.NoError(t, svc.ProcessOrder(context.Background(), ev))
 }
 
@@ -189,7 +182,7 @@ func TestProcessOrder_RetryAfterUpdateStatusFailure_ProducesSingleConfirm(t *tes
 		repo.EXPECT().GetByID(gomock.Any(), ev.OrderID).Return(makeOrder(t, ev, domain.OrderStatusCharging), nil),
 	)
 
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
 	err := svc.ProcessOrder(context.Background(), ev)
 	assert.ErrorIs(t, err, dbErr, "first attempt surfaces the DB error so Kafka retries")
@@ -261,7 +254,7 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 	// Second attempt no longer invokes uow.Do (we skip on Charging),
 	// so no second expectUowDoInvokesFn needed.
 
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 
 	err := svc.ProcessOrder(context.Background(), ev)
 	assert.ErrorIs(t, err, uowFirstAttemptErr, "first attempt surfaces uow error so Kafka retries")
@@ -273,11 +266,25 @@ func TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure(t *tes
 // ── CreatePaymentIntent (D4) ─────────────────────────────────────────
 
 // makeAwaitingPaymentOrder constructs an order in AwaitingPayment with
-// a future reservedUntil — the canonical input shape for /pay.
-func makeAwaitingPaymentOrder(t *testing.T, orderID, eventID uuid.UUID, quantity int) domain.Order {
+// a future reservedUntil + a D4.1 price snapshot. The amountCents +
+// currency must be non-zero / non-empty so `order.HasPriceSnapshot()`
+// returns true and the production /pay path proceeds; passing 0/""
+// would simulate a legacy pre-D4.1 row, which the post-D4.1 service
+// correctly rejects.
+//
+// The synthetic ticket_type_id satisfies the orders.ticket_type_id
+// FK column shape; tests don't dereference it (no TicketTypeRepository
+// lookup at /pay time — price comes off the order, not the
+// ticket_type).
+func makeAwaitingPaymentOrder(t *testing.T, orderID, eventID uuid.UUID, quantity int, amountCents int64, currency string) domain.Order {
 	t.Helper()
 	reservedUntil := time.Now().Add(15 * time.Minute)
-	return domain.ReconstructOrder(orderID, 1, eventID, uuid.Nil, quantity, domain.OrderStatusAwaitingPayment, time.Now(), reservedUntil, "", 0, "")
+	ticketTypeID := uuid.New()
+	return domain.ReconstructOrder(
+		orderID, 1, eventID, ticketTypeID, quantity,
+		domain.OrderStatusAwaitingPayment, time.Now(), reservedUntil,
+		"", amountCents, currency,
+	)
 }
 
 func newPaymentService(t *testing.T) (*gomock.Controller, payment.Service, *mocks.MockPaymentGateway, *mocks.MockOrderRepository) {
@@ -286,7 +293,7 @@ func newPaymentService(t *testing.T) (*gomock.Controller, payment.Service, *mock
 	gw := mocks.NewMockPaymentGateway(ctrl)
 	repo := mocks.NewMockOrderRepository(ctrl)
 	uow := mocks.NewMockUnitOfWork(ctrl)
-	svc := payment.NewService(gw, repo, uow, testPaymentConfig(), mlog.NewNop())
+	svc := payment.NewService(gw, repo, uow, mlog.NewNop())
 	return ctrl, svc, gw, repo
 }
 
@@ -296,7 +303,10 @@ func TestCreatePaymentIntent_HappyPath(t *testing.T) {
 
 	orderID := uuid.New()
 	eventID := uuid.New()
-	order := makeAwaitingPaymentOrder(t, orderID, eventID, 2) // qty 2 → 4000 cents at price=2000
+	// D4.1: amount_cents is the snapshot (already qty × priceCents),
+	// frozen on the order at book time. Test passes 4000 explicitly so
+	// the gateway expectation pins the same value.
+	order := makeAwaitingPaymentOrder(t, orderID, eventID, 2, 4000, "usd")
 	wantIntent := domain.PaymentIntent{
 		ID:           "pi_test_123",
 		ClientSecret: "pi_test_123_secret_abc",
@@ -391,7 +401,7 @@ func TestCreatePaymentIntent_GatewayError(t *testing.T) {
 	defer ctrl.Finish()
 
 	orderID := uuid.New()
-	order := makeAwaitingPaymentOrder(t, orderID, uuid.New(), 1)
+	order := makeAwaitingPaymentOrder(t, orderID, uuid.New(), 1, 2000, "usd")
 	gwErr := errors.New("gateway 503")
 
 	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
@@ -411,7 +421,7 @@ func TestCreatePaymentIntent_PersistRaceLost(t *testing.T) {
 	defer ctrl.Finish()
 
 	orderID := uuid.New()
-	order := makeAwaitingPaymentOrder(t, orderID, uuid.New(), 1)
+	order := makeAwaitingPaymentOrder(t, orderID, uuid.New(), 1, 2000, "usd")
 	intent := domain.PaymentIntent{ID: "pi_race", ClientSecret: "pi_race_secret", AmountCents: 2000, Currency: "usd"}
 
 	gomock.InOrder(

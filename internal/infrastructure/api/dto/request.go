@@ -17,16 +17,26 @@ import (
 	"booking_monitor/internal/domain"
 )
 
-// BookingRequest is the wire shape of POST /api/v1/book. EventID is
-// a UUID v7 string in the JSON body (since PR 34 — domain entities
-// use UUID identity); uuid.UUID's UnmarshalJSON handles parsing.
-// `binding:"required"` checks for non-zero value: for uuid.UUID
-// (which is [16]byte) the zero value is uuid.Nil, so a missing /
-// empty event_id is correctly rejected at bind time.
+// BookingRequest is the wire shape of POST /api/v1/book.
+//
+// D4.1 (KKTIX 票種 alignment): the customer-facing input is a
+// `ticket_type_id`, NOT an `event_id`. Pre-D4.1 every event had a
+// single global price; post-D4.1 each event carries one or more
+// ticket_types (票種) and the ticket_type drives both the price
+// snapshot and the inventory key. The event_id is implicit —
+// derived from the chosen ticket_type — so the wire shape only
+// surfaces the ticket_type_id. Clients discover the available
+// ticket_types via `POST /api/v1/events` (response includes
+// `ticket_types[]`) or a future `GET /api/v1/events/:id` endpoint.
+//
+// uuid.UUID's UnmarshalJSON handles parsing. `binding:"required"`
+// checks for non-zero value: for uuid.UUID (which is [16]byte) the
+// zero value is uuid.Nil, so a missing / empty ticket_type_id is
+// correctly rejected at bind time.
 type BookingRequest struct {
-	UserID   int       `json:"user_id" binding:"required"`
-	EventID  uuid.UUID `json:"event_id" binding:"required"`
-	Quantity int       `json:"quantity" binding:"required,min=1,max=10"`
+	UserID       int       `json:"user_id" binding:"required"`
+	TicketTypeID uuid.UUID `json:"ticket_type_id" binding:"required"`
+	Quantity     int       `json:"quantity" binding:"required,min=1,max=10"`
 }
 
 // CreateEventRequest is the wire shape of POST /api/v1/events.

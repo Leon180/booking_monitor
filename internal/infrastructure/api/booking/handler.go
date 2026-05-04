@@ -167,7 +167,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		return
 	}
 
-	order, err := h.service.BookTicket(ctx, req.UserID, req.EventID, req.Quantity)
+	order, err := h.service.BookTicket(ctx, req.UserID, req.TicketTypeID, req.Quantity)
 	if err != nil {
 		// Log the raw error with full context server-side, then
 		// translate to a sanitized public message via mapError so
@@ -175,7 +175,7 @@ func (h *bookingHandler) HandleBook(c *gin.Context) {
 		log.Error(ctx, "BookTicket failed",
 			tag.Error(err),
 			tag.UserID(req.UserID),
-			tag.EventID(req.EventID),
+			tag.TicketTypeID(req.TicketTypeID),
 			tag.Quantity(req.Quantity),
 		)
 		status, publicMsg := mapError(err)

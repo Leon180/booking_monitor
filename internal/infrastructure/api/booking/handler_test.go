@@ -187,7 +187,11 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 	}
 	r := newRouter(svc)
 
-	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	// D4.1: BookingRequest takes `ticket_type_id` (not `event_id`).
+	// Customer chose a specific ticket_type from the event's
+	// ticket_types[] surface; BookingService derives event_id + price
+	// from the lookup.
+	body := `{"user_id":1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -223,7 +227,7 @@ func TestHandleBook_SoldOut(t *testing.T) {
 	}
 	r := newRouter(svc)
 
-	body := `{"user_id":1,"event_id":"` + uuid.New().String() + `","quantity":1}`
+	body := `{"user_id":1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

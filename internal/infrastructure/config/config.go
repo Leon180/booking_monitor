@@ -52,22 +52,21 @@ type BookingConfig struct {
 	// once D8 lands.
 	ReservationWindow time.Duration `yaml:"reservation_window" env:"BOOKING_RESERVATION_WINDOW" env-default:"15m"`
 
-	// DefaultTicketPriceCents is the per-ticket charge amount /pay
-	// (D4) uses when constructing the PaymentIntent's amount.
-	// Per-event / per-section pricing lands in D8 with admin section
-	// CRUD (the `event_sections` table from migration 000012 already
-	// has the schema room — D4 just doesn't read it yet).
+	// D4.1 NOTE: pre-D4.1 BookingConfig also held
+	// `DefaultTicketPriceCents` + `DefaultCurrency` — every payment
+	// used a single global default. D4.1 retired both: prices live on
+	// the `event_ticket_types` table (KKTIX 票種 model), are picked by
+	// `BookingService.BookTicket` from the chosen ticket_type at book
+	// time, and are snapshotted onto `orders.amount_cents` /
+	// `orders.currency`. `PaymentService.CreatePaymentIntent` then
+	// reads them off the order via `order.AmountCents()` /
+	// `order.Currency()`. The customer pays exactly what they were
+	// quoted, even if the merchant edits the ticket_type's price
+	// mid-checkout. See `docs/design/ticket_pricing.md` for the
+	// schema-level rationale.
 	//
-	// 2000 cents = US$20 mirrors typical concert / event-ticket
-	// pricing for our flash-sale simulation. int64 because
-	// float-money is the OWASP-listed representation-error
-	// anti-pattern; Stripe's API also takes amount in smallest unit
-	// (cents) as int.
-	DefaultTicketPriceCents int64 `yaml:"default_ticket_price_cents" env:"BOOKING_DEFAULT_TICKET_PRICE_CENTS" env-default:"2000"`
-
-	// DefaultCurrency is the ISO 4217 three-letter code used for the
-	// PaymentIntent. Lowercase per Stripe convention.
-	DefaultCurrency string `yaml:"default_currency" env:"BOOKING_DEFAULT_CURRENCY" env-default:"usd"`
+	// `BOOKING_DEFAULT_TICKET_PRICE_CENTS` and `BOOKING_DEFAULT_CURRENCY`
+	// env vars are no longer read; setting them has no effect.
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the
