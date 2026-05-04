@@ -37,11 +37,36 @@ func mapError(err error) (status int, publicMsg string) {
 		return http.StatusConflict, "user already bought ticket"
 
 	case errors.Is(err, domain.ErrEventNotFound),
-		errors.Is(err, domain.ErrOrderNotFound):
+		errors.Is(err, domain.ErrOrderNotFound),
+		errors.Is(err, domain.ErrTicketTypeNotFound):
 		return http.StatusNotFound, "resource not found"
 
 	case errors.Is(err, domain.ErrInvalidOrderID):
 		return http.StatusBadRequest, "invalid order id"
+
+	// D4.1 — KKTIX-aligned event/ticket-type creation invariants.
+	// All originate at the domain factories (NewEvent / NewTicketType)
+	// and escape unwrapped from event.Service.CreateEvent. Without
+	// these cases the default branch fires and a malformed request body
+	// silently surfaces as 500, paging on-call for what is a 4xx.
+	case errors.Is(err, domain.ErrInvalidEventName),
+		errors.Is(err, domain.ErrInvalidTotalTickets),
+		errors.Is(err, domain.ErrInvalidTicketTypeID),
+		errors.Is(err, domain.ErrInvalidTicketTypeEventID),
+		errors.Is(err, domain.ErrInvalidTicketTypeName),
+		errors.Is(err, domain.ErrInvalidTicketTypePrice),
+		errors.Is(err, domain.ErrInvalidTicketTypeCurrency),
+		errors.Is(err, domain.ErrInvalidTicketTypeTotal),
+		errors.Is(err, domain.ErrInvalidTicketTypeAvailable),
+		errors.Is(err, domain.ErrInvalidTicketTypeSaleWindow),
+		errors.Is(err, domain.ErrInvalidTicketTypePerUser):
+		return http.StatusBadRequest, "invalid event parameters"
+
+	// 23505 unique-constraint violation on (event_id, name) when an
+	// admin tries to create a duplicate-named ticket type. Surfaced as
+	// 409 Conflict — the caller can resolve by picking a different name.
+	case errors.Is(err, domain.ErrTicketTypeNameTaken):
+		return http.StatusConflict, "ticket type name already exists for this event"
 
 	// D4 Pattern A /pay errors. Both surface as 409 Conflict because
 	// they describe a state mismatch the client could resolve by

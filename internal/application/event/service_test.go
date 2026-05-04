@@ -63,6 +63,13 @@ func uowDoSucceeds(repos *application.Repositories) func(ctx context.Context, fn
 	}
 }
 
+// eventServiceHarness wires the mocks. Note that NewService no longer
+// takes standalone EventRepository / TicketTypeRepository — every D4.1
+// access goes through the UoW closure (`repos.Event` / `repos.TicketType`).
+// Tests still need the mocked repos so we can register expectations on
+// them; they're handed to the test code via the return tuple but
+// passed into the service ONLY through application.Repositories
+// inside the UoW closure body.
 func eventServiceHarness(t *testing.T) (
 	appevent.Service,
 	*mocks.MockUnitOfWork,
@@ -76,7 +83,7 @@ func eventServiceHarness(t *testing.T) (
 	repo := mocks.NewMockEventRepository(ctrl)
 	tt := mocks.NewMockTicketTypeRepository(ctrl)
 	inv := mocks.NewMockInventoryRepository(ctrl)
-	svc := appevent.NewService(uow, repo, tt, inv, mlog.NewNop())
+	svc := appevent.NewService(uow, inv, mlog.NewNop())
 	return svc, uow, repo, tt, inv
 }
 
@@ -142,6 +149,12 @@ func TestCreateEvent_UoWError(t *testing.T) {
 // compensation UoW runs and deletes both rows. Service surfaces the
 // Redis error so callers know the operation failed; the DB is left
 // clean for retry.
+//
+// Uses gomock.InOrder for the two Do calls (NOT .Times(2) on a single
+// expectation) so the test pins the actual call sequence:
+// first Do = Create+Create closure, second Do = Delete+Delete closure.
+// A regression that swapped the order would otherwise pass under
+// .Times(2) because the same DoAndReturn matches both calls.
 func TestCreateEvent_RedisFails_CompensationSucceeds(t *testing.T) {
 	t.Parallel()
 	svc, uow, repo, tt, inv := eventServiceHarness(t)
@@ -149,18 +162,28 @@ func TestCreateEvent_RedisFails_CompensationSucceeds(t *testing.T) {
 	created := reconstructEvent(t)
 	createdTT := reconstructTicketType(t, created.ID(), 2000, "usd", 100)
 
-	// First Do: event + ticket_type Create.
-	repo.EXPECT().Create(gomock.Any(), gomock.Any()).Return(created, nil)
-	tt.EXPECT().Create(gomock.Any(), gomock.Any()).Return(createdTT, nil)
-
-	// Compensation Do: ticket_type Delete then event Delete.
-	tt.EXPECT().Delete(gomock.Any(), createdTT.ID()).Return(nil)
-	repo.EXPECT().Delete(gomock.Any(), created.ID()).Return(nil)
-
-	// Two Do calls — initial + compensation. Both invoke the closure.
-	uow.EXPECT().Do(gomock.Any(), gomock.Any()).
-		DoAndReturn(uowDoSucceeds(&application.Repositories{Event: repo, TicketType: tt})).
-		Times(2)
+	repos := &application.Repositories{Event: repo, TicketType: tt}
+	gomock.InOrder(
+		// First Do: the original tx — Create + Create.
+		uow.EXPECT().Do(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+				repo.EXPECT().Create(gomock.Any(), gomock.Any()).Return(created, nil)
+				tt.EXPECT().Create(gomock.Any(), gomock.Any()).Return(createdTT, nil)
+				return fn(repos)
+			}),
+		// Second Do: the compensation tx — TicketType.Delete + Event.Delete.
+		// This is the load-bearing assertion: a regression that calls
+		// Event.Delete BEFORE TicketType.Delete (or skips one) would
+		// fail the InOrder + per-call expectation match here.
+		uow.EXPECT().Do(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, fn func(*application.Repositories) error) error {
+				gomock.InOrder(
+					tt.EXPECT().Delete(gomock.Any(), createdTT.ID()).Return(nil),
+					repo.EXPECT().Delete(gomock.Any(), created.ID()).Return(nil),
+				)
+				return fn(repos)
+			}),
+	)
 
 	redisErr := errors.New("redis: connection refused")
 	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 100).Return(redisErr)
@@ -172,14 +195,18 @@ func TestCreateEvent_RedisFails_CompensationSucceeds(t *testing.T) {
 
 // TestCreateEvent_RedisFails_CompensationAlsoFails: dangling-rows
 // scenario. The compensation UoW also fails (e.g. DB connection lost
-// after Redis went down). Service surfaces BOTH errors so an operator
-// can manually reconcile.
+// after Redis went down). Service surfaces BOTH errors via
+// `errors.Join` so a future caller can `errors.Is`-branch against
+// EITHER sentinel from the same chain.
 func TestCreateEvent_RedisFails_CompensationAlsoFails(t *testing.T) {
 	t.Parallel()
 	svc, uow, repo, tt, inv := eventServiceHarness(t)
 
 	created := reconstructEvent(t)
 	createdTT := reconstructTicketType(t, created.ID(), 2000, "usd", 100)
+
+	redisErr := errors.New("redis: max clients reached")
+	compensationErr := errors.New("postgres: connection lost during compensation")
 
 	// Initial Do succeeds (event + ticket_type rows committed).
 	repos := &application.Repositories{Event: repo, TicketType: tt}
@@ -191,19 +218,21 @@ func TestCreateEvent_RedisFails_CompensationAlsoFails(t *testing.T) {
 				return fn(repos)
 			}),
 		// Compensation Do fails.
-		uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(errors.New("postgres: connection lost during compensation")),
+		uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(compensationErr),
 	)
 
-	redisErr := errors.New("redis: max clients reached")
 	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 100).Return(redisErr)
 
 	_, err := svc.CreateEvent(context.Background(), "Concert", 100, 2000, "usd")
 	require.Error(t, err)
-	// Caller-visible error chain MUST include both: the load-bearing
-	// "redis fail" cause + the compensation failure that makes manual
-	// recon necessary.
-	assert.Contains(t, err.Error(), "redis")
-	assert.Contains(t, err.Error(), "compensating delete failed")
+	// errors.Join preserves both branches in the chain — `errors.Is`
+	// against EITHER sentinel must match. This is the contract a
+	// future caller (e.g. a circuit-breaker middleware checking for
+	// redis-specific failures) needs.
+	assert.True(t, errors.Is(err, redisErr),
+		"errors.Is must match the Redis sentinel — the joined chain must preserve it for circuit-breaker / retry-policy callers")
+	assert.True(t, errors.Is(err, compensationErr),
+		"errors.Is must match the compensation sentinel — operators searching for the load-bearing failure need a typed branch, not string-match")
 }
 
 // TestCreateEvent_HappyPath: UoW commits + Redis SetInventory

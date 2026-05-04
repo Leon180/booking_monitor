@@ -737,6 +737,16 @@ func (r *postgresTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID
 // row returns rowsAffected=0, which we don't surface as an error —
 // the compensation path may run after an earlier partial delete).
 // See domain.TicketTypeRepository.Delete doc for the rationale.
+//
+// Forensics note: rowsAffected is intentionally NOT read or logged
+// here. The repository layer is observability-unaware by design (the
+// tracing decorator adds spans; metrics layer adds db_pool / db
+// stats); adding a debug log per delete from inside the repo would
+// fight that convention and produce a per-ticket-type-delete debug
+// line in production. Operators investigating compensation behaviour
+// can correlate via the higher-level event_service Warn/Error logs
+// (which DO carry tag.TicketTypeID + tag.EventID) plus the postgres-
+// side query metrics.
 func (r *postgresTicketTypeRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	if _, err := r.exec.ExecContext(ctx, "DELETE FROM event_ticket_types WHERE id = $1", id); err != nil {
 		return fmt.Errorf("ticketTypeRepository.Delete id=%s: %w", id, err)

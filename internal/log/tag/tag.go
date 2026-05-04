@@ -31,6 +31,12 @@ func OrderID(id uuid.UUID) zap.Field { return zap.Stringer("order_id", id) }
 // Domain entity IDs are UUID v7 since PR 34.
 func EventID(id uuid.UUID) zap.Field { return zap.Stringer("event_id", id) }
 
+// TicketTypeID labels the log entry with a KKTIX-style 票種 identifier
+// (D4.1+). Forms the (event_id, ticket_type_id) pair operators use to
+// pivot on a single booking flow across event creation, ticket-type
+// lookup, and order persistence.
+func TicketTypeID(id uuid.UUID) zap.Field { return zap.Stringer("ticket_type_id", id) }
+
 // UserID labels the log entry with the authenticated user id. Stays
 // int because users are an external concept (this service does not
 // own the users table).
