@@ -33,8 +33,17 @@ import (
 // checks for non-zero value: for uuid.UUID (which is [16]byte) the
 // zero value is uuid.Nil, so a missing / empty ticket_type_id is
 // correctly rejected at bind time.
+//
+// `user_id` carries an explicit `min=1`. Without it `required` only
+// rejects the int zero-value — a negative id (e.g. `-1`) would slip
+// past Gin into the service, where domain.NewReservation finally
+// fails with ErrInvalidUserID. Pre-fix the API mapper did not
+// translate that sentinel and a malformed client input surfaced as
+// 500 Internal Server Error (Codex P2). Shift-left validation here is
+// the cheap fix; mapError still carries the matching case as
+// defense-in-depth for non-HTTP entry points.
 type BookingRequest struct {
-	UserID       int       `json:"user_id" binding:"required"`
+	UserID       int       `json:"user_id" binding:"required,min=1"`
 	TicketTypeID uuid.UUID `json:"ticket_type_id" binding:"required"`
 	Quantity     int       `json:"quantity" binding:"required,min=1,max=10"`
 }

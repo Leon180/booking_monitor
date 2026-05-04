@@ -44,6 +44,19 @@ func mapError(err error) (status int, publicMsg string) {
 	case errors.Is(err, domain.ErrInvalidOrderID):
 		return http.StatusBadRequest, "invalid order id"
 
+	// Order/Reservation invariants from domain.NewOrder / NewReservation.
+	// Pre-fix these fell through to the default branch and surfaced as
+	// 500, even though they originate from malformed client input
+	// (Codex P2). Layer-1 binding tags in dto/request.go also catch
+	// most of these for HTTP callers; this case is defense-in-depth
+	// for non-HTTP entry points (queue replay, future RPC, etc.).
+	case errors.Is(err, domain.ErrInvalidUserID),
+		errors.Is(err, domain.ErrInvalidQuantity),
+		errors.Is(err, domain.ErrInvalidReservedUntil),
+		errors.Is(err, domain.ErrInvalidAmountCents),
+		errors.Is(err, domain.ErrInvalidCurrency):
+		return http.StatusBadRequest, "invalid request parameters"
+
 	// D4.1 — KKTIX-aligned event/ticket-type creation invariants.
 	// All originate at the domain factories (NewEvent / NewTicketType)
 	// and escape unwrapped from event.Service.CreateEvent. Without

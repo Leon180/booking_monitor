@@ -215,6 +215,41 @@ func TestHandleBook_AcceptedShape(t *testing.T) {
 		"D3: links.pay must point at the D4 payment endpoint — clients use this to initiate Stripe checkout")
 }
 
+// TestHandleBook_NegativeUserID_Returns400 closes Codex P2: pre-fix,
+// `binding:"required"` on UserID only rejected the int zero-value, so
+// `-1` slipped through into BookingService → domain.NewReservation
+// returned ErrInvalidUserID, but mapError didn't translate that
+// sentinel and it surfaced as 500. Two-layer fix:
+//
+//  1. Layer-1 binding tag `min=1` on UserID — Gin rejects at bind time.
+//     This test exercises Layer 1: the service stub MUST NOT be called.
+//  2. Layer-2 mapError sentinels (TestMapError_DomainSentinels covers
+//     them at unit level).
+//
+// The masking concern (negative user_id + non-existent ticket_type_id
+// returning 404 instead of 400) is also closed by Layer 1 because Gin
+// rejects before the service runs at all.
+func TestHandleBook_NegativeUserID_Returns400(t *testing.T) {
+	t.Parallel()
+
+	svc := &stubBookingService{
+		bookFn: func(_ context.Context, _ int, _ uuid.UUID, _ int) (domain.Order, error) {
+			t.Fatal("BookingService.BookTicket MUST NOT be called for negative user_id — Gin binding (min=1) rejects at bind time")
+			return domain.Order{}, nil
+		},
+	}
+	r := newRouter(svc)
+
+	body := `{"user_id":-1,"ticket_type_id":"` + uuid.New().String() + `","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/book", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"negative user_id must surface as 400 — pre-fix it leaked as 500 via the missing ErrInvalidUserID mapError case (Codex P2)")
+}
+
 // TestHandleBook_SoldOut pins the 409 sold-out path. Status code +
 // sanitized error message via mapError.
 func TestHandleBook_SoldOut(t *testing.T) {
