@@ -37,6 +37,11 @@ func TestMapError_DomainSentinels(t *testing.T) {
 	}{
 		// 4xx — sold-out / duplicate
 		{name: "ErrSoldOut", err: domain.ErrSoldOut, wantStatus: http.StatusConflict, wantPublicMsg: "sold out"},
+		// D4.1 follow-up — defense-in-depth case. ErrTicketTypeSoldOut
+		// surfaces from the worker today, not the HTTP handler, but a
+		// future synchronous-book variant would route through here. The
+		// case must classify as 409 (not fall through to 500).
+		{name: "ErrTicketTypeSoldOut", err: domain.ErrTicketTypeSoldOut, wantStatus: http.StatusConflict, wantPublicMsg: "sold out"},
 		{name: "ErrUserAlreadyBought", err: domain.ErrUserAlreadyBought, wantStatus: http.StatusConflict, wantPublicMsg: "user already bought ticket"},
 
 		// 404 — not-found family

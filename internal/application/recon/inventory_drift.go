@@ -53,11 +53,12 @@ import (
 // of A/B/C/D); see docs/architectural_backlog.md "Cache-truth
 // architecture" for the full story.
 type InventoryDriftDetector struct {
-	events    domain.EventRepository
-	inventory domain.InventoryRepository
-	cfg       DriftConfig
-	metrics   DriftMetrics
-	log       *mlog.Logger
+	events     domain.EventRepository
+	ticketType domain.TicketTypeRepository
+	inventory  domain.InventoryRepository
+	cfg        DriftConfig
+	metrics    DriftMetrics
+	log        *mlog.Logger
 }
 
 // NewInventoryDriftDetector is the constructor. Same dependency-
@@ -68,19 +69,27 @@ type InventoryDriftDetector struct {
 // Decorates the logger with `component=inventory_drift` so every log
 // line is filterable independently of the Reconciler's
 // `component=recon` lines (the two sweepers cohabit one process).
+//
+// D4.1 follow-up: ticketType is now required to compute the per-event
+// available_tickets value. The legacy `events.available_tickets`
+// column is frozen post-D4.1 (no longer decremented by the worker), so
+// reading it would falsely report drift on every event — silent
+// failure G surfaced at multi-agent review.
 func NewInventoryDriftDetector(
 	events domain.EventRepository,
+	ticketType domain.TicketTypeRepository,
 	inventory domain.InventoryRepository,
 	cfg DriftConfig,
 	metrics DriftMetrics,
 	logger *mlog.Logger,
 ) *InventoryDriftDetector {
 	return &InventoryDriftDetector{
-		events:    events,
-		inventory: inventory,
-		cfg:       cfg,
-		metrics:   metrics,
-		log:       logger.With(mlog.String("component", "inventory_drift")),
+		events:     events,
+		ticketType: ticketType,
+		inventory:  inventory,
+		cfg:        cfg,
+		metrics:    metrics,
+		log:        logger.With(mlog.String("component", "inventory_drift")),
 	}
 }
 
@@ -205,7 +214,26 @@ func (d *InventoryDriftDetector) checkOne(ctx context.Context, e domain.Event) c
 		return checkOutcomeSkipped
 	}
 
-	dbQty := e.AvailableTickets()
+	// D4.1 follow-up: dbQty is the SUM across event_ticket_types for
+	// this event, NOT events.available_tickets (frozen post-D4.1).
+	// Aggregate-across-ticket-types matches the Redis key's event-id
+	// granularity. A ListByEventID + sum-in-Go variant would also work
+	// but adds a per-event allocation; the dedicated SUM query is
+	// cheaper at sweep cadence.
+	dbQty, err := d.ticketType.SumAvailableByEventID(ctx, e.ID())
+	if err != nil {
+		// Same "skip + retry next sweep" discipline as cache read
+		// failures — a transient DB blip shouldn't sink the sweep.
+		// Distinct error counter would be ideal but the existing
+		// CacheReadErrors / ListEventsErrors pair already covers the
+		// two extremes; the per-event SUM failure mode is a transient
+		// DB issue that surfaces aggregate-level on next sweep via
+		// ListEventsErrors anyway.
+		d.metrics.IncCacheReadErrors()
+		d.log.Warn(ctx, "drift: ticket_type SUM failed, will retry next sweep",
+			tag.EventID(e.ID()), tag.Error(err))
+		return checkOutcomeSkipped
+	}
 	drift := dbQty - cacheQty
 
 	// Branch 1 — cache_missing. The Redis key is ABSENT (`found==false`),

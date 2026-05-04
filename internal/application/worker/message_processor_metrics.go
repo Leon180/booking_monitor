@@ -37,10 +37,20 @@ func (d *messageProcessorMetricsDecorator) Process(ctx context.Context, msg *Que
 	switch {
 	case err == nil:
 		d.metrics.RecordOrderOutcome("success")
-	case errors.Is(err, domain.ErrSoldOut):
+	case errors.Is(err, domain.ErrSoldOut),
+		errors.Is(err, domain.ErrTicketTypeSoldOut):
 		// Inventory conflict — Redis approved but DB disagreed.
 		// Record both: the specific conflict signal (for drift dashboards)
 		// and the outcome bucket (for throughput categorisation).
+		//
+		// Both sentinels classify here:
+		//   - ErrSoldOut         legacy events.available_tickets path
+		//   - ErrTicketTypeSoldOut  D4.1 follow-up event_ticket_types path
+		// They are NOT wrapped versions of each other (errors.New
+		// returns distinct values), so the explicit OR is required.
+		// Without it the new D4.1 sold-out path falls through to
+		// "db_error" and `inventory_conflict_total` flatlines at zero
+		// — caught at multi-agent review (silent-failure-hunter G).
 		d.metrics.RecordInventoryConflict()
 		d.metrics.RecordOrderOutcome("sold_out")
 	case errors.Is(err, domain.ErrUserAlreadyBought):

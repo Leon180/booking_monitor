@@ -789,3 +789,75 @@ func (r *postgresTicketTypeRepository) ListByEventID(ctx context.Context, eventI
 	}
 	return out, nil
 }
+
+// DecrementTicket atomically deducts inventory on the event_ticket_types
+// row. The `available_tickets >= $2` predicate makes the decrement
+// atomic under concurrent writers — a row affected of 0 means either
+// (a) the row was over-drawn (the dominant case) or (b) the id has no
+// row. We conflate both into ErrTicketTypeSoldOut to match the Event
+// repository's pattern (case (b) is a data-corruption rarity that
+// shouldn't appear in normal flows; a follow-up GetByID would distinguish
+// it but at the cost of an extra round-trip on the hot path).
+//
+// D4.1: this is the new SoT for inventory decrements. The legacy
+// EventRepository.DecrementTicket is preserved for backward compat
+// (events.available_tickets is frozen — no longer written by the
+// worker as of D4.1 follow-up) and will be removed in a follow-up
+// migration.
+func (r *postgresTicketTypeRepository) DecrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	res, err := r.exec.ExecContext(ctx,
+		"UPDATE event_ticket_types SET available_tickets = available_tickets - $2 WHERE id = $1 AND available_tickets >= $2",
+		id, quantity)
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.DecrementTicket exec (ticket_type=%s, qty=%d): %w", id, quantity, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.DecrementTicket rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return domain.ErrTicketTypeSoldOut
+	}
+	return nil
+}
+
+// SumAvailableByEventID is the per-event aggregate that replaces the
+// frozen `events.available_tickets` reader paths post-D4.1 follow-up
+// (rehydrate + inventory drift detection). The query is COALESCE'd to
+// 0 because SUM over zero rows would return NULL — which would scan
+// into Go's int as 0 anyway, but COALESCE makes the intent explicit
+// and protects against driver-version differences on NULL→int scans.
+func (r *postgresTicketTypeRepository) SumAvailableByEventID(ctx context.Context, eventID uuid.UUID) (int, error) {
+	var sum int
+	if err := r.exec.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(available_tickets), 0) FROM event_ticket_types WHERE event_id = $1",
+		eventID,
+	).Scan(&sum); err != nil {
+		return 0, fmt.Errorf("ticketTypeRepository.SumAvailableByEventID event_id=%s: %w", eventID, err)
+	}
+	return sum, nil
+}
+
+// IncrementTicket restores inventory. Used by saga compensation. The
+// `+ $2 <= total_tickets` predicate prevents over-restore — symmetric
+// with EventRepository.IncrementTicket. The schema's
+// `check_ticket_type_available_tickets_non_negative` CHECK constraint
+// is a defense-in-depth backup; the SQL guard surfaces over-restore as
+// rowsAffected==0 (a wrapped error caller can act on) instead of a raw
+// constraint-violation panic.
+func (r *postgresTicketTypeRepository) IncrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	res, err := r.exec.ExecContext(ctx,
+		"UPDATE event_ticket_types SET available_tickets = available_tickets + $2 WHERE id = $1 AND available_tickets + $2 <= total_tickets",
+		id, quantity)
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket exec (ticket_type=%s, qty=%d): %w", id, quantity, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket rows: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("ticketTypeRepository.IncrementTicket: ticket_type %s not found or exceeds total tickets", id)
+	}
+	return nil
+}

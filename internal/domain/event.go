@@ -116,7 +116,16 @@ type EventRepository interface {
 	// inside a UoW-managed transaction.
 	GetByIDForUpdate(ctx context.Context, id uuid.UUID) (Event, error)
 	Update(ctx context.Context, event Event) error
+	// Deprecated: D4.1 follow-up. Inventory now lives on
+	// event_ticket_types.available_tickets — use
+	// TicketTypeRepository.DecrementTicket / IncrementTicket instead.
+	// `events.available_tickets` is frozen post-D4.1 (initialised at
+	// CreateEvent then never written) and a follow-up migration removes
+	// the column. These methods are retained for backward-compat with
+	// old tests and any out-of-tree callers; production hot paths
+	// (worker + saga compensator) no longer call them.
 	DecrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
+	// Deprecated: see DecrementTicket above.
 	IncrementTicket(ctx context.Context, eventID uuid.UUID, quantity int) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	// ListAvailable returns events with `available_tickets > 0`,

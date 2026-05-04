@@ -404,3 +404,46 @@ func (d *ticketTypeRepositoryTracingDecorator) ListByEventID(ctx context.Context
 	}
 	return tt, err
 }
+
+func (d *ticketTypeRepositoryTracingDecorator) DecrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DecrementTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.DecrementTicket(ctx, id, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) IncrementTicket(ctx context.Context, id uuid.UUID, quantity int) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "IncrementTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+		attribute.Int("quantity", quantity),
+	))
+	defer span.End()
+
+	err := d.next.IncrementTicket(ctx, id, quantity)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (d *ticketTypeRepositoryTracingDecorator) SumAvailableByEventID(ctx context.Context, eventID uuid.UUID) (int, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SumAvailableByEventIDTicketType", trace.WithAttributes(
+		attribute.String("event_id", eventID.String()),
+	))
+	defer span.End()
+
+	sum, err := d.next.SumAvailableByEventID(ctx, eventID)
+	if err != nil {
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.Int("sum", sum))
+	}
+	return sum, err
+}

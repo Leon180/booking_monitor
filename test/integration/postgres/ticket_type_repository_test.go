@@ -215,3 +215,111 @@ func TestTicketTypeRepository_ListByEventID_NoRowsReturnsNilNotError(t *testing.
 	require.NoError(t, err, "no-rows must NOT surface as an error — events with no ticket types are valid pre-D4.1 state")
 	assert.Nil(t, got)
 }
+
+// Decrement/Increment integration tests — D4.1 follow-up. These pin
+// the contract that the worker (DecrementTicket on book) and saga
+// compensator (IncrementTicket on rollback) rely on. Unit tests with
+// mocked repos can verify the call shape but not the SQL atomicity
+// guarantees: only a real postgres exec hits the
+// `WHERE available_tickets >= $2` predicate that prevents over-deduct
+// under concurrent writers.
+
+func TestTicketTypeRepository_DecrementTicket_HappyPath(t *testing.T) {
+	h, repo := ticketTypeRepoHarness(t)
+	ctx := context.Background()
+
+	eventID := seedEventForOrder(t, h)
+	tt := newTicketType(t, eventID, "Decrement happy path")
+	_, err := repo.Create(ctx, tt)
+	require.NoError(t, err)
+
+	// total=100, decrement by 3 → expect 97 remaining.
+	require.NoError(t, repo.DecrementTicket(ctx, tt.ID(), 3))
+
+	got, err := repo.GetByID(ctx, tt.ID())
+	require.NoError(t, err)
+	assert.Equal(t, 97, got.AvailableTickets(), "available_tickets must be exactly total - quantity after a successful decrement")
+}
+
+func TestTicketTypeRepository_DecrementTicket_SoldOut(t *testing.T) {
+	h, repo := ticketTypeRepoHarness(t)
+	ctx := context.Background()
+
+	eventID := seedEventForOrder(t, h)
+	tt := newTicketType(t, eventID, "Sold out boundary")
+	_, err := repo.Create(ctx, tt)
+	require.NoError(t, err)
+
+	// Drain to 0.
+	require.NoError(t, repo.DecrementTicket(ctx, tt.ID(), 100))
+	got, err := repo.GetByID(ctx, tt.ID())
+	require.NoError(t, err)
+	require.Equal(t, 0, got.AvailableTickets())
+
+	// Next decrement must return ErrTicketTypeSoldOut — the
+	// `available_tickets >= $2` predicate fires.
+	err = repo.DecrementTicket(ctx, tt.ID(), 1)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrTicketTypeSoldOut, "DecrementTicket on a sold-out row must return the typed sentinel for callers to branch on")
+
+	// Counter must remain at 0 — partial decrement would corrupt the
+	// invariant.
+	got, err = repo.GetByID(ctx, tt.ID())
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.AvailableTickets())
+}
+
+func TestTicketTypeRepository_DecrementTicket_RowNotFound_ReturnsSoldOutSentinel(t *testing.T) {
+	_, repo := ticketTypeRepoHarness(t)
+	ctx := context.Background()
+
+	// Conflated with sold-out per the repo doc — a missing row is data
+	// corruption that shouldn't appear in normal flows. Pinning the
+	// behaviour so a future "split into ErrTicketTypeNotFound" refactor
+	// has to update this test deliberately.
+	missing, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	err = repo.DecrementTicket(ctx, missing, 1)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrTicketTypeSoldOut)
+}
+
+func TestTicketTypeRepository_IncrementTicket_HappyPath(t *testing.T) {
+	h, repo := ticketTypeRepoHarness(t)
+	ctx := context.Background()
+
+	eventID := seedEventForOrder(t, h)
+	tt := newTicketType(t, eventID, "Increment happy path")
+	_, err := repo.Create(ctx, tt)
+	require.NoError(t, err)
+
+	// Decrement by 5 then restore via IncrementTicket — saga
+	// compensation shape.
+	require.NoError(t, repo.DecrementTicket(ctx, tt.ID(), 5))
+	require.NoError(t, repo.IncrementTicket(ctx, tt.ID(), 5))
+
+	got, err := repo.GetByID(ctx, tt.ID())
+	require.NoError(t, err)
+	assert.Equal(t, 100, got.AvailableTickets(), "Increment must fully restore the row — saga compensation invariant")
+}
+
+func TestTicketTypeRepository_IncrementTicket_OverRestoreRejected(t *testing.T) {
+	h, repo := ticketTypeRepoHarness(t)
+	ctx := context.Background()
+
+	eventID := seedEventForOrder(t, h)
+	tt := newTicketType(t, eventID, "Over-restore guard")
+	_, err := repo.Create(ctx, tt)
+	require.NoError(t, err)
+
+	// Row is at total=100 / available=100. Incrementing would push it
+	// > total, which the `+ $2 <= total_tickets` predicate rejects.
+	// Surfaces as a wrapped error (rowsAffected=0 path), NOT silent
+	// corruption. Errors.Is is not used because the error string is
+	// the load-bearing signal here — a future change that adds a
+	// typed sentinel should update this test deliberately.
+	err = repo.IncrementTicket(ctx, tt.ID(), 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds total tickets", "over-restore must surface as an error, not silently corrupt the counter")
+}

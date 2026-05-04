@@ -23,7 +23,13 @@ import (
 // rehydrateTestSetup wires miniredis + a mocked event repo + an
 // always-acquires-lock mock so each test focuses on the SETNX semantics
 // rather than re-doing infrastructure boilerplate.
-func rehydrateTestSetup(t *testing.T) (*redis.Client, *miniredis.Miniredis, *mocks.MockEventRepository, *mocks.MockDistributedLock, *config.Config, *mlog.Logger, *gomock.Controller) {
+//
+// D4.1 follow-up: also returns a TicketTypeRepository mock — rehydrate
+// now reads dbAvailable from event_ticket_types via SumAvailableByEventID
+// instead of the now-frozen events.available_tickets column. Tests
+// that exercise the SETNX path register a SumAvailableByEventID
+// expectation alongside ListAvailable.
+func rehydrateTestSetup(t *testing.T) (*redis.Client, *miniredis.Miniredis, *mocks.MockEventRepository, *mocks.MockTicketTypeRepository, *mocks.MockDistributedLock, *config.Config, *mlog.Logger, *gomock.Controller) {
 	t.Helper()
 	s := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: s.Addr()})
@@ -33,11 +39,12 @@ func rehydrateTestSetup(t *testing.T) (*redis.Client, *miniredis.Miniredis, *moc
 	t.Cleanup(ctrl.Finish)
 
 	eventRepo := mocks.NewMockEventRepository(ctrl)
+	ticketTypeRepo := mocks.NewMockTicketTypeRepository(ctrl)
 	locker := mocks.NewMockDistributedLock(ctrl)
 
 	cfg := &config.Config{Redis: config.RedisConfig{InventoryTTL: 1 * time.Hour}}
 
-	return rdb, s, eventRepo, locker, cfg, mlog.NewNop(), ctrl
+	return rdb, s, eventRepo, ticketTypeRepo, locker, cfg, mlog.NewNop(), ctrl
 }
 
 // makeEvent constructs an Event via ReconstructEvent (same as repo scan).
@@ -52,7 +59,7 @@ func makeEvent(t *testing.T, name string, total, available int) domain.Event {
 // startup: N pods racing should cost ~1× DB scan, not N×.
 func TestRehydrate_LockNotAcquired_NoDBScanNoSETNX(t *testing.T) {
 	t.Parallel()
-	rdb, _, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, _, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	// Lock denied on this instance.
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(false, nil)
@@ -60,11 +67,12 @@ func TestRehydrate_LockNotAcquired_NoDBScanNoSETNX(t *testing.T) {
 	// fails if either fires unexpectedly — that's the assertion.
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	assert.NoError(t, err, "denied lock is not an error — leader will populate Redis")
 }
@@ -75,7 +83,7 @@ func TestRehydrate_LockNotAcquired_NoDBScanNoSETNX(t *testing.T) {
 // returns the right counts in the log.
 func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 	t.Parallel()
-	rdb, s, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, s, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	events := []domain.Event{
 		makeEvent(t, "concert", 1000, 750),
@@ -85,14 +93,21 @@ func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return(events, nil)
+	// D4.1 follow-up: rehydrate now reads dbAvailable from
+	// SumAvailableByEventID. Each event registers an expectation
+	// returning the same value the test expects in Redis afterwards.
+	for _, e := range events {
+		ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), e.ID()).Return(e.AvailableTickets(), nil)
+	}
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	require.NoError(t, err)
 
@@ -114,7 +129,7 @@ func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 // stale DB value would silently re-add in-flight deducts to inventory.
 func TestRehydrate_PreservesLiveRedisValues(t *testing.T) {
 	t.Parallel()
-	rdb, s, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, s, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	event := makeEvent(t, "concert", 1000, 800) // DB says 800 available
 	key := "event:" + event.ID().String() + ":qty"
@@ -124,14 +139,16 @@ func TestRehydrate_PreservesLiveRedisValues(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return([]domain.Event{event}, nil)
+	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), event.ID()).Return(event.AvailableTickets(), nil)
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	require.NoError(t, err)
 
@@ -146,18 +163,19 @@ func TestRehydrate_PreservesLiveRedisValues(t *testing.T) {
 // goes wrong. Just a pure no-op (apart from lock acquisition).
 func TestRehydrate_EmptyEventList(t *testing.T) {
 	t.Parallel()
-	rdb, _, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, _, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return([]domain.Event{}, nil)
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	assert.NoError(t, err)
 }
@@ -168,7 +186,7 @@ func TestRehydrate_EmptyEventList(t *testing.T) {
 // hit this path frequently.
 func TestRehydrate_UnlockRunsEvenOnQueryFailure(t *testing.T) {
 	t.Parallel()
-	rdb, _, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, _, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return(nil, assert.AnError)
@@ -176,11 +194,12 @@ func TestRehydrate_UnlockRunsEvenOnQueryFailure(t *testing.T) {
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	assert.Error(t, err, "list query failure must surface; we don't swallow it")
 }
@@ -192,7 +211,7 @@ func TestRehydrate_UnlockRunsEvenOnQueryFailure(t *testing.T) {
 // would leave the operator no clear signal.
 func TestRehydrate_SETNXFailureAbortsAndUnlocks(t *testing.T) {
 	t.Parallel()
-	rdb, s, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, s, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	events := []domain.Event{makeEvent(t, "concert", 1000, 800)}
 
@@ -203,15 +222,17 @@ func TestRehydrate_SETNXFailureAbortsAndUnlocks(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return(events, nil)
+	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), events[0].ID()).Return(events[0].AvailableTickets(), nil)
 	// CRITICAL: Unlock MUST still fire even though SETNX failed.
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "SETNX",
@@ -224,7 +245,7 @@ func TestRehydrate_SETNXFailureAbortsAndUnlocks(t *testing.T) {
 // deducts) and must NOT count as drift.
 func TestRehydrate_DriftDetected(t *testing.T) {
 	t.Parallel()
-	rdb, s, eventRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
+	rdb, s, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	// Two events. Event A: Redis has STALE-HIGH value (drift). Event B:
 	// Redis has live-low value (in-flight deducts — normal, not drift).
@@ -236,14 +257,17 @@ func TestRehydrate_DriftDetected(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return([]domain.Event{eventA, eventB}, nil)
+	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), eventA.ID()).Return(eventA.AvailableTickets(), nil)
+	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), eventB.ID()).Return(eventB.AvailableTickets(), nil)
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
-		EventRepo:   eventRepo,
-		RedisClient: rdb,
-		Locker:      locker,
-		Cfg:         cfg,
-		Logger:      log,
+		EventRepo:      eventRepo,
+		TicketTypeRepo: ticketTypeRepo,
+		RedisClient:    rdb,
+		Locker:         locker,
+		Cfg:            cfg,
+		Logger:         log,
 	})
 	require.NoError(t, err)
 

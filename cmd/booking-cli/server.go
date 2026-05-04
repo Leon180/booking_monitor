@@ -173,6 +173,7 @@ func runServer(_ *cobra.Command, _ []string) {
 func installInventoryRehydrate(
 	lc fx.Lifecycle,
 	eventRepo domain.EventRepository,
+	ticketTypeRepo domain.TicketTypeRepository,
 	rdb *redis.Client,
 	locker application.DistributedLock,
 	cfg *config.Config,
@@ -181,11 +182,12 @@ func installInventoryRehydrate(
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			return cache.RehydrateInventory(ctx, cache.RehydrateInventoryParams{
-				EventRepo:   eventRepo,
-				RedisClient: rdb,
-				Locker:      locker,
-				Cfg:         cfg,
-				Logger:      logger,
+				EventRepo:      eventRepo,
+				TicketTypeRepo: ticketTypeRepo,
+				RedisClient:    rdb,
+				Locker:         locker,
+				Cfg:            cfg,
+				Logger:         logger,
 			})
 		},
 	})

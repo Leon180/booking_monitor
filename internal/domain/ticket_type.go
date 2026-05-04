@@ -23,6 +23,18 @@ var (
 	// matching the raw postgres error.
 	ErrTicketTypeNameTaken = errors.New("ticket type name already exists for this event")
 
+	// ErrTicketTypeSoldOut is returned by
+	// TicketTypeRepository.DecrementTicket when the row's
+	// available_tickets < requested quantity. Symmetric with
+	// `ErrSoldOut` for the legacy events-table inventory path.
+	//
+	// Worker map: when the worker's UoW closure receives this from
+	// `repos.TicketType.DecrementTicket`, it surfaces it as a
+	// "Redis approved but DB sold out" inventory conflict — the same
+	// shape the legacy Event.DecrementTicket returned, so the worker's
+	// existing branch logic + metric labelling stays identical.
+	ErrTicketTypeSoldOut = errors.New("ticket type sold out")
+
 	// Invariant violations from NewTicketType.
 	ErrInvalidTicketTypeID         = errors.New("ticket_type id must not be the zero UUID")
 	ErrInvalidTicketTypeEventID    = errors.New("ticket_type event_id must not be the zero UUID")
@@ -270,4 +282,46 @@ type TicketTypeRepository interface {
 	// is not surfaced as an error). The compensation path may run after
 	// a partial earlier compensation already deleted the row.
 	Delete(ctx context.Context, id uuid.UUID) error
+
+	// DecrementTicket atomically reduces the row's available_tickets by
+	// quantity. The SQL's `WHERE available_tickets >= $quantity` guard
+	// makes the operation atomic under concurrent writers — a row
+	// affected of 0 means the row was either absent OR over-drawn.
+	//
+	// Errors:
+	//   - ErrTicketTypeSoldOut    available_tickets < quantity (the
+	//                             dominant case: Redis Lua approved but
+	//                             DB disagrees, i.e. cache drift)
+	//   - ErrTicketTypeNotFound   the id has no row (data corruption —
+	//                             ticket_type was deleted mid-flight)
+	//   - other                   wrapped DB error
+	//
+	// D4.1: this replaces the worker's call to
+	// `EventRepository.DecrementTicket(eventID, ...)`. The events table
+	// still has an `available_tickets` column for backward compat
+	// (post-D4.1 it is frozen — no decrement on book, no increment on
+	// compensation; a follow-up migration removes the column entirely).
+	DecrementTicket(ctx context.Context, id uuid.UUID, quantity int) error
+
+	// IncrementTicket atomically increases the row's available_tickets
+	// by quantity. Used by saga compensation. No upper-bound guard —
+	// the schema's `check_ticket_type_available_tickets_non_negative`
+	// constraint catches over-increment as a data-integrity bug
+	// (would-be > total_tickets case must surface as an error so the
+	// saga retries, not silently corrupt the counter).
+	IncrementTicket(ctx context.Context, id uuid.UUID, quantity int) error
+
+	// SumAvailableByEventID returns the sum of available_tickets across
+	// all ticket types for the given event. Returns 0 (not an error)
+	// when no ticket types exist for the event — caller decides whether
+	// that's a "sold out" signal or a "missing data" condition.
+	//
+	// D4.1 follow-up: replaces direct reads of `events.available_tickets`
+	// in rehydrate + drift detection. Post-D4.1 the events column is
+	// frozen at totalTickets (no longer decremented by the worker), so
+	// reading it would give a stale value. The per-ticket-type counter
+	// is the SoT; SUM aggregates across the (typically single, future
+	// multi-) ticket types per event so the Redis key (which remains
+	// keyed at event-id level) gets the correct seed value.
+	SumAvailableByEventID(ctx context.Context, eventID uuid.UUID) (int, error)
 }

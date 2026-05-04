@@ -67,12 +67,20 @@ const inventoryRehydrateLockID int64 = 2001
 // fx. Fields are public so external callers (e.g. the integration test
 // harness in PR-B's follow-up) can construct the struct directly without
 // going through fx wiring.
+//
+// D4.1 follow-up: TicketTypeRepo is the new SoT for inventory.
+// `events.available_tickets` is frozen (no longer decremented by the
+// worker) and reading it would seed Redis with stale `total_tickets`
+// values, causing double-booking after a Redis wipe. The actual
+// remaining inventory is the SUM across `event_ticket_types` for each
+// event — caller resolves via TicketTypeRepo.SumAvailableByEventID.
 type RehydrateInventoryParams struct {
-	EventRepo   domain.EventRepository
-	RedisClient *redis.Client
-	Locker      application.DistributedLock
-	Cfg         *config.Config
-	Logger      *mlog.Logger
+	EventRepo      domain.EventRepository
+	TicketTypeRepo domain.TicketTypeRepository
+	RedisClient    *redis.Client
+	Locker         application.DistributedLock
+	Cfg            *config.Config
+	Logger         *mlog.Logger
 }
 
 func RehydrateInventory(ctx context.Context, p RehydrateInventoryParams) error {
@@ -123,7 +131,26 @@ func RehydrateInventory(ctx context.Context, p RehydrateInventoryParams) error {
 	var rehydrated, skipped, drifted int
 	for _, e := range events {
 		key := inventoryKey(e.ID())
-		ok, err := p.RedisClient.SetNX(ctx, key, e.AvailableTickets(), p.Cfg.Redis.InventoryTTL).Result()
+		// D4.1 follow-up: the actual remaining inventory is the SUM
+		// across event_ticket_types (the per-ticket-type SoT), NOT
+		// `events.available_tickets` which is frozen post-D4.1. SUM
+		// across a single ticket_type (D4.1 default) returns the same
+		// value the legacy column would have held; across multiple
+		// ticket types (future D8) it aggregates correctly because
+		// the Redis key is keyed at event level (the deduct.lua hot
+		// path key has not migrated to ticket_type granularity yet).
+		dbAvailable, err := p.TicketTypeRepo.SumAvailableByEventID(ctx, e.ID())
+		if err != nil {
+			return fmt.Errorf("inventoryRehydrate sum ticket_types event=%s: %w", e.ID(), err)
+		}
+		if dbAvailable <= 0 {
+			// Event has no ticket types OR all ticket types are sold
+			// out. Either way Redis seed is unnecessary — Lua deduct
+			// returns sold-out for missing/zero keys. Skip without
+			// counting as "rehydrated".
+			continue
+		}
+		ok, err := p.RedisClient.SetNX(ctx, key, dbAvailable, p.Cfg.Redis.InventoryTTL).Result()
 		if err != nil {
 			return fmt.Errorf("inventoryRehydrate SETNX event=%s: %w", e.ID(), err)
 		}
@@ -163,14 +190,14 @@ func RehydrateInventory(ctx context.Context, p RehydrateInventoryParams) error {
 				mlog.String("redis_value", existingStr), tag.Error(parseErr))
 			continue
 		}
-		if existing > e.AvailableTickets() {
+		if existing > dbAvailable {
 			drifted++
 			observability.InventoryRehydrateDriftTotal.Inc()
 			log.Warn(ctx, "inventory rehydrate drift detected (Redis > DB)",
 				tag.EventID(e.ID()),
 				mlog.Int("redis_qty", existing),
-				mlog.Int("db_available_tickets", e.AvailableTickets()),
-				mlog.Int("drift", existing-e.AvailableTickets()),
+				mlog.Int("db_available_tickets", dbAvailable),
+				mlog.Int("drift", existing-dbAvailable),
 			)
 		}
 	}

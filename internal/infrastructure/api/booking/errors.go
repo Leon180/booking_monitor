@@ -30,7 +30,15 @@ func mapError(err error) (status int, publicMsg string) {
 	}
 
 	switch {
-	case errors.Is(err, domain.ErrSoldOut):
+	case errors.Is(err, domain.ErrSoldOut),
+		errors.Is(err, domain.ErrTicketTypeSoldOut):
+		// Both sentinels surface as 409 Conflict. ErrSoldOut is the
+		// legacy events.available_tickets path; ErrTicketTypeSoldOut
+		// is the D4.1 follow-up event_ticket_types path. Today the
+		// HTTP handler does NOT call DecrementTicket directly (only
+		// the worker does), so ErrTicketTypeSoldOut would not actually
+		// reach mapError today — defensive case for any future synchronous
+		// booking variant. Ship it as defense-in-depth (go-reviewer H2).
 		return http.StatusConflict, "sold out"
 
 	case errors.Is(err, domain.ErrUserAlreadyBought):
