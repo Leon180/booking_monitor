@@ -388,12 +388,56 @@ func TestCreatePaymentIntent_RejectsExpiredReservation(t *testing.T) {
 
 	orderID := uuid.New()
 	expiredAt := time.Now().Add(-1 * time.Minute)
-	order := domain.ReconstructOrder(orderID, 1, uuid.New(), uuid.Nil, 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredAt, "", 0, "")
+	// Use a real D4.1 price snapshot (2000, "usd") so the test
+	// unambiguously exercises the reservedUntil guard, not the
+	// HasPriceSnapshot guard. Pre-fix this used (0, "") which would
+	// have ALSO failed the snapshot check; fixing makes the assertion
+	// intent unambiguous.
+	order := domain.ReconstructOrder(orderID, 1, uuid.New(), uuid.New(), 1, domain.OrderStatusAwaitingPayment, time.Now().Add(-16*time.Minute), expiredAt, "", 2000, "usd")
 	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
 
 	_, err := svc.CreatePaymentIntent(context.Background(), orderID)
 	assert.ErrorIs(t, err, payment.ErrReservationExpired,
 		"reservation past TTL must reject with ErrReservationExpired (handler returns 409)")
+}
+
+// TestCreatePaymentIntent_RejectsMissingPriceSnapshot pins the D4.1
+// data-integrity guard. An order in `awaiting_payment` with a future
+// reservedUntil but a missing (amount_cents, currency) snapshot must
+// reject with `ErrOrderMissingPriceSnapshot` (NOT
+// `ErrOrderNotAwaitingPayment` — the order IS awaiting payment; what's
+// missing is the persistence-layer snapshot). Mapped to 409 with a
+// distinct public message; deliberately excluded from
+// `isExpectedPayError` so the handler logs at Error.
+//
+// This is the regression net for the legacy-row / migration-gap case
+// the defensive `HasPriceSnapshot()` guard was introduced to catch.
+// Without this test, a future refactor that flipped the `!` or moved
+// the guard would silently regress the data-integrity contract.
+func TestCreatePaymentIntent_RejectsMissingPriceSnapshot(t *testing.T) {
+	ctrl, svc, gw, repo := newPaymentService(t)
+	defer ctrl.Finish()
+
+	orderID := uuid.New()
+	// AwaitingPayment + future reservedUntil — only the price snapshot
+	// is missing (0/"") so the previous two guards pass and the
+	// HasPriceSnapshot guard is the load-bearing rejection.
+	order := makeAwaitingPaymentOrder(t, orderID, uuid.New(), 1, 0, "")
+	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
+	// gateway.CreatePaymentIntent MUST NOT be called — we never
+	// hand a $0 charge to the gateway. gomock fails the test if any
+	// unexpected gateway call fires.
+	_ = gw
+
+	_, err := svc.CreatePaymentIntent(context.Background(), orderID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, payment.ErrOrderMissingPriceSnapshot,
+		"missing snapshot must surface as the typed sentinel — distinct from ErrOrderNotAwaitingPayment so handler logs at Error and operator dashboards can branch")
+	// Defense in depth: the same call MUST NOT match ErrOrderNotAwaitingPayment.
+	// If a future refactor reverts to the old (wrong) sentinel, this
+	// guard fires before the public-message regression reaches prod.
+	assert.False(t, errors.Is(err, payment.ErrOrderNotAwaitingPayment),
+		"missing snapshot must NOT alias to ErrOrderNotAwaitingPayment — review #4 finding C-2 / H-1")
 }
 
 func TestCreatePaymentIntent_GatewayError(t *testing.T) {

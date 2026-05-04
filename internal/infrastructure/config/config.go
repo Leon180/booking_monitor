@@ -66,7 +66,11 @@ type BookingConfig struct {
 	// schema-level rationale.
 	//
 	// `BOOKING_DEFAULT_TICKET_PRICE_CENTS` and `BOOKING_DEFAULT_CURRENCY`
-	// env vars are no longer read; setting them has no effect.
+	// env vars are no longer read. cleanenv ignores unknown env vars
+	// silently, but `LoadConfig` calls `checkDeprecatedEnv` after
+	// parsing to log a stderr warning if either is still set in the
+	// process environment — turning the silent misconfig into a loud
+	// signal for operators migrating from pre-D4.1 deployment configs.
 }
 
 // ReconConfig holds the tunables for the `recon` subcommand — the
@@ -443,7 +447,45 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
 
+	checkDeprecatedEnv()
+
 	return cfg, nil
+}
+
+// deprecatedEnvVars is the registry of env vars that USED to be read
+// by an earlier release and are now silently ignored by `cleanenv`
+// (which doesn't error on unknown keys). Each entry maps the env name
+// to a short operator-facing message describing what replaced it.
+//
+// Why this exists: a fresh-build deploy where the operator's
+// `.env` / configmap / EnvironmentFile still sets one of these is
+// otherwise undetectable at runtime — the variable is parsed by no
+// struct field, no validator complains, and the process starts with
+// the wrong-by-default behaviour. Logging at startup turns the silent
+// misconfig into a loud warning.
+//
+// Convention: when removing a field that previously had `env:"X"`,
+// add an entry here for at least one major release so operators
+// migrating from older docker-compose / Helm charts get a signal.
+var deprecatedEnvVars = map[string]string{
+	"BOOKING_DEFAULT_TICKET_PRICE_CENTS": "removed in D4.1; price is now per `event_ticket_types` row (KKTIX 票種 model). Set price via POST /api/v1/events { price_cents } at event creation time.",
+	"BOOKING_DEFAULT_CURRENCY":           "removed in D4.1; currency is now per `event_ticket_types` row (KKTIX 票種 model). Set currency via POST /api/v1/events { currency } at event creation time.",
+}
+
+// checkDeprecatedEnv writes a Stderr warning for any deprecated env
+// var that's still set in the process environment. Stderr (NOT the
+// structured log) because LoadConfig runs BEFORE the logger is wired,
+// and we want this signal to be unconditionally visible in any
+// container log even on a misconfigured logging stack.
+//
+// Empty values are treated as unset (`os.Getenv` returns "" for both
+// "absent" and "explicitly empty" — they're operationally equivalent).
+func checkDeprecatedEnv() {
+	for name, replacement := range deprecatedEnvVars {
+		if val := os.Getenv(name); val != "" {
+			fmt.Fprintf(os.Stderr, "[config] WARN: env var %s=%q is deprecated and IGNORED — %s\n", name, val, replacement)
+		}
+	}
 }
 
 // Validate checks that required-at-startup fields are present. It

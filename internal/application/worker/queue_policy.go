@@ -51,6 +51,17 @@ type RetryPolicy func(err error) bool
 // runs) take a different path — they go straight to DLQ via
 // `dlqReasonMalformedParse` without consulting this policy. See
 // internal/infrastructure/cache/redis_queue.go::parseMessage.
+//
+// Rolling-upgrade behaviour (D4.1+): if a partial deploy updates the
+// worker before the Lua deduct script (or vice versa), in-flight
+// messages will have zero TicketTypeID / AmountCents / empty Currency
+// from the producer side. This function correctly classifies the
+// resulting domain errors as malformed and short-circuits the retry
+// budget — every such message goes straight to DLQ with the
+// `malformed_classified` label. Operators draining a stream after
+// such a partial deploy should expect a transient DLQ spike with
+// that label and confirm both halves are at the new schema before
+// re-enqueuing.
 func DefaultRetryPolicy() RetryPolicy {
 	return func(err error) bool {
 		return !domain.IsMalformedOrderInput(err)

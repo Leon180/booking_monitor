@@ -68,15 +68,25 @@ func mapError(err error) (status int, publicMsg string) {
 	case errors.Is(err, domain.ErrTicketTypeNameTaken):
 		return http.StatusConflict, "ticket type name already exists for this event"
 
-	// D4 Pattern A /pay errors. Both surface as 409 Conflict because
-	// they describe a state mismatch the client could resolve by
-	// re-reading the order or re-booking; not a 4xx-malformed-input
-	// problem.
+	// D4 Pattern A /pay errors. All three surface as 409 Conflict
+	// because they describe a state / data mismatch the client could
+	// resolve by re-reading the order or re-booking; not a 4xx-
+	// malformed-input problem. Distinct public messages so client
+	// debugging tools can branch.
 	case errors.Is(err, paymentapp.ErrOrderNotAwaitingPayment):
 		return http.StatusConflict, "order is not awaiting payment"
 
 	case errors.Is(err, paymentapp.ErrReservationExpired):
 		return http.StatusConflict, "reservation expired"
+
+	// D4.1 — data-integrity guard for legacy rows / migration gaps.
+	// Distinct from ErrOrderNotAwaitingPayment: the order IS in the
+	// right status, but its (amount_cents, currency) snapshot is
+	// missing. Public message points at "support" rather than
+	// suggesting the client retry, because no client-side action
+	// resolves a missing snapshot.
+	case errors.Is(err, paymentapp.ErrOrderMissingPriceSnapshot):
+		return http.StatusConflict, "order price data unavailable; contact support"
 
 	case errors.Is(err, context.Canceled):
 		return http.StatusServiceUnavailable, "request canceled"
@@ -92,8 +102,16 @@ func mapError(err error) (status int, publicMsg string) {
 
 // isExpectedPayError reports whether err is one of the
 // /pay-specific business outcomes the handler should log at Warn
-// (not Error). Keeps log dashboards clean: 404 / 409 paths are
-// expected client-side state transitions, not internal failures.
+// (not Error). Keeps log dashboards clean: 404 / 409 paths that
+// represent expected client-side state transitions are not internal
+// failures and shouldn't page on-call.
+//
+// DELIBERATELY EXCLUDED: `ErrOrderMissingPriceSnapshot`. That sentinel
+// is returned for orders where the (amount_cents, currency) snapshot
+// is absent — a data-integrity defect (legacy row / migration gap),
+// NOT a routine client-side transition. It must surface at Error so
+// dashboards / alerts pick it up. See `payment/port.go::ErrOrderMissingPriceSnapshot`
+// doc-comment for the full rationale.
 //
 // Pinned in errors.go (not handler.go) to live alongside the
 // authoritative mapError so a future sentinel addition updates both

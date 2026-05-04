@@ -297,28 +297,26 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 		return domain.PaymentIntent{}, ErrReservationExpired
 	}
 
-	// D4.1 — read the snapshot frozen on the Order at book time.
-	// `BookingService.BookTicket` computed `amount_cents = priceCents
-	// × quantity` against the chosen ticket_type and stored both
-	// `amount_cents` and `currency` on the order. /pay reads them
-	// verbatim — the customer pays what they were quoted, even if
-	// the merchant edits the ticket_type's price mid-checkout
-	// (industry SOP).
+	// D4.1 — read the snapshot frozen on the Order at book time
+	// (`BookingService.BookTicket` computed `amount_cents = priceCents
+	// × quantity` and stored it on the order). The customer pays what
+	// they were quoted, even if the merchant edits the ticket_type's
+	// price mid-checkout. See `docs/design/ticket_pricing.md` for the
+	// schema-level rationale.
 	//
-	// Defensive: `HasPriceSnapshot()` distinguishes "real D4.1 row"
-	// (amount > 0 AND currency != "") from "legacy / pre-D4.1 row
-	// where toDomain coerced SQL NULL to (0, '')". A legacy
-	// AwaitingPayment order somehow reaching /pay (shouldn't be
-	// possible — D4.1 BookingService is the only path that mints
-	// AwaitingPayment) is a state-machine bug; surface loudly rather
-	// than silently charge 0.
+	// `HasPriceSnapshot()` is a data-integrity guard, NOT a status
+	// guard — it catches legacy rows / migration gaps where the
+	// snapshot is missing. Wrapped as `ErrOrderMissingPriceSnapshot`
+	// (NOT `ErrOrderNotAwaitingPayment`) so the handler logs at Error
+	// (data bug pages on-call) instead of Warn (routine state
+	// transition).
 	if !order.HasPriceSnapshot() {
 		s.log.Error(ctx, "CreatePaymentIntent rejected: order missing D4.1 price snapshot",
 			tag.OrderID(orderID),
 			mlog.Int64("amount_cents", order.AmountCents()),
 			mlog.String("currency", order.Currency()),
 		)
-		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent: order %s missing price snapshot (legacy row?): %w", orderID, ErrOrderNotAwaitingPayment)
+		return domain.PaymentIntent{}, fmt.Errorf("CreatePaymentIntent: order %s missing price snapshot (legacy row?): %w", orderID, ErrOrderMissingPriceSnapshot)
 	}
 	amount := order.AmountCents()
 	currency := order.Currency()

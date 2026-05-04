@@ -40,6 +40,28 @@ var ErrOrderNotAwaitingPayment = errors.New("order not awaiting payment")
 // a fresh reservation.
 var ErrReservationExpired = errors.New("reservation expired")
 
+// ErrOrderMissingPriceSnapshot is returned by CreatePaymentIntent when
+// the order is in `awaiting_payment` AND the reservation is still
+// valid, but the (amount_cents, currency) price snapshot is missing
+// (`order.HasPriceSnapshot()` false). Two paths produce this state:
+//
+//   1. Legacy / pre-D4.1 order rows where the persistence layer
+//      coerced SQL NULL to (0, ""). New D4.1 orders always have the
+//      snapshot set by `domain.NewReservation`; legacy rows in
+//      `awaiting_payment` should not exist by this PR's cutover, but
+//      this guard catches the case if migration leaves them behind.
+//   2. A future state-machine bug where a D4.1 order somehow loses
+//      its snapshot. This is the load-bearing case — it's a real
+//      data-integrity defect that must page on-call, NOT a routine
+//      client-side state-mismatch like ErrOrderNotAwaitingPayment.
+//
+// Mapped to HTTP 409 Conflict (same status as the other two /pay
+// rejects) but with a distinct public message + DELIBERATELY excluded
+// from `isExpectedPayError` so the handler logs at Error (not Warn).
+// Operators investigating "why is /pay returning 409" can then
+// distinguish data-integrity bugs from routine state transitions.
+var ErrOrderMissingPriceSnapshot = errors.New("order missing price snapshot")
+
 //go:generate mockgen -source=payment_service.go -destination=../mocks/payment_service_mock.go -package=mocks
 
 // Service defines the application-layer port for the payment
