@@ -66,7 +66,23 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
   D2   domain state machine: pending → awaiting_payment → paid | expired | failed
   D3   POST /api/v1/book becomes a reservation (TTL 10–15 min); response includes payment_intent metadata
   D4   POST /api/v1/orders/:id/pay creates the PaymentIntent against the gateway adapter (Stripe-like)
-  D5   POST /webhook/payment receives async outcome; webhook signature verification; idempotent against payment_intent_id
+  D4.1 **KKTIX ticket type model + price snapshot** (added 2026-05-04, between D4 and D5)
+       — rename `event_sections` → `event_ticket_types`; add `price_cents`, `currency`,
+         `sale_starts_at`, `sale_ends_at`, `per_user_limit`, `area_label`
+       — `orders.section_id` → `orders.ticket_type_id`; orders gain `amount_cents` + `currency` snapshot at book time
+       — BookingService.BookTicket reads price from ticket_type, snapshots onto order
+       — payment.Service.CreatePaymentIntent reads `order.amount_cents` (not from config / not re-querying ticket_type)
+       — removes `BookingConfig.DefaultTicketPriceCents` / `DefaultCurrency` (architectural smell)
+       — Decision rationale + alternatives considered: see [`docs/design/ticket_pricing.md`](design/ticket_pricing.md) and [`docs/architectural_backlog.md` § KKTIX-aligned ticket type model](architectural_backlog.md)
+       — Empirical decisions inside (single-table vs two-table) gated on benchmark, not speculation
+  D4.2 **StripeGateway adapter** (post-D4.1; can run in parallel with D5)
+       — `internal/infrastructure/payment/stripe_gateway.go` against real Stripe test API (`sk_test_...`)
+       — env var `PAYMENT_GATEWAY_MODE=mock|stripe_test|stripe` switches fx-provided adapter
+       — `docker-compose.test.yml` adds `stripe-mock` service for offline CI
+       — application layer NOT modified — proves Clean Architecture's gateway swap-in/swap-out
+  D5   POST /webhook/payment receives async outcome; Stripe-shape signature verification (`webhook.ConstructEvent`); idempotent against payment_intent_id
+       — assumes D4.2 merged so webhook payload metadata carries real `order_id`
+       — `payment_intent.succeeded` → `MarkPaid`, `payment_intent.payment_failed` → `MarkPaymentFailed`
   D6   reservation expiry sweeper (mirrors A5 watchdog shape): scan `awaiting_payment` past `reserved_until`, transition → expired, revert Redis inventory via revert.lua
   D7   payment_worker stops being a saga consumer for the happy path. Saga compensator scope narrows to {expired, payment_failed}.
 
