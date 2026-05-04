@@ -59,11 +59,23 @@ func init() {
 	// Today "dlq" is the only value written; future main-stream writers
 	// will add their own label values here.
 	RedisXAddFailuresTotal.WithLabelValues("dlq")
-	// Pre-warm the DLQ-route reason labels so all three series exist in
+	// Pre-warm the DLQ-route reason labels so all five series exist in
 	// /metrics from boot, even on a worker that hasn't yet seen any
 	// failures. Keep these strings in sync with the const block in
 	// internal/infrastructure/cache/redis_queue.go (DLQReason*).
-	for _, reason := range []string{"malformed_parse", "malformed_classified", "exhausted_retries"} {
+	//
+	// `malformed_parse` is retained as a pre-warm label even though the
+	// post-fix code emits `malformed_reverted_legacy` /
+	// `malformed_unrecoverable` instead — the alert rules reference the
+	// older label and a renamed series would orphan them. New alerts
+	// SHOULD branch on the more specific labels.
+	for _, reason := range []string{
+		"malformed_parse",
+		"malformed_classified",
+		"exhausted_retries",
+		"malformed_reverted_legacy",
+		"malformed_unrecoverable",
+	} {
 		RedisDLQRoutedTotal.WithLabelValues(reason)
 	}
 	// Pre-warm the cache labels so the series exist in /metrics before

@@ -59,10 +59,16 @@ type RetryPolicy func(err error) bool
 //     in-flight messages from the old Lua are missing
 //     ticket_type_id / amount_cents / currency entirely. parseMessage
 //     in `infrastructure/cache/redis_queue.go` rejects at the queue
-//     boundary with `dlqReasonMalformedParse` BEFORE this function
-//     ever sees the error. Operators watching for a rolling-upgrade
-//     drain spike should grep `dlq_route_total{reason="malformed_parse"}`,
-//     not the classified label.
+//     boundary BEFORE this function ever sees the error.
+//     `handleParseFailure` then attempts a best-effort revert via
+//     `parseLegacyRevertHints` (event_id + quantity, both pre-D4.1
+//     stable) and routes to ONE of two labels:
+//       - `malformed_reverted_legacy`  (revert succeeded — expected
+//         transitional drain)
+//       - `malformed_unrecoverable`    (revert hints unparseable OR
+//         RevertInventory itself failed — inventory leaked, page on)
+//     The legacy `malformed_parse` label is no longer emitted by new
+//     code paths (kept pre-warmed for old alert compatibility).
 //
 //   - **Old worker, new Lua** (Lua deployed first, worker not yet):
 //     the new Lua writes the new fields, the old worker's parseMessage
@@ -77,9 +83,10 @@ type RetryPolicy func(err error) bool
 //     DLQ with `malformed_classified`. Far less common in practice.
 //
 // Bottom line: rolling-upgrade DLQ spikes during a D4.1 deploy show up
-// as `malformed_parse`, not `malformed_classified`. The label
-// `malformed_classified` appears only when the producer side is
-// schema-correct but the data is invariant-violating.
+// as `malformed_reverted_legacy` (with corresponding inventory revert)
+// and should taper as legacy messages drain from the stream + PEL. A
+// `malformed_unrecoverable` spike is a producer regression OR a Redis
+// outage during compensation — both warrant paging.
 func DefaultRetryPolicy() RetryPolicy {
 	return func(err error) bool {
 		return !domain.IsMalformedOrderInput(err)
