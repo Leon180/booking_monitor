@@ -356,6 +356,14 @@ func (h *Harness) SeedEvent(t *testing.T, id, name string, totalTickets int) {
 // Default status is 'pending'; pass an explicit status string to
 // override (e.g. "charging" / "failed" for tests targeting specific
 // branches). user_id and quantity default to 1.
+//
+// D4.1 caveat: this helper produces a row WITHOUT `ticket_type_id`,
+// `amount_cents`, or `currency` (all NULLable post-000014 — the row
+// represents a pre-D4.1 / migration-gap state). Tests that exercise
+// the post-D4.1 payment path (`/pay`) against orders inserted via
+// `SeedOrder` will hit `payment.ErrOrderMissingPriceSnapshot` from
+// the defensive `HasPriceSnapshot()` guard. For "real" D4.1
+// reservations use `SeedReservation` below.
 func (h *Harness) SeedOrder(t *testing.T, id, eventID, status string) {
 	t.Helper()
 	if status == "" {
@@ -366,5 +374,36 @@ func (h *Harness) SeedOrder(t *testing.T, id, eventID, status string) {
 		VALUES ($1::uuid, $2::uuid, 1, 1, $3, NOW(), NOW())`
 	if _, err := h.DB.Exec(stmt, id, eventID, status); err != nil {
 		t.Fatalf("Harness.SeedOrder: %v", err)
+	}
+}
+
+// SeedReservation inserts a Pattern A reservation row complete with
+// the D4.1 price snapshot (`ticket_type_id` + `amount_cents` +
+// `currency` populated; `reserved_until` set to 15 minutes in the
+// future). Use this for tests that need an order capable of
+// completing the `/pay` flow — `payment.Service.CreatePaymentIntent`
+// rejects orders missing the snapshot via `ErrOrderMissingPriceSnapshot`,
+// so tests using `SeedOrder` will silently fail that path.
+//
+// status defaults to 'awaiting_payment' (the canonical Pattern A entry
+// state). Pass a non-empty value to override.
+func (h *Harness) SeedReservation(t *testing.T, id, eventID, ticketTypeID, status string, amountCents int64, currency string) {
+	t.Helper()
+	if status == "" {
+		status = "awaiting_payment"
+	}
+	const stmt = `
+		INSERT INTO orders (
+			id, event_id, ticket_type_id, user_id, quantity, status,
+			created_at, updated_at, reserved_until,
+			amount_cents, currency
+		)
+		VALUES (
+			$1::uuid, $2::uuid, $3::uuid, 1, 1, $4,
+			NOW(), NOW(), NOW() + INTERVAL '15 minutes',
+			$5, $6
+		)`
+	if _, err := h.DB.Exec(stmt, id, eventID, ticketTypeID, status, amountCents, currency); err != nil {
+		t.Fatalf("Harness.SeedReservation: %v", err)
 	}
 }

@@ -52,16 +52,34 @@ type RetryPolicy func(err error) bool
 // `dlqReasonMalformedParse` without consulting this policy. See
 // internal/infrastructure/cache/redis_queue.go::parseMessage.
 //
-// Rolling-upgrade behaviour (D4.1+): if a partial deploy updates the
-// worker before the Lua deduct script (or vice versa), in-flight
-// messages will have zero TicketTypeID / AmountCents / empty Currency
-// from the producer side. This function correctly classifies the
-// resulting domain errors as malformed and short-circuits the retry
-// budget — every such message goes straight to DLQ with the
-// `malformed_classified` label. Operators draining a stream after
-// such a partial deploy should expect a transient DLQ spike with
-// that label and confirm both halves are at the new schema before
-// re-enqueuing.
+// Rolling-upgrade behaviour (D4.1+): the actual DLQ label depends on
+// WHICH half is at the new schema:
+//
+//   - **New worker, old Lua** (worker deployed first, Lua not yet):
+//     in-flight messages from the old Lua are missing
+//     ticket_type_id / amount_cents / currency entirely. parseMessage
+//     in `infrastructure/cache/redis_queue.go` rejects at the queue
+//     boundary with `dlqReasonMalformedParse` BEFORE this function
+//     ever sees the error. Operators watching for a rolling-upgrade
+//     drain spike should grep `dlq_route_total{reason="malformed_parse"}`,
+//     not the classified label.
+//
+//   - **Old worker, new Lua** (Lua deployed first, worker not yet):
+//     the new Lua writes the new fields, the old worker's parseMessage
+//     ignores the unknown fields, and `domain.NewOrder` (legacy
+//     factory) handles the message normally — no DLQ at all. This is
+//     the safer rollout direction.
+//
+//   - **Both halves new but different versions of the SAME field**:
+//     parseMessage parses successfully but `domain.NewReservation` 's
+//     invariant (e.g. zero ticket_type_id) trips. THIS path goes
+//     through DefaultRetryPolicy → IsMalformedOrderInput → fast-path
+//     DLQ with `malformed_classified`. Far less common in practice.
+//
+// Bottom line: rolling-upgrade DLQ spikes during a D4.1 deploy show up
+// as `malformed_parse`, not `malformed_classified`. The label
+// `malformed_classified` appears only when the producer side is
+// schema-correct but the data is invariant-violating.
 func DefaultRetryPolicy() RetryPolicy {
 	return func(err error) bool {
 		return !domain.IsMalformedOrderInput(err)

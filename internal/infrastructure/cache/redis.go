@@ -232,17 +232,19 @@ func (r *redisInventoryRepository) DeductInventory(
 	// verbatim. reservedUntil is converted to UTC unix seconds before the
 	// call.
 	//
-	// Wire-encoding note: go-redis's EvalSha serialises every interface{}
-	// arg via RESP bulk-string encoding — int64 / int go through
-	// `strconv.FormatInt`, time.Time via formatter, etc. The Lua script
-	// receives every ARGV as a string and passes them through to XADD
-	// without calling `tonumber()` (the deduct.lua doesn't do arithmetic
-	// on user_id / order_id / amount_cents — only on count, where DECRBY
-	// itself parses). The consumer side `parseMessage` re-parses each
-	// field with the matching `strconv.*` call. No floating-point
-	// conversion is involved at any step, so the IEEE-754 exact-int
-	// range (≤ 2^53) is irrelevant — the fields round-trip bit-exact
-	// for any int64.
+	// Wire-encoding note: go-redis encodes integer arguments (`count`,
+	// `userID`, `reservedUntil` unix seconds, `amountCents`) as RESP
+	// integer frames (`:N\r\n`) — NOT bulk strings. Strings (UUID
+	// stringifications, `currency`) go as RESP bulk strings (`$N\r\n…`).
+	// Either way, **Redis presents every ARGV to the Lua script as a
+	// Lua string** (this is the RESP→Lua conversion contract; numbers
+	// are stringified by Redis itself). The deduct.lua script doesn't
+	// call `tonumber()` on user_id / order_id / amount_cents — only on
+	// `count`, where DECRBY itself parses the string. The consumer side
+	// `parseMessage` re-parses each field with the matching `strconv.*`
+	// call. No floating-point conversion happens at any step, so the
+	// IEEE-754 exact-int range (≤ 2^53) is irrelevant — the fields
+	// round-trip bit-exact for any int64.
 	argsPtr := deductArgsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count

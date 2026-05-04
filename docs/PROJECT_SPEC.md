@@ -128,7 +128,7 @@ The split between `domain` and `application` packages is per-port: domain-side i
 
 ### PostgreSQL (port 5433)
 
-The schema below reflects the **post-migration-000012 state**. Migration 000008 (PR #34) swapped all primary keys from `SERIAL` to caller-generated `UUID` (UUIDv7 — RFC 9562, time-prefixed); 000009 added the `order_status_history` audit log; 000010/000011 added the `updated_at` column on `orders` and the partial index that powers reconciler + saga-watchdog sweeps. **000012 (Phase 3 D1 — Pattern A schema) introduced `event_sections`, `orders.section_id`, `orders.reserved_until`, `orders.payment_intent_id`, and `events.reservation_window_seconds` to support the upcoming reservation + payment + webhook flow + multi-section model.**
+The schema below reflects the **post-migration-000014 state**. Migration 000008 swapped all primary keys from `SERIAL` to caller-generated `UUID` (UUIDv7 — RFC 9562, time-prefixed); 000009 added the `order_status_history` audit log; 000010/000011 added the `updated_at` column on `orders` and the partial index that powers reconciler + saga-watchdog sweeps. **000012 (Phase 3 D1 — Pattern A schema) introduced `event_sections`, `orders.section_id`, `orders.reserved_until`, `orders.payment_intent_id`, and `events.reservation_window_seconds`.** **000014 (Phase 3 D4.1 — KKTIX 票種 alignment) renamed `event_sections` → `event_ticket_types`; added `price_cents`, `currency`, `sale_starts_at`, `sale_ends_at`, `per_user_limit`, `area_label` to that table; renamed `orders.section_id` → `orders.ticket_type_id`; added `orders.amount_cents` + `orders.currency` to carry the price snapshot frozen at book time.**
 
 ```sql
 -- events: Source of truth for inventory
@@ -145,25 +145,31 @@ ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
 -- No longer seeded by default. Tests use h.SeedEvent / domain.NewEvent.
 
--- event_sections: Per-event price-tier / area sections (added in 000012)
--- Phase 3 D1 — schema scaffolding for the section-level sharding axis
--- documented in `docs/architectural_backlog.md` § Section-level inventory
--- sharding. The application layer treats each `(event_id, section_id)`
--- as the real inventory aggregate; `events.total_tickets` becomes a
--- denormalised summary that future PRs may compute from sections.
-CREATE TABLE event_sections (
+-- event_ticket_types: KKTIX 票種 (ticket type) entity — owns pricing,
+-- inventory, sale window, per-user limit, and an optional area_label.
+-- Renamed from `event_sections` in 000014 (D4.1) so the vocabulary
+-- matches the customer-facing 票種 model rather than the internal
+-- "section as inventory shard" framing. Pre-D4.1 the table existed as
+-- schema-only scaffolding; D4.1 wires it to the booking + payment flow.
+CREATE TABLE event_ticket_types (
     id UUID PRIMARY KEY,           -- UUIDv7, caller-generated
     event_id UUID NOT NULL,        -- FK target (no DB-level constraint; same rationale as orders.event_id)
-    name VARCHAR(255) NOT NULL,    -- e.g., "VIP", "搖滾區", "二樓 A 區"
+    name VARCHAR(255) NOT NULL,    -- 票種 label, e.g., "VIP 早鳥票", "一般票", "學生票"
+    price_cents BIGINT NOT NULL,   -- D4.1; integer minor unit (Stripe convention); see docs/design/ticket_pricing.md §9 for why int64 not Decimal
+    currency VARCHAR(3) NOT NULL,  -- D4.1; lowercase ISO 4217 (Stripe convention)
+    sale_starts_at TIMESTAMPTZ NULL,   -- D4.1; schema-only (D8 will enforce)
+    sale_ends_at TIMESTAMPTZ NULL,     -- D4.1; schema-only (D8 will enforce)
+    per_user_limit INT NULL,           -- D4.1; schema-only (D8 will enforce)
+    area_label VARCHAR(255) NULL,      -- D4.1; optional 「分區」 (e.g., "VIP A 區") — D8's seat layer references this for grouping
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
     version INT DEFAULT 0,
-    CONSTRAINT check_section_available_tickets_non_negative
+    CONSTRAINT check_ticket_type_available_tickets_non_negative
         CHECK (available_tickets >= 0),
-    CONSTRAINT uq_section_name_per_event
+    CONSTRAINT uq_ticket_type_name_per_event
         UNIQUE (event_id, name)
 );
-CREATE INDEX idx_event_sections_event_id ON event_sections (event_id);
+CREATE INDEX idx_event_ticket_types_event_id ON event_ticket_types (event_id);
 
 -- orders: Booking transaction log
 CREATE TABLE orders (
@@ -174,28 +180,38 @@ CREATE TABLE orders (
     status VARCHAR(50) NOT NULL,   -- legacy: pending | charging | confirmed | failed | compensated (A4) · Pattern A (D2): pending | awaiting_payment | paid | expired | payment_failed | compensated. Both vocabularies coexist until cleanup PR after D7 narrows saga scope.
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- added in 000010 for recon/watchdog age comparisons
-    -- Pattern A columns (added in 000012 / Phase 3 D1):
-    section_id UUID NULL,                            -- FK target (no DB-level constraint); NULL for legacy pre-Pattern-A orders
+    -- Pattern A columns (added in 000012 / Phase 3 D1; section_id renamed to ticket_type_id in 000014):
+    ticket_type_id UUID NULL,                        -- D4.1 (renamed from section_id); FK target (no DB-level constraint); NULL for legacy pre-D4.1 orders
     reserved_until TIMESTAMPTZ NULL,                 -- per-order reservation TTL fact; NULL for terminal-status orders
-    payment_intent_id VARCHAR(255) NULL              -- Stripe-shape payment intent id; set by POST /orders/:id/pay
+    payment_intent_id VARCHAR(255) NULL,             -- Stripe-shape payment intent id; set by POST /orders/:id/pay
+    -- D4.1 price snapshot (added in 000014). NULLable for legacy pre-
+    -- D4.1 rows; NewReservation enforces non-zero on every new row.
+    -- See docs/design/ticket_pricing.md §6 for the snapshot rationale
+    -- (industry SOP — Stripe Checkout / Shopify / Eventbrite all
+    -- freeze price at order create time so the customer pays what
+    -- they were quoted, even if the merchant edits price mid-checkout).
+    amount_cents BIGINT NULL,
+    currency VARCHAR(3) NULL
 );
 -- Re-added in 000008 (originally 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
   WHERE status != 'failed';
--- Added in 000010, widened in 000011:
+-- Added in 000010, widened in 000011 + 000013:
 CREATE INDEX idx_orders_status_updated_at_partial
     ON orders (status, updated_at)
- WHERE status IN ('charging', 'pending', 'failed');
+ WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed');
 -- Added in 000012 — powers the reservation expiry sweeper (D6):
 CREATE INDEX idx_orders_awaiting_payment_reserved_until
     ON orders (status, reserved_until)
  WHERE status = 'awaiting_payment';
--- Added in 000012 — supports per-section availability checks for the
--- future Layer 1 sharding router. Partial because terminal-status
--- orders dominate the table; the active working set is small.
-CREATE INDEX idx_orders_section_id_active
-    ON orders (section_id, status)
- WHERE section_id IS NOT NULL
+-- Added in 000014 (renamed from idx_orders_section_id_active in
+-- 000012) — supports per-ticket-type availability checks for the
+-- future D8 multi-ticket-type-per-event router. Partial because
+-- terminal-status orders dominate the table; the active working
+-- set is small.
+CREATE INDEX idx_orders_ticket_type_id_active
+    ON orders (ticket_type_id, status)
+ WHERE ticket_type_id IS NOT NULL
    AND status NOT IN ('paid', 'compensated', 'expired', 'payment_failed', 'confirmed', 'failed');
 
 -- events_outbox: Transactional outbox for event publishing
@@ -232,7 +248,7 @@ CREATE INDEX idx_order_status_history_occurred
 
 **Note on `orders.event_id`:** there is no DB-level FK constraint to `events(id)`. Domain validation enforces the relationship at the application boundary (`domain.NewOrder` requires `eventID` to be the id of a real event) and integration tests pin the partial-unique-index re-buy contract; the absence of the FK is deliberate and documented in migration 000008.
 
-### Migration History (12 files in `deploy/postgres/migrations/`)
+### Migration History (14 files in `deploy/postgres/migrations/`)
 
 | # | Purpose |
 |---|---------|
@@ -249,6 +265,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000011 | **A5 saga watchdog index widening** (PR #49) — re-creates the 000010 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed')` so the saga-watchdog `FindStuckFailed` sweep shares the same index plan as the reconciler. |
 | 000012 | **Phase 3 D1 — Pattern A schema** — adds `event_sections` table (multi-section model + Layer 1 sharding axis); `events.reservation_window_seconds` (admin-configurable TTL default, 900s = 15 min); `orders.section_id` (NULLable; new code paths set it; legacy rows stay NULL); `orders.reserved_until` (per-order TTL fact); `orders.payment_intent_id` (Stripe-shape, set during POST /orders/:id/pay); partial index `idx_orders_awaiting_payment_reserved_until` for the reservation expiry sweeper (D6); partial index `idx_orders_section_id_active` for the future Layer 1 sharding router. **Schema-only — D2 ships the matching Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`). No DB-level FK on `section_id` and no CHECK on the new statuses; same rationale as 000008 / 000010 (application enforces). |
 | 000013 | **Phase 3 D2 — widen `idx_orders_status_updated_at_partial`** — re-creates the 000011 partial index with the predicate widened to `WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed')`. Lands together with D2 because once D5 / D6 add code paths that produce `expired` / `payment_failed` orders, the saga watchdog's `FindStuckFailed` query (now `WHERE status IN ('failed', 'expired', 'payment_failed')`) would otherwise fall back to a sequential scan. Same DROP + CREATE shape as 000011 — Postgres has no DDL to rewrite a partial-index predicate in place; brief lock window during non-concurrent CREATE INDEX is acceptable at current scale. |
+| 000014 | **Phase 3 D4.1 — KKTIX 票種 alignment + price snapshot.** Renames `event_sections` → `event_ticket_types`; adds `price_cents` BIGINT + `currency` VARCHAR(3) + sale-window timestamps + `per_user_limit` + `area_label` to that table; renames `orders.section_id` → `orders.ticket_type_id`; adds `orders.amount_cents` BIGINT + `orders.currency` VARCHAR(3) (NULLable, frozen at book time by `domain.NewReservation`); renames `idx_orders_section_id_active` → `idx_orders_ticket_type_id_active`. **Ordering: migrate FIRST, then deploy the new binary** — see `docs/runbooks/d4.1_rollout.md` for the operator runbook. Pre-migration binary boot will silently fail every booking with a `column does not exist` error. |
 
 ### Redis
 

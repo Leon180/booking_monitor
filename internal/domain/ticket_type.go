@@ -176,6 +176,17 @@ func NewTicketType(
 
 // ReconstructTicketType rehydrates from a persisted row. Skips
 // invariant validation; postgres scan code is the only intended caller.
+//
+// Currency is defensively re-normalised here even though the factory
+// already lowercases on every write path. Direct-SQL inserts (admin
+// scripts, manual recovery, integration test fixtures) can bypass the
+// factory and store mixed-case values; without this guard a
+// `'USD'` row would round-trip un-lowercased into the API response,
+// while NewReservation would still snapshot the lowercased form onto
+// the order — producing a case-mismatch between the ticket_type
+// response and the eventual /pay PaymentIntent. Cheap to do here
+// (single strings.ToLower per scan); load-bearing for the
+// ticket_type ↔ order currency consistency contract.
 func ReconstructTicketType(
 	id, eventID uuid.UUID,
 	name string,
@@ -192,7 +203,7 @@ func ReconstructTicketType(
 		eventID:          eventID,
 		name:             name,
 		priceCents:       priceCents,
-		currency:         currency,
+		currency:         NormalizeCurrency(currency),
 		totalTickets:     totalTickets,
 		availableTickets: availableTickets,
 		saleStartsAt:     saleStartsAt,

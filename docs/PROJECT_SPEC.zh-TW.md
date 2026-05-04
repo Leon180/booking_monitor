@@ -124,7 +124,7 @@ Types: order.created, order.failed
 
 ### PostgreSQL(對外 port 5433)
 
-下面的 schema 反映的是 **migration 000012 之後的狀態**。Migration 000008(PR #34)把所有 primary key 從 `SERIAL` 換成 caller-generated 的 `UUID`(UUIDv7 — RFC 9562,前綴帶時間戳);000009 加入 `order_status_history` 審計記錄表;000010/000011 加入 `orders.updated_at` 欄位以及驅動 reconciler + saga-watchdog sweep 的部分索引。**000012(Phase 3 D1 — Pattern A schema)加入 `event_sections`、`orders.section_id`、`orders.reserved_until`、`orders.payment_intent_id` 跟 `events.reservation_window_seconds`,為接下來的 reservation + payment + webhook 流程跟 multi-section 模型鋪路。**
+下面的 schema 反映的是 **migration 000014 之後的狀態**。Migration 000008 把所有 primary key 從 `SERIAL` 換成 caller-generated 的 `UUID`(UUIDv7 — RFC 9562,前綴帶時間戳);000009 加入 `order_status_history` 審計記錄表;000010/000011 加入 `orders.updated_at` 欄位以及驅動 reconciler + saga-watchdog sweep 的部分索引。**000012(Phase 3 D1 — Pattern A schema)加入 `event_sections`、`orders.section_id`、`orders.reserved_until`、`orders.payment_intent_id` 跟 `events.reservation_window_seconds`。** **000014(Phase 3 D4.1 — KKTIX 票種對齊)把 `event_sections` 改名為 `event_ticket_types`;在該表加入 `price_cents`、`currency`、`sale_starts_at`、`sale_ends_at`、`per_user_limit`、`area_label`;把 `orders.section_id` 改名為 `orders.ticket_type_id`;為 `orders` 加入 `amount_cents` + `currency` 來保存訂票當下凍結的價格快照。**
 
 ```sql
 -- events: 庫存的事實來源
@@ -141,24 +141,30 @@ ALTER TABLE events ADD CONSTRAINT check_available_tickets_non_negative
   CHECK (available_tickets >= 0);
 -- 預設不再 seed。測試用 h.SeedEvent / domain.NewEvent。
 
--- event_sections: 每場活動的票價區域 / 區段(000012 加入)
--- Phase 3 D1 — section-level sharding 軸的 schema 鋪路,設計細節記在
--- `docs/architectural_backlog.md` § Section-level inventory sharding。
--- application 層把每個 `(event_id, section_id)` 視為真實的庫存 aggregate;
--- `events.total_tickets` 變成可由 sections 計算出來的 denormalised 摘要。
-CREATE TABLE event_sections (
+-- event_ticket_types: KKTIX 票種(ticket type)物件 — 擁有訂價、庫存、
+-- 銷售期間、每人限購、選用的 area_label。000014(D4.1)從 `event_sections`
+-- 改名而來,讓詞彙跟客戶面對的「票種」模型對齊,而不是內部的「section as
+-- inventory shard」框架。D4.1 之前這張表只是 schema-only 鋪路;D4.1 把它
+-- 真正接到訂票 + 付款流程上。
+CREATE TABLE event_ticket_types (
     id UUID PRIMARY KEY,           -- UUIDv7,呼叫端產生
     event_id UUID NOT NULL,        -- FK 目標(沒有 DB-level 約束;跟 orders.event_id 同樣理由)
-    name VARCHAR(255) NOT NULL,    -- 例如 "VIP"、"搖滾區"、"二樓 A 區"
+    name VARCHAR(255) NOT NULL,    -- 票種顯示名,例如 "VIP 早鳥票"、"一般票"、"學生票"
+    price_cents BIGINT NOT NULL,   -- D4.1;整數 minor unit(Stripe 慣例);選 int64 而不是 Decimal 的理由見 docs/design/ticket_pricing.md §9
+    currency VARCHAR(3) NOT NULL,  -- D4.1;小寫 ISO 4217(Stripe 慣例)
+    sale_starts_at TIMESTAMPTZ NULL,   -- D4.1;只動 schema(D8 才會強制)
+    sale_ends_at TIMESTAMPTZ NULL,     -- D4.1;只動 schema(D8 才會強制)
+    per_user_limit INT NULL,           -- D4.1;只動 schema(D8 才會強制)
+    area_label VARCHAR(255) NULL,      -- D4.1;選用的「分區」(例如 "VIP A 區")— D8 的座位層會用它做分組
     total_tickets INT NOT NULL,
     available_tickets INT NOT NULL,
     version INT DEFAULT 0,
-    CONSTRAINT check_section_available_tickets_non_negative
+    CONSTRAINT check_ticket_type_available_tickets_non_negative
         CHECK (available_tickets >= 0),
-    CONSTRAINT uq_section_name_per_event
+    CONSTRAINT uq_ticket_type_name_per_event
         UNIQUE (event_id, name)
 );
-CREATE INDEX idx_event_sections_event_id ON event_sections (event_id);
+CREATE INDEX idx_event_ticket_types_event_id ON event_ticket_types (event_id);
 
 -- orders: 訂單交易紀錄
 CREATE TABLE orders (
@@ -169,27 +175,35 @@ CREATE TABLE orders (
     status VARCHAR(50) NOT NULL,   -- legacy:pending | charging | confirmed | failed | compensated(A4)· Pattern A(D2):pending | awaiting_payment | paid | expired | payment_failed | compensated。兩種狀態詞彙會共存,直到 D7 narrowing saga scope 之後的 cleanup PR 才移除舊的。
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- 000010 加入,給 recon/watchdog 做 age 比較
-    -- Pattern A 欄位(000012 / Phase 3 D1 加入):
-    section_id UUID NULL,                            -- FK 目標(沒有 DB-level 約束);Pattern A 之前的 legacy 訂單為 NULL
+    -- Pattern A 欄位(000012 / Phase 3 D1 加入;000014 把 section_id 改名為 ticket_type_id):
+    ticket_type_id UUID NULL,                        -- D4.1(從 section_id 改名);FK 目標(沒有 DB-level 約束);D4.1 之前的 legacy 訂單為 NULL
     reserved_until TIMESTAMPTZ NULL,                 -- 每筆訂單的 reservation TTL 事實值;終止狀態的訂單為 NULL
-    payment_intent_id VARCHAR(255) NULL              -- Stripe-shape payment intent id;由 POST /orders/:id/pay 設定
+    payment_intent_id VARCHAR(255) NULL,             -- Stripe-shape payment intent id;由 POST /orders/:id/pay 設定
+    -- D4.1 價格快照(000014 加入)。給 D4.1 之前的 legacy 列保留 NULL;
+    -- 新訂單由 NewReservation 強制非零。snapshot 設計理由見
+    -- docs/design/ticket_pricing.md §6(業界標準作法 — Stripe Checkout /
+    -- Shopify / Eventbrite 都是訂單建立當下凍結價格,即使商家在結帳途中
+    -- 改了價格,客戶付的也是被 quote 當下的價格)。
+    amount_cents BIGINT NULL,
+    currency VARCHAR(3) NULL
 );
 -- 由 000008 重新加入(原本 000004 → 000006):
 CREATE UNIQUE INDEX uq_orders_user_event ON orders (user_id, event_id)
   WHERE status != 'failed';
--- 000010 加入,000011 擴大 predicate:
+-- 000010 加入,000011 + 000013 擴大 predicate:
 CREATE INDEX idx_orders_status_updated_at_partial
     ON orders (status, updated_at)
- WHERE status IN ('charging', 'pending', 'failed');
+ WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed');
 -- 000012 加入 — 驅動 reservation 過期 sweeper(D6):
 CREATE INDEX idx_orders_awaiting_payment_reserved_until
     ON orders (status, reserved_until)
  WHERE status = 'awaiting_payment';
--- 000012 加入 — 給未來 Layer 1 sharding router 做 per-section 可用性檢查。
--- Partial 是因為終止狀態的訂單佔大宗,正在進行中的工作集很小。
-CREATE INDEX idx_orders_section_id_active
-    ON orders (section_id, status)
- WHERE section_id IS NOT NULL
+-- 000014 加入(從 000012 的 idx_orders_section_id_active 改名而來)—
+-- 給未來 D8 multi-ticket-type-per-event router 做 per-ticket-type 可用性
+-- 檢查。Partial 是因為終止狀態的訂單佔大宗,正在進行中的工作集很小。
+CREATE INDEX idx_orders_ticket_type_id_active
+    ON orders (ticket_type_id, status)
+ WHERE ticket_type_id IS NOT NULL
    AND status NOT IN ('paid', 'compensated', 'expired', 'payment_failed', 'confirmed', 'failed');
 
 -- events_outbox: 事件發布的交易型 outbox
@@ -225,7 +239,7 @@ CREATE INDEX idx_order_status_history_occurred
 
 **`orders.event_id` 備註:** 沒有 DB-level FK 約束指向 `events(id)`。Domain 驗證在 application 邊界強制這個關係(`domain.NewOrder` 要求 `eventID` 是真正存在的 event id),整合測試也固定了 partial-unique-index 重複購買的契約;沒有 FK 是刻意決定,並在 migration 000008 內部記錄。
 
-### Migration 歷史(`deploy/postgres/migrations/` 內共 12 個檔案)
+### Migration 歷史(`deploy/postgres/migrations/` 內共 14 個檔案)
 
 | # | 內容 |
 |---|------|
@@ -242,6 +256,7 @@ CREATE INDEX idx_order_status_history_occurred
 | 000011 | **A5 saga watchdog 索引擴大**(PR #49)— 重建 000010 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed')`,讓 saga-watchdog 的 `FindStuckFailed` sweep 跟 reconciler 共用同一個 index plan。 |
 | 000012 | **Phase 3 D1 — Pattern A schema** — 加入 `event_sections` 資料表(multi-section 模型 + Layer 1 sharding 軸);`events.reservation_window_seconds`(可由 admin 調整的 TTL 預設值,900s = 15 分鐘);`orders.section_id`(可空值;新流程會設值,legacy 列維持 NULL);`orders.reserved_until`(每筆訂單的 TTL 事實值);`orders.payment_intent_id`(Stripe-shape,由 POST /orders/:id/pay 設值);部分索引 `idx_orders_awaiting_payment_reserved_until` 給 reservation 過期 sweeper(D6)用;部分索引 `idx_orders_section_id_active` 給未來 Layer 1 sharding router 用。**只動 schema — 對應的 Go state-machine** (`pending → awaiting_payment → paid \| expired \| payment_failed`)**由 D2 接著上**。`section_id` 沒有 DB-level FK,新狀態也沒有 CHECK;跟 000008 / 000010 一樣由應用層強制。 |
 | 000013 | **Phase 3 D2 — 擴大 `idx_orders_status_updated_at_partial`** — 重建 000011 的部分索引,把 predicate 擴大成 `WHERE status IN ('charging', 'pending', 'failed', 'expired', 'payment_failed')`。跟 D2 一起上是因為 D5 / D6 開始產生 `expired` / `payment_failed` 訂單後,saga watchdog 的 `FindStuckFailed` 查詢(現在是 `WHERE status IN ('failed', 'expired', 'payment_failed')`)若沒有對應索引就會退化成 sequential scan。形狀跟 000011 一樣是 DROP + CREATE — Postgres 沒有原地改寫部分索引 predicate 的 DDL;在當前資料量下,non-concurrent CREATE INDEX 的短暫 lock window 可以接受。 |
+| 000014 | **Phase 3 D4.1 — KKTIX 票種對齊 + 價格快照。** 把 `event_sections` 改名為 `event_ticket_types`;在該表加入 `price_cents` BIGINT + `currency` VARCHAR(3) + sale-window 時間戳 + `per_user_limit` + `area_label`;把 `orders.section_id` 改名為 `orders.ticket_type_id`;為 `orders` 加入 `amount_cents` BIGINT + `currency` VARCHAR(3)(可空值,訂票當下由 `domain.NewReservation` 凍結);把 `idx_orders_section_id_active` 改名為 `idx_orders_ticket_type_id_active`。**部署順序:先跑 migration,再部署新 binary** — 詳見 `docs/runbooks/d4.1_rollout.md` 的 operator runbook。沒先 migrate 就部署新 binary 的話,每筆訂票都會悄悄 fail,錯誤訊息是 `column does not exist`。 |
 
 ### Redis
 

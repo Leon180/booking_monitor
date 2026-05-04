@@ -63,11 +63,13 @@ export default function (data) {
     const params = { headers: { 'Content-Type': 'application/json' } };
     const res = http.post(`${BASE_URL}/book`, payload, params);
 
-    // Record error only if status is NOT 200 AND NOT 409
-    businessErrors.add(res.status !== 200 && res.status !== 409);
+    // POST /api/v1/book returns 202 Accepted (PR #47 — Pattern A async
+    // pipeline). 409 = sold out (the path this verify script is
+    // exercising) or duplicate purchase. Anything else is a real error.
+    businessErrors.add(res.status !== 202 && res.status !== 409);
 
     check(res, {
-        'status is 200 or 409': (r) => r.status === 200 || r.status === 409,
+        'status is 202 or 409': (r) => r.status === 202 || r.status === 409,
         'is sold out': (r) => r.status === 409 && r.json('error') === 'sold out',
         'is duplicate': (r) => r.status === 409 && r.json('error') === 'user already bought ticket',
     });

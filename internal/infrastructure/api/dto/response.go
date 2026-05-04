@@ -19,14 +19,32 @@ import (
 // reservedUntil) marshal without the field rather than as RFC3339
 // "0001-01-01T00:00:00Z" — clients can reliably check
 // `if "reserved_until" in response` to branch Pattern A from legacy.
+//
+// D4.1 (KKTIX 票種 alignment): adds `TicketTypeID` + `AmountCents` +
+// `Currency` (the price snapshot frozen at book time). Lets a polling
+// client display "you reserved 2 × VIP Early Bird at US$20.00 each"
+// without separately calling `/pay`. All three use omitempty so
+// legacy / pre-D4.1 rows (where the persistence layer coerces SQL
+// NULL to zero values) emit a clean response shape without
+// suggesting a ticket_type / price exists when it doesn't.
+//
+// `TicketTypeID` is `*uuid.UUID` (not bare `uuid.UUID`) so the JSON
+// encoder can emit nothing for legacy rows — `uuid.UUID` is a fixed-
+// size byte array whose zero value (uuid.Nil) marshals as
+// `"00000000-..."`, which is operationally indistinguishable from a
+// real id. Pointer is the idiomatic Go shape for "this field may
+// not exist."
 type OrderResponse struct {
 	ID            uuid.UUID  `json:"id"`
 	EventID       uuid.UUID  `json:"event_id"`
+	TicketTypeID  *uuid.UUID `json:"ticket_type_id,omitempty"`
 	UserID        int        `json:"user_id"`
 	Quantity      int        `json:"quantity"`
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"created_at"`
 	ReservedUntil *time.Time `json:"reserved_until,omitempty"`
+	AmountCents   int64      `json:"amount_cents,omitempty"`
+	Currency      string     `json:"currency,omitempty"`
 }
 
 // EventResponse is the wire shape of an event in API responses.
