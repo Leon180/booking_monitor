@@ -126,6 +126,38 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
   - Empirical evidence: [`docs/saturation-profile/`](saturation-profile/), [`docs/benchmarks/20260502_132335_compare_c500_vu_scaling/`](benchmarks/)
   - Cache-truth contract this builds on: [Cache-truth architecture entry](#cache-truth-architecture-redis-as-ephemeral-db-as-source-of-truth-2026-05-03)
 
+### KKTIX-aligned ticket type model (Phase 3+, committed) (2026-05-04)
+
+- **Commitment.** This project explicitly aligns its inventory + pricing model to **KKTIX-shape ticket types**, NOT generic e-commerce SKU or Pretix Item/Quota M:N. The unit of inventory + pricing + sale-rules is `event_ticket_type`. Section / area is **optional metadata** on a ticket type (`area_label`), not an independent dimension. Decided 2026-05-04 after comparative research against Pretix (open-source code), Stripe Product/Price, IATA NDC fare class, and KKTIX user-facing observation.
+
+- **What this means concretely.**
+  - Each event has 1..N ticket types. Examples: "VIP A 區早鳥票", "A 區一般票", "學生票C區", "套票(VIP+T恤)"
+  - Ticket type holds: name, price_cents, currency, total / available, sale_starts_at / sale_ends_at, per_user_limit, area_label?
+  - Order references `ticket_type_id` (not `event_id` directly, not `section_id`)
+  - Order snapshots `amount_cents` + `currency` at book time (industry SOP — see [`docs/design/ticket_pricing.md`](design/ticket_pricing.md))
+  - Hold = Order in `awaiting_payment` status (no separate cart table — see [`docs/design/inventory_hold.md`](design/inventory_hold.md))
+
+- **Why this alignment.** KKTIX is the local-market reference (TW interview pool weights it heavily). Their model is also closest to what Eventbrite / Ticketmaster / 大型演唱會 actually use, even if their internal schema isn't public. Pretix's M:N Item/Quota is more academic-correct but more ceremony than our scope needs. Stripe's Product/Price is a generic e-commerce model that doesn't capture sale-window / per-user-limit / area metadata that ticketing needs.
+
+- **Supersedes the section-level entry above** for terminology only — the two-layer sharding plan still applies, just rename `section` → `ticket_type` throughout. The Layer 1 / Layer 2 sharding axis becomes `ticket_type_id` (not `section_id`). Sharding's underlying logic is unchanged.
+
+- **Concrete next steps.**
+  - **D4.1 — Ticket type model + price snapshot** (between D4 and D5 in roadmap): rename `event_sections` → `event_ticket_types`; add price_cents / currency / sale_window / per_user_limit / area_label; orders.amount_cents snapshot at book time
+  - **D8 (revised)** — adds `seats` table referencing `ticket_type_id`, NOT a separate "section" entity. Section becomes `ticket_types.area_label` string metadata
+  - **D9-minimal** benchmarks Pattern A two-step flow with the new ticket_type model
+
+- **Empirical decisions deferred to benchmark.**
+  - Single-table (ticket_type holds price + inventory + area metadata) vs two-table (section + ticket_type independent) → benchmark before deciding. p95 noise floor < 5% threshold for keeping single-table; > 10% threshold for splitting. See [`docs/design/ticket_pricing.md` §5](design/ticket_pricing.md)
+
+- **What this is NOT.**
+  - Not a commitment to copy KKTIX's internal schema (we don't have it)
+  - Not a commitment to ship every KKTIX feature (early bird / 學生票 are schema-supported but business-rule-out-of-scope until D8+)
+  - Not a precommitment to Pretix's M:N Item/Quota — that's marked as future expansion in [`docs/design/ticket_pricing.md` §8](design/ticket_pricing.md), trigger condition documented
+
+- **Related design docs.**
+  - [`docs/design/ticket_pricing.md`](design/ticket_pricing.md) — pricing + ticket type schema research
+  - [`docs/design/inventory_hold.md`](design/inventory_hold.md) — order = hold pattern decision
+
 ---
 
 ## Testing
