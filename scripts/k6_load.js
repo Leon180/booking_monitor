@@ -29,11 +29,16 @@ export const options = {
 const BASE_URL = 'http://app:8080/api/v1';
 
 export function setup() {
-    // Create a new event for this test run
+    // Create a new event for this test run.
+    // D4.1: POST /api/v1/events now requires `price_cents` + `currency`
+    // for the auto-provisioned default ticket_type; iteration body
+    // POSTs against `ticket_type_id` (KKTIX 票種), NOT `event_id`.
     const eventName = `K6 Load Test Event ${Date.now()}`;
     const payload = JSON.stringify({
         name: eventName,
         total_tickets: 50000, // Enough tickets for the test duration
+        price_cents: 2000,
+        currency: 'usd',
     });
 
     const params = {
@@ -49,18 +54,22 @@ export function setup() {
         throw new Error(`Setup failed: ${res.status} ${res.body}`);
     }
 
+    const body = res.json();
+    if (!body.ticket_types || body.ticket_types.length === 0) {
+        throw new Error(`Setup failed: response missing ticket_types[] — D4.1 contract regression? body=${res.body}`);
+    }
+
     check(res, {
         'setup event created': (r) => r.status === 201,
     });
 
-    const event = res.json();
-    return { eventID: event.id };
+    return { ticketTypeID: body.ticket_types[0].id };
 }
 
 export default function (data) {
     const payload = JSON.stringify({
         user_id: randomIntBetween(1, 10000),
-        event_id: data.eventID,
+        ticket_type_id: data.ticketTypeID,
         quantity: randomIntBetween(1, 5),
     });
 

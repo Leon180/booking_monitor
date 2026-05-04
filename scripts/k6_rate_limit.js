@@ -20,15 +20,21 @@ export const options = {
 // capacity benchmarks.
 const NGINX_URL = 'http://booking_nginx:80/api/v1';
 
-// setup creates a fresh event and returns its UUID. Identical pattern
-// to k6_load.js / k6_comparison.js / k6_verify_soldout.js. Required
-// post-PR-34 — event_id is now a UUID v7 string, hardcoded `1` no
-// longer parses on the server.
+// setup creates a fresh event and returns the auto-provisioned default
+// ticket_type's UUID. Identical pattern to k6_load.js /
+// k6_comparison.js / k6_verify_soldout.js.
+//
+// Post-PR-34 — UUIDs throughout the wire (no hardcoded int ids).
+// D4.1 — POST /api/v1/events takes price_cents + currency for the
+// default ticket_type; iteration body uses ticket_type_id (NOT
+// event_id, KKTIX 票種 model).
 export function setup() {
     const eventName = `K6 Rate Limit Event ${Date.now()}`;
     const payload = JSON.stringify({
         name: eventName,
         total_tickets: 100000, // High enough that no rate-limited request gets a "sold out" by accident.
+        price_cents: 2000,
+        currency: 'usd',
     });
     const params = { headers: { 'Content-Type': 'application/json' } };
 
@@ -38,17 +44,21 @@ export function setup() {
         console.error(`Setup failed: ${res.status} ${res.body}`);
         throw new Error(`Setup failed: ${res.status} ${res.body}`);
     }
+    const body = res.json();
+    if (!body.ticket_types || body.ticket_types.length === 0) {
+        throw new Error(`Setup failed: response missing ticket_types[] — D4.1 contract regression? body=${res.body}`);
+    }
     check(res, { 'setup event created': (r) => r.status === 201 });
 
-    const event = res.json();
-    return { eventID: event.id };
+    return { ticketTypeID: body.ticket_types[0].id };
 }
 
 export default function (data) {
-    // Generate a random payload — event_id comes from setup()'s UUID.
+    // Generate a random payload — ticket_type_id comes from setup()'s
+    // ticket_types[0].id.
     const payload = JSON.stringify({
         user_id: Math.floor(Math.random() * 10000) + 1,
-        event_id: data.eventID,
+        ticket_type_id: data.ticketTypeID,
         quantity: 1,
     });
 
