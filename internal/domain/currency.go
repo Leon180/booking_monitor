@@ -32,7 +32,11 @@ func isValidCurrencyCode(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		// De Morgan'd form of `!((c in 'a'..'z') || (c in 'A'..'Z'))`
+		// — staticcheck QF1001 prefers the positive shape because the
+		// outer `!` over a compound `||` is harder to scan than two
+		// ranged "outside" checks ANDed together.
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			return false
 		}
 	}
