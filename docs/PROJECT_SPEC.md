@@ -277,10 +277,10 @@ Group IDs and topic names are all sourced from `KafkaConfig` (`KAFKA_PAYMENT_GRO
 ## 5. API Reference
 
 ### POST /api/v1/book
-Reserve tickets for an event (D3 — Pattern A reservation flow).
+Reserve tickets for an event (D3 — Pattern A reservation flow). The customer-facing input is a `ticket_type_id` (KKTIX 票種) — D4.1 moved pricing + inventory ownership onto the ticket_type entity, so the booking flow no longer takes `event_id` directly. Clients discover available ticket_types from the `POST /api/v1/events` response (`ticket_types[]`) or future `GET /api/v1/events/:id` endpoint.
 ```json
 // Request
-{ "user_id": 123, "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
+{ "user_id": 123, "ticket_type_id": "019dd493-47ae-79b1-b954-8e0f14a6a482", "quantity": 1 }
 // Headers: Idempotency-Key: <ASCII-printable, <= 128 chars> (optional)
 
 // 202 Accepted — Redis reservation succeeded; client must complete payment before reserved_until
@@ -359,7 +359,7 @@ The client uses `client_secret` with Stripe Elements (or our mock equivalent) to
 
 **Idempotent at the gateway boundary.** Repeat POSTs to `/pay` with the same `order_id` return the SAME `PaymentIntent` — the gateway treats `order_id` as the idempotency key (Stripe's `Idempotency-Key` header convention; our mock implements the same via `sync.Map`). Clients don't need to cache or retry-guard themselves. The application layer therefore skips the N4-style `Idempotency-Key` middleware on this route — adding it would just be ceremony.
 
-**Pricing today.** D4 hardcodes `amount_cents = quantity * BOOKING_DEFAULT_TICKET_PRICE_CENTS` (default 2000, US$20) and `currency = BOOKING_DEFAULT_CURRENCY` (default "usd"). Per-event/per-section pricing lands in D8 with admin section CRUD — the `event_sections` table from migration 000012 already has the schema room.
+**Pricing (D4.1).** Price + currency are read off the order via `order.AmountCents()` / `order.Currency()` — the snapshot frozen at book time by `domain.NewReservation`. `BookingService.BookTicket` looks up the chosen `ticket_type` (from `event_ticket_types`), computes `amount_cents = priceCents × quantity`, and persists both onto `orders.amount_cents` / `orders.currency`. The customer pays exactly what they were quoted, even if the merchant edits the ticket_type's price mid-checkout (industry SOP — Stripe Checkout / Shopify / Eventbrite all freeze price at order create time). The pre-D4.1 global defaults `BOOKING_DEFAULT_TICKET_PRICE_CENTS` + `BOOKING_DEFAULT_CURRENCY` are removed; a startup Stderr warning fires if they're still set in the deployment env (see `config.go::checkDeprecatedEnv`). See [docs/design/ticket_pricing.md](design/ticket_pricing.md) for the schema-level rationale.
 
 **Race-safety.** The persist step uses an SQL predicate `WHERE status = 'awaiting_payment' AND (payment_intent_id IS NULL OR payment_intent_id = $2)`. If the D5 webhook flips the order to `paid` between our `GetByID` and `UPDATE`, the predicate 0-rows-affected → 404 surfaces back; the `paid` row is preserved. Same shape closes the D6 sweeper race (`expired`).
 
@@ -391,10 +391,38 @@ Paginated order history.
 ```
 
 ### POST /api/v1/events
-Create a new event.
+Create a new event AND its default ticket_type atomically. D4.1 (KKTIX 票種 alignment): the request now requires `price_cents` + `currency` for the auto-provisioned default ticket_type; the response surfaces the new ticket_type's id under `ticket_types[]` so the client can immediately POST `/book` against it.
+
 ```json
-{ "name": "Concert", "total_tickets": 1000 }
+// Request
+{ "name": "Concert", "total_tickets": 1000, "price_cents": 2000, "currency": "usd" }
+
+// 201 Created
+{
+  "id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+  "name": "Concert",
+  "total_tickets": 1000,
+  "available_tickets": 1000,
+  "version": 0,
+  "ticket_types": [
+    {
+      "id": "019dd493-47ae-79b1-b954-aaaaaaaaaaaa",
+      "event_id": "019dd493-47ae-79b1-b954-8e0f14a6a482",
+      "name": "Default",
+      "price_cents": 2000,
+      "currency": "usd",
+      "total_tickets": 1000,
+      "available_tickets": 1000
+    }
+  ]
+}
+// 400 Bad Request — invariant violation (empty name, non-positive price/total, non-3-letter currency)
+{ "error": "invalid event parameters" }
+// 409 Conflict — duplicate (event_id, ticket_type.name) — relevant once D8 lets admins POST multiple ticket_types
+{ "error": "ticket type name already exists for this event" }
 ```
+
+The event + default ticket_type are inserted in one Postgres transaction via the UnitOfWork (`event.Service.CreateEvent`); the Redis `SetInventory` happens after commit. If Redis fails, a compensation UoW deletes BOTH rows so a retry can re-create cleanly. Currency is normalised to lowercase by the domain factory (Stripe / KKTIX convention) — `"USD"` round-trips as `"usd"` in the response. D8 will replace the single-default-ticket-type shape with a `ticket_types: [{name, price_cents, total, ...}]` array so admins can specify multiple 票種 (VIP, 一般, 學生) at create time.
 
 ### GET /api/v1/events/:id
 **Stub.** Currently returns `{"message": "View event", "event_id": "<uuid>"}` and increments the `page_views_total` metric for conversion-funnel tracking. Does NOT load event details from `EventRepository`. The endpoint exists today as the page-view tracking surface; full event-detail loading is tracked separately and will land when the demo (Phase 3) needs it. README and tests intentionally pin this stub behavior so a future implementation has to deliberately update both.
