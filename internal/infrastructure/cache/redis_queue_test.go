@@ -88,10 +88,12 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 	// 2. Add a message and claim it (simulate pending). event_id is a
 	// UUID string post-PR-34; user_id stays int (external reference).
 	// reserved_until added in D3 — Pattern A reservation TTL field that
-	// parseMessage now requires. The value just needs to be a positive
-	// unix timestamp for parseMessage to accept it.
+	// parseMessage requires. ticket_type_id / amount_cents / currency
+	// added in D4.1 — KKTIX 票種 + price snapshot, all parseMessage now
+	// rejects on absence (the wire format must mirror deduct.lua exactly).
 	eventUUID := uuid.New().String()
 	orderUUID := uuid.New().String()
+	ticketTypeUUID := uuid.New().String()
 	id, _ := rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
@@ -100,6 +102,9 @@ func TestRedisOrderQueue_Subscribe_PELRecovery(t *testing.T) {
 			"event_id":       eventUUID,
 			"quantity":       "1",
 			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
+			"ticket_type_id": ticketTypeUUID,
+			"amount_cents":   "2000",
+			"currency":       "usd",
 		},
 	}).Result()
 
@@ -204,7 +209,11 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 	rdb.XGroupCreateMkStream(ctx, "orders:stream", "orders:group", "$")
 
 	// Push a structurally-valid stream entry (parseMessage will succeed)
-	// — invariant validation happens later, inside the handler.
+	// — invariant validation happens later, inside the handler. D4.1 added
+	// ticket_type_id / amount_cents / currency to the wire format; all
+	// three are required by parseMessage so the entry would otherwise
+	// fail at the queue boundary (a different code path than the one
+	// this test exercises).
 	rdb.XAdd(ctx, &redis.XAddArgs{
 		Stream: "orders:stream",
 		Values: map[string]interface{}{
@@ -213,6 +222,9 @@ func TestRedisOrderQueue_Subscribe_MalformedFastPath(t *testing.T) {
 			"event_id":       uuid.New().String(),
 			"quantity":       "1",
 			"reserved_until": fmt.Sprintf("%d", time.Now().Add(15*time.Minute).Unix()),
+			"ticket_type_id": uuid.New().String(),
+			"amount_cents":   "2000",
+			"currency":       "usd",
 		},
 	})
 
@@ -248,7 +260,7 @@ type fakeInventoryRevert struct{ reverted bool }
 func (f *fakeInventoryRevert) SetInventory(_ context.Context, _ uuid.UUID, _ int) error {
 	panic("SetInventory not expected in this test")
 }
-func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ int, _ int, _ time.Time) (bool, error) {
+func (f *fakeInventoryRevert) DeductInventory(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ int, _ int, _ time.Time, _ int64, _ string) (bool, error) {
 	panic("DeductInventory not expected in this test")
 }
 func (f *fakeInventoryRevert) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {

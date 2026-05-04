@@ -65,7 +65,10 @@ func TestBookingService_BookTicket(t *testing.T) {
 				// computed inside the service from time.Now(); the relevant
 				// assertion is that DeductInventory is called with the
 				// validated user/event/quantity tuple.
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 2, gomock.Any()).Return(true, nil)
+				// D4.1: DeductInventory now takes (ctx, orderID, eventID, ticketTypeID, userID, qty, reservedUntil, amountCents, currency).
+				// Match positional invariants (eventID, ticketTypeID, userID, qty)
+				// + amountCents = priceCents × qty = 2000 × 2; currency = "usd".
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, ticketTypeID, 1, 2, gomock.Any(), int64(4000), "usd").Return(true, nil)
 			},
 			expectedError: nil,
 		},
@@ -77,7 +80,9 @@ func TestBookingService_BookTicket(t *testing.T) {
 			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
 				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
 				// Redis returns false (Sold Out)
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 5, gomock.Any()).Return(false, nil)
+				// D4.1: matches the same 9-arg shape as the success path.
+				// quantity=5 → amountCents = 2000 × 5 = 10000.
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, ticketTypeID, 1, 5, gomock.Any(), int64(10000), "usd").Return(false, nil)
 			},
 			expectedError: domain.ErrSoldOut,
 		},
@@ -91,7 +96,9 @@ func TestBookingService_BookTicket(t *testing.T) {
 			quantity:     1,
 			mockSetup: func(o *mocks.MockOrderRepository, ttr *mocks.MockTicketTypeRepository, i *mocks.MockInventoryRepository) {
 				ttr.EXPECT().GetByID(gomock.Any(), ticketTypeID).Return(tt, nil)
-				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, 1, 1, gomock.Any()).Return(false, errors.New("connection failed"))
+				// D4.1: matches the same 9-arg shape as the success path.
+				// quantity=1 → amountCents = 2000 × 1 = 2000.
+				i.EXPECT().DeductInventory(gomock.Any(), gomock.Any(), eventID, ticketTypeID, 1, 1, gomock.Any(), int64(2000), "usd").Return(false, errors.New("connection failed"))
 			},
 			expectedError: errors.New("redis inventory error: connection failed"),
 		},

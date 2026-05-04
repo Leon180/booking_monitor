@@ -179,9 +179,22 @@ func (s *service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.
 
 	// 5. Atomic Deduct from Redis (hot path — Redis is the load-
 	//    shedding gate; sold-out attempts never touch DB). reservedUntil
-	//    rides along inside the same atomic XADD so the worker
-	//    receives a fully-formed reservation in one stream message.
-	success, err := s.inventoryRepo.DeductInventory(ctx, order.ID(), order.EventID(), order.UserID(), order.Quantity(), reservedUntil)
+	//    + ticketTypeID + amountCents + currency all ride along inside
+	//    the same atomic XADD so the worker receives a fully-formed
+	//    reservation in one stream message — no second Redis trip / DB
+	//    lookup at the worker boundary, and no race against admin price
+	//    edits between book and worker-process time.
+	success, err := s.inventoryRepo.DeductInventory(
+		ctx,
+		order.ID(),
+		order.EventID(),
+		order.TicketTypeID(),
+		order.UserID(),
+		order.Quantity(),
+		reservedUntil,
+		order.AmountCents(),
+		order.Currency(),
+	)
 	if err != nil {
 		return domain.Order{}, fmt.Errorf("redis inventory error: %w", err)
 	}

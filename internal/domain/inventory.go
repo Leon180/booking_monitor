@@ -17,7 +17,8 @@ type InventoryRepository interface {
 
 	// DeductInventory atomically decrements the inventory count and,
 	// on success, publishes the booking onto orders:stream with the
-	// caller-provided orderID + reservedUntil embedded in the payload.
+	// caller-provided orderID + reservedUntil + ticket_type/price
+	// snapshot embedded in the payload.
 	//
 	// orderID flows end-to-end (handler → Lua → stream → worker
 	// `domain.NewReservation` → DB) so the id the client receives at
@@ -39,11 +40,30 @@ type InventoryRepository interface {
 	// commitment; the D6 expiry sweeper later compares
 	// `WHERE reserved_until < NOW()` against this column.
 	//
+	// ticketTypeID + amountCents + currency are the D4.1 KKTIX-aligned
+	// snapshot. BookingService looks up the chosen ticket_type, derives
+	// (eventID, priceCents, currency) from it, and computes
+	// amountCents = priceCents × quantity. The values ride along on
+	// the same atomic XADD so a Pattern A reservation is fully
+	// described by one stream message (no second Redis trip / DB
+	// lookup at the worker boundary). Currency is already normalised
+	// to lowercase by the domain factory.
+	//
 	// Returns true if successful, false if insufficient inventory
 	// (ErrSoldOut). On false, NO stream message is produced — the
 	// orderID is silently discarded so the client gets a sold_out
 	// response with no order intent persisted.
-	DeductInventory(ctx context.Context, orderID uuid.UUID, eventID uuid.UUID, userID int, count int, reservedUntil time.Time) (bool, error)
+	DeductInventory(
+		ctx context.Context,
+		orderID uuid.UUID,
+		eventID uuid.UUID,
+		ticketTypeID uuid.UUID,
+		userID int,
+		count int,
+		reservedUntil time.Time,
+		amountCents int64,
+		currency string,
+	) (bool, error)
 
 	// RevertInventory restores inventory count.
 	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
