@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/application/outbox"
 	"booking_monitor/internal/application/payment"
 	"booking_monitor/internal/application/saga"
@@ -112,6 +113,12 @@ func runServer(_ *cobra.Command, _ []string) {
 		// saga/ imports `application` for OrderFailedEvent + UnitOfWork
 		// + Repositories. CP2.6b moved this from application/module.go.
 		fx.Provide(saga.NewCompensator),
+		// Event service wiring — D4.1 moved this from
+		// application/module.go because event.Service now imports
+		// `application` for the UoW interface (CreateEvent atomically
+		// creates an event + a default ticket_type, which requires
+		// cross-aggregate transactional coordination).
+		fx.Provide(event.NewService),
 		// Start the outbox relay (with tracing) as a background
 		// goroutine managed by the Fx lifecycle. The run-context is
 		// derived from context.Background() rather than a

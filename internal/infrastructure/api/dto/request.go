@@ -30,9 +30,28 @@ type BookingRequest struct {
 }
 
 // CreateEventRequest is the wire shape of POST /api/v1/events.
+//
+// D4.1 (KKTIX 票種 alignment): adds `price_cents` + `currency`. The
+// event service auto-creates a single default ticket_type carrying
+// these as the price snapshot. D8 will replace this with a
+// `ticket_types: [{name, price_cents, total, ...}]` array so admins
+// can specify multiple 票種 (VIP, 一般, 學生) at create time; for D4.1
+// the convenience-default of one ticket_type per event keeps the
+// existing API contract one POST.
+//
+// Validation:
+//   - `price_cents` must be ≥ 1 (free / promotional 0-price tickets
+//     are out of scope; future `discount_cents` modifier handles
+//     that case).
+//   - `currency` must be exactly 3 characters at the binding stage.
+//     Domain-level NormalizeCurrency lowercases + isValidCurrencyCode
+//     does the ASCII-letter shape check; the gateway (Stripe)
+//     enforces ISO 4217 membership at charge time.
 type CreateEventRequest struct {
 	Name         string `json:"name" binding:"required"`
 	TotalTickets int    `json:"total_tickets" binding:"required,min=1"`
+	PriceCents   int64  `json:"price_cents" binding:"required,min=1"`
+	Currency     string `json:"currency" binding:"required,len=3"`
 }
 
 // ListBookingsQueryParams binds the query string of GET /api/v1/history.

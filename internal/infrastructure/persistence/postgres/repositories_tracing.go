@@ -377,6 +377,19 @@ func (d *ticketTypeRepositoryTracingDecorator) GetByID(ctx context.Context, id u
 	return t, err
 }
 
+func (d *ticketTypeRepositoryTracingDecorator) Delete(ctx context.Context, id uuid.UUID) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "DeleteTicketType", trace.WithAttributes(
+		attribute.String("ticket_type_id", id.String()),
+	))
+	defer span.End()
+
+	err := d.next.Delete(ctx, id)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return err
+}
+
 func (d *ticketTypeRepositoryTracingDecorator) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "ListTicketTypesByEventID", trace.WithAttributes(
 		attribute.String("event_id", eventID.String()),

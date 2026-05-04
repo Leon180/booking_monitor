@@ -12,6 +12,7 @@ import (
 
 	"booking_monitor/internal/application"
 	bookingapp "booking_monitor/internal/application/booking"
+	appevent "booking_monitor/internal/application/event"
 	paymentapp "booking_monitor/internal/application/payment"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/booking"
@@ -84,14 +85,18 @@ func (s *stubBookingService) GetBookingHistory(ctx context.Context, page, size i
 // future event.Service interface expansion — the compile error is the
 // useful signal.
 type stubEventService struct {
-	createFn func(ctx context.Context, name string, totalTickets int) (domain.Event, error)
+	createFn func(ctx context.Context, name string, totalTickets int, priceCents int64, currency string) (appevent.CreateEventResult, error)
 }
 
-func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTickets int) (domain.Event, error) {
+// Compile-time guard against signature drift — same defensive pattern
+// as `var _ bookingapp.Service = (*stubBookingService)(nil)`.
+var _ appevent.Service = (*stubEventService)(nil)
+
+func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTickets int, priceCents int64, currency string) (appevent.CreateEventResult, error) {
 	if s.createFn == nil {
-		return domain.Event{}, errors.New("CreateEvent called without createFn")
+		return appevent.CreateEventResult{}, errors.New("CreateEvent called without createFn")
 	}
-	return s.createFn(ctx, name, totalTickets)
+	return s.createFn(ctx, name, totalTickets, priceCents, currency)
 }
 
 // stubPaymentService is the D4 counterpart to stubBookingService /
@@ -390,18 +395,25 @@ func TestHandleCreateEvent_HappyPath(t *testing.T) {
 	t.Parallel()
 
 	wantID := uuid.New()
+	wantTTID := uuid.New()
 	created := domain.ReconstructEvent(wantID, "Concert", 100, 100, 0)
+	createdTT := domain.ReconstructTicketType(
+		wantTTID, wantID, "Default", 2000, "usd",
+		100, 100, nil, nil, nil, "", 0,
+	)
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, name string, total int) (domain.Event, error) {
+		createFn: func(_ context.Context, name string, total int, priceCents int64, currency string) (appevent.CreateEventResult, error) {
 			assert.Equal(t, "Concert", name)
 			assert.Equal(t, 100, total)
-			return created, nil
+			assert.Equal(t, int64(2000), priceCents, "handler must thread price_cents through to the service verbatim")
+			assert.Equal(t, "usd", currency, "handler must thread currency through to the service verbatim")
+			return appevent.CreateEventResult{Event: created, TicketTypes: []domain.TicketType{createdTT}}, nil
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
 
-	body := `{"name":"Concert","total_tickets":100}`
+	body := `{"name":"Concert","total_tickets":100,"price_cents":2000,"currency":"usd"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -415,6 +427,12 @@ func TestHandleCreateEvent_HappyPath(t *testing.T) {
 	assert.Equal(t, 100, got.TotalTickets,
 		"DTO must echo total_tickets — guards against a name/totalTickets arg-swap regression at the service call site")
 	assert.Equal(t, 100, got.AvailableTickets, "fresh event must have AvailableTickets == TotalTickets")
+	// D4.1: response must surface the auto-created ticket_type so the
+	// client can immediately POST /book with ticket_types[0].id.
+	require.Len(t, got.TicketTypes, 1, "POST /events must include the default ticket_type in the response so clients have an id to book against")
+	assert.Equal(t, wantTTID, got.TicketTypes[0].ID)
+	assert.Equal(t, int64(2000), got.TicketTypes[0].PriceCents)
+	assert.Equal(t, "usd", got.TicketTypes[0].Currency)
 }
 
 // TestHandleCreateEvent_InvalidBody: malformed JSON → 400 from the
@@ -424,9 +442,9 @@ func TestHandleCreateEvent_InvalidBody(t *testing.T) {
 
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
+		createFn: func(_ context.Context, _ string, _ int, _ int64, _ string) (appevent.CreateEventResult, error) {
 			t.Fatal("CreateEvent must not be called when the body fails to bind")
-			return domain.Event{}, nil
+			return appevent.CreateEventResult{}, nil
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
@@ -449,13 +467,13 @@ func TestHandleCreateEvent_ServiceError(t *testing.T) {
 
 	bookSvc := &stubBookingService{}
 	evt := &stubEventService{
-		createFn: func(_ context.Context, _ string, _ int) (domain.Event, error) {
-			return domain.Event{}, errors.New("postgres: relation \"events\" does not exist")
+		createFn: func(_ context.Context, _ string, _ int, _ int64, _ string) (appevent.CreateEventResult, error) {
+			return appevent.CreateEventResult{}, errors.New("postgres: relation \"events\" does not exist")
 		},
 	}
 	r := newRouterWithEvents(bookSvc, evt)
 
-	body := `{"name":"Concert","total_tickets":100}`
+	body := `{"name":"Concert","total_tickets":100,"price_cents":2000,"currency":"usd"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

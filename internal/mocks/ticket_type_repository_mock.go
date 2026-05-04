@@ -57,6 +57,20 @@ func (mr *MockTicketTypeRepositoryMockRecorder) Create(ctx, t any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockTicketTypeRepository)(nil).Create), ctx, t)
 }
 
+// Delete mocks base method.
+func (m *MockTicketTypeRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Delete", ctx, id)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Delete indicates an expected call of Delete.
+func (mr *MockTicketTypeRepositoryMockRecorder) Delete(ctx, id any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Delete", reflect.TypeOf((*MockTicketTypeRepository)(nil).Delete), ctx, id)
+}
+
 // GetByID mocks base method.
 func (m *MockTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.TicketType, error) {
 	m.ctrl.T.Helper()

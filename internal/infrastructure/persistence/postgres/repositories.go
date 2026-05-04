@@ -733,6 +733,17 @@ func (r *postgresTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID
 	return row.toDomain(), nil
 }
 
+// Delete removes a ticket type by id. Idempotent (DELETE on a missing
+// row returns rowsAffected=0, which we don't surface as an error —
+// the compensation path may run after an earlier partial delete).
+// See domain.TicketTypeRepository.Delete doc for the rationale.
+func (r *postgresTicketTypeRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	if _, err := r.exec.ExecContext(ctx, "DELETE FROM event_ticket_types WHERE id = $1", id); err != nil {
+		return fmt.Errorf("ticketTypeRepository.Delete id=%s: %w", id, err)
+	}
+	return nil
+}
+
 // ListByEventID returns all ticket types belonging to an event,
 // ordered by id (UUIDv7 → time-prefixed → insertion order). Empty
 // result is a nil slice, not an error — events with no ticket types

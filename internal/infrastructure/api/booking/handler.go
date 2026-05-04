@@ -270,19 +270,21 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 		return
 	}
 
-	event, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets)
+	result, err := h.eventService.CreateEvent(ctx, req.Name, req.TotalTickets, req.PriceCents, req.Currency)
 	if err != nil {
 		log.Error(ctx, "CreateEvent failed",
 			tag.Error(err),
 			log.String("name", req.Name),
 			log.Int("total_tickets", req.TotalTickets),
+			log.Int64("price_cents", req.PriceCents),
+			log.String("currency", req.Currency),
 		)
 		status, public := mapError(err)
 		c.JSON(status, dto.ErrorResponse{Error: public})
 		return
 	}
 
-	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(event))
+	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(result.Event, result.TicketTypes))
 }
 
 func (h *bookingHandler) HandleViewEvent(c *gin.Context) {

@@ -30,12 +30,46 @@ type OrderResponse struct {
 }
 
 // EventResponse is the wire shape of an event in API responses.
+//
+// D4.1: adds `ticket_types[]`. Populated by `POST /api/v1/events`
+// (creates the event + one default ticket_type) and any future
+// `GET /api/v1/events/:id` that loads the event detail. Single-element
+// for D4.1 default; multi-element after D8 multi-ticket-type-per-event.
+// Empty slice (NOT omitted) when an event has no ticket types yet —
+// makes "this event isn't bookable" operationally observable in the
+// JSON without a separate flag field.
 type EventResponse struct {
-	ID               uuid.UUID `json:"id"`
-	Name             string    `json:"name"`
-	TotalTickets     int       `json:"total_tickets"`
-	AvailableTickets int       `json:"available_tickets"`
-	Version          int       `json:"version"`
+	ID               uuid.UUID            `json:"id"`
+	Name             string               `json:"name"`
+	TotalTickets     int                  `json:"total_tickets"`
+	AvailableTickets int                  `json:"available_tickets"`
+	Version          int                  `json:"version"`
+	TicketTypes      []TicketTypeResponse `json:"ticket_types"`
+}
+
+// TicketTypeResponse is the wire shape of a ticket_type (KKTIX 票種)
+// nested under an event. Mirrors `domain.TicketType` field layout but
+// exposes only the fields the client cares about — `version` is
+// internal optimistic-concurrency state, not surfaced.
+//
+// Optional fields (`sale_starts_at`, `sale_ends_at`, `per_user_limit`,
+// `area_label`) use omitempty so a default ticket_type with no sale
+// window / no limit / no area emits a clean `{id, name, price_cents,
+// currency, total_tickets, available_tickets}` object — clients can
+// reliably check `if "sale_starts_at" in tt` to know whether the
+// operator set the field, distinct from "set but expired."
+type TicketTypeResponse struct {
+	ID               uuid.UUID  `json:"id"`
+	EventID          uuid.UUID  `json:"event_id"`
+	Name             string     `json:"name"`
+	PriceCents       int64      `json:"price_cents"`
+	Currency         string     `json:"currency"`
+	TotalTickets     int        `json:"total_tickets"`
+	AvailableTickets int        `json:"available_tickets"`
+	SaleStartsAt     *time.Time `json:"sale_starts_at,omitempty"`
+	SaleEndsAt       *time.Time `json:"sale_ends_at,omitempty"`
+	PerUserLimit     *int       `json:"per_user_limit,omitempty"`
+	AreaLabel        string     `json:"area_label,omitempty"`
 }
 
 // ListBookingsResponse is the wire shape of GET /api/v1/history.

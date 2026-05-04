@@ -243,4 +243,20 @@ type TicketTypeRepository interface {
 	// ordered by created_at ASC. D4.1 typically returns one row;
 	// D8 expansion will return many.
 	ListByEventID(ctx context.Context, eventID uuid.UUID) ([]TicketType, error)
+
+	// Delete removes a ticket type by id. Used as the compensation leg
+	// of `event.Service.CreateEvent` when the event + ticket_type
+	// transaction commits but the subsequent Redis SetInventory fails
+	// — the orphaned ticket_type row must be cleaned up alongside the
+	// event row (no FK CASCADE in the schema; D1 chose not to add a
+	// cross-aggregate FK to avoid OutboxRelay locking surprises).
+	//
+	// Returns:
+	//   - nil               row deleted (or already absent — idempotent)
+	//   - other errors      wrapped DB failure
+	//
+	// Idempotent: deleting a non-existent id is a no-op (rowsAffected=0
+	// is not surfaced as an error). The compensation path may run after
+	// a partial earlier compensation already deleted the row.
+	Delete(ctx context.Context, id uuid.UUID) error
 }

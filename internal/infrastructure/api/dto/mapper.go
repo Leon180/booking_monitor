@@ -29,15 +29,43 @@ func OrderResponseFromDomain(o domain.Order) OrderResponse {
 	return resp
 }
 
-// EventResponseFromDomain converts a domain.Event into the API
-// response DTO.
-func EventResponseFromDomain(e domain.Event) EventResponse {
+// EventResponseFromDomain converts a domain.Event + its ticket types
+// into the API response DTO. D4.1 — the `ticket_types[]` slice is
+// always materialised (Make over `nil`) so the JSON shape is stable
+// even for an event with zero ticket_types: clients can rely on the
+// key being present and iterate without nil-checks.
+func EventResponseFromDomain(e domain.Event, ticketTypes []domain.TicketType) EventResponse {
+	tts := make([]TicketTypeResponse, len(ticketTypes))
+	for i, t := range ticketTypes {
+		tts[i] = TicketTypeResponseFromDomain(t)
+	}
 	return EventResponse{
 		ID:               e.ID(),
 		Name:             e.Name(),
 		TotalTickets:     e.TotalTickets(),
 		AvailableTickets: e.AvailableTickets(),
 		Version:          e.Version(),
+		TicketTypes:      tts,
+	}
+}
+
+// TicketTypeResponseFromDomain converts a single domain.TicketType
+// into the wire shape. Optional fields (sale window / per-user limit
+// / area_label) emit nil / empty-string so omitempty hides them in
+// the rendered JSON when unset.
+func TicketTypeResponseFromDomain(t domain.TicketType) TicketTypeResponse {
+	return TicketTypeResponse{
+		ID:               t.ID(),
+		EventID:          t.EventID(),
+		Name:             t.Name(),
+		PriceCents:       t.PriceCents(),
+		Currency:         t.Currency(),
+		TotalTickets:     t.TotalTickets(),
+		AvailableTickets: t.AvailableTickets(),
+		SaleStartsAt:     t.SaleStartsAt(),
+		SaleEndsAt:       t.SaleEndsAt(),
+		PerUserLimit:     t.PerUserLimit(),
+		AreaLabel:        t.AreaLabel(),
 	}
 }
 
