@@ -13,9 +13,10 @@ import (
 // consistency boundary, and joining several aggregates in a single tx
 // is an application-level concession (e.g. transactional outbox).
 type Repositories struct {
-	Order  domain.OrderRepository
-	Event  domain.EventRepository
-	Outbox domain.OutboxRepository
+	Order      domain.OrderRepository
+	Event      domain.EventRepository
+	Outbox     domain.OutboxRepository
+	TicketType domain.TicketTypeRepository
 }
 
 //go:generate mockgen -source=uow.go -destination=../mocks/uow_mock.go -package=mocks

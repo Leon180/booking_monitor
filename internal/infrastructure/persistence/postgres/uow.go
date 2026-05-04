@@ -23,12 +23,13 @@ import (
 // this struct satisfies that interface — DIP, exactly as Clean
 // Architecture prescribes.
 type PostgresUnitOfWork struct {
-	db         *sql.DB
-	orderRepo  *postgresOrderRepository
-	eventRepo  *postgresEventRepository
-	outboxRepo *postgresOutboxRepository
-	logger     *mlog.Logger
-	metrics    application.DBMetrics
+	db             *sql.DB
+	orderRepo      *postgresOrderRepository
+	eventRepo      *postgresEventRepository
+	outboxRepo     *postgresOutboxRepository
+	ticketTypeRepo *postgresTicketTypeRepository
+	logger         *mlog.Logger
+	metrics        application.DBMetrics
 }
 
 func NewPostgresUnitOfWork(
@@ -36,16 +37,18 @@ func NewPostgresUnitOfWork(
 	orderRepo *postgresOrderRepository,
 	eventRepo *postgresEventRepository,
 	outboxRepo *postgresOutboxRepository,
+	ticketTypeRepo *postgresTicketTypeRepository,
 	logger *mlog.Logger,
 	metrics application.DBMetrics,
 ) application.UnitOfWork {
 	return &PostgresUnitOfWork{
-		db:         db,
-		orderRepo:  orderRepo,
-		eventRepo:  eventRepo,
-		outboxRepo: outboxRepo,
-		logger:     logger.With(mlog.String("component", "unit_of_work")),
-		metrics:    metrics,
+		db:             db,
+		orderRepo:      orderRepo,
+		eventRepo:      eventRepo,
+		outboxRepo:     outboxRepo,
+		ticketTypeRepo: ticketTypeRepo,
+		logger:         logger.With(mlog.String("component", "unit_of_work")),
+		metrics:        metrics,
 	}
 }
 
@@ -70,9 +73,10 @@ func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(repos *application.
 	}
 
 	repos := &application.Repositories{
-		Order:  u.orderRepo.WithTx(tx),
-		Event:  u.eventRepo.WithTx(tx),
-		Outbox: u.outboxRepo.WithTx(tx),
+		Order:      u.orderRepo.WithTx(tx),
+		Event:      u.eventRepo.WithTx(tx),
+		Outbox:     u.outboxRepo.WithTx(tx),
+		TicketType: u.ticketTypeRepo.WithTx(tx),
 	}
 
 	if err := fn(repos); err != nil {

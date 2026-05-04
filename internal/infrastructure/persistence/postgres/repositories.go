@@ -677,3 +677,73 @@ func (r *postgresOutboxRepository) MarkProcessed(ctx context.Context, id uuid.UU
 	}
 	return nil
 }
+
+// --- TicketTypeRepository (D4.1) ---
+
+type postgresTicketTypeRepository struct {
+	exec dbExecutor
+}
+
+// NewPostgresTicketTypeRepository returns the long-lived non-tx repo.
+// Mirrors NewPostgresEventRepository; the fx provider in module.go
+// re-exposes this under `domain.TicketTypeRepository` for application-
+// layer consumers, and PostgresUnitOfWork can call WithTx on it.
+func NewPostgresTicketTypeRepository(db *sql.DB) *postgresTicketTypeRepository {
+	return &postgresTicketTypeRepository{exec: db}
+}
+
+func (r *postgresTicketTypeRepository) WithTx(tx *sql.Tx) *postgresTicketTypeRepository {
+	return &postgresTicketTypeRepository{exec: tx}
+}
+
+func (r *postgresTicketTypeRepository) Create(ctx context.Context, t domain.TicketType) (domain.TicketType, error) {
+	row := ticketTypeRowFromDomain(t)
+	if _, err := r.exec.ExecContext(ctx,
+		"INSERT INTO event_ticket_types ("+ticketTypeColumns+") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+		row.ID, row.EventID, row.Name, row.PriceCents, row.Currency,
+		row.TotalTickets, row.AvailableTickets,
+		row.SaleStartsAt, row.SaleEndsAt,
+		row.PerUserLimit, row.AreaLabel,
+		row.Version,
+	); err != nil {
+		return domain.TicketType{}, fmt.Errorf("ticketTypeRepository.Create: %w", err)
+	}
+	return row.toDomain(), nil
+}
+
+func (r *postgresTicketTypeRepository) GetByID(ctx context.Context, id uuid.UUID) (domain.TicketType, error) {
+	var row ticketTypeRow
+	if err := row.scanInto(r.exec.QueryRowContext(ctx, "SELECT "+ticketTypeColumns+" FROM event_ticket_types WHERE id = $1", id)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.TicketType{}, domain.ErrTicketTypeNotFound
+		}
+		return domain.TicketType{}, fmt.Errorf("ticketTypeRepository.GetByID id=%s: %w", id, err)
+	}
+	return row.toDomain(), nil
+}
+
+// ListByEventID returns all ticket types belonging to an event,
+// ordered by id (UUIDv7 → time-prefixed → insertion order). Empty
+// result is a nil slice, not an error — events with no ticket types
+// are valid pre-D4.1 rows during the migration window.
+func (r *postgresTicketTypeRepository) ListByEventID(ctx context.Context, eventID uuid.UUID) ([]domain.TicketType, error) {
+	rows, err := r.exec.QueryContext(ctx,
+		"SELECT "+ticketTypeColumns+" FROM event_ticket_types WHERE event_id = $1 ORDER BY id ASC", eventID)
+	if err != nil {
+		return nil, fmt.Errorf("ticketTypeRepository.ListByEventID query (event=%s): %w", eventID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.TicketType
+	for rows.Next() {
+		var row ticketTypeRow
+		if err := row.scanInto(rows); err != nil {
+			return nil, fmt.Errorf("ticketTypeRepository.ListByEventID scan: %w", err)
+		}
+		out = append(out, row.toDomain())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ticketTypeRepository.ListByEventID iter: %w", err)
+	}
+	return out, nil
+}
