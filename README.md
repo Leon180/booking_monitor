@@ -119,13 +119,13 @@ sequenceDiagram
     participant SW as Expiry<br/>Sweeper
 
     rect rgb(240, 248, 255)
-    Note over C,P: Reservation (D1-D3)
-    C->>+API: POST /book {event_id, qty}
-    API->>+R: Lua DECRBY + XADD
+    Note over C,P: Reservation (D1-D3, D4.1)
+    C->>+API: POST /book {ticket_type_id, qty}
+    API->>+R: Lua DECRBY + XADD<br/>(price snapshot from ticket_type)
     R-->>-API: ok
-    API-->>-C: 202 {order_id, awaiting_payment,<br/>reserved_until, payment_intent}
+    API-->>-C: 202 {order_id, status:reserved,<br/>reserved_until, links.pay}
     R-->>W: XReadGroup
-    W->>P: INSERT order status=awaiting_payment
+    W->>P: INSERT order status=awaiting_payment<br/>(amount_cents + currency frozen)
     end
 
     alt Customer pays before TTL (D4-D5)
@@ -207,7 +207,7 @@ sequenceDiagram
 | POST | `/api/v1/book` | Submit a booking. Returns **202 Accepted** + an `order_id` to track it (see **Booking flow** below). |
 | GET | `/api/v1/orders/:id` | Look up the latest status of one order by `order_id`. May return 404 in a brief window after `POST /book` (see **Booking flow**). |
 | GET | `/api/v1/history` | Order history `?page=1&size=10&status=confirmed` |
-| POST | `/api/v1/events` | Create event `{ name, total_tickets }` |
+| POST | `/api/v1/events` | Create event `{ name, total_tickets, price_cents, currency }`. D4.1 atomically provisions a default ticket_type carrying the price snapshot; the response surfaces `ticket_types[].id` for booking. |
 | GET | `/api/v1/events/:id` | **Stub** — returns `{"message": "View event", "event_id": ...}` + bumps `page_views_total` for conversion tracking. Does NOT load event details (deferred to Phase 3 demo). |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/livez` | Liveness probe — always 200 if process is up (no downstream deps) |
@@ -218,31 +218,42 @@ sequenceDiagram
 `POST /api/v1/book` is **asynchronous by design**. The 202 (not 200) is honest: at the moment of the response, only the Redis-side inventory deduct has happened — the order hasn't been written to DB, payment hasn't been attempted, the booking isn't actually confirmed yet. The client gets back an `order_id` and is expected to poll for the terminal status.
 
 ```
-1. Client → POST /api/v1/book { user_id, event_id, quantity }
+1. Client → POST /api/v1/book { user_id, ticket_type_id, quantity }
 2. Server → 202 Accepted {
-       order_id: "019dd493-47ae-79b1-b954-8e0f14a6a482",
-       status:   "processing",
-       message:  "booking accepted, awaiting confirmation",
-       links:    { self: "/api/v1/orders/019dd493-..." }
+       order_id:           "019dd493-47ae-79b1-b954-8e0f14a6a482",
+       status:             "reserved",
+       message:            "booking accepted, complete payment before reserved_until",
+       reserved_until:     "2026-05-04T22:30:00Z",
+       expires_in_seconds: 900,
+       links: {
+         self: "/api/v1/orders/019dd493-...",
+         pay:  "/api/v1/orders/019dd493-.../pay"
+       }
    }
 
    At this point:
    - Redis inventory: deducted (the "load-shed gate")
-   - DB orders row:   not yet (worker writes it ~ms later)
-   - Payment:         not attempted yet
+   - DB orders row:   not yet (worker writes it ~ms later as awaiting_payment,
+                       with amount_cents + currency snapshot frozen onto the row)
+   - Payment:         not attempted yet — client must POST links.pay
+                       before reserved_until or the D6 expiry sweeper
+                       flips the row to "expired" and reverts inventory
    - Outcome:         not yet known
 
 3. Client → GET /api/v1/orders/<order_id>  (poll with backoff: 100ms → 250ms → 500ms ...)
 
    Possible responses:
    - 404  → worker hasn't persisted the row yet. Retry.
-   - 200  → { id, user_id, event_id, quantity, status, created_at }
+   - 200  → { id, user_id, ticket_type_id, quantity, amount_cents, currency,
+              status, reserved_until, created_at }
             where `status` is one of:
-              "pending"     — DB persisted, awaiting payment
-              "charging"    — payment in progress
-              "confirmed"   — paid + booked       ✓ terminal (success)
-              "failed"      — payment failed; saga will compensate
-              "compensated" — saga has rolled back inventory  ✓ terminal (failure)
+              "awaiting_payment" — DB persisted, awaiting POST /pay before reserved_until
+              "charging"         — PaymentIntent created, payment in progress
+              "paid"             — paid + booked                       ✓ terminal (success)
+              "expired"          — reserved_until elapsed without payment;
+                                    inventory reverted                 ✓ terminal (timeout)
+              "failed"           — payment failed; saga will compensate
+              "compensated"      — saga has rolled back inventory      ✓ terminal (failure)
 ```
 
 **Why async, not synchronous?** Redis-first acts as a **load-shed gate** — at flash-sale traffic, sold-out attempts get rejected at the Redis layer without ever touching DB. If `POST /book` blocked until terminal status, every request would hold a connection through the entire payment round-trip (seconds), and the throughput ceiling would be the slowest dependency. Industry standard for flash-sale systems (Tmall, KKTIX, Ticketmaster).

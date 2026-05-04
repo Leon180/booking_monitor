@@ -75,10 +75,11 @@ docker-compose up -d  # Full stack (app, nginx, payment_worker, postgres, redis,
 
 ## API Endpoints
 ```
-POST /api/v1/book          # Book tickets (user_id, event_id, quantity) → 202 with order_id + poll URL
+POST /api/v1/book          # Book tickets (user_id, ticket_type_id, quantity) → 202 with order_id + reserved_until + links.pay
 GET  /api/v1/orders/:id    # Poll order status by id (returns 404 during the brief async-processing window)
+POST /api/v1/orders/:id/pay  # D4 — create Stripe-shape PaymentIntent for the reservation; gateway-idempotent on order_id
 GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
-POST /api/v1/events        # Create event (name, total_tickets)
+POST /api/v1/events        # D4.1 — create event + auto-provision default ticket_type (name, total_tickets, price_cents, currency); response surfaces ticket_types[]
 GET  /api/v1/events/:id    # Stub — returns {"message": "View event", "event_id": ...} + bumps page_views_total. Does NOT load event details (deferred to Phase 3).
 GET  /metrics              # Prometheus metrics
 GET  /livez                # Liveness probe — always 200 if process is up
@@ -87,7 +88,7 @@ GET  /readyz               # Readiness probe — 200 only if PG + Redis + Kafka 
 
 Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypassed nginx rate-limit zones. All callers must use `/api/v1/book`.
 
-**Booking response contract (PR #47).** `POST /api/v1/book` returns 202 Accepted with `{order_id, status: "processing", message, links: {self}}`. The 202 is honest about the async pipeline: Redis-side inventory deduct succeeded (the load-shed gate); DB persistence + payment + saga are in flight. Clients poll `GET /api/v1/orders/:id` for the terminal status — that endpoint may return 404 for ~ms after 202 (async-processing window) and clients should retry with backoff. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker → DB → outbox → saga; PEL retries reuse the same id rather than minting a fresh one per delivery.
+**Booking response contract (PR #47, updated D3 + D4.1).** `POST /api/v1/book` takes `{user_id, ticket_type_id, quantity}` (D4.1: `ticket_type_id`, NOT `event_id` — KKTIX 票種 model puts inventory + pricing on the ticket_type entity) and returns 202 Accepted with `{order_id, status: "reserved", message, reserved_until, expires_in_seconds, links: {self, pay}}`. Pattern A reservation semantics: Redis-side inventory has been *reserved* (not auto-charged); the worker is async-persisting the row as `awaiting_payment` with `reserved_until = NOW() + BOOKING_RESERVATION_WINDOW` (default 15m) and the price snapshot frozen onto `orders.amount_cents` / `orders.currency`. The client POSTs to `links.pay` (D4 — `POST /api/v1/orders/:id/pay`) before `reserved_until` to obtain a `PaymentIntent`; otherwise the D6 expiry sweeper flips the order to `expired` and reverts inventory. Clients poll `GET /api/v1/orders/:id` for the terminal status — may return 404 for ~ms after 202 (async-processing window) and clients should retry with backoff. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Redis stream → worker → DB → outbox → saga; PEL retries reuse the same id. The legacy `status: "processing"` constant remains in the codebase for backwards compatibility with mid-flight clients but every newly-deployed server returns `status: "reserved"`.
 
 `/livez` + `/readyz` follow k8s probe conventions: liveness must NOT depend on downstream services (a Redis blip cannot be allowed to kill every pod), readiness pings real dependencies. The compose `app` service uses `/livez` as its HEALTHCHECK.
 

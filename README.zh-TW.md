@@ -119,13 +119,13 @@ sequenceDiagram
     participant SW as Expiry<br/>Sweeper
 
     rect rgb(240, 248, 255)
-    Note over C,P: 預訂(D1-D3)
-    C->>+API: POST /book {event_id, qty}
-    API->>+R: Lua DECRBY + XADD
+    Note over C,P: 預訂(D1-D3、D4.1)
+    C->>+API: POST /book {ticket_type_id, qty}
+    API->>+R: Lua DECRBY + XADD<br/>(從 ticket_type 取價格快照)
     R-->>-API: ok
-    API-->>-C: 202 {order_id, awaiting_payment,<br/>reserved_until, payment_intent}
+    API-->>-C: 202 {order_id, status:reserved,<br/>reserved_until, links.pay}
     R-->>W: XReadGroup
-    W->>P: INSERT order status=awaiting_payment
+    W->>P: INSERT order status=awaiting_payment<br/>(amount_cents + currency 凍結)
     end
 
     alt 客戶在 TTL 內付款(D4-D5)
@@ -207,7 +207,7 @@ sequenceDiagram
 | POST | `/api/v1/book` | 提交訂票。回 **202 Accepted** + 一個 `order_id` 用來追蹤訂單(詳見下方「**訂票流程**」)。 |
 | GET | `/api/v1/orders/:id` | 用 `order_id` 查單筆訂單的最新狀態。在 `POST /book` 之後的短暫視窗裡會回 404(詳見「**訂票流程**」)。 |
 | GET | `/api/v1/history` | 訂單歷史 `?page=1&size=10&status=confirmed` |
-| POST | `/api/v1/events` | 建立活動 `{ name, total_tickets }` |
+| POST | `/api/v1/events` | 建立活動 `{ name, total_tickets, price_cents, currency }`。D4.1 起會在同一筆交易中自動建立帶有價格快照的預設 ticket_type;response 的 `ticket_types[].id` 即為訂票時要帶的 id。 |
 | GET | `/api/v1/events/:id` | **Stub** — 回 `{"message": "View event", "event_id": ...}` 並遞增 `page_views_total` 給轉換率追蹤。**不會**載入活動詳情(延後到 Phase 3 demo 才實作)。 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/livez` | Liveness 探針 — process 還活著就一律回 200(不依賴下游) |
@@ -218,31 +218,41 @@ sequenceDiagram
 `POST /api/v1/book` 在設計上**就是非同步的**。回 202(不是 200)是誠實的:在這個回應的當下,只完成了 Redis 端的庫存扣減 — 訂單還沒寫進資料庫、付款還沒嘗試、訂票其實還沒真正成功。Client 拿到 `order_id` 之後,要自己輪詢最終狀態。
 
 ```
-1. Client → POST /api/v1/book { user_id, event_id, quantity }
+1. Client → POST /api/v1/book { user_id, ticket_type_id, quantity }
 2. Server → 202 Accepted {
-       order_id: "019dd493-47ae-79b1-b954-8e0f14a6a482",
-       status:   "processing",
-       message:  "booking accepted, awaiting confirmation",
-       links:    { self: "/api/v1/orders/019dd493-..." }
+       order_id:           "019dd493-47ae-79b1-b954-8e0f14a6a482",
+       status:             "reserved",
+       message:            "booking accepted, complete payment before reserved_until",
+       reserved_until:     "2026-05-04T22:30:00Z",
+       expires_in_seconds: 900,
+       links: {
+         self: "/api/v1/orders/019dd493-...",
+         pay:  "/api/v1/orders/019dd493-.../pay"
+       }
    }
 
    此時:
    - Redis 庫存:已扣減(這是 load-shed gate)
-   - DB orders 列:還沒寫入(worker ~ms 後才會寫)
-   - 付款:還沒嘗試
+   - DB orders 列:還沒寫入(worker 在 ~ms 後寫成 awaiting_payment,
+                              並把 amount_cents + currency 快照凍結在該列上)
+   - 付款:還沒嘗試 — client 必須在 reserved_until 之前 POST links.pay,
+                      否則 D6 expiry sweeper 會把該列翻成 "expired" 並退還庫存
    - 結果:還不知道
 
 3. Client → GET /api/v1/orders/<order_id>  (帶 backoff 輪詢:100ms → 250ms → 500ms ...)
 
    可能的回應:
    - 404  → worker 還沒寫進 DB。重試即可。
-   - 200  → { id, user_id, event_id, quantity, status, created_at }
+   - 200  → { id, user_id, ticket_type_id, quantity, amount_cents, currency,
+              status, reserved_until, created_at }
             其中 `status` 為:
-              "pending"     — DB 已寫入,等待付款
-              "charging"    — 付款進行中
-              "confirmed"   — 付款成功 + 訂票完成    ✓ 終態(成功)
-              "failed"      — 付款失敗,saga 即將回滾
-              "compensated" — saga 已回滾庫存         ✓ 終態(失敗)
+              "awaiting_payment" — DB 已寫入,等待在 reserved_until 前 POST /pay
+              "charging"         — PaymentIntent 已建立,付款進行中
+              "paid"             — 付款成功 + 訂票完成               ✓ 終態(成功)
+              "expired"          — reserved_until 過期且未付款;
+                                    庫存已退還                       ✓ 終態(逾時)
+              "failed"           — 付款失敗,saga 即將回滾
+              "compensated"      — saga 已回滾庫存                  ✓ 終態(失敗)
 ```
 
 **為什麼不直接同步回終態?** Redis-first 是 **load-shed gate** — flash-sale 流量下,售完的請求會在 Redis 層就被擋掉,根本不會碰到資料庫。如果 `POST /book` 同步等到終態,每一個請求都會佔用整個付款 round-trip(數秒)的連線,整體吞吐就被最慢的依賴卡住。Flash-sale 系統的業界標準做法(Tmall、KKTIX、Ticketmaster 都這樣)。

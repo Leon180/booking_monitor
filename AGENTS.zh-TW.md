@@ -75,10 +75,11 @@ docker-compose up -d  # 啟動完整環境(app, nginx, payment_worker, postgres,
 
 ## API Endpoints
 ```
-POST /api/v1/book          # 訂票(user_id, event_id, quantity)→ 202 含 order_id + 輪詢 URL
+POST /api/v1/book          # 訂票(user_id, ticket_type_id, quantity)→ 202 含 order_id + reserved_until + links.pay
 GET  /api/v1/orders/:id    # 透過 id 查訂單狀態(在短暫的非同步處理視窗中會回 404)
+POST /api/v1/orders/:id/pay  # D4 — 為這筆預訂建立 Stripe-shape PaymentIntent;gateway 對 order_id 是冪等的
 GET  /api/v1/history       # 分頁訂單歷史(?page=&size=&status=)
-POST /api/v1/events        # 建立活動(name, total_tickets)
+POST /api/v1/events        # D4.1 — 建立 event 並原子地配發 default ticket_type(name, total_tickets, price_cents, currency);response 會回 ticket_types[]
 GET  /api/v1/events/:id    # Stub — 回 {"message": "View event", "event_id": ...} 並遞增 page_views_total。**不會**載入活動詳情(延後到 Phase 3)。
 GET  /metrics              # Prometheus 指標
 GET  /livez                # Liveness probe — process 還活著就一律回 200
@@ -87,7 +88,7 @@ GET  /readyz               # Readiness probe — PG + Redis + Kafka 都能在 1s
 
 舊的 `POST /book` 在 Phase 13 已移除(PR #9 H9)— 它會繞過 nginx 的 rate-limit zones。所有呼叫端必須改用 `/api/v1/book`。
 
-**訂票 response contract(PR #47)。** `POST /api/v1/book` 回 202 Accepted,內容是 `{order_id, status: "processing", message, links: {self}}`。202 對非同步管線是誠實的:Redis 端庫存扣減成功(load-shed gate);DB 持久化 + 付款 + saga 還在 in flight。Client 輪詢 `GET /api/v1/orders/:id` 拿終態 — 該 endpoint 在 202 之後幾毫秒可能會回 404(非同步處理視窗),client 應該配 backoff 重試。`order_id` 是 `BookingService.BookTicket` 在 API 邊界用 UUIDv7 鑄出來的,一路串到 Redis stream → worker → DB → outbox → saga;PEL 重送會沿用同一個 id,不會每次重送就重鑄一個。
+**訂票 response contract(PR #47,D3 + D4.1 更新)。** `POST /api/v1/book` 帶 `{user_id, ticket_type_id, quantity}`(D4.1:用 `ticket_type_id`,不是 `event_id` — KKTIX 票種模型把庫存與定價放在 ticket_type 物件上),回 202 Accepted,內容是 `{order_id, status: "reserved", message, reserved_until, expires_in_seconds, links: {self, pay}}`。Pattern A 預訂語意:Redis 端庫存已 *預留*(沒有自動扣款);worker 非同步寫入 `awaiting_payment` 列,`reserved_until = NOW() + BOOKING_RESERVATION_WINDOW`(預設 15 分鐘),並把價格快照凍結在 `orders.amount_cents` / `orders.currency`。Client 必須在 `reserved_until` 之前 POST `links.pay`(D4 — `POST /api/v1/orders/:id/pay`)以取得 `PaymentIntent`;否則 D6 expiry sweeper 會把訂單翻成 `expired` 並退還庫存。Client 用 `GET /api/v1/orders/:id` 輪詢終態 — 在 202 之後幾毫秒可能會回 404(非同步處理視窗),client 應該配 backoff 重試。`order_id` 是 `BookingService.BookTicket` 在 API 邊界用 UUIDv7 鑄出來的,一路串到 Redis stream → worker → DB → outbox → saga;PEL 重送會沿用同一個 id。舊的 `status: "processing"` 常數還留在 codebase 給 in-flight client 做向後相容,但新部署的 server 一律回 `status: "reserved"`。
 
 `/livez` + `/readyz` 遵循 k8s probe 慣例:liveness 不能依賴下游服務(Redis 抖動不能殺光所有 pod),readiness 才會真的 ping 依賴。compose 的 `app` service 用 `/livez` 做 HEALTHCHECK。
 
