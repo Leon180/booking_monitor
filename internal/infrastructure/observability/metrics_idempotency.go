@@ -53,11 +53,51 @@ var CacheMissesTotal = promauto.NewCounterVec(
 // Page-worthy: rate > 0 sustained for 1m means a Redis outage
 // affecting a financial-correctness control. The companion
 // runbook in monitoring.md explains operator response.
+//
+// Naming history: this counter pre-dates the generic
+// `CacheErrorsTotal{cache,op}` introduced for the ticket_type cache.
+// Kept on its own series for backward compatibility with existing
+// alert rules; new caches use the labelled counter below.
 var IdempotencyCacheGetErrorsTotal = promauto.NewCounter(
 	prometheus.CounterOpts{
 		Name: "idempotency_cache_get_errors_total",
 		Help: "Total number of idempotency cache GET infra failures (Redis down, unmarshal). Sustained non-zero means idempotency protection is suspended.",
 	},
+)
+
+// CacheErrorsTotal counts infrastructure failures on the cache layer,
+// labelled by `cache` (which cache) and `op` (which operation).
+// Generalisation of IdempotencyCacheGetErrorsTotal: the per-cache
+// dedicated counter pattern doesn't scale once you have N caches with
+// 3+ failure modes each (get / set / marshal). One labelled series
+// covers them cleanly.
+//
+// Why split from `cache_hits_total` / `cache_misses_total`: an infra
+// error must NOT inflate the miss rate during a Redis outage —
+// otherwise a Redis blip looks like a cache-cold spike on the hit-rate
+// dashboard, masking the real cause (Redis itself).
+//
+// `op` label values:
+//
+//   - "get"     — Redis GET failure (network, AUTH, OOM)
+//   - "set"     — Redis SET failure (same shape as get; different op
+//                 because operator runbooks differ — SET stalls
+//                 specifically point at maxmemory policy)
+//   - "marshal" — JSON marshal of the cache entry failed. Theoretical
+//                 for a fixed-shape DTO, but a future field-add could
+//                 trip it; surfacing the metric makes the regression
+//                 immediately visible instead of "p95 mysteriously
+//                 climbed".
+//
+// Page-worthy: rate("get" or "set") > 0 sustained for 1m means a
+// Redis outage degrading the affected cache. Marshal errors should
+// be 0 in steady state; rate > 0 means a code regression.
+var CacheErrorsTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "cache_errors_total",
+		Help: "Total number of cache infra failures, labelled by cache name + operation (get / set / marshal). Distinct from cache_misses to keep miss rate uncontaminated by Redis outages.",
+	},
+	[]string{"cache", "op"},
 )
 
 // IdempotencyReplaysTotal tracks the outcome of every Idempotency-

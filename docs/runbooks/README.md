@@ -51,6 +51,10 @@ silence / inhibit / notification log.
 - [IdempotencyCacheGetErrors](#idempotencycachegeterrors)
 - [DBRollbackFailures](#dbrollbackfailures)
 
+### Cache layer (perf optimisations — fail-soft)
+- [TicketTypeCacheRedisErrors](#tickettypecacherediserrors)
+- [TicketTypeCacheMarshalErrors](#tickettypecachemarshalerrors)
+
 ### Redis / Kafka infra
 - [RedisXAckFailures](#redisxackfailures)
 - [RedisRevertFailures](#redisrevertfailures)
@@ -325,6 +329,44 @@ silence / inhibit / notification log.
 **Action.** Restore Redis. The handler fails open during the outage (DB UNIQUE constraints provide last-resort protection), but the contract degrades for the duration.
 
 **Escalation.** Page immediately if sustained — financial-correctness control is offline.
+
+---
+
+## TicketTypeCacheRedisErrors
+
+**Symptom.** `cache_errors_total{cache="ticket_type",op=~"get|set"}` rate > 0 for 5m+. Severity `warning`. **NOT page-worthy at the warning threshold** — the cache is a perf optimisation, not a correctness control. Booking endpoint stays up via Postgres fallback; the +38% sold-out fast-path RPS / -21% p95 gain from PR #90 is what's silently disabled.
+
+**Diagnosis.** This alert disambiguates "Redis down / degraded" from "cache cold". Cross-check:
+- `redis_up{job="redis"}` / `RedisExporterCannotReachRedis` — is Redis itself reachable?
+- `redis_client_pool_timeouts` / `redis_client_pool_misses` — is OUR client starving?
+- `redis_used_memory_bytes` vs `maxmemory` — OOM eviction storms can cause `op="set"` failures specifically
+- `IdempotencyCacheGetErrors` — typically fires under the same incident; if it doesn't, the cause is more localised
+- `RedisXAddFailures` / `RedisXAckFailures` — same Redis, different code paths; pattern of which fire helps localise
+
+**Action.** Restore Redis health. The cache is fail-soft so booking continues during the incident; the only impact is paying the post-D4.1 PG round-trip cost on every booking attempt (`http_req_duration` p95 will track back toward the no-cache baseline of ~28ms while the alert is active). No special operator action against the cache itself — once Redis recovers, write-through fills entries lazily on the next miss for each ticket_type.
+
+**Escalation.** Page if sustained > 30m AND `RedisXAddFailures` is also firing — that combination means the booking hot path is approaching the Lua single-thread limit at ~5ms per attempt (vs the cache's ~1ms hit cost) AND the `accepted_bookings/s` ceiling will start dropping. Otherwise warning + on-call awareness is sufficient; the gain this PR added is recoverable via simple Redis recovery.
+
+**Why severity = warning, not critical.** A docker-compose Redis restart or k8s pod rolling-redeploy bursts `op="get"` errors for the duration of disconnect. A 1m / critical alert would page on routine ops. The 5m soak absorbs routine restarts while still catching real outages within the SLO window.
+
+---
+
+## TicketTypeCacheMarshalErrors
+
+**Symptom.** `cache_errors_total{cache="ticket_type",op="marshal"}` rate > 0 for 1m+. Severity `warning`.
+
+**This is NOT a Redis incident.** Marshal of the fixed-shape `ticketTypeCacheEntry` JSON is a deterministic operation; non-zero rate means a code regression introduced an unmarshalable type into the cache entry struct. The booking endpoint stays up (cache write is skipped on marshal failure, the inner result still returns), but the cache layer is permanently disabled until a fix lands.
+
+**Diagnosis.** Recent changes to:
+- `internal/infrastructure/cache/ticket_type_cache.go::ticketTypeCacheEntry` (the cache DTO)
+- `internal/infrastructure/cache/ticket_type_cache.go::ticketTypeCacheEntryFromDomain` (the domain → DTO mapper)
+- The aggregate accessors on `domain.TicketType` if a new type was added
+
+Pull recent commits touching these paths; the offending struct field will surface in the marshal stack trace.
+
+**Action.** **File a bug; do NOT page Redis on-call.** The fix is a code change (revert the bad field type or fix its JSON tags). Until the fix lands, the cache layer is bypassed → total RPS regresses ~28% and p95 climbs by ~6ms on the sold-out fast path.
+
+**Escalation.** This alert's existence is its own escalation signal. If the rate sustains > 1h, raise the severity manually.
 
 ---
 

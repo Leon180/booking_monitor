@@ -79,11 +79,20 @@ func init() {
 		RedisDLQRoutedTotal.WithLabelValues(reason)
 	}
 	// Pre-warm the cache labels so the series exist in /metrics before
-	// the first lookup. "idempotency" is the only cache today; add new
-	// values here when new caches are introduced.
-	for _, cache := range []string{"idempotency"} {
+	// the first lookup. Add new values here when new caches are
+	// introduced. Keep the literal strings in sync with the
+	// `cacheLabel*` consts in `internal/infrastructure/cache/*.go`.
+	for _, cache := range []string{"idempotency", "ticket_type"} {
 		CacheHitsTotal.WithLabelValues(cache)
 		CacheMissesTotal.WithLabelValues(cache)
+	}
+	// Pre-warm the cache error labels too. Today only ticket_type
+	// emits to this counter; idempotency uses the older dedicated
+	// `idempotency_cache_get_errors_total` series. New caches should
+	// use the labelled `cache_errors_total{cache,op}` and add their
+	// pre-warm tuples here.
+	for _, op := range []string{"get", "set", "marshal"} {
+		CacheErrorsTotal.WithLabelValues("ticket_type", op)
 	}
 	// Pre-warm idempotency replay outcomes (N4) so all three series
 	// exist in /metrics from boot. "legacy_match" should taper to ~0

@@ -474,13 +474,20 @@ Prometheus metrics 端點。
 
 ### 6.3 Saga 補償
 
+
+
 1. PaymentWorker 消費 `order.created`,呼叫 PaymentGateway.Charge()
 2. 失敗時:更新訂單狀態為 `failed`,並寫入 `order.failed` outbox 事件
 3. SagaCompensator 消費 `order.failed`(透過 `SagaConsumer`):
-   - DB: `IncrementTicket` + 更新訂單狀態為 `compensated`(同一交易,以 `OrderStatusCompensated` 作為冪等守門員)
+   - DB: `TicketTypeRepository.IncrementTicket`(D4.1 follow-up 之前是 `EventRepository.IncrementTicket`)+ 更新訂單狀態為 `compensated`(同一交易,以 `OrderStatusCompensated` 作為冪等守門員)
    - Redis: `revert.lua` 先做 `INCRBY`,再以 `SET NX EX 7d` 記錄補償鍵 — crash-safe 的順序(見第 6.1 節)
 4. **重試計數由 Redis 持久化**(`saga:retry:p{partition}:o{offset}` TTL 24 小時),consumer 重啟也不會被 reset
 5. 超過 `sagaMaxRetries = 3` 次後,訊息會被寫入 `order.failed.dlq`(帶 provenance headers)、清掉計數器、commit offset,並同時遞增 `saga_poison_messages_total` 與 `dlq_messages_total{topic="order.failed.dlq", reason="max_retries"}` — 不會再有靜默 drop
+
+**Wire 格式 v3 + 三路徑回退(D4.1 follow-up)。** 自 `OrderEventVersion = 3` 起,`OrderCreatedEvent` 與 `OrderFailedEvent` 都帶 `ticket_type_id` 欄位,compensator 用它驅動 per-ticket-type 增量。對於 rolling upgrade 期間還在 Kafka 上的 pre-v3 事件,`compensator.resolveTicketTypeID` 用三路徑回退:
+- **Path A**(乾淨):`event.TicketTypeID != uuid.Nil` → 直接用。
+- **Path B**(legacy fallback):`TicketTypeID == uuid.Nil` 且 `ListByEventID` 回傳剛好 1 筆 → D4.1 預設 single-ticket-type case,可以安全地把增量歸到那筆。記 WARN log。
+- **Path C**(無解):`TicketTypeID == uuid.Nil` 且 `ListByEventID` 回傳 0 或 > 1 筆 → 跳過 DB 增量(等人工檢查),但 `MarkCompensated` 與 Redis revert 仍照常執行。記 ERROR log。Redis 是用 `event_id` keying,所以使用者看到的庫存仍會正確釋放;只有 DB ticket_type 計數器漂移、等待 ops 處理。
 
 付款端的 DLQ(`order.created.dlq`)採用相同機制:無法解析的 JSON 以及 `PaymentService.ProcessOrder` 回傳的 `ErrInvalidPaymentEvent` 都會被 dead-letter,而不是像舊版那樣 `return nil` 然後被靜默 commit。
 
@@ -498,8 +505,8 @@ Prometheus metrics 端點。
 - 重試 3 次,linear backoff(100ms * 第 n 次)
 - 重試用盡後:回滾 Redis 庫存 + 移至 DLQ stream(`orders:dlq`)+ ACK
 - 自我修復:遇到 NOGROUP 錯誤(例如 FLUSHALL 後)會自動重建 consumer group
-- 交易內容(UnitOfWork): `DecrementTicket`(DB 雙重檢查)→ `Create Order` → `Create OutboxEvent` → COMMIT
-- 每筆訊息都有指標記錄: `success`, `sold_out`, `duplicate`, `db_error` + 處理時間
+- 交易內容(UnitOfWork — D4.1 follow-up): `TicketTypeRepository.DecrementTicket`(對 ticket_type SoT 做 DB 雙重檢查)→ `Create Order` → `Create OutboxEvent` → COMMIT。D4.1-followup 之前 worker 是扣 `events.available_tickets`;**該欄位 D4.1 之後已凍結**(worker 不再寫入,後續 migration 會移除)。新的 SoT 是 `event_ticket_types.available_tickets`,`RehydrateInventory` 與 `InventoryDriftDetector` 也透過 `SumAvailableByEventID` 讀取這個欄位。§6.9 的 cache decorator 把這個欄位回傳成 `0`(conservative-safe sentinel),因為 cache 刻意不存可變欄位 — 細節見 §6.9。
+- 每筆訊息都有指標記錄: `success`, `sold_out`, `duplicate`, `db_error` + 處理時間。`sold_out` 同時涵蓋 `domain.ErrSoldOut`(舊 events 欄位)與 `domain.ErrTicketTypeSoldOut`(D4.1-followup 新增 sentinel) — `worker/message_processor_metrics.go:42` 的 metrics decorator 用 `errors.Is` 兩個都比對,所以 `inventory_conflict_total` 仍持續追蹤正確訊號。
 
 ### 6.6 三層冪等性
 
@@ -665,11 +672,63 @@ booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API →
 
 為什麼是 16 KiB 而不是 Stripe 的 1 MB:booking 端點吃的是固定形狀 JSON(實際約 80 bytes)。上限要抓緊 — 寬鬆的上限會放大「合法請求 vs 攻擊請求」的比例。下游的快取層因此可以信任已經驗證過的輸入;`Idempotency-Key` 對應的 value 不可能比產生它的 body 還大。
 
+**Parse-fail 補償(D4.1 follow-up)。** 修正前,若 stream 訊息在 `parseMessage` 失敗(例如 rolling upgrade 期間 pre-D4.1 producer 的訊息落到 post-D4.1 worker 上),會直接 DLQ + ACK,**沒有**退還 producer 已經扣掉的 Redis 庫存 — 靜默庫存洩漏。`handleParseFailure` 採用跟 `handleFailure` 相同的合約:盡力透過 `parseLegacyRevertHints` 做 `RevertInventory`(從 raw `redis.XMessage` 抽 `event_id` + `quantity` — 這兩個欄位從 D3 起穩定)→ DLQ → ACK。DLQ label 用於區分操作形態:
+
+| DLQ label | 成因 | 是否退還庫存 | 操作員動作 |
+| :-- | :-- | :-- | :-- |
+| `malformed_reverted_legacy` | parse 失敗但抽到 legacy hints;revert + DLQ 都成功。預期的 rolling-upgrade taper。 | ✅ 有 | 不用做事 — 等收斂 |
+| `malformed_unrecoverable` | hints 無法解析,或拿到 hints 但 `RevertInventory` 失敗。庫存洩漏。 | ❌ 沒有 | 持續 rate > 0 要 page |
+| `malformed_classified` | `parseMessage` 成功但 `domain.NewReservation` 拒絕(deterministic invariant 違反;e.g. 零 ticket_type_id)。不會有 Redis deduct(Lua 不會產這種),所以不需 revert。 | n/a | producer regression — 開 bug |
+| `exhausted_retries` | handler 在 transient 錯誤下 hit `maxRetries`。`handleFailure` 在 DLQ 前已經跑過 `RevertInventory`。 | ✅ 有 | 調查 transient failure mode |
+
+舊 `malformed_parse` label 在 `metrics_init.go` 仍 pre-warm 保留,給任何引用它的舊 alert 規則做向後相容;新的程式碼路徑只 emit 上面四個 label。
+
 **延後到後續 PR 處理**:
 
 - **生產者端反壓**:`XLEN > threshold` → booking handler 回 503。把 queue 限定在有界範圍,代價是顯式拒絕。threshold 需要 k6 + worker-killed 負載資料才能調(等 N6 test infra 完成後)。
 - **Redis 8 + DLQ XAdd 用 IDMP**:Redis 8 內建 server-side stream-entry idempotency(`XADD ... IDMP <token>`),消除 worker-retry-after-XACK-failure 造成的重複 DLQ 條目。需要先升級到 Redis 8(目前在 7-alpine)。
 - **booking-side IDMP**:優先序較低,因為 HTTP 層的冪等快取已經能阻擋使用者可見的重複下單。
+
+---
+
+### 6.9 `TicketTypeRepository.GetByID` 的 read-through cache(D4.1 follow-up #1)
+
+D4.1 為了拿到價格快照,讓每次訂票嘗試都對 Postgres 做一次無條件的 `GetByID` — 連便宜的 sold-out fast path 也不例外。D4.1 之後的 benchmark(PR #89)顯示在 sold-out fast path 上,跟 pre-D4.1 main 相比 total RPS ~−40% / p95 +95%。PR #90 加上了一個 read-through Redis cache decorator 來復原這個成本。
+
+**架構。** `cache.ticketTypeCacheDecorator`(在 `internal/infrastructure/cache/ticket_type_cache.go`)包住 `domain.TicketTypeRepository`,透過 `fx.Decorate` 疊在現有的 tracing decorator **上面**(cache 包 tracing 包 postgres)。cache hit 時不會有 PG span — per-cache 的 Prometheus counter 才是運維訊號。
+
+**有快取 vs 不快取 — IMMUTABLE-only 合約。**
+
+| 欄位 | 快取? | 為什麼 |
+| :-- | :-- | :-- |
+| `id`、`event_id`、`name`、`price_cents`、`currency`、`total_tickets`、`sale_starts_at`、`sale_ends_at`、`per_user_limit`、`area_label`、`version` | ✅ 是 | 全部建立後就不可變。可以放心快取,`DecrementTicket` / `IncrementTicket` 不需要 invalidate 鉤子。 |
+| `available_tickets` | ❌ 否 — `toDomain` 回傳哨兵值 `0` | **刻意省略**。decorator 的契約是「只快取 BookTicket 讀的欄位,且這些都是建立後不可變的」。把這個會變動的計數器也快取起來,代表每次 Decrement / Increment 都得做 invalidation — 為了一個目前沒有 cache-hit 路徑會讀的欄位,代價過高。`toDomain()` 把 aggregate 的 `availableTickets` 設成 `0` 作為**保守安全的哨兵值**:未來有人不小心對 `tt.AvailableTickets() > 0` 做分支判斷,讀到的會是「售完」而不是過時的「還有票」。要拿新值請用 `SumAvailableByEventID`(無快取)或直接查 Postgres。 |
+
+**Cache 合約 — fail-soft。**
+
+- `redis.Nil` → 真正的 miss → 落到 inner repo、write-through、回傳。
+- Cache entry JSON 壞掉,或 `_v` 對不上 → 視為 miss → write-through 用當前 schema 覆蓋。
+- 真的 Redis GET 錯誤(網路、AUTH、OOM)→ 遞增 `cache_errors_total{cache="ticket_type",op="get"}`、落到 inner repo。**不會**遞增 `cache_misses_total` — 這個分隔讓 Redis 故障不會在 dashboard 上偽裝成 cache-cold spike。
+- `ErrTicketTypeNotFound` 與其它 inner 錯誤 → **不快取**。否則一個剛被 Created 的 ticket_type 立刻被 GetByID 會在 TTL 期間隱形。
+- 對 inner 呼叫成功後 cache SET 失敗 → 遞增 `cache_errors_total{op="set"}`、log Warn、回傳 inner 結果。SET 用 detached `context.WithTimeout(context.Background(), 1s)` — 即將 deadline 的 request ctx **不能**取消 cache 寫入。
+- `Delete` 主動 invalidate 條目(為 D8 admin 生命週期預先設計);inner Delete 失敗則保留 cache 條目(DB 列還在)。
+- TTL=0 fail-soft:每次 call 都直接 pass-through;啟動時記一次 WARN log。
+
+**Wire format 版本控制。** Cache entry 帶 `_v: 1`;不對的版本被視為 miss,write-through 用新 schema 覆蓋。對單 pod rolling deploy 足夠。**Blue/green deploy 的脆弱性**(兩支車隊互相 invalidate 對方的 entry → 切換期間 hit rate 崩塌)記在 `post_phase2_roadmap.md` 的 TT-Cache-2 — 修法是 key-namespace versioning(`ticket_type:v1:{id}`)。
+
+**Operator 直接 DB 編輯的 runbook。** Emergency runbook 直接做 `UPDATE event_ticket_types SET price_cents = X` 並**不會** invalidate cache — 接下來的 ≤ TTL 期間訂票會把過時價格 snapshot 到 `orders.amount_cents`。**強制步驟**:任何直接寫入後請 `redis-cli DEL ticket_type:<UUID>`。完整流程見 `docs/runbooks/d4.1_rollout.md` § "Direct DB edits to event_ticket_types"。
+
+**Benchmark recovery(PR #90 vs D4.1-no-cache baseline,k6 500 VUs / 60s)。**
+
+| 指標 | D4.1-no-cache | D4.1 + cache | Δ |
+| :-- | ---: | ---: | :--- |
+| `accepted_bookings/s` | 8,331 | 8,332 | +0.0%(Lua 上限 — cache 不影響訂票熱路徑) |
+| Total HTTP RPS | 28,862 | ~39,857 | **+38%**(sold-out fast path) |
+| p95 / p99 / p99.9 | 28.1 / — / — | 22.2 / 35.5 / 56.5 ms | p95 −21%;tail 仍遠在 500ms 門檻之內 |
+
+復原了跟 pre-D4.1 main(48,351 RPS / 14.4ms p95)之間 gap 的 ~57%。剩下的 ~18% 是「每次訂票都得 lookup」這個動作本身的不可避免成本(Redis GET + JSON unmarshal 仍 ~1ms);要關掉這個 gap 得改 wire format,不在本 PR 範圍 — 已記為未來選項。
+
+**透過 `REDIS_TICKET_TYPE_TTL` 設定**(預設 5m)。見 §7 Config overrides。
 
 ---
 
@@ -692,6 +751,10 @@ booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API →
 | `redis_xack_failures_total` | Counter | Redis `XAck` 對已成功處理的訊息失敗 — 訊息會留在 PEL 等下次重送。這個計數器是「可能發生重複處理」的唯一先行訊號 |
 | `redis_xadd_failures_total` | Counter(`stream`) | Redis `XAdd` 失敗,依目標 stream 分 label。目前只有 DLQ stream(`stream="dlq"`)會從 Go 寫入;label 保留是為了未來擴充主 stream 寫入者 |
 | `redis_revert_failures_total` | Counter | Worker `handleFailure` 呼叫 `RevertInventory` 失敗 — 訊息留在 PEL 等下次 PEL reclaim 重試。非零速率代表 Redis 庫存正在跟 DB 產生漂移 |
+| `cache_hits_total` | Counter(`cache`) | 命中快取的 lookup 計數,以 cache 名稱分 label。`cache="idempotency"`(Stripe 風格 fingerprint 快取)+ `cache="ticket_type"`(D4.1 follow-up read-through cache,見 §6.9)。命中率查詢:`rate(cache_hits_total{cache="X"}[5m]) / (rate(cache_hits_total{cache="X"}[5m]) + rate(cache_misses_total{cache="X"}[5m]))` |
+| `cache_misses_total` | Counter(`cache`) | 沒命中的 lookup。`cache_hits_total` 的兄弟。**不包含 Redis-error-as-miss** — 那些走 `cache_errors_total{op="get"}`,讓 miss rate 不會被污染。 |
+| `cache_errors_total` | Counter(`cache`, `op`) | 快取基礎設施失敗,以 cache + operation 分 label。`op` ∈ `{get, set, marshal}`。跟 `cache_misses_total` 拆開,避免 Redis 故障在 dashboard 上偽裝成 cache-cold spike。目前只有 `cache="ticket_type"` 會 emit — 較舊的 `idempotency_cache_get_errors_total` 專屬計數器先於這個 labelled 形態,migration 計畫記在 `post_phase2_roadmap.md` 的 TT-Cache-3。 |
+| `idempotency_cache_get_errors_total` | Counter | 冪等快取 GET 基礎設施失敗(Redis 掛了、unmarshal 失敗)。持續非零代表重複扣款防護被暫停。**Page-worthy**。**命名歷史**:這個計數器先於 labelled 的 `cache_errors_total{cache,op}` 形態出現,為了向後相容既有 alert rule 而保留獨立 series。 |
 
 **告警(`deploy/prometheus/alerts.yml`):**
 
@@ -699,6 +762,9 @@ booking pipeline 用兩個 Redis Streams:`orders:stream`(熱資料佇列,API →
 - `HighLatency` — p99 請求延遲 > 2s
 - `InventorySoldOut` — `increase(bookings_total{status="sold_out"}[5m]) > 0`。舊版的 `booking_sold_out_total` 表達式指向一個程式碼裡不存在的指標,所以告警原本永遠不會觸發,在 remediation 中修掉。
 - `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1`,持續 2m。與 `kafka_consumer_retry_total` 計數器配對使用的契約:當下游短暫錯誤造成持續 rebalance retry 時,這個告警會觸發,讓 oncall 去查**下游基礎設施**(DB / Redis / payment gateway),**不是** consumer 本身。Consumer 是按設計運作的;告警存在的目的是讓「卡住但沒死」這個狀態能被 operator 看到,而不需要靠 dead-letter 正在處理中的訂單來製造可見度。
+- `IdempotencyCacheGetErrors` — `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m`。Page-worthy:告警期間,被影響的請求其重複扣款防護被暫停。
+- `TicketTypeCacheRedisErrors`(D4.1 follow-up #1)— `rate(cache_errors_total{cache="ticket_type",op=~"get|set"}[5m]) > 0 for 5m`。**severity 設 warning + 5m soak 是刻意的**:這個 cache 是效能優化、**不是**像 idempotency cache 那樣的正確性控制;5m 可以吸收例行的 Redis 重啟,避免 1m 警示被路面操作 false-positive。觸發時 PR #90 帶來的 +38% sold-out fast-path RPS 增益被靜默地停用(booking endpoint 透過 PG fallback 仍正常運作)。Runbook:`docs/runbooks/README.md#tickettypecacherediserrors`。
+- `TicketTypeCacheMarshalErrors`(D4.1 follow-up #1)— `rate(cache_errors_total{cache="ticket_type",op="marshal"}[5m]) > 0 for 1m`。跟 Redis-error 那條 alert 拆開是因為兩者的處理動作完全不同:marshal 失敗是**程式 regression**(回報 bug、不要叫 Redis on-call)。對固定 shape 的 DTO 來說這是理論上不會發生的;非零代表未來有人加了一個無法 marshal 的型別。Runbook:`docs/runbooks/README.md#tickettypecachemarshalerrors`。
 
 ### 分散式追蹤(OpenTelemetry + Jaeger)
 - Decorator 模式:`BookingServiceTracingDecorator`, `MessageProcessorMetricsDecorator`, `OutboxRelayTracingDecorator`
@@ -756,6 +822,10 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `DB_PING_INTERVAL` | `postgres.ping_interval` | `1s` | 兩次 DB ping 之間的間隔 |
 | `DB_PING_PER_ATTEMPT` | `postgres.ping_per_attempt` | `3s` | 單次探測的 context timeout |
 | `KAFKA_BROKERS` | `kafka.brokers` | `localhost:9092` | **PR #22 型別變更**:`Brokers` 改為 `[]string`(cleanenv `env-separator:","`)。env 用逗號分隔;yaml 是 sequence。先前 `[]string{cfg.Brokers}` 把整個逗號字串當成單一位址 — multi-broker 設定先前其實靜默失效 |
+| `REDIS_INVENTORY_TTL` | `redis.inventory_ttl` | `720h`(30 天) | `event:{uuid}:qty` Redis key 的存活時間。預設值較長 — 活躍 event 會被運維流程在過期前重新 upsert;TTL 是用來避免孤兒 key 累積。記憶體緊就調低;sale window 很長就調高。 |
+| `REDIS_IDEMPOTENCY_TTL` | `redis.idempotency_ttl` | `24h` | 以 `Idempotency-Key` 為鍵的快取回應保留期。必須跟最長的 client 重試窗口對齊;跨天重試的金融流程要調高。 |
+| `REDIS_TICKET_TYPE_TTL` | `redis.ticket_type_ttl` | `5m` | **D4.1 follow-up #1。** 訂票熱路徑上 `ticket_type:{uuid}` cache entry 的存活時間(見 §6.9)。5 分鐘對正確性是安全的,因為 `BookTicket` 只讀**不可變**欄位;若會在不主動 invalidate 的情況下直接改價,可調低(例如 30s);讀多寫少、命中率優先於新鮮度的場景可調高(例如 1h)。**TTL=0 → fail-soft pass-through**,啟動時記一條 WARN log;緊急 bypass 用合理,但設成 0 期間 PR #90 帶來的 +38% sold-out fast-path RPS 增益會被停用。 |
+| `REDIS_DLQ_RETENTION` | `redis.dlq_retention` | `720h`(30 天) | `orders:dlq` 條目的保留期上限,透過 MINID 風格的 XADD trim 強制執行。要保留更久供事後檢視就調高;`Validate()` 會拒絕 ≤ 0。 |
 
 ---
 

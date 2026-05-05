@@ -323,6 +323,54 @@ groups:
           summary: "Idempotency cache GET path returning errors"
           description: "idempotency_cache_get_errors_total averaging {{ $value }} errors/sec over 5m. Duplicate-charge protection is suspended for affected requests — operators must investigate Redis health immediately. See docs/monitoring.md §2 for the metric's contract."
 
+      - alert: TicketTypeCacheRedisErrors
+        # Fires when the ticket_type read-through cache's Redis path
+        # (op=get or op=set) errors persistently. The decorator is
+        # fail-soft (cache miss → falls through to postgres), so the
+        # booking endpoint stays up — but a sustained signal here means
+        # the +38% RPS / -21% p95 sold-out fast-path recovery from
+        # PR #90 is silently disabled and total RPS regresses to the
+        # post-D4.1-no-cache baseline. Distinct from cache_misses_total
+        # (which would normally rise during the same incident); the
+        # error counter is the operator's "Redis is down" signal that
+        # disambiguates infra failure from organic miss-rate spikes.
+        #
+        # Severity warning + for: 5m soak deliberate (Staff SRE round 3
+        # finding H4): a docker-compose Redis restart or k8s pod
+        # rolling-redeploy would briefly burst op=get errors; a 1m
+        # window would page on routine ops. 5m absorbs routine restarts
+        # while still catching real outages within the SLO window. The
+        # ticket_type cache is a perf optimisation (NOT a correctness
+        # control like the idempotency cache) so warning is the right
+        # severity ceiling — escalation to critical happens in the
+        # runbook if the rate sustains > 30m alongside `RedisXAddFailures`.
+        expr: rate(cache_errors_total{cache="ticket_type",op=~"get|set"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#tickettypecacherediserrors"
+          summary: "ticket_type cache Redis errors sustained — sold-out fast path RPS regressing"
+          description: "cache_errors_total{cache=\"ticket_type\",op=\"{{ $labels.op }}\"} averaging {{ $value }} errors/sec over 5m. The cache decorator is failing soft (booking still works via postgres fallback) but the +38% sold-out fast-path RPS gain from PR #90 is currently disabled. Investigate Redis health (redis_client_pool_*, redis_up, redis_used_memory_bytes); cross-check against RedisXAddFailures + IdempotencyCacheGetErrors which would also fire under the same incident. See docs/monitoring.md §2."
+
+      - alert: TicketTypeCacheMarshalErrors
+        # Distinct from the Redis-error alert above because the
+        # remediation is completely different. A non-zero rate here
+        # means JSON marshal of the ticket_type cache entry is failing
+        # — theoretical for a fixed-shape DTO, so any non-zero is a
+        # CODE REGRESSION (e.g. a future field addition introduced an
+        # unmarshalable type). Operator action is "file a bug, do NOT
+        # page Redis owner". The companion runbook entry calls this out
+        # explicitly so on-call doesn't waste cycles on the wrong axis.
+        expr: rate(cache_errors_total{cache="ticket_type",op="marshal"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#tickettypecachemarshalerrors"
+          summary: "ticket_type cache JSON marshal failing — code regression"
+          description: "cache_errors_total{cache=\"ticket_type\",op=\"marshal\"} > 0. Marshal of the cache entry is failing — this is a code defect, NOT a Redis incident. The booking endpoint stays up (cache write is skipped, the inner result returns), but the cache layer is permanently disabled until a fix lands. File a bug; do not page the Redis on-call. See ticket_type_cache.go::ticketTypeCacheEntry."
+
       - alert: ReconMarkErrors
         # Fires when MarkConfirmed / MarkFailed inside the reconciler's
         # resolve path returns a non-ErrInvalidTransition error — i.e., a
