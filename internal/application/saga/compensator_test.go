@@ -118,9 +118,31 @@ func TestHandleOrderFailed_AlreadyCompensated(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
 
 	// IncrementTicket / MarkCompensated NOT expected — short-circuit.
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	require.NoError(t, err)
+}
+
+// TestHandleOrderFailed_AlreadyCompensated_LegacyEventStillRevertsRedis:
+// a prior delivery may have already marked the DB order compensated but
+// failed during Redis revert. On retry, a legacy payload still needs the
+// fallback ticket_type resolution so the idempotent Redis revert can run.
+func TestHandleOrderFailed_AlreadyCompensated_LegacyEventStillRevertsRedis(t *testing.T) {
+	t.Parallel()
+	comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow := compensatorHarness(t)
+
+	orderID, eventID, fallbackTicketTypeID := uuid.New(), uuid.New(), uuid.New()
+	already := reconstructOrder(t, orderID, eventID, domain.OrderStatusCompensated)
+	tt := domain.ReconstructTicketType(fallbackTicketTypeID, eventID, "Default", 2000, "usd", 100, 100, nil, nil, nil, "", 0)
+
+	uow.EXPECT().Do(gomock.Any(), gomock.Any()).
+		DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
+	ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return([]domain.TicketType{tt}, nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), fallbackTicketTypeID, 1, "order:"+orderID.String()).Return(nil)
+
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
 	require.NoError(t, err)
 }
 
@@ -212,7 +234,7 @@ func TestHandleOrderFailed_RevertInventoryError(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ticketTypeID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(redisErr)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(redisErr)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
 	require.Error(t, err)
@@ -233,7 +255,7 @@ func TestHandleOrderFailed_HappyPath(t *testing.T) {
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ticketTypeID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
 	require.NoError(t, err)
@@ -261,7 +283,7 @@ func TestHandleOrderFailed_LegacyEvent_FallsBackToSingleTicketType(t *testing.T)
 	// IncrementTicket called against the fallback id, NOT the (zero) one in the event.
 	ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), fallbackTicketTypeID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
+	invRepo.EXPECT().RevertInventory(gomock.Any(), fallbackTicketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
 	require.NoError(t, err)
@@ -269,12 +291,11 @@ func TestHandleOrderFailed_LegacyEvent_FallsBackToSingleTicketType(t *testing.T)
 
 // TestHandleOrderFailed_LegacyEvent_NoTicketTypes_SkipsIncrement:
 // Path C of the three-path resolution. ListByEventID returns 0 rows
-// → DB increment skipped (manual review required), but
-// MarkCompensated + Redis revert still proceed because the
-// user-visible inventory (Redis) remains authoritative.
+	// → DB increment skipped and Redis revert is also skipped because
+	// the compensator cannot safely identify the runtime key.
 func TestHandleOrderFailed_LegacyEvent_NoTicketTypes_SkipsIncrement(t *testing.T) {
 	t.Parallel()
-	comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow := compensatorHarness(t)
+	comp, orderRepo, eventRepo, ticketTypeRepo, _, uow := compensatorHarness(t)
 
 	orderID, eventID := uuid.New(), uuid.New()
 	failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
@@ -284,9 +305,8 @@ func TestHandleOrderFailed_LegacyEvent_NoTicketTypes_SkipsIncrement(t *testing.T
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	// Legacy fallback finds zero ticket_types — corruption case.
 	ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return(nil, nil)
-	// IncrementTicket NOT expected (Path C skip).
+	// IncrementTicket and RevertInventory NOT expected (Path C skip).
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
 	require.NoError(t, err)
@@ -296,11 +316,11 @@ func TestHandleOrderFailed_LegacyEvent_NoTicketTypes_SkipsIncrement(t *testing.T
 // Path C of the three-path resolution, multi-row variant. > 1
 // ticket_type per event + missing TicketTypeID is unrecoverable —
 // picking the wrong one would corrupt the visible counter, so the
-// compensator skips DB increment and relies on Redis (which is keyed
-// by event_id and unambiguous).
+	// compensator skips DB increment and Redis revert because there is
+	// no safe ticket_type key to target.
 func TestHandleOrderFailed_LegacyEvent_MultipleTicketTypes_SkipsIncrement(t *testing.T) {
 	t.Parallel()
-	comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow := compensatorHarness(t)
+	comp, orderRepo, eventRepo, ticketTypeRepo, _, uow := compensatorHarness(t)
 
 	orderID, eventID := uuid.New(), uuid.New()
 	failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
@@ -311,9 +331,8 @@ func TestHandleOrderFailed_LegacyEvent_MultipleTicketTypes_SkipsIncrement(t *tes
 		DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
 	ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return([]domain.TicketType{tt1, tt2}, nil)
-	// IncrementTicket NOT expected (Path C skip).
+	// IncrementTicket and RevertInventory NOT expected (Path C skip).
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
-	invRepo.EXPECT().RevertInventory(gomock.Any(), eventID, 1, "order:"+orderID.String()).Return(nil)
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
 	require.NoError(t, err)

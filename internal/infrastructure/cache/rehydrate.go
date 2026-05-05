@@ -23,9 +23,14 @@ import (
 // distinct in `pg_locks` queries.
 const inventoryRehydrateLockID int64 = 2001
 
-// RehydrateInventory scans events with `available_tickets > 0` from
-// Postgres (the source of truth) and populates Redis `event:{id}:qty`
-// keys via SETNX. Idempotent: existing Redis keys are NEVER overwritten.
+// RehydrateInventory scans active events from Postgres and repopulates
+// Redis runtime state:
+//
+//   - `ticket_type_meta:{id}` immutable metadata via HSET
+//   - `ticket_type_qty:{id}` mutable inventory via SETNX
+//
+// Existing qty keys are NEVER overwritten; metadata keys are always
+// refreshed because the fields are immutable snapshots.
 //
 // Why this exists.
 //   This codebase treats Redis as an ephemeral hot-path cache while
@@ -38,10 +43,10 @@ const inventoryRehydrateLockID int64 = 2001
 //
 // Why SETNX, not SET.
 //   During normal operation, Redis is AHEAD of DB:
-//     - Lua deduct atomically writes `event:{id}:qty -= N` AND emits a
-//       stream message
+//     - Lua deduct atomically writes `ticket_type_qty:{id} -= N` AND
+//       emits a stream message
 //     - Worker eventually consumes the message and runs DecrementTicket
-//       on `events.available_tickets` in a DB transaction
+//       on `event_ticket_types.available_tickets` in a DB transaction
 //   So at any moment, Redis qty == DB available_tickets MINUS in-flight
 //   deducts that haven't reached the worker yet. Overwriting Redis with
 //   the DB value would re-add the in-flight deducts to inventory and
@@ -108,17 +113,17 @@ func RehydrateInventory(ctx context.Context, p RehydrateInventoryParams) error {
 		}
 	}()
 
-	// 2. Scan events with available_tickets > 0. Sold-out events are
-	// excluded — Lua deduct handles missing keys correctly (DECRBY → -N
-	// → revert path → return -1) so we don't need cache entries for
-	// them.
+	// 2. Scan active events. Sold-out events are excluded because the
+	// hot path treats missing qty keys as sold out; runtime metadata is
+	// restored for every ticket type under the active events.
 	events, err := p.EventRepo.ListAvailable(ctx)
 	if err != nil {
 		return fmt.Errorf("inventoryRehydrate list events: %w", err)
 	}
 
-	// 3. SETNX each event's qty key. Live keys are preserved; missing
-	// keys get the DB value with the configured TTL.
+	// 3. Refresh metadata + SETNX each ticket type's qty key. Live qty
+	// keys are preserved; missing keys get the DB value with the
+	// configured TTL.
 	//
 	// Failure semantics: a single SETNX error aborts the entire
 	// rehydrate. This is INTENTIONAL — if Redis is in a state where
@@ -130,75 +135,58 @@ func RehydrateInventory(ctx context.Context, p RehydrateInventoryParams) error {
 	// retries the whole rehydrate from scratch.
 	var rehydrated, skipped, drifted int
 	for _, e := range events {
-		key := inventoryKey(e.ID())
-		// D4.1 follow-up: the actual remaining inventory is the SUM
-		// across event_ticket_types (the per-ticket-type SoT), NOT
-		// `events.available_tickets` which is frozen post-D4.1. SUM
-		// across a single ticket_type (D4.1 default) returns the same
-		// value the legacy column would have held; across multiple
-		// ticket types (future D8) it aggregates correctly because
-		// the Redis key is keyed at event level (the deduct.lua hot
-		// path key has not migrated to ticket_type granularity yet).
-		dbAvailable, err := p.TicketTypeRepo.SumAvailableByEventID(ctx, e.ID())
+		ticketTypes, err := p.TicketTypeRepo.ListByEventID(ctx, e.ID())
 		if err != nil {
-			return fmt.Errorf("inventoryRehydrate sum ticket_types event=%s: %w", e.ID(), err)
+			return fmt.Errorf("inventoryRehydrate list ticket_types event=%s: %w", e.ID(), err)
 		}
-		if dbAvailable <= 0 {
-			// Event has no ticket types OR all ticket types are sold
-			// out. Either way Redis seed is unnecessary — Lua deduct
-			// returns sold-out for missing/zero keys. Skip without
-			// counting as "rehydrated".
-			continue
-		}
-		ok, err := p.RedisClient.SetNX(ctx, key, dbAvailable, p.Cfg.Redis.InventoryTTL).Result()
-		if err != nil {
-			return fmt.Errorf("inventoryRehydrate SETNX event=%s: %w", e.ID(), err)
-		}
-		if ok {
-			rehydrated++
-			continue
-		}
-		// SETNX returned false → the key already exists. Normal cause:
-		// app restart while Redis was alive, in-flight deducts mean
-		// Redis is AHEAD of DB by some count. We must NOT overwrite
-		// (that would re-add the in-flight deducts to inventory).
-		//
-		// But: SETNX-false silently masks "key exists with WRONG value"
-		// (corruption, manual tinkering, NOGROUP-aftermath). Detect
-		// the latter by GET-ing the existing value and comparing.
-		//
-		// Drift definition: Redis value > DB value. Redis < DB is
-		// EXPECTED during normal operation (in-flight deducts).
-		// Redis > DB cannot happen via the deduct-then-DB-decrement
-		// flow; it only happens when something put the wrong value in.
-		skipped++
-		existingStr, getErr := p.RedisClient.Get(ctx, key).Result()
-		if getErr != nil {
-			if errors.Is(getErr, redis.Nil) {
-				// Race: key existed at SETNX time, expired before GET.
-				// Ignore — it'll be (correctly) repopulated on next access.
+		for _, tt := range ticketTypes {
+			metaKey := ticketTypeMetaKey(tt.ID())
+			if err := p.RedisClient.HSet(ctx, metaKey, ticketTypeMetaValues(tt)).Err(); err != nil {
+				return fmt.Errorf("inventoryRehydrate HSET metadata ticket_type=%s: %w", tt.ID(), err)
+			}
+			if err := p.RedisClient.Expire(ctx, metaKey, p.Cfg.Redis.InventoryTTL).Err(); err != nil {
+				return fmt.Errorf("inventoryRehydrate EXPIRE metadata ticket_type=%s: %w", tt.ID(), err)
+			}
+
+			key := inventoryKey(tt.ID())
+			dbAvailable := tt.AvailableTickets()
+			ok, err := p.RedisClient.SetNX(ctx, key, dbAvailable, p.Cfg.Redis.InventoryTTL).Result()
+			if err != nil {
+				return fmt.Errorf("inventoryRehydrate SETNX ticket_type=%s: %w", tt.ID(), err)
+			}
+			if ok {
+				rehydrated++
 				continue
 			}
-			log.Warn(ctx, "inventory rehydrate drift-check GET failed",
-				tag.EventID(e.ID()), tag.Error(getErr))
-			continue
-		}
-		existing, parseErr := strconv.Atoi(existingStr)
-		if parseErr != nil {
-			log.Warn(ctx, "inventory rehydrate drift-check parse failed",
-				tag.EventID(e.ID()),
-				mlog.String("redis_value", existingStr), tag.Error(parseErr))
-			continue
-		}
-		if existing > dbAvailable {
-			drifted++
-			observability.InventoryRehydrateDriftTotal.Inc()
-			log.Warn(ctx, "inventory rehydrate drift detected (Redis > DB)",
-				tag.EventID(e.ID()),
-				mlog.Int("redis_qty", existing),
-				mlog.Int("db_available_tickets", dbAvailable),
-				mlog.Int("drift", existing-dbAvailable),
-			)
+			skipped++
+			existingStr, getErr := p.RedisClient.Get(ctx, key).Result()
+			if getErr != nil {
+				if errors.Is(getErr, redis.Nil) {
+					continue
+				}
+				log.Warn(ctx, "inventory rehydrate drift-check GET failed",
+					tag.EventID(e.ID()), tag.TicketTypeID(tt.ID()), tag.Error(getErr))
+				continue
+			}
+			existing, parseErr := strconv.Atoi(existingStr)
+			if parseErr != nil {
+				log.Warn(ctx, "inventory rehydrate drift-check parse failed",
+					tag.EventID(e.ID()),
+					tag.TicketTypeID(tt.ID()),
+					mlog.String("redis_value", existingStr), tag.Error(parseErr))
+				continue
+			}
+			if existing > dbAvailable {
+				drifted++
+				observability.InventoryRehydrateDriftTotal.Inc()
+				log.Warn(ctx, "inventory rehydrate drift detected (Redis > DB)",
+					tag.EventID(e.ID()),
+					tag.TicketTypeID(tt.ID()),
+					mlog.Int("redis_qty", existing),
+					mlog.Int("db_available_tickets", dbAvailable),
+					mlog.Int("drift", existing-dbAvailable),
+				)
+			}
 		}
 	}
 

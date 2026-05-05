@@ -41,15 +41,15 @@ func reconstructTicketType(t *testing.T, eventID uuid.UUID, priceCents int64, cu
 //   - domain factory invariants (empty name, zero total_tickets, bad
 //     price/currency surfaced via NewTicketType)
 //   - UoW commit failure → wrapped, no Redis call
-//   - Redis SetInventory failure + compensation success → wrapped
+//   - Redis SetTicketTypeRuntime failure + compensation success → wrapped
 //     Redis error, both rows deleted
-//   - Redis SetInventory failure + compensation failure → "compensation
+//   - Redis SetTicketTypeRuntime failure + compensation failure → "compensation
 //     failed" surfaced with both errors for manual recon
 //   - happy path → both DB rows + Redis hot inventory installed
 //
 // The compensation path is the load-bearing part of this service: a
 // dangling DB row pair with no Redis inventory makes the event
-// permanently unsellable. SetInventory failure must either succeed-
+// permanently unsellable. Redis runtime-write failure must either succeed-
 // with-rollback (delete both rows) or fail-loud. Both branches are
 // covered.
 
@@ -130,14 +130,14 @@ func TestCreateEvent_InvariantFailure_BadCurrency(t *testing.T) {
 
 // TestCreateEvent_UoWError: the UoW Do call returns an error (e.g. DB
 // constraint violation inside the closure, or a tx-begin failure).
-// Service must NOT call SetInventory.
+// Service must NOT call SetTicketTypeRuntime.
 func TestCreateEvent_UoWError(t *testing.T) {
 	t.Parallel()
 	svc, uow, _, _, _ := eventServiceHarness(t)
 
 	dbErr := errors.New("postgres: deadlock detected")
 	uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(dbErr)
-	// inv.SetInventory NOT expected.
+	// inv.SetTicketTypeRuntime NOT expected.
 
 	_, err := svc.CreateEvent(context.Background(), "Concert", 100, 2000, "usd")
 	require.Error(t, err)
@@ -145,7 +145,7 @@ func TestCreateEvent_UoWError(t *testing.T) {
 }
 
 // TestCreateEvent_RedisFails_CompensationSucceeds: the UoW commits
-// (event + ticket_type both inserted), Redis SetInventory fails, the
+// (event + ticket_type both inserted), Redis runtime write fails, the
 // compensation UoW runs and deletes both rows. Service surfaces the
 // Redis error so callers know the operation failed; the DB is left
 // clean for retry.
@@ -186,7 +186,7 @@ func TestCreateEvent_RedisFails_CompensationSucceeds(t *testing.T) {
 	)
 
 	redisErr := errors.New("redis: connection refused")
-	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 100).Return(redisErr)
+	inv.EXPECT().SetTicketTypeRuntime(gomock.Any(), createdTT).Return(redisErr)
 
 	_, err := svc.CreateEvent(context.Background(), "Concert", 100, 2000, "usd")
 	require.Error(t, err)
@@ -221,7 +221,7 @@ func TestCreateEvent_RedisFails_CompensationAlsoFails(t *testing.T) {
 		uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(compensationErr),
 	)
 
-	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 100).Return(redisErr)
+	inv.EXPECT().SetTicketTypeRuntime(gomock.Any(), createdTT).Return(redisErr)
 
 	_, err := svc.CreateEvent(context.Background(), "Concert", 100, 2000, "usd")
 	require.Error(t, err)
@@ -235,7 +235,7 @@ func TestCreateEvent_RedisFails_CompensationAlsoFails(t *testing.T) {
 		"errors.Is must match the compensation sentinel — operators searching for the load-bearing failure need a typed branch, not string-match")
 }
 
-// TestCreateEvent_HappyPath: UoW commits + Redis SetInventory
+// TestCreateEvent_HappyPath: UoW commits + Redis runtime write
 // succeeds; service returns the rehydrated event AND the default
 // ticket_type so the API layer can echo it in the response.
 func TestCreateEvent_HappyPath(t *testing.T) {
@@ -250,7 +250,7 @@ func TestCreateEvent_HappyPath(t *testing.T) {
 	uow.EXPECT().Do(gomock.Any(), gomock.Any()).
 		DoAndReturn(uowDoSucceeds(&application.Repositories{Event: repo, TicketType: tt}))
 
-	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 100).Return(nil)
+	inv.EXPECT().SetTicketTypeRuntime(gomock.Any(), createdTT).Return(nil)
 
 	got, err := svc.CreateEvent(context.Background(), "Concert", 100, 2000, "usd")
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestCreateEvent_CurrencyNormalisedToLowercase(t *testing.T) {
 		})
 	uow.EXPECT().Do(gomock.Any(), gomock.Any()).
 		DoAndReturn(uowDoSucceeds(&application.Repositories{Event: repo, TicketType: tt}))
-	inv.EXPECT().SetInventory(gomock.Any(), created.ID(), 50).Return(nil)
+	inv.EXPECT().SetTicketTypeRuntime(gomock.Any(), createdTT).Return(nil)
 
 	// Caller passes uppercase "TWD"; service should normalise.
 	_, err := svc.CreateEvent(context.Background(), "Concert", 50, 5000, "TWD")

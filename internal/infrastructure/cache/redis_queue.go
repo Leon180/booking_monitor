@@ -378,16 +378,16 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 // pass retries compensation.
 //
 // Strategy:
-//   - Try `parseLegacyRevertHints` to extract event_id + quantity from
-//     the raw msg.Values. These two fields predate D4.1, so they're
-//     present even on legacy messages that fail parseMessage on the new
-//     D4.1 fields (ticket_type_id / amount_cents / currency).
+//   - Try `parseRevertHints` to extract ticket_type_id + quantity from
+//     the raw msg.Values. These are the minimum fields needed by the
+//     ticket_type-scoped revert path.
 //   - Hints unrecoverable: revert is impossible (we don't know what to
 //     revert against), so retry can't fix it either — DLQ + ACK with
 //     `malformed_unrecoverable`. Inventory leak unavoidable; ops alert
 //     on the distinct label.
 //   - Hints OK + revert succeeds + DLQ succeeds: ACK with
-//     `malformed_reverted_legacy`.
+//     `malformed_reverted_legacy` (label retained for continuity even
+//     though the runtime key is now ticket_type-scoped).
 //   - Hints OK + revert FAILS: leave in PEL (return "", false) — same
 //     contract as handleFailure. revert.lua's msgID SETNX guard makes
 //     repeated reverts idempotent, so PEL retry converges. DLQ + ACK
@@ -399,7 +399,7 @@ func (q *redisOrderQueue) handleParseFailure(ctx context.Context, rawMsg redis.X
 	bgCtx, cancel := context.WithTimeout(context.Background(), q.failureTimeout)
 	defer cancel()
 
-	eventID, qty, hintsOK := parseLegacyRevertHints(rawMsg)
+	ticketTypeID, qty, hintsOK := parseRevertHints(rawMsg)
 	if !hintsOK {
 		// Truly malformed — no event_id / quantity to revert against.
 		// Retry can't fix it (parse will fail forever AND we still
@@ -418,10 +418,10 @@ func (q *redisOrderQueue) handleParseFailure(ctx context.Context, rawMsg redis.X
 		return dlqReasonMalformedUnrecoverable, true
 	}
 
-	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, eventID, qty, rawMsg.ID); revertErr != nil {
+	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, ticketTypeID, qty, rawMsg.ID); revertErr != nil {
 		q.metrics.RecordRevertFailure()
 		q.logger.Error(ctx, "RevertInventory failed during parse-fail compensation — leaving message in PEL for retry",
-			tag.Error(revertErr), tag.MsgID(rawMsg.ID), tag.EventID(eventID), tag.Quantity(qty))
+			tag.Error(revertErr), tag.MsgID(rawMsg.ID), tag.TicketTypeID(ticketTypeID), tag.Quantity(qty))
 		// Symmetric with handleFailure: revert is idempotent (revert.lua
 		// + msgID SETNX), so PEL retry is safe. ACK + DLQ would
 		// permanently leak Redis inventory under a transient revert
@@ -440,7 +440,7 @@ func (q *redisOrderQueue) handleParseFailure(ctx context.Context, rawMsg redis.X
 	}
 
 	q.logger.Info(ctx, "parse-fail compensation: Redis inventory reverted via legacy hints",
-		tag.MsgID(rawMsg.ID), tag.EventID(eventID), tag.Quantity(qty), tag.Error(parseErr))
+		tag.MsgID(rawMsg.ID), tag.TicketTypeID(ticketTypeID), tag.Quantity(qty), tag.Error(parseErr))
 	return dlqReasonMalformedRevertedLegacy, true
 }
 
@@ -463,12 +463,12 @@ func (q *redisOrderQueue) handleFailure(ctx context.Context, orderMsg *worker.Qu
 	bgCtx, cancel := context.WithTimeout(context.Background(), q.failureTimeout)
 	defer cancel()
 
-	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.EventID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
+	if revertErr := q.inventoryRepo.RevertInventory(bgCtx, orderMsg.TicketTypeID, orderMsg.Quantity, rawMsg.ID); revertErr != nil {
 		q.metrics.RecordRevertFailure()
 		q.logger.Error(ctx, "RevertInventory failed — leaving message in PEL for retry",
 			tag.Error(revertErr),
 			tag.MsgID(rawMsg.ID),
-			tag.EventID(orderMsg.EventID),
+			tag.TicketTypeID(orderMsg.TicketTypeID),
 			tag.Quantity(orderMsg.Quantity),
 		)
 		return false
@@ -542,19 +542,17 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 	return nil
 }
 
-// parseLegacyRevertHints extracts only `event_id` + `quantity` from a
+// parseRevertHints extracts only `ticket_type_id` + `quantity` from a
 // raw stream message, best-effort. Used by the parse-fail path to
 // retire Redis inventory before the message is DLQ'd: a hard parse
 // failure (e.g. missing D4.1 fields on a pre-D4.1 in-flight message)
 // originally ACK'd the message without reverting, leaking 1 inventory
 // unit per dropped message (Codex P1).
 //
-// Why these two fields specifically: `event_id` (the inventory key)
+// Why these two fields specifically: `ticket_type_id` (the inventory key)
 // and `quantity` (the amount Lua DECRBY'd) are the minimum needed by
 // `InventoryRepository.RevertInventory`. They have been present on
-// every message produced by `deduct.lua` since D3 — pre-D4.1 OR
-// post-D4.1 — so this helper is stable across the rolling-upgrade
-// window that motivates the fix.
+// every message produced by the post-D4.1 Lua runtime path.
 //
 // Returns ok=false when EITHER field is missing or unparseable. In
 // that case the message goes to DLQ with `dlqReasonMalformedUnrecoverable`
@@ -565,13 +563,13 @@ func (q *redisOrderQueue) moveToDLQ(ctx context.Context, msg redis.XMessage, err
 // not happy-path parsing. parseMessage's stricter checks already ran
 // and rejected the message; this helper just tries to salvage what's
 // needed for compensation.
-func parseLegacyRevertHints(msg redis.XMessage) (eventID uuid.UUID, qty int, ok bool) {
-	eventIDStr, isStr := msg.Values[fieldEventID].(string)
+func parseRevertHints(msg redis.XMessage) (ticketTypeID uuid.UUID, qty int, ok bool) {
+	ticketTypeIDStr, isStr := msg.Values[fieldTicketTypeID].(string)
 	if !isStr {
 		return uuid.Nil, 0, false
 	}
-	parsedEventID, err := uuid.Parse(eventIDStr)
-	if err != nil || parsedEventID == uuid.Nil {
+	parsedTicketTypeID, err := uuid.Parse(ticketTypeIDStr)
+	if err != nil || parsedTicketTypeID == uuid.Nil {
 		return uuid.Nil, 0, false
 	}
 
@@ -584,7 +582,7 @@ func parseLegacyRevertHints(msg redis.XMessage) (eventID uuid.UUID, qty int, ok 
 		return uuid.Nil, 0, false
 	}
 
-	return parsedEventID, parsedQty, true
+	return parsedTicketTypeID, parsedQty, true
 }
 
 func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
@@ -688,12 +686,12 @@ func parseMessage(msg redis.XMessage) (*worker.QueuedBookingMessage, error) {
 
 	// D4.1 — ticket_type_id is a UUID v7 (caller-generated by the
 	// admin / event service). Reject zero UUID at the boundary so the
-	// DLQ entry is labelled `malformed_parse` (wire-format bug class)
+	// DLQ entry takes the parse-failure branch
 	// rather than `malformed_classified` (domain invariant rejection
-	// class) — operationally distinct: a `malformed_parse` spike on a
-	// rolling upgrade is the expected transitional drain of pre-D4.1
-	// PEL entries; a `malformed_classified` spike is a producer
-	// regression worth paging on.
+	// class) — operationally distinct: a
+	// `malformed_reverted_legacy` taper after a rolling upgrade is the
+	// expected drain of pre-D4.1 PEL entries, while
+	// `malformed_classified` is a producer regression worth paging on.
 	ticketTypeID, err := uuid.Parse(ticketTypeIDStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s %q: %w", fieldTicketTypeID, ticketTypeIDStr, err)

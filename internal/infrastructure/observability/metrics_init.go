@@ -64,11 +64,11 @@ func init() {
 	// failures. Keep these strings in sync with the const block in
 	// internal/infrastructure/cache/redis_queue.go (DLQReason*).
 	//
-	// `malformed_parse` is retained as a pre-warm label even though the
+	// `malformed_parse` is retained as a pre-warm label for backward
+	// compatibility with historical dashboards / queries even though the
 	// post-fix code emits `malformed_reverted_legacy` /
-	// `malformed_unrecoverable` instead — the alert rules reference the
-	// older label and a renamed series would orphan them. New alerts
-	// SHOULD branch on the more specific labels.
+	// `malformed_unrecoverable` instead. New alerts SHOULD branch on the
+	// more specific labels.
 	for _, reason := range []string{
 		"malformed_parse",
 		"malformed_classified",
@@ -79,20 +79,10 @@ func init() {
 		RedisDLQRoutedTotal.WithLabelValues(reason)
 	}
 	// Pre-warm the cache labels so the series exist in /metrics before
-	// the first lookup. Add new values here when new caches are
-	// introduced. Keep the literal strings in sync with the
-	// `cacheLabel*` consts in `internal/infrastructure/cache/*.go`.
-	for _, cache := range []string{"idempotency", "ticket_type"} {
+	// the first lookup.
+	for _, cache := range []string{"idempotency"} {
 		CacheHitsTotal.WithLabelValues(cache)
 		CacheMissesTotal.WithLabelValues(cache)
-	}
-	// Pre-warm the cache error labels too. Today only ticket_type
-	// emits to this counter; idempotency uses the older dedicated
-	// `idempotency_cache_get_errors_total` series. New caches should
-	// use the labelled `cache_errors_total{cache,op}` and add their
-	// pre-warm tuples here.
-	for _, op := range []string{"get", "set", "marshal"} {
-		CacheErrorsTotal.WithLabelValues("ticket_type", op)
 	}
 	// Pre-warm idempotency replay outcomes (N4) so all three series
 	// exist in /metrics from boot. "legacy_match" should taper to ~0

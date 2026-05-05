@@ -51,10 +51,6 @@ silence / inhibit / notification log.
 - [IdempotencyCacheGetErrors](#idempotencycachegeterrors)
 - [DBRollbackFailures](#dbrollbackfailures)
 
-### Cache layer (perf optimisations — fail-soft)
-- [TicketTypeCacheRedisErrors](#tickettypecacherediserrors)
-- [TicketTypeCacheMarshalErrors](#tickettypecachemarshalerrors)
-
 ### Redis / Kafka infra
 - [RedisXAckFailures](#redisxackfailures)
 - [RedisRevertFailures](#redisrevertfailures)
@@ -179,11 +175,13 @@ silence / inhibit / notification log.
 
 **Symptom.** `orders:dlq` has > 0 entries for 5m. Severity `warning`. Operator review awaits.
 
-**Diagnosis.** `redis-cli -a "$REDIS_PASSWORD" XRANGE orders:dlq - +` to read the entries. Each carries a `reason` label (malformed_parse / malformed_classified / exhausted_retries).
+**Diagnosis.** `redis-cli -a "$REDIS_PASSWORD" XRANGE orders:dlq - +` to read the entries. Each carries a `reason` label (`malformed_reverted_legacy` / `malformed_unrecoverable` / `malformed_classified` / `exhausted_retries`).
 
 **Action.**
-- malformed_parse / malformed_classified → producer bug. Investigate via the message payload + git blame on the producer side.
-- exhausted_retries → downstream was degraded for the retry budget window. Spot-check downstream health.
+- `malformed_reverted_legacy` → expected rolling-upgrade taper. The worker extracted legacy hints, reverted Redis inventory, then DLQ'd the message. Track the rate; it should decay toward zero after old PEL entries drain.
+- `malformed_unrecoverable` → inventory leak. The worker could not parse revert hints or `RevertInventory` itself failed. Page immediately and reconcile Redis `ticket_type_qty:{id}` against Postgres `event_ticket_types.available_tickets`.
+- `malformed_classified` → producer bug. Message parsed but failed deterministic domain invariants. Investigate the payload + git blame on the producer side.
+- `exhausted_retries` → downstream was degraded for the retry budget window. Spot-check DB / Redis / payment-worker health.
 - After investigation: `XACK` (still in PEL) or `XDEL` (after archiving the entry to long-term storage).
 
 ---
@@ -332,44 +330,6 @@ silence / inhibit / notification log.
 
 ---
 
-## TicketTypeCacheRedisErrors
-
-**Symptom.** `cache_errors_total{cache="ticket_type",op=~"get|set"}` rate > 0 for 5m+. Severity `warning`. **NOT page-worthy at the warning threshold** — the cache is a perf optimisation, not a correctness control. Booking endpoint stays up via Postgres fallback; the +38% sold-out fast-path RPS / -21% p95 gain from PR #90 is what's silently disabled.
-
-**Diagnosis.** This alert disambiguates "Redis down / degraded" from "cache cold". Cross-check:
-- `redis_up{job="redis"}` / `RedisExporterCannotReachRedis` — is Redis itself reachable?
-- `redis_client_pool_timeouts` / `redis_client_pool_misses` — is OUR client starving?
-- `redis_used_memory_bytes` vs `maxmemory` — OOM eviction storms can cause `op="set"` failures specifically
-- `IdempotencyCacheGetErrors` — typically fires under the same incident; if it doesn't, the cause is more localised
-- `RedisXAddFailures` / `RedisXAckFailures` — same Redis, different code paths; pattern of which fire helps localise
-
-**Action.** Restore Redis health. The cache is fail-soft so booking continues during the incident; the only impact is paying the post-D4.1 PG round-trip cost on every booking attempt (`http_req_duration` p95 will track back toward the no-cache baseline of ~28ms while the alert is active). No special operator action against the cache itself — once Redis recovers, write-through fills entries lazily on the next miss for each ticket_type.
-
-**Escalation.** Page if sustained > 30m AND `RedisXAddFailures` is also firing — that combination means the booking hot path is approaching the Lua single-thread limit at ~5ms per attempt (vs the cache's ~1ms hit cost) AND the `accepted_bookings/s` ceiling will start dropping. Otherwise warning + on-call awareness is sufficient; the gain this PR added is recoverable via simple Redis recovery.
-
-**Why severity = warning, not critical.** A docker-compose Redis restart or k8s pod rolling-redeploy bursts `op="get"` errors for the duration of disconnect. A 1m / critical alert would page on routine ops. The 5m soak absorbs routine restarts while still catching real outages within the SLO window.
-
----
-
-## TicketTypeCacheMarshalErrors
-
-**Symptom.** `cache_errors_total{cache="ticket_type",op="marshal"}` rate > 0 for 1m+. Severity `warning`.
-
-**This is NOT a Redis incident.** Marshal of the fixed-shape `ticketTypeCacheEntry` JSON is a deterministic operation; non-zero rate means a code regression introduced an unmarshalable type into the cache entry struct. The booking endpoint stays up (cache write is skipped on marshal failure, the inner result still returns), but the cache layer is permanently disabled until a fix lands.
-
-**Diagnosis.** Recent changes to:
-- `internal/infrastructure/cache/ticket_type_cache.go::ticketTypeCacheEntry` (the cache DTO)
-- `internal/infrastructure/cache/ticket_type_cache.go::ticketTypeCacheEntryFromDomain` (the domain → DTO mapper)
-- The aggregate accessors on `domain.TicketType` if a new type was added
-
-Pull recent commits touching these paths; the offending struct field will surface in the marshal stack trace.
-
-**Action.** **File a bug; do NOT page Redis on-call.** The fix is a code change (revert the bad field type or fix its JSON tags). Until the fix lands, the cache layer is bypassed → total RPS regresses ~28% and p95 climbs by ~6ms on the sold-out fast path.
-
-**Escalation.** This alert's existence is its own escalation signal. If the rate sustains > 1h, raise the severity manually.
-
----
-
 ## DBRollbackFailures
 
 **Symptom.** `db_rollback_failures_total` rate > 0 for 5m. Severity `warning`.
@@ -451,7 +411,7 @@ Pull recent commits touching these paths; the offending struct field will surfac
 
 ## InventoryDriftDetected
 
-**Symptom.** `increase(inventory_drift_detected_total[5m]) > 0 for 5m`. Severity **warning**. The drift detector running in the `recon` process found at least one event whose Redis cache disagrees with the Postgres source-of-truth (`events.available_tickets`) beyond the configured `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100). The `direction` label tells you WHICH failure mode and routes you to the right diagnosis branch.
+**Symptom.** `increase(inventory_drift_detected_total[5m]) > 0 for 5m`. Severity **warning**. The drift detector running in the `recon` process found at least one event with a ticket type whose Redis cache disagrees with the Postgres source-of-truth (`event_ticket_types.available_tickets`) beyond the configured `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100). The `direction` label tells you WHICH failure mode and routes you to the right diagnosis branch.
 
 **Why this is warning-severity (not critical).** Drift between Redis and DB is RECOVERABLE — the rehydrate path (`cache.RehydrateInventory`) re-runs at app startup and SETNX-guards in-flight values, so a manual restart is the worst-case remediation. The risk is sustained drift left undetected: customers see "sold out" while DB still has inventory (`cache_low_excess`), or successful 202s with no DB row (`cache_high`). The `for: 5m` window discriminates "transient in-flight blip" (one busy moment crosses tolerance briefly) from "sustained corruption worth paging".
 
@@ -506,11 +466,11 @@ Redis < DB by more than tolerance. Steady-state drift is positive (in-flight boo
 **Action (general):**
 
 - **Single sweep flagged once and cleared:** acknowledge and move on. The detector's `for: 5m` window already filtered transients.
-- **Persistent for > 30m:** start with the diagnosis branch matching the `direction` label. If unclear, dump current state for the affected event:
+- **Persistent for > 30m:** start with the diagnosis branch matching the `direction` label. If unclear, dump current state for the affected ticket type:
   ```bash
-  docker exec booking_redis redis-cli GET event:<uuid>:qty
+  docker exec booking_redis redis-cli GET ticket_type_qty:<ticket-type-uuid>
   docker exec booking_db psql -U user -d booking -c \
-    "SELECT id, available_tickets FROM events WHERE id = '<uuid>';"
+    "SELECT id, event_id, available_tickets FROM event_ticket_types WHERE id = '<ticket-type-uuid>';"
   ```
 
 **Escalation.** If drift exceeds 1000 tickets for any single event OR multiple events drift simultaneously across direction labels, that suggests systemic corruption (Redis or DB). Bring in whoever owns the storage layer.

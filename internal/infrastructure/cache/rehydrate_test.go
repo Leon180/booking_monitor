@@ -25,10 +25,8 @@ import (
 // rather than re-doing infrastructure boilerplate.
 //
 // D4.1 follow-up: also returns a TicketTypeRepository mock — rehydrate
-// now reads dbAvailable from event_ticket_types via SumAvailableByEventID
-// instead of the now-frozen events.available_tickets column. Tests
-// that exercise the SETNX path register a SumAvailableByEventID
-// expectation alongside ListAvailable.
+// now rebuilds runtime state from per-event ticket types rather than
+// the frozen events.available_tickets column.
 func rehydrateTestSetup(t *testing.T) (*redis.Client, *miniredis.Miniredis, *mocks.MockEventRepository, *mocks.MockTicketTypeRepository, *mocks.MockDistributedLock, *config.Config, *mlog.Logger, *gomock.Controller) {
 	t.Helper()
 	s := miniredis.RunT(t)
@@ -51,6 +49,12 @@ func rehydrateTestSetup(t *testing.T) (*redis.Client, *miniredis.Miniredis, *moc
 func makeEvent(t *testing.T, name string, total, available int) domain.Event {
 	t.Helper()
 	return domain.ReconstructEvent(uuid.New(), name, total, available, 0)
+}
+
+func expectTicketTypes(repo *mocks.MockTicketTypeRepository, e domain.Event, available int) domain.TicketType {
+	tt := domain.ReconstructTicketType(e.ID(), e.ID(), "Default", 2000, "usd", 1000, available, nil, nil, nil, "", 0)
+	repo.EXPECT().ListByEventID(gomock.Any(), e.ID()).Return([]domain.TicketType{tt}, nil)
+	return tt
 }
 
 // TestRehydrate_LockNotAcquired_NoDBScanNoSETNX pins the contract that
@@ -79,7 +83,7 @@ func TestRehydrate_LockNotAcquired_NoDBScanNoSETNX(t *testing.T) {
 
 // TestRehydrate_PopulatesEmptyRedis: the canonical recovery scenario.
 // Redis is empty (FLUSHALL aftermath, fresh deploy), DB has 3 events
-// with various available_tickets. Rehydrate writes all 3 keys and
+// with various available_tickets. Rehydrate writes all 3 runtime keys and
 // returns the right counts in the log.
 func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 	t.Parallel()
@@ -93,11 +97,9 @@ func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return(events, nil)
-	// D4.1 follow-up: rehydrate now reads dbAvailable from
-	// SumAvailableByEventID. Each event registers an expectation
-	// returning the same value the test expects in Redis afterwards.
+	var ticketTypes []domain.TicketType
 	for _, e := range events {
-		ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), e.ID()).Return(e.AvailableTickets(), nil)
+		ticketTypes = append(ticketTypes, expectTicketTypes(ticketTypeRepo, e, e.AvailableTickets()))
 	}
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
@@ -111,15 +113,16 @@ func TestRehydrate_PopulatesEmptyRedis(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify each event's qty key was written with the correct value.
-	for _, e := range events {
-		key := "event:" + e.ID().String() + ":qty"
+	// Verify each ticket type's runtime state was written.
+	for i, tt := range ticketTypes {
+		key := "ticket_type_qty:" + tt.ID().String()
 		val, err := s.Get(key)
 		require.NoError(t, err, "key %s should exist", key)
-		assert.Equal(t, e.AvailableTickets(), parseInt(t, val), "key %s should hold available_tickets", key)
-		// TTL should be set (miniredis tracks TTL).
+		assert.Equal(t, events[i].AvailableTickets(), parseInt(t, val), "key %s should hold available_tickets", key)
 		ttl := s.TTL(key)
 		assert.Greater(t, ttl, time.Duration(0), "key %s should have a TTL", key)
+		metaKey := "ticket_type_meta:" + tt.ID().String()
+		require.True(t, s.Exists(metaKey), "metadata key %s should exist", metaKey)
 	}
 }
 
@@ -132,14 +135,14 @@ func TestRehydrate_PreservesLiveRedisValues(t *testing.T) {
 	rdb, s, eventRepo, ticketTypeRepo, locker, cfg, log, _ := rehydrateTestSetup(t)
 
 	event := makeEvent(t, "concert", 1000, 800) // DB says 800 available
-	key := "event:" + event.ID().String() + ":qty"
+	tt := expectTicketTypes(ticketTypeRepo, event, event.AvailableTickets())
+	key := "ticket_type_qty:" + tt.ID().String()
 	// Redis already has 750 (live state — 50 in-flight deducts haven't
 	// reached the worker yet, so DB hasn't decremented).
 	require.NoError(t, s.Set(key, "750"))
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return([]domain.Event{event}, nil)
-	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), event.ID()).Return(event.AvailableTickets(), nil)
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
@@ -204,8 +207,8 @@ func TestRehydrate_UnlockRunsEvenOnQueryFailure(t *testing.T) {
 	assert.Error(t, err, "list query failure must surface; we don't swallow it")
 }
 
-// TestRehydrate_SETNXFailureAbortsAndUnlocks: SETNX failure (Redis
-// unreachable mid-rehydrate) MUST surface as an error so fx aborts
+// TestRehydrate_SETNXFailureAbortsAndUnlocks: a Redis runtime-write
+// failure (metadata HSET or qty SETNX) MUST surface as an error so fx aborts
 // startup, AND MUST still release the advisory lock. The fail-fast
 // behaviour is intentional — proceeding with a half-populated Redis
 // would leave the operator no clear signal.
@@ -222,7 +225,7 @@ func TestRehydrate_SETNXFailureAbortsAndUnlocks(t *testing.T) {
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return(events, nil)
-	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), events[0].ID()).Return(events[0].AvailableTickets(), nil)
+	expectTicketTypes(ticketTypeRepo, events[0], events[0].AvailableTickets())
 	// CRITICAL: Unlock MUST still fire even though SETNX failed.
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
@@ -235,7 +238,7 @@ func TestRehydrate_SETNXFailureAbortsAndUnlocks(t *testing.T) {
 		Logger:         log,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SETNX",
+	assert.Contains(t, err.Error(), "HSET metadata",
 		"error should name the operation that failed for fast triage")
 }
 
@@ -252,13 +255,13 @@ func TestRehydrate_DriftDetected(t *testing.T) {
 	eventA := makeEvent(t, "concert-A", 1000, 500) // DB says 500 available
 	eventB := makeEvent(t, "concert-B", 1000, 800) // DB says 800 available
 
-	require.NoError(t, s.Set("event:"+eventA.ID().String()+":qty", "999")) // > DB → drift
-	require.NoError(t, s.Set("event:"+eventB.ID().String()+":qty", "750")) // < DB → expected, NOT drift
+	ttA := expectTicketTypes(ticketTypeRepo, eventA, eventA.AvailableTickets())
+	ttB := expectTicketTypes(ticketTypeRepo, eventB, eventB.AvailableTickets())
+	require.NoError(t, s.Set("ticket_type_qty:"+ttA.ID().String(), "999")) // > DB → drift
+	require.NoError(t, s.Set("ticket_type_qty:"+ttB.ID().String(), "750")) // < DB → expected, NOT drift
 
 	locker.EXPECT().TryLock(gomock.Any(), gomock.Any()).Return(true, nil)
 	eventRepo.EXPECT().ListAvailable(gomock.Any()).Return([]domain.Event{eventA, eventB}, nil)
-	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), eventA.ID()).Return(eventA.AvailableTickets(), nil)
-	ticketTypeRepo.EXPECT().SumAvailableByEventID(gomock.Any(), eventB.ID()).Return(eventB.AvailableTickets(), nil)
 	locker.EXPECT().Unlock(gomock.Any(), gomock.Any()).Return(nil)
 
 	err := cache.RehydrateInventory(context.Background(), cache.RehydrateInventoryParams{
@@ -272,8 +275,8 @@ func TestRehydrate_DriftDetected(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both Redis keys remain unchanged (SETNX preserves both).
-	a, _ := s.Get("event:" + eventA.ID().String() + ":qty")
-	b, _ := s.Get("event:" + eventB.ID().String() + ":qty")
+	a, _ := s.Get("ticket_type_qty:" + ttA.ID().String())
+	b, _ := s.Get("ticket_type_qty:" + ttB.ID().String())
 	assert.Equal(t, 999, parseInt(t, a), "drift case: SETNX must NOT overwrite (Redis ahead)")
 	assert.Equal(t, 750, parseInt(t, b), "in-flight case: SETNX must NOT overwrite (Redis behind)")
 	// (We don't directly assert the metric counter here because it's a

@@ -78,14 +78,13 @@ func eventWithAvail(t *testing.T, avail int) domain.Event {
 	return domain.ReconstructEvent(id, "test event", 1000, avail, 0)
 }
 
-// expectDBQty registers the SumAvailableByEventID expectation. D4.1
-// follow-up: the drift detector now reads dbQty from event_ticket_types
-// (frozen events.available_tickets is no longer SoT). Test fixtures
-// pass `dbQty` explicitly so a future divergence between
-// `eventWithAvail` (legacy column) and the SUM (new SoT) shows up as
-// a deliberate test-side decision rather than implicit equality.
+// expectDBQty registers the ListByEventID expectation. The detector now
+// compares Redis against per-ticket-type availability and treats an
+// event as drifted when any ticket type under it drifts. Tests model
+// the common D4.1 shape of exactly one ticket type per event.
 func (h *driftHarness) expectDBQty(ctx context.Context, e domain.Event, dbQty int) {
-	h.ticketType.EXPECT().SumAvailableByEventID(ctx, e.ID()).Return(dbQty, nil)
+	tt := domain.ReconstructTicketType(e.ID(), e.ID(), "Default", 2000, "usd", 1000, dbQty, nil, nil, nil, "", 0)
+	h.ticketType.EXPECT().ListByEventID(ctx, e.ID()).Return([]domain.TicketType{tt}, nil)
 }
 
 func TestDriftSweep_NoEvents_ZeroGaugeNoCalls(t *testing.T) {
@@ -249,9 +248,10 @@ func TestDriftSweep_PerEventCacheError_ContinuesSweep(t *testing.T) {
 	e2 := eventWithAvail(t, 50)
 
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e1, e2}, nil)
+	h.expectDBQty(ctx, e1, 100)
 	h.inventory.EXPECT().GetInventory(ctx, e1.ID()).Return(0, false, errors.New("redis transient"))
+	h.expectDBQty(ctx, e2, 50)
 	h.inventory.EXPECT().GetInventory(ctx, e2.ID()).Return(50, true, nil)
-	h.expectDBQty(ctx, e2, 50) // e1 short-circuits at GetInventory; only e2 reaches the SUM
 
 	require.NoError(t, h.d.Sweep(ctx),
 		"per-event cache failure should not abort the whole sweep")
@@ -271,6 +271,7 @@ func TestDriftSweep_PerEventCtxCancelled_NoCacheReadErrorBump(t *testing.T) {
 	// it on shutdown would page operators on every clean SIGTERM.
 	e := eventWithAvail(t, 100)
 	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
+	h.expectDBQty(ctx, e, 100)
 	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(0, false, context.Canceled)
 
 	require.NoError(t, h.d.Sweep(ctx))

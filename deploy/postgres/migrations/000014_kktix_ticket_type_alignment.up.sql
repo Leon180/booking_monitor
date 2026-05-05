@@ -27,11 +27,10 @@
 --   docs/architectural_backlog.md  § KKTIX-aligned ticket type model
 --
 -- What this migration does NOT do:
---   * Does NOT rename Redis Lua keys (`event:{id}:qty` stays). D4.1
---     assumes 1 ticket_type per event so the key path is equivalent.
---     D8 multi-ticket-type-per-event will rename to
---     `ticket_type:{id}:qty` along with the broader Lua / rehydrate /
---     drift-detector changes.
+--   * Does NOT rename Redis Lua keys as part of the migration itself.
+--     The application-layer follow-up now uses `ticket_type_qty:{id}`
+--     + `ticket_type_meta:{id}`, but those runtime keys are created by
+--     Go startup / write paths, not by SQL.
 --   * Does NOT add a CHECK constraint on `currency`. ISO 4217 validation
 --     happens at the domain factory; same rationale as `orders.status`
 --     not having a CHECK (Go enforces, DB doesn't).
