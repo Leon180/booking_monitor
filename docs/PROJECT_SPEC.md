@@ -493,10 +493,15 @@ intermediate state.
 1. PaymentWorker consumes `order.created`, calls PaymentGateway.Charge()
 2. On failure: updates order status to `failed`, inserts `order.failed` outbox event
 3. SagaCompensator consumes `order.failed` (via `SagaConsumer`):
-   - DB: `IncrementTicket` + update order status to `compensated` (same TX, idempotent via the `OrderStatusCompensated` guard)
+   - DB: `TicketTypeRepository.IncrementTicket` (D4.1 follow-up — was `EventRepository.IncrementTicket` pre-followup) + update order status to `compensated` (same TX, idempotent via the `OrderStatusCompensated` guard)
    - Redis: `revert.lua` does an `INCRBY` then `SET NX EX 7d` — crash-safe ordering (see Section 6.1)
 4. **Retry counter is Redis-backed** (`saga:retry:p{partition}:o{offset}` TTL 24h), so a consumer restart cannot reset it
 5. After `sagaMaxRetries = 3` failures, the message is written to `order.failed.dlq` with provenance headers, the counter is cleared, the offset is committed, and both `saga_poison_messages_total` and `dlq_messages_total{topic="order.failed.dlq", reason="max_retries"}` counters are incremented — no more silent partition drops
+
+**Wire format v3 + 3-path resolution (D4.1 follow-up).** `OrderCreatedEvent` and `OrderFailedEvent` carry `ticket_type_id` since `OrderEventVersion = 3`. The compensator uses it to drive the per-ticket-type increment. For pre-v3 events still in flight on Kafka during a rolling upgrade, `compensator.resolveTicketTypeID` falls back through three paths:
+- **Path A** (clean): `event.TicketTypeID != uuid.Nil` → use directly.
+- **Path B** (legacy fallback): `TicketTypeID == uuid.Nil` AND `ListByEventID` returns exactly 1 row → D4.1 default-single-ticket-type case, safe to attribute the increment to that row. Logs WARN.
+- **Path C** (unrecoverable): `TicketTypeID == uuid.Nil` AND `ListByEventID` returns 0 rows OR > 1 rows → DB increment is SKIPPED (manual review required), but `MarkCompensated` + Redis revert STILL run. Logs ERROR. Redis is keyed by `event_id` so the user-visible inventory still releases correctly; only the DB ticket_type counter drifts and waits for ops.
 
 Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `ErrInvalidPaymentEvent` from `PaymentService.ProcessOrder` are dead-lettered instead of being silently committed (which the old `return nil` branches did).
 
@@ -514,8 +519,8 @@ Payment-side DLQ (`order.created.dlq`) works the same way: malformed JSON and `E
 - 3 retries with linear backoff (100ms * attempt)
 - On exhausted retries: revert Redis inventory + move to DLQ stream (`orders:dlq`) + ACK
 - Self-healing: recreates consumer group on NOGROUP error (e.g. after Redis FLUSHALL)
-- Transaction body (UnitOfWork): `DecrementTicket` (DB double-check) → `Create Order` → `Create OutboxEvent` → COMMIT
-- Per-message metrics: `success`, `sold_out`, `duplicate`, `db_error` outcomes + processing duration
+- Transaction body (UnitOfWork — D4.1 follow-up): `TicketTypeRepository.DecrementTicket` (DB double-check on the per-ticket-type SoT) → `Create Order` → `Create OutboxEvent` → COMMIT. Pre-D4.1-followup the worker decremented `events.available_tickets`; that column is now **frozen post-D4.1** (never written by the worker; a follow-up migration will drop it). The new SoT is `event_ticket_types.available_tickets`, which is what `RehydrateInventory` and `InventoryDriftDetector` also read via `SumAvailableByEventID`. The cached aggregate from §6.9 returns this field as `0` (conservative-safe sentinel) because the cache decorator deliberately omits the mutable counter — see §6.9 for the rationale.
+- Per-message metrics: `success`, `sold_out`, `duplicate`, `db_error` outcomes + processing duration. `sold_out` covers BOTH `domain.ErrSoldOut` (legacy events column) AND `domain.ErrTicketTypeSoldOut` (new D4.1-followup sentinel) — the metrics decorator at `worker/message_processor_metrics.go:42` matches both via `errors.Is` so `inventory_conflict_total` keeps tracking the right signal.
 
 ### 6.6 Idempotency (3 Levels)
 
@@ -681,11 +686,63 @@ Size validation lives at the HTTP layer, NOT inside the cache (industry conventi
 
 Why 16 KiB and not Stripe's 1 MB: the booking endpoints take fixed-shape JSON (~80 bytes realistic). Caps belong tight — looser caps amplify the legitimate-vs-attack ratio. The cache layer downstream therefore trusts pre-validated input; an `Idempotency-Key` value can never be larger than the body that produced it.
 
+**Parse-fail compensation (D4.1 follow-up).** Pre-fix, a stream message that failed `parseMessage` (e.g. a pre-D4.1 producer's message landed on a post-D4.1 worker during rolling upgrade) was DLQ'd + ACK'd **without** reverting the Redis inventory the producer had already deducted — silent inventory leak. `handleParseFailure` mirrors `handleFailure`'s contract: best-effort `RevertInventory` via `parseLegacyRevertHints` (extracts `event_id` + `quantity` from the raw `redis.XMessage` — both stable fields since D3) → DLQ → ACK. The DLQ label distinguishes operational shape:
+
+| DLQ label | Cause | Inventory reverted? | Operator action |
+| :-- | :-- | :-- | :-- |
+| `malformed_reverted_legacy` | Parse failed BUT legacy hints extracted; revert + DLQ both succeeded. The expected rolling-upgrade taper. | ✅ yes | None — wait for taper |
+| `malformed_unrecoverable` | Hints unparseable OR `RevertInventory` failed even with valid hints. Inventory leaked. | ❌ no | Page on sustained rate |
+| `malformed_classified` | `parseMessage` succeeded but `domain.NewReservation` rejected (deterministic invariant violation; e.g. zero ticket_type_id). No Redis deduct happened (Lua wouldn't have produced this), so no revert needed. | n/a | Producer regression — file bug |
+| `exhausted_retries` | Handler reached `maxRetries` on transient errors. `RevertInventory` ran via `handleFailure` before DLQ. | ✅ yes | Investigate transient failure mode |
+
+The legacy `malformed_parse` label is retained as a pre-warm in `metrics_init.go` for backward compatibility with any old alert rule referencing it; new code paths emit only the four labels above.
+
 **Deferred to follow-up PRs**:
 
 - **Backpressure at the producer**: `XLEN > threshold` → return 503 from booking handler. Bounds queue at the cost of explicit rejection. Threshold needs k6 + worker-killed load data to tune (after N6 test infra).
 - **Redis 8 + IDMP for DLQ XAdd**: Redis 8's native server-side stream-entry idempotency (`XADD ... IDMP <token>`) eliminates duplicate-DLQ entries from worker-retry-after-XACK-failure. Requires Redis 8 bump (currently on 7-alpine).
 - **Booking-side IDMP**: lower priority since the HTTP-layer idempotency cache already prevents user-visible double-orders.
+
+---
+
+### 6.9 Read-through cache for `TicketTypeRepository.GetByID` (D4.1 follow-up #1)
+
+D4.1 introduced an unconditional Postgres `GetByID` on every booking attempt to resolve the price snapshot — even on the cheap sold-out fast path. The post-D4.1 benchmark (PR #89) showed ~−40% total RPS / +95% p95 vs pre-D4.1 main on the sold-out fast path. PR #90 added a read-through Redis cache decorator to recover this.
+
+**Architecture.** `cache.ticketTypeCacheDecorator` (in `internal/infrastructure/cache/ticket_type_cache.go`) wraps `domain.TicketTypeRepository` and is layered ABOVE the existing tracing decorator via `fx.Decorate` (cache wraps tracing wraps postgres). On a cache hit, no PG span fires — the per-cache Prometheus counter is the operational signal.
+
+**What's cached vs not — IMMUTABLE-only contract.**
+
+| Field | Cached? | Why |
+| :-- | :-- | :-- |
+| `id`, `event_id`, `name`, `price_cents`, `currency`, `total_tickets`, `sale_starts_at`, `sale_ends_at`, `per_user_limit`, `area_label`, `version` | ✅ yes | All immutable post-creation. Safe to cache without invalidation hooks on `DecrementTicket` / `IncrementTicket`. |
+| `available_tickets` | ❌ NO — sentinel `0` returned | DELIBERATELY OMITTED. The decorator's contract is "cache only fields BookTicket reads, all of which are immutable post-creation". Caching the mutable counter would require invalidating on every Decrement / Increment — entire layer of complexity for a field no current consumer reads from a cache hit. `toDomain()` returns the aggregate with `availableTickets=0` as the **conservative-safe sentinel**: a future caller mistakenly branching on `tt.AvailableTickets() > 0` reads "sold out" rather than stale "has stock". Fresh values come from `SumAvailableByEventID` (uncached) or direct Postgres query. |
+
+**Cache contract — fail-soft.**
+
+- `redis.Nil` → organic miss → fall through to inner repo, write-through, return.
+- Cache entry malformed JSON OR `_v` mismatch → treated as miss → write-through overwrites with current shape.
+- Real Redis GET error (network, AUTH, OOM) → bump `cache_errors_total{cache="ticket_type",op="get"}`, fall through. **Does NOT inflate `cache_misses_total`** — distinct counter so a Redis outage doesn't masquerade as a cache-cold spike on dashboards.
+- `ErrTicketTypeNotFound` + other inner errors → NOT cached. A brand-new ticket_type Created and immediately GetByID'd would otherwise be invisible for TTL minutes.
+- Cache SET error after a successful inner call → bump `cache_errors_total{op="set"}`, log Warn, return inner result. Detached `context.WithTimeout(context.Background(), 1s)` for the SET — request ctx near-deadline must NOT cancel the cache write.
+- `Delete` invalidates the entry proactively (forward-looking for D8 admin lifecycle); inner Delete error preserves the entry (DB row still exists).
+- TTL=0 fail-soft: pass-through every call, log WARN once at startup.
+
+**Wire format versioning.** Cache entry has `_v: 1`; mismatch → treated as miss → write-through overwrites cleanly. Sufficient for single-pod rolling deploy. **Blue/green deploy fragility** (each fleet's writes invalidate the other's reads → hit-rate collapse during cutover) tracked as TT-Cache-2 in `post_phase2_roadmap.md` — fix is key-namespace versioning (`ticket_type:v1:{id}`).
+
+**Operator runbook for direct DB edits.** A direct `UPDATE event_ticket_types SET price_cents = X` from an emergency runbook does NOT invalidate the cache — bookings during the next ≤ TTL window snapshot stale prices onto `orders.amount_cents`. **Mandatory step**: `redis-cli DEL ticket_type:<UUID>` after any direct write. See `docs/runbooks/d4.1_rollout.md` § "Direct DB edits to event_ticket_types" for the full procedure.
+
+**Benchmark recovery (PR #90 vs D4.1-no-cache baseline, k6 500 VUs / 60s).**
+
+| Metric | D4.1-no-cache | D4.1 + cache | Δ |
+| :-- | ---: | ---: | :--- |
+| `accepted_bookings/s` | 8,331 | 8,332 | +0.0% (Lua ceiling — cache doesn't touch the booking hot path) |
+| Total HTTP RPS | 28,862 | ~39,857 | **+38%** (sold-out fast path) |
+| p95 / p99 / p99.9 | 28.1 / — / — | 22.2 / 35.5 / 56.5 ms | -21% on p95; tail well inside the 500ms threshold |
+
+Recovers ~57% of the gap to pre-D4.1 main (48,351 RPS / 14.4ms p95). The remaining ~18% is the unavoidable cost of the per-booking lookup itself (Redis GET + JSON unmarshal still ~1ms); closing it requires a wire-format redesign — out of scope, logged as a future option.
+
+**Configurable via `REDIS_TICKET_TYPE_TTL`** (default 5m). See §7 Config overrides.
 
 ---
 
@@ -708,6 +765,10 @@ Why 16 KiB and not Stripe's 1 MB: the booking endpoints take fixed-shape JSON (~
 | `redis_xack_failures_total` | Counter | Redis `XAck` failed on a successfully-processed message — the message stays in the PEL and will be re-delivered. This counter is the only leading signal that double-processing may occur |
 | `redis_xadd_failures_total` | Counter (`stream`) | Redis `XAdd` failed, labelled by target stream. Currently only the DLQ stream (`stream="dlq"`) writes from Go; label kept for future main-stream writers |
 | `redis_revert_failures_total` | Counter | `RevertInventory` failed during worker `handleFailure` — the message stays in the PEL for PEL-reclaim retry. A non-zero rate means Redis inventory is drifting relative to DB state |
+| `cache_hits_total` | Counter (`cache`) | Cache lookups that returned a cached value, labelled by cache name. `cache="idempotency"` (Stripe-style fingerprint cache) + `cache="ticket_type"` (D4.1 follow-up read-through cache, see §6.9). Operator hit-rate query: `rate(cache_hits_total{cache="X"}[5m]) / (rate(cache_hits_total{cache="X"}[5m]) + rate(cache_misses_total{cache="X"}[5m]))` |
+| `cache_misses_total` | Counter (`cache`) | Cache lookups that did NOT find a value. Sibling to `cache_hits_total`. **Does NOT include Redis-error-as-miss** — those go to `cache_errors_total{op="get"}` to keep the miss rate uncontaminated. |
+| `cache_errors_total` | Counter (`cache`, `op`) | Cache infra failures, labelled by cache + operation. `op` ∈ `{get, set, marshal}`. Distinct from `cache_misses_total` so a Redis outage doesn't masquerade as a cache-cold spike. Today only `cache="ticket_type"` emits — the older `idempotency_cache_get_errors_total` dedicated counter pre-dates this labelled shape and is tracked for migration as TT-Cache-3 in `post_phase2_roadmap.md`. |
+| `idempotency_cache_get_errors_total` | Counter | Idempotency cache GET infra failures (Redis down, unmarshal). Sustained non-zero means duplicate-charge protection is suspended. Page-worthy. **Naming history**: pre-dates the labelled `cache_errors_total{cache,op}` shape; kept on its own series for backward compatibility with existing alert rules. |
 
 **Alerts (`deploy/prometheus/alerts.yml`):**
 
@@ -715,6 +776,9 @@ Why 16 KiB and not Stripe's 1 MB: the booking endpoints take fixed-shape JSON (~
 - `HighLatency` — p99 request duration > 2s
 - `InventorySoldOut` — `increase(bookings_total{status="sold_out"}[5m]) > 0`. The previous `booking_sold_out_total` expression referenced a metric that did not exist in the code, so the alert was permanently silent until the remediation fix.
 - `KafkaConsumerStuck` — `sum by (topic) (rate(kafka_consumer_retry_total[5m])) > 1` for 2m. Paired contract with the `kafka_consumer_retry_total` counter: when transient errors cause sustained rebalance retries, this alert fires so oncall investigates **downstream infra** (DB / Redis / payment gateway), NOT the consumer. The consumer is working as designed; the alert exists so "stuck but not dead" is operator-visible without having to dead-letter in-flight orders.
+- `IdempotencyCacheGetErrors` — `rate(idempotency_cache_get_errors_total[5m]) > 0 for 1m`. Page-worthy: duplicate-charge protection is suspended for affected requests during the alert window.
+- `TicketTypeCacheRedisErrors` (D4.1 follow-up #1) — `rate(cache_errors_total{cache="ticket_type",op=~"get|set"}[5m]) > 0 for 5m`. **Severity warning + 5m soak deliberate**: the cache is a perf optimisation, NOT a correctness control like the idempotency cache; 5m absorbs routine Redis maintenance restarts that would false-positive a 1m alert. When firing, the +38% sold-out fast-path RPS gain from PR #90 is silently disabled (booking endpoint stays up via PG fallback). Runbook: `docs/runbooks/README.md#tickettypecacherediserrors`.
+- `TicketTypeCacheMarshalErrors` (D4.1 follow-up #1) — `rate(cache_errors_total{cache="ticket_type",op="marshal"}[5m]) > 0 for 1m`. Distinct from the Redis-error alert because the remediation axis is completely different: marshal failure is a **code regression** (file a bug, do NOT page Redis owner). Theoretical for a fixed-shape DTO; non-zero means a future field addition introduced an unmarshalable type. Runbook: `docs/runbooks/README.md#tickettypecachemarshalerrors`.
 
 ### Tracing (OpenTelemetry + Jaeger)
 - Decorator pattern: `BookingServiceTracingDecorator`, `MessageProcessorMetricsDecorator`, `OutboxRelayTracingDecorator`
@@ -772,6 +836,10 @@ These env vars override the same-named keys in `config/config.yml`. cleanenv mer
 | `DB_PING_INTERVAL` | `postgres.ping_interval` | `1s` | Wait between DB ping attempts |
 | `DB_PING_PER_ATTEMPT` | `postgres.ping_per_attempt` | `3s` | Per-probe context timeout |
 | `KAFKA_BROKERS` | `kafka.brokers` | `localhost:9092` | **Type changed in PR #22**: `Brokers` is now `[]string` (cleanenv `env-separator:","`). Env form is comma-separated; yaml is a sequence. Previously `[]string{cfg.Brokers}` wrapped a comma-string as one literal address — multi-broker configs were silently broken |
+| `REDIS_INVENTORY_TTL` | `redis.inventory_ttl` | `720h` (30d) | Lifetime of `event:{uuid}:qty` Redis keys. Long by default — active events are re-upserted by operational flows well before expiry; the TTL prevents orphaned keys from accumulating. Lower for tighter memory; raise for very long sale windows. |
+| `REDIS_IDEMPOTENCY_TTL` | `redis.idempotency_ttl` | `24h` | Retention of `Idempotency-Key`-keyed cached responses. Must align with the longest client retry window; raise for financial flows that retry across days. |
+| `REDIS_TICKET_TYPE_TTL` | `redis.ticket_type_ttl` | `5m` | **D4.1 follow-up #1.** Lifetime of `ticket_type:{uuid}` cache entries on the booking hot path (see §6.9). 5m is correctness-safe because `BookTicket` reads only IMMUTABLE fields; lower (e.g. 30s) if you start editing prices live without explicit cache invalidation; higher (e.g. 1h) for read-mostly catalogs where hit rate dominates over freshness. **TTL=0 → fail-soft pass-through** with a startup WARN; valid for emergency bypass but the +38% sold-out fast-path RPS gain is disabled while set. |
+| `REDIS_DLQ_RETENTION` | `redis.dlq_retention` | `720h` (30d) | Bounded retention of `orders:dlq` entries via MINID-style XADD trim. Raise to keep stale failures around for forensic review; `Validate()` rejects ≤ 0. |
 
 ---
 
