@@ -271,7 +271,19 @@ func (d *ticketTypeCacheDecorator) GetByID(ctx context.Context, id uuid.UUID) (d
 			tag.TicketTypeID(id), tag.Error(marshalErr))
 		return tt, nil
 	}
-	if setErr := d.client.Set(ctx, key, payload, d.ttl).Err(); setErr != nil {
+	// Detached ctx for the SET — the cache write is a fire-and-forget
+	// side effect of the SUCCESSFUL inner GetByID, NOT something the
+	// caller is waiting on. Inheriting the request ctx here would mean
+	// any near-deadline request that just finished its PG read would
+	// fail the cache SET on context.Canceled / DeadlineExceeded, even
+	// though the booking itself succeeded. That false-positive would
+	// pollute `cache_errors_total{op="set"}` under load, masking real
+	// Redis incidents. Budget mirrors how the worker's handleFailure
+	// detaches its compensation ctx (see redis_queue.go::handleFailure).
+	// 1s is generous for a Redis SET — actual writes are sub-ms.
+	bgCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if setErr := d.client.Set(bgCtx, key, payload, d.ttl).Err(); setErr != nil {
 		observability.CacheErrorsTotal.WithLabelValues(cacheLabelTicketType, "set").Inc()
 		d.logger.Warn(ctx, "ticket_type cache SET failed; entry not persisted",
 			tag.TicketTypeID(id), tag.Error(setErr))

@@ -32,6 +32,25 @@ Both runs reset Redis (FLUSHALL) + Postgres (TRUNCATE orders + event_ticket_type
 
 For reference (from the prior PR #89 report), pre-D4.1 main was at 48,351 RPS / 14.4ms p95 — the cache recovers **~57% of the gap** (28,862 → 39,857 closed of 19,489 lost). Full recovery is impossible without restructuring the wire format: the cache eliminates the *Postgres* round-trip but not the cache-side Redis GET + JSON unmarshal, which together still cost ~1ms per call.
 
+## Tail latency (p99 / p99.9) — addendum
+
+The original Run A + Run B above used k6's default summary stats (avg / med / p90 / p95). Per Staff-SRE round-3 finding M2, the tail is what matters for a flash-sale system and `max` alone underspecifies the distribution. A subsequent third run with `K6_SUMMARY_TREND_STATS="avg,min,med,max,p(90),p(95),p(99),p(99.9)"` gives:
+
+| Metric | Run C (this PR, extended stats) |
+| :--- | ---: |
+| `accepted_bookings/s` | 8,331 (Lua ceiling — consistent with Runs A/B) |
+| Total HTTP RPS | 38,811 |
+| avg | 11.8 ms |
+| p90 | 19.80 ms |
+| p95 | 24.19 ms |
+| **p99** | **35.50 ms** |
+| **p99.9** | **56.48 ms** |
+| max | 153 ms |
+
+The D4.1-no-cache baseline (PR #89's report) also used k6 defaults and does NOT capture p99/p99.9, so a like-for-like p99 delta isn't available — the `max` values from both reports are similar (~150ms range), suggesting the cache change doesn't materially shift the long tail. The p99/p99.9 numbers are well inside the 500ms `http_req_duration` threshold and inside the 17× safety margin called out in the original benchmark interpretation.
+
+For future bench runs: `scripts/benchmark_compare.sh` should pass `K6_SUMMARY_TREND_STATS` so the tail is captured by default — flagged for the next benchmark-script touch.
+
 ## Self-consistency check (Run A vs Run B, same binary)
 
 | Metric | Run A | Run B | Δ |

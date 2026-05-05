@@ -136,6 +136,20 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
        **GitHub Releases page** for each tag — 2-3 paragraph release notes (can paste from CHANGELOG entry), list of included PRs (`Includes: #45, #46, ...`). The Releases URL becomes the resume bullet's anchor: "https://github.com/Leon180/booking_monitor/releases" replaces "browse my PR history" as the architectural-evolution surface.
        **Order:** D16 lands EARLY in Phase 3 (week 1-2) so the existing v0.4.0 milestone is captured BEFORE Pattern A starts adding new commits — retroactive tagging is much cleaner against a static SHA range than a moving HEAD.
 
+### Post-PR-#90 (ticket_type cache) follow-ups — tracked, not yet PR'd
+
+PR #90 landed the read-through Redis cache for `TicketTypeRepository.GetByID`, recovering ~57% of D4.1's sold-out fast-path RPS regression. Three rounds of multi-agent review (go-reviewer + silent-failure-hunter, then Staff-SRE + Staff-BE) produced a set of findings that were intentionally NOT in scope for the cache PR itself but should be addressed before D8 (multi-ticket-type-per-event expansion) lands. Listed in priority order:
+
+| ID | Source | Scope | Trigger |
+| :-- | :-- | :-- | :-- |
+| **TT-Cache-1** | Staff-BE H1 | Replace `domain.TicketType` with a dedicated `TicketTypeSnapshot` (or equivalent) read-only DTO returned by the cache decorator. Today the decorator returns a `domain.TicketType` aggregate with `availableTickets=0` as a "conservative-safe sentinel". Works because no current caller branches on `AvailableTickets()` from a cache hit, but D8's ticket-type detail endpoint will. **Must fix before D8.** | D8 design phase |
+| **TT-Cache-2** | Staff-BE H2 | Migrate cache wire-format versioning from `_v: 1` field to key-namespace (`ticket_type:v1:{id}`). Current `_v` mismatch-treated-as-miss pattern works for single-pod rolling deploy; fails for blue/green (both fleets amplify each other's miss load during the cutover window). | First blue/green or multi-pod rolling-deploy attempt |
+| **TT-Cache-3** | Staff-BE M1 / Staff-SRE H3 | Migrate `idempotency_cache_get_errors_total` (legacy bare counter) to the labelled `cache_errors_total{cache,op}` shape. Heterogeneity complicates dashboards + alerts that want "alert on cache error rate across all caches". Cost: emit both for one TTL cycle (24h), then drop the legacy series. | Next observability cleanup pass |
+| **TT-Cache-4** | Staff-BE M3 | OTEL span on cache hit (`ticket_type_cache.GetByID` with `cache.hit=true/false` attribute). Currently a hit emits no span; trace-driven latency debugging shows a gap at the GetByID step. Trivial to add (1-line `tracer.Start` wrap around the GET branch). | Before D8 (where ticket-type detail latency debugging matters) |
+| **TT-Cache-5** | Staff-SRE M3 | Multi-ticket-type cold-fill bench. Current PR #90 benchmark drives 500K bookings against ONE ticket_type — pathological best-case hit rate. D8 expansion adds N ticket_types per event; verify the cache's behaviour at tier-opening time (cold-fill burst per tier). | D8 verification |
+| **TT-Cache-6** | Staff-BE M4 | `singleflight.Group` keyed on `id.String()` to collapse cold-start thundering-herd PG calls into one. Not required for correctness today (concurrent fills are idempotent), but becomes load-bearing in D12's multi-binary comparison harness where 4 instances would multiply the PG load on cold-fill bursts. | D12 multi-binary harness |
+| **TT-Cache-7** | Staff-SRE M4 | Document the rolling-upgrade hit-rate-collapse window in `d4.1_rollout.md` (or its successor). When `_v` is bumped or key-namespace versioning lands (TT-Cache-2), there's a transient cluster-wide hit-rate dip during the deploy. Currently undocumented as a known operational expectation. | Before TT-Cache-2 lands |
+
 ### Explicitly DEFERRED / DROPPED from Phase 3
 
 | ID | Original scope | Why dropped |
