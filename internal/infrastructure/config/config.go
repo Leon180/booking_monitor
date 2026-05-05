@@ -301,6 +301,18 @@ type RedisConfig struct {
 	// flows that retry across days.
 	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
 
+	// TicketTypeTTL bounds how long a `ticket_type:{uuid}` cache entry
+	// (`BookingService.BookTicket`'s pricing-snapshot lookup) is retained.
+	// 5min default: BookTicket reads ONLY immutable fields (eventID,
+	// priceCents, currency, totalTickets) so a TTL cache is correctness-
+	// safe even without explicit invalidation on Decrement/Increment;
+	// 5min keeps the staleness window short enough that a future
+	// admin-driven price edit becomes visible quickly without aggressive
+	// cache invalidation infrastructure. Lower (e.g. 30s) if you start
+	// editing prices live; higher (e.g. 1h) for read-mostly catalogs
+	// where cache hit-rate dominates over freshness.
+	TicketTypeTTL time.Duration `yaml:"ticket_type_ttl" env:"REDIS_TICKET_TYPE_TTL" env-default:"5m"`
+
 	// DLQRetention is the bounded retention window for the
 	// `orders:dlq` stream. Translated to a Redis Streams MINID
 	// directive on every XADD so entries older than NOW-DLQRetention

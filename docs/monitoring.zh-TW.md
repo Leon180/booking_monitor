@@ -62,7 +62,7 @@ curl -s "http://localhost:80/api/v1/orders/$ORDER_ID" | jq
 | :-- | :-- | :-- |
 | Go runtime | `go_*`、`process_*` | goroutines、GC pause、heap inuse — 透過 `collectors.NewGoCollector` 註冊 |
 | DB pool | `db_pool_*` | `db_pool_in_use`、`db_pool_idle`、`db_pool_wait_count`、`db_pool_wait_duration_seconds` |
-| Redis 快取(Go-client 視角) | `cache_hits_total{cache}`、`cache_misses_total{cache}` | 每個快取名稱獨立的 hit/miss;**我們的應用程式**所看到的 |
+| Redis 快取(Go-client 視角) | `cache_hits_total{cache}`、`cache_misses_total{cache}`、`cache_errors_total{cache,op}` | 每個快取名稱獨立的 hit/miss;**我們的應用程式**所看到的。`cache_errors_total` 是「Redis 掛了」的操作員訊號 — 跟 `cache_misses_total` 拆開,讓 Redis 故障不會偽裝成 hit-rate dashboard 上的 cache-cold spike。`op` ∈ {get, set, marshal}。 |
 | Redis streams | `redis_stream_length{stream}`、`redis_stream_pending_entries{stream,group}`、`redis_stream_consumer_lag_seconds{stream,group}` | scrape 時由 `StreamsCollector` 即時讀取 |
 | Redis server(oliver006 exporter,從 `redis_exporter:9121` scrape) | `redis_*` | 「Redis 自己飽和了嗎」這類我們應用層指標無法回答的問題。請參考下方子表格。 |
 | Redis client pool(go-redis `PoolStats()`,從 app `:8080/metrics` scrape) | `redis_client_pool_*` | 「**我們的 client** 是不是在排隊等連線」這個視角。跟 `db_pool_*` 是兄弟。請參考下方子表格。 |

@@ -62,7 +62,7 @@ The authoritative source is `internal/infrastructure/observability/metrics.go` p
 | :-- | :-- | :-- |
 | Go runtime | `go_*`, `process_*` | goroutines, GC pause, heap inuse — registered via `collectors.NewGoCollector` |
 | DB pool | `db_pool_*` | `db_pool_in_use`, `db_pool_idle`, `db_pool_wait_count`, `db_pool_wait_duration_seconds` |
-| Redis cache (Go-client view) | `cache_hits_total{cache}`, `cache_misses_total{cache}` | per-cache-name hit/miss; what *our app* sees |
+| Redis cache (Go-client view) | `cache_hits_total{cache}`, `cache_misses_total{cache}`, `cache_errors_total{cache,op}` | per-cache-name hit/miss; what *our app* sees. `cache_errors_total` is the operator's "Redis is down" signal — distinct from `cache_misses_total` so a Redis outage doesn't masquerade as a cache-cold spike on the hit-rate dashboard. `op` ∈ {get, set, marshal}. |
 | Redis streams | `redis_stream_length{stream}`, `redis_stream_pending_entries{stream,group}`, `redis_stream_consumer_lag_seconds{stream,group}` | scraped at request time by `StreamsCollector` |
 | Redis server (oliver006 exporter, scraped from `redis_exporter:9121`) | `redis_*` | The "is Redis itself saturated" view that our app-side metrics can't answer. See sub-table below. |
 | Redis client pool (Go-redis `PoolStats()`, scraped from app `:8080/metrics`) | `redis_client_pool_*` | The "is OUR client starving for connections" view. Sibling to `db_pool_*`. See sub-table below. |

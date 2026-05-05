@@ -73,6 +73,20 @@ var Module = fx.Options(
 	// this codebase layers cross-cutting concerns over storage /
 	// handler types. Storage code stays observability-unaware.
 	fx.Decorate(NewInstrumentedIdempotencyRepository),
+	// D4.1 follow-up: read-through cache for `domain.TicketTypeRepository.GetByID`.
+	// Layered ABOVE postgres.Module's tracing decorator (fx.Decorate
+	// stacks outermost-last), so a cache hit short-circuits before any
+	// PG span fires; a miss falls through to the existing tracing +
+	// postgres path. See ticket_type_cache.go doc-comment for what's
+	// cached / not cached + invalidation semantics.
+	fx.Decorate(func(
+		inner domain.TicketTypeRepository,
+		client *redis.Client,
+		cfg *config.Config,
+		logger *mlog.Logger,
+	) domain.TicketTypeRepository {
+		return NewTicketTypeCacheDecorator(inner, client, cfg.Redis.TicketTypeTTL, logger)
+	}),
 	fx.Provide(observability.NewQueueMetrics),
 	// Streams collector — XLEN / XPENDING / consumer-lag gauges per
 	// scrape. Wired here (not in bootstrap) because the *redis.Client
