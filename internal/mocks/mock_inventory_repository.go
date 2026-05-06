@@ -10,11 +10,11 @@
 package mocks
 
 import (
+	domain "booking_monitor/internal/domain"
 	context "context"
 	reflect "reflect"
 	time "time"
 
-	domain "booking_monitor/internal/domain"
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 )

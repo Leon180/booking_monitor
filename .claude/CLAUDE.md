@@ -79,6 +79,8 @@ POST /api/v1/orders/:id/pay  # D4 — create Stripe-shape PaymentIntent for the 
 GET  /api/v1/history       # Paginated order history (?page=&size=&status=)
 POST /api/v1/events        # D4.1 — create event + auto-provision default ticket_type (name, total_tickets, price_cents, currency); response surfaces ticket_types[] with the new ticket_type_id for booking
 GET  /api/v1/events/:id    # Stub — returns {"message": "View event", "event_id": ...} + bumps page_views_total. Does NOT load event details (deferred to Phase 3).
+POST /webhook/payment      # D5 — inbound Stripe-shape provider webhook; HMAC-SHA256 verified against PAYMENT_WEBHOOK_SECRET; dispatches succeeded → MarkPaid, payment_failed → MarkPaymentFailed + saga emit. Mounted at root, NOT under /api/v1.
+POST /test/payment/confirm/:order_id  # D5 (test-only, gated by ENABLE_TEST_ENDPOINTS) — simulates the provider's webhook emit; signs with the same secret and POSTs to /webhook/payment. ?outcome=succeeded|failed.
 GET  /metrics              # Prometheus metrics
 GET  /livez                # Liveness probe — always 200 if process is up
 GET  /readyz               # Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 with per-dep JSON otherwise

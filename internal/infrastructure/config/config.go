@@ -10,16 +10,17 @@ import (
 )
 
 type Config struct {
-	App             AppConfig             `yaml:"app"`
-	Server          ServerConfig          `yaml:"server"`
-	Redis           RedisConfig           `yaml:"redis"`
-	Worker          WorkerConfig          `yaml:"worker"`
-	Postgres        PostgresConfig        `yaml:"postgres"`
-	Kafka           KafkaConfig           `yaml:"kafka"`
-	Recon           ReconConfig           `yaml:"recon"`
-	Saga            SagaConfig            `yaml:"saga"`
-	InventoryDrift  InventoryDriftConfig  `yaml:"inventory_drift"`
-	Booking         BookingConfig         `yaml:"booking"`
+	App            AppConfig            `yaml:"app"`
+	Server         ServerConfig         `yaml:"server"`
+	Redis          RedisConfig          `yaml:"redis"`
+	Worker         WorkerConfig         `yaml:"worker"`
+	Postgres       PostgresConfig       `yaml:"postgres"`
+	Kafka          KafkaConfig          `yaml:"kafka"`
+	Recon          ReconConfig          `yaml:"recon"`
+	Saga           SagaConfig           `yaml:"saga"`
+	InventoryDrift InventoryDriftConfig `yaml:"inventory_drift"`
+	Booking        BookingConfig        `yaml:"booking"`
+	Payment        PaymentConfig        `yaml:"payment"`
 }
 
 // BookingConfig holds the tunables for `BookingService.BookTicket` —
@@ -151,6 +152,49 @@ type ReconConfig struct {
 
 // SagaConfig holds the tunables for the `saga-watchdog` subcommand
 // (A5) — the sweeper that re-drives stuck-Failed orders through the
+// PaymentConfig holds the tunables for the D4 `/pay` + D5 webhook
+// surfaces. Most knobs are webhook-side because the gateway-side
+// idempotency + per-event price snapshot eliminate the configuration
+// surface a real Stripe adapter would need (api keys, version pin,
+// retry budget — handled by the adapter, not us).
+type PaymentConfig struct {
+	// WebhookSecret is the HMAC-SHA256 signing secret the provider
+	// shares with us. Source of truth: the provider's dashboard
+	// (Stripe: developer settings → webhooks → signing secret;
+	// real-world string starts with `whsec_`). For local mock /
+	// integration tests, anything non-empty works as long as the
+	// mock signer + the verifier read the same value.
+	//
+	// HARD RULE: empty value MUST cause startup failure (see
+	// `application/payment/webhook_service.go` consumer + the
+	// VerifySignature config-error branch). Silently accepting any
+	// signature against an empty key is a forgery vector.
+	WebhookSecret string `yaml:"webhook_secret" env:"PAYMENT_WEBHOOK_SECRET"`
+
+	// WebhookReplayTolerance bounds how far the `t=<unix>` in the
+	// signature header can drift from our wall clock before we 401
+	// the request. 5 minutes mirrors Stripe's documented default;
+	// tighter is safer (smaller replay window for a captured
+	// signature) but risks rejecting legitimate retries from a
+	// provider whose clock drifted. Lower for tests so verifier-
+	// behaviour assertions don't have to wait wall-clock seconds.
+	WebhookReplayTolerance time.Duration `yaml:"webhook_replay_tolerance" env:"PAYMENT_WEBHOOK_REPLAY_TOLERANCE" env-default:"5m"`
+
+	// WebhookExpectedLiveMode tells the WebhookService whether this
+	// deployment expects livemode=true events (production with live
+	// keys) or livemode=false (test / staging). Mismatched envelopes
+	// are 200-no-op'd with `unknown_intent{cross_env_livemode}` so a
+	// misrouted test webhook can't error-storm a prod listener.
+	WebhookExpectedLiveMode bool `yaml:"webhook_expected_live_mode" env:"PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE" env-default:"false"`
+
+	// WebhookLoopbackURL is the URL the testapi handler POSTs back
+	// into for the mock-confirm flow (full-pipeline simulation of a
+	// real provider's webhook delivery). Defaults to localhost on
+	// the configured server port — override for tests / containers.
+	// Only consulted when `Server.EnableTestEndpoints` is true.
+	WebhookLoopbackURL string `yaml:"webhook_loopback_url" env:"PAYMENT_WEBHOOK_LOOPBACK_URL" env-default:"http://127.0.0.1:8080/webhook/payment"`
+}
+
 // existing (idempotent) compensator. Same shape as ReconConfig but
 // distinct so the two sweepers can tune independently:
 //
@@ -252,6 +296,15 @@ type ServerConfig struct {
 	// EnablePprof gates the operator-only pprof listener. Off by default
 	// so heap dumps + /admin/loglevel aren't exposed in every deployment.
 	EnablePprof bool `yaml:"enable_pprof" env:"ENABLE_PPROF" env-default:"false"`
+
+	// EnableTestEndpoints gates the `/test/*` route group used by
+	// integration tests + dev demos to simulate provider-side events
+	// (e.g. POST /test/payment/confirm/:order_id triggers a signed
+	// webhook delivery). Off by default — production deployments
+	// MUST leave it false. The route group is conditionally mounted
+	// inside `buildGinEngine`, so when this is false the paths
+	// return 404 (not 401) — impossible to enable accidentally.
+	EnableTestEndpoints bool `yaml:"enable_test_endpoints" env:"ENABLE_TEST_ENDPOINTS" env-default:"false"`
 	// PprofAddr is the bind address for the pprof listener. Defaults to
 	// loopback so remote access requires an explicit override.
 	PprofAddr         string        `yaml:"pprof_addr" env:"PPROF_ADDR" env-default:"127.0.0.1:6060"`

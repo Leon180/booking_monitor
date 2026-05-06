@@ -379,7 +379,68 @@ The client uses `client_secret` with Stripe Elements (or our mock equivalent) to
 
 **Pricing (D4.1).** Price + currency are read off the order via `order.AmountCents()` / `order.Currency()` — the snapshot frozen at book time by `domain.NewReservation`. `BookingService.BookTicket` looks up the chosen `ticket_type` (from `event_ticket_types`), computes `amount_cents = priceCents × quantity`, and persists both onto `orders.amount_cents` / `orders.currency`. The customer pays exactly what they were quoted, even if the merchant edits the ticket_type's price mid-checkout (industry SOP — Stripe Checkout / Shopify / Eventbrite all freeze price at order create time). The pre-D4.1 global defaults `BOOKING_DEFAULT_TICKET_PRICE_CENTS` + `BOOKING_DEFAULT_CURRENCY` are removed; a startup Stderr warning fires if they're still set in the deployment env (see `config.go::checkDeprecatedEnv`). See [docs/design/ticket_pricing.md](design/ticket_pricing.md) for the schema-level rationale.
 
-**Race-safety.** The persist step uses an SQL predicate `WHERE status = 'awaiting_payment' AND (payment_intent_id IS NULL OR payment_intent_id = $2)`. If the D5 webhook flips the order to `paid` between our `GetByID` and `UPDATE`, the predicate 0-rows-affected → 404 surfaces back; the `paid` row is preserved. Same shape closes the D6 sweeper race (`expired`).
+**Race-safety.** The persist step uses an SQL predicate `WHERE status = 'awaiting_payment' AND reserved_until > NOW() AND (payment_intent_id IS NULL OR payment_intent_id = $2)`. If the D5 webhook flips the order to `paid` between our `GetByID` and `UPDATE`, the predicate 0-rows-affected, and D5's 3-sentinel disambiguation (introduced in `MarkPaid` + extended into `SetPaymentIntentID`) routes the failure precisely:
+
+- `ErrOrderNotFound` — row truly gone; handler returns 404.
+- `ErrReservationExpired` — `reserved_until` lapsed during the gateway round-trip; handler returns 409 with "reservation expired" so the client can re-book. Same sentinel that MarkPaid surfaces from the D5 webhook handler's late-success branch.
+- `ErrInvalidTransition` — status flipped (webhook / sweeper raced ahead) OR a different intent_id is already on the row; handler returns 409 with "order state changed; refetch".
+
+This widening from D4's umbrella `ErrOrderNotFound` to the 3-sentinel contract is what lets the D5 webhook handler's orphan-repair branch route `SetPaymentIntentID` failures into the late-success path instead of bubbling them as a generic 500.
+
+### POST /webhook/payment
+
+D5 — inbound payment-provider webhook. Mounted at the engine root (NOT under `/api/v1`); auth is the signature header, not network. Stripe-shape envelope:
+
+```json
+{
+  "id": "evt_3xyz",
+  "type": "payment_intent.succeeded",  // or payment_intent.payment_failed
+  "created": 1715000000,
+  "livemode": false,
+  "data": {
+    "object": {
+      "id": "pi_3xyz",
+      "status": "succeeded",
+      "amount": 4000,
+      "currency": "usd",
+      "metadata": { "order_id": "019dd493-480a-7499-b208-812c930b152e" }
+    }
+  }
+}
+```
+
+**Signature verification.** `Stripe-Signature: t=<unix>,v1=<hex>` header, HMAC-SHA256 over `<t>.<raw_body>` with `PAYMENT_WEBHOOK_SECRET`. 5-minute skew tolerance (`PAYMENT_WEBHOOK_REPLAY_TOLERANCE`). Failures return 401 + a precise reason label on `payment_webhook_signature_invalid_total`.
+
+**Order resolution.** Two paths, primary then fallback:
+1. `metadata.order_id` (UUID) — `/pay` writes it at intent-creation time. The default path.
+2. `payment_intent_id` lookup against `orders.payment_intent_id` (partial unique idx from migration 000015) — fallback for legacy intents OR rescue for the SetPaymentIntentID race orphan documented at `application/payment/service.go:331`.
+
+If neither resolves → 500 + alert. We MUST NOT 200-no-op an unknown intent because that would silently swallow the only success signal we get for the orphan-rescue case.
+
+**Intent-id consistency check.** When the metadata path resolves, we cross-check the order's persisted `payment_intent_id` against the envelope's `object.id`. Disagreement → 500 + `payment_webhook_intent_mismatch_total` (single-event paging) — could be forged metadata, leaked test fixture, or a real provider bug. Refuse to flip; humans investigate.
+
+**State-machine dispatch.** Only `awaiting_payment` orders are processed; terminal status (`paid`/`payment_failed`/`expired`/`compensated`) returns 200 idempotent (provider redelivery). Concurrent webhook race surfaces as `ErrInvalidTransition` and falls back to the same re-read path (`ProcessOrder` precedent at `service.go:195-228`).
+
+- `payment_intent.succeeded` → `MarkPaid` (race-aware SQL: `status='awaiting_payment' AND reserved_until > NOW()`). Orphan repair: if `payment_intent_id` is empty (race orphan), the same UoW first calls `SetPaymentIntentID` then `MarkPaid`.
+- `payment_intent.payment_failed` → `MarkPaymentFailed` + emit `order.failed` (saga compensator reverts Redis inventory).
+- Anything else (incl. `payment_intent.canceled` — out of scope per plan v5) → 200 ACK + `payment_webhook_unsupported_type_total`.
+
+**Late success.** A `succeeded` webhook arriving after `reserved_until` elapsed lands on the SQL predicate's `ErrReservationExpired`. The handler walks the order to `expired` + emits `order.failed` (saga reverts inventory) + `payment_webhook_late_success_total{detected_at}` fires (`service_check` if caught at the application-layer pre-check, `sql_predicate` if the DB caught the narrow race). **Critical alert; manual provider-side refund required.**
+
+**Cross-env guard.** `livemode` mismatch (test webhook hitting prod listener or vice versa) → 200 no-op + `payment_webhook_unknown_intent_total{reason="cross_env_livemode"}`. Avoids retry-storming a misconfigured pipeline.
+
+### POST /test/payment/confirm/:order_id
+
+D5 — test-only endpoint that simulates the provider's webhook delivery for the full pipeline. Gated by `cfg.Server.EnableTestEndpoints` (off by default; production deployments leave the flag false → the route is never registered, returning 404 not 401 — impossible to enable accidentally). Reads the order's persisted `payment_intent_id`, builds a Stripe-shape envelope with `metadata.order_id`, signs it with the same `PAYMENT_WEBHOOK_SECRET` the verifier uses, and POSTs internally to `/webhook/payment`. Used by integration tests + dev demos to drive the full pipeline without a real provider.
+
+```bash
+# Trigger a successful confirmation:
+curl -X POST 'http://localhost:8080/test/payment/confirm/<order_id>?outcome=succeeded'
+# Trigger a failure (drives the saga compensation path):
+curl -X POST 'http://localhost:8080/test/payment/confirm/<order_id>?outcome=failed'
+```
+
+The endpoint is intentionally NOT auto-fired from `/pay` — keeping mock confirmation as an explicit operator action preserves the D4 client-confirm contract (Stripe Elements would need to confirm before the webhook fires) AND lets the D6 expiry-sweeper demo work (skip the confirm step → reservation actually expires).
 
 ### GET /api/v1/orders/:id
 Poll the terminal status of a booking. The id is the UUID v7 returned by `POST /api/v1/book`.

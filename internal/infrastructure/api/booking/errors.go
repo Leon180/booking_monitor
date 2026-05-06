@@ -98,7 +98,18 @@ func mapError(err error) (status int, publicMsg string) {
 		return http.StatusConflict, "order is not awaiting payment"
 
 	case errors.Is(err, paymentapp.ErrReservationExpired):
+		// Catches both the service-level pre-check and the D5 SQL
+		// predicate (SetPaymentIntentID after gateway succeeded but
+		// reserved_until elapsed during the round-trip). Same sentinel
+		// since the consolidation in port.go.
 		return http.StatusConflict, "reservation expired"
+
+	case errors.Is(err, domain.ErrInvalidTransition):
+		// D5 widened SetPaymentIntentID's contract to surface this
+		// sentinel when status is no longer awaiting_payment OR a
+		// different intent_id is already on the row. /pay client
+		// should re-fetch the order to see the actual state.
+		return http.StatusConflict, "order state changed; refetch"
 
 	// D4.1 — data-integrity guard for legacy rows / migration gaps.
 	// Distinct from ErrOrderNotAwaitingPayment: the order IS in the
@@ -140,6 +151,7 @@ func mapError(err error) (status int, publicMsg string) {
 func isExpectedPayError(err error) bool {
 	return errors.Is(err, domain.ErrOrderNotFound) ||
 		errors.Is(err, domain.ErrInvalidOrderID) ||
+		errors.Is(err, domain.ErrInvalidTransition) ||
 		errors.Is(err, paymentapp.ErrOrderNotAwaitingPayment) ||
 		errors.Is(err, paymentapp.ErrReservationExpired)
 }

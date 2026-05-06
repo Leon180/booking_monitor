@@ -206,9 +206,12 @@ sequenceDiagram
 |--------|------|------|
 | POST | `/api/v1/book` | 提交訂票。回 **202 Accepted** + 一個 `order_id` 用來追蹤訂單(詳見下方「**訂票流程**」)。 |
 | GET | `/api/v1/orders/:id` | 用 `order_id` 查單筆訂單的最新狀態。在 `POST /book` 之後的短暫視窗裡會回 404(詳見「**訂票流程**」)。 |
+| POST | `/api/v1/orders/:id/pay` | **D4** Pattern A — 為一筆 reservation 建立 Stripe-shape `PaymentIntent`。回 200 並帶 `{order_id, payment_intent_id, client_secret, amount_cents, currency}`。對 `order_id` 是冪等的(由 gateway 端保證)。狀態守門:non-`awaiting_payment` 回 409、reservation 已過期回 409、找不到 order 回 404。 |
 | GET | `/api/v1/history` | 訂單歷史 `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | 建立活動 `{ name, total_tickets, price_cents, currency }`。D4.1 起會在同一筆交易中自動建立帶有價格快照的預設 ticket_type;response 的 `ticket_types[].id` 即為訂票時要帶的 id。 |
 | GET | `/api/v1/events/:id` | **Stub** — 回 `{"message": "View event", "event_id": ...}` 並遞增 `page_views_total` 給轉換率追蹤。**不會**載入活動詳情(延後到 Phase 3 demo 才實作)。 |
+| POST | `/webhook/payment` | **D5** Pattern A — 收 payment provider 的入站 webhook(Stripe-shape envelope)。用 `PAYMENT_WEBHOOK_SECRET` 做 HMAC-SHA256 簽章驗證,依 event type 分派:`payment_intent.succeeded` → MarkPaid;`payment_intent.payment_failed` → MarkPaymentFailed + emit `order.failed`(交給 saga 補償)。對 provider 重投靠資料庫終態做冪等。掛在 engine root(**不**在 `/api/v1` 之下);驗證身份靠簽章,不靠網路。 |
+| POST | `/test/payment/confirm/:order_id` | **D5(僅測試用)** 模擬 provider 端的 webhook emit — 由 `ENABLE_TEST_ENDPOINTS` 控制(prod 預設關)。讀取 order 的 `payment_intent_id`,組出帶 `metadata.order_id` 的 Stripe-shape envelope,用同一把 webhook secret 簽名,然後 POST 到 `/webhook/payment`。整合測試與 dev demo 用來在沒有真 provider 的情況下走完整 pipeline。Query:`?outcome=succeeded\|failed`。 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/livez` | Liveness 探針 — process 還活著就一律回 200(不依賴下游) |
 | GET | `/readyz` | Readiness 探針 — PG + Redis + Kafka 都在 1s 內回應才回 200,否則回 503 並附逐 dep 的 JSON |

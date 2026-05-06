@@ -80,9 +80,10 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
        — env var `PAYMENT_GATEWAY_MODE=mock|stripe_test|stripe` switches fx-provided adapter
        — `docker-compose.test.yml` adds `stripe-mock` service for offline CI
        — application layer NOT modified — proves Clean Architecture's gateway swap-in/swap-out
-  D5   POST /webhook/payment receives async outcome; Stripe-shape signature verification (`webhook.ConstructEvent`); idempotent against payment_intent_id
-       — assumes D4.2 merged so webhook payload metadata carries real `order_id`
-       — `payment_intent.succeeded` → `MarkPaid`, `payment_intent.payment_failed` → `MarkPaymentFailed`
+  D5   ✅ POST /webhook/payment shipped (PR #92; merged 2026-05-06). Stripe-shape signature verification (HMAC-SHA256 over `t.<body>` with 5-min skew tolerance), order resolution via metadata.order_id primary + payment_intent_id fallback (partial unique idx in migration 000015). Race-aware MarkPaid SQL guards `reserved_until > NOW()` so a late-success webhook routes to the expired path + saga refund instead of soft-locking inventory. SetPaymentIntentID widened to 3-sentinel disambiguation (`ErrOrderNotFound` / `ErrReservationExpired` / `ErrInvalidTransition`) so D4 + D5 share the same race-classification contract. Mock confirm gated by `ENABLE_TEST_ENDPOINTS` (off in prod) — preserves D4 client-confirm contract + lets D6 expiry demo work.
+       — `payment_intent.succeeded` → MarkPaid (orphan-repair: same UoW also persists `payment_intent_id` if the SetPaymentIntentID race lost it earlier), `payment_intent.payment_failed` → MarkPaymentFailed + emit `order.failed` (saga compensator)
+       — 4 alerts: `PaymentWebhookSignatureFailing` (warning), `PaymentWebhookUnknownIntentSurging` (critical, orphan rescue), `PaymentWebhookLateSuccessAfterExpiry` (single-event paging, manual refund), `PaymentWebhookIntentMismatch` (single-event paging, possible forgery)
+       — assumes D4.2 NOT a hard prerequisite: D5 ships with mock provider; real Stripe SDK adapter still queued as D4.2 follow-up
   D6   reservation expiry sweeper (mirrors A5 watchdog shape): scan `awaiting_payment` past `reserved_until`, transition → expired, revert Redis inventory via revert.lua
   D7   payment_worker stops being a saga consumer for the happy path. Saga compensator scope narrows to {expired, payment_failed}.
 

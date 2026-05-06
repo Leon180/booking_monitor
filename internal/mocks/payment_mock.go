@@ -120,18 +120,18 @@ func (m *MockPaymentIntentCreator) EXPECT() *MockPaymentIntentCreatorMockRecorde
 }
 
 // CreatePaymentIntent mocks base method.
-func (m *MockPaymentIntentCreator) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+func (m *MockPaymentIntentCreator) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string, metadata map[string]string) (domain.PaymentIntent, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency)
+	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency, metadata)
 	ret0, _ := ret[0].(domain.PaymentIntent)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // CreatePaymentIntent indicates an expected call of CreatePaymentIntent.
-func (mr *MockPaymentIntentCreatorMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency any) *gomock.Call {
+func (mr *MockPaymentIntentCreatorMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency, metadata any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentIntentCreator)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentIntentCreator)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency, metadata)
 }
 
 // MockPaymentGateway is a mock of PaymentGateway interface.
@@ -173,18 +173,18 @@ func (mr *MockPaymentGatewayMockRecorder) Charge(ctx, orderID, amount any) *gomo
 }
 
 // CreatePaymentIntent mocks base method.
-func (m *MockPaymentGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+func (m *MockPaymentGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string, metadata map[string]string) (domain.PaymentIntent, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency)
+	ret := m.ctrl.Call(m, "CreatePaymentIntent", ctx, orderID, amountCents, currency, metadata)
 	ret0, _ := ret[0].(domain.PaymentIntent)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // CreatePaymentIntent indicates an expected call of CreatePaymentIntent.
-func (mr *MockPaymentGatewayMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency any) *gomock.Call {
+func (mr *MockPaymentGatewayMockRecorder) CreatePaymentIntent(ctx, orderID, amountCents, currency, metadata any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentGateway)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockPaymentGateway)(nil).CreatePaymentIntent), ctx, orderID, amountCents, currency, metadata)
 }
 
 // GetStatus mocks base method.

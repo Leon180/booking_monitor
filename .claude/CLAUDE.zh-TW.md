@@ -79,6 +79,8 @@ POST /api/v1/orders/:id/pay  # D4 — 為預訂建立 Stripe-shape PaymentIntent
 GET  /api/v1/history       # 分頁查詢訂單 (?page=&size=&status=)
 POST /api/v1/events        # D4.1 — 建立活動 + 自動建立預設 ticket_type (name, total_tickets, price_cents, currency);response 把新 ticket_type_id 放在 ticket_types[] 給 client 拿去訂票
 GET  /api/v1/events/:id    # Stub — 回 {"message": "View event", "event_id": ...} 並遞增 page_views_total。**不會**載入活動詳情(延後到 Phase 3)。
+POST /webhook/payment      # D5 — 收 Stripe-shape provider webhook;用 PAYMENT_WEBHOOK_SECRET 做 HMAC-SHA256 驗章;succeeded → MarkPaid、payment_failed → MarkPaymentFailed + saga emit。掛在 root,**不**在 /api/v1 之下。
+POST /test/payment/confirm/:order_id  # D5(僅測試用,由 ENABLE_TEST_ENDPOINTS 控制)— 模擬 provider 的 webhook emit;用同一把 secret 簽完後 POST 到 /webhook/payment。?outcome=succeeded|failed。
 GET  /metrics              # Prometheus 指標
 GET  /livez                # 存活探針 — process 還活著就回 200
 GET  /readyz               # 就緒探針 — PG + Redis + Kafka 在 1s 內全部回應才回 200,失敗回 503 並附逐 dep 的 JSON
