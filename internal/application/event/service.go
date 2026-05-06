@@ -56,7 +56,7 @@ type Service interface {
 	//   2. UoW: INSERT events + event_ticket_types in one transaction
 	//      so the "event with no ticket_type" partial state is
 	//      structurally impossible.
-	//   3. Redis SetInventory (best-effort with compensation: on Redis
+	//   3. Redis SetTicketTypeRuntime (best-effort with compensation: on Redis
 	//      failure, delete BOTH rows so a retry can re-Create cleanly).
 	//
 	// Errors:
@@ -147,25 +147,25 @@ func (s *service) CreateEvent(ctx context.Context, name string, totalTickets int
 		return CreateEventResult{}, fmt.Errorf("service.CreateEvent uow: %w", err)
 	}
 
-	// 4. Redis SetInventory. If it fails after the tx committed, the
+	// 4. Redis SetTicketTypeRuntime. If it fails after the tx committed, the
 	//    booking hot path would read sold-out for an event that has
 	//    DB-side inventory — permanently unsellable. Compensate by
 	//    deleting BOTH rows in a second UoW so the operator (or an
 	//    automatic retry) can re-Create the event cleanly.
 	//
 	//    Recovery cross-reference: if the worker SIGKILLs between this
-	//    UoW commit and the SetInventory call, neither compensation
-	//    nor the SetInventory ever runs — but `cache/rehydrate.go`
+	//    UoW commit and the runtime-cache write, neither compensation
+	//    nor the Redis write ever runs — but `cache/rehydrate.go`
 	//    runs at app startup, queries `EventRepository.ListAvailable`,
 	//    and SetNX-installs Redis qty keys for any event whose Redis
 	//    key is absent. So a pod restart (or its k8s liveness probe
 	//    equivalent) is a safety net for the SIGKILL-mid-flight case.
 	//    Manual cleanup is only needed when the Redis fail + compensation
 	//    fail BOTH happen and no pod restart follows.
-	if err := s.inventoryRepo.SetInventory(ctx, createdEvent.ID(), totalTickets); err != nil {
+	if err := s.inventoryRepo.SetTicketTypeRuntime(ctx, createdTT); err != nil {
 		// Compensation runs against a fresh, detached background
 		// context. The handler ctx may have already been cancelled
-		// (HTTP client timeout was the cause of the SetInventory
+		// (HTTP client timeout was the cause of the Redis runtime
 		// failure), and threading that ctx through to BeginTx would
 		// fail immediately with context.Canceled — leaving dangling
 		// rows. The 5s budget mirrors WORKER_FAILURE_TIMEOUT.
@@ -183,7 +183,7 @@ func (s *service) CreateEvent(ctx context.Context, name string, totalTickets int
 				mlog.NamedError("redis_error", err),
 				mlog.NamedError("compensation_error", compensateErr),
 			)
-			return CreateEventResult{}, fmt.Errorf("service.CreateEvent: redis SetInventory + compensation both failed: %w", errors.Join(err, compensateErr))
+			return CreateEventResult{}, fmt.Errorf("service.CreateEvent: redis SetTicketTypeRuntime + compensation both failed: %w", errors.Join(err, compensateErr))
 		}
 		// Standardised log key `redis_error` so an operator running
 		// `redis_error=<pattern>` finds both compensated AND
@@ -196,7 +196,7 @@ func (s *service) CreateEvent(ctx context.Context, name string, totalTickets int
 			tag.TicketTypeID(createdTT.ID()),
 			mlog.NamedError("redis_error", err),
 		)
-		return CreateEventResult{}, fmt.Errorf("service.CreateEvent redis SetInventory: %w", err)
+		return CreateEventResult{}, fmt.Errorf("service.CreateEvent redis SetTicketTypeRuntime: %w", err)
 	}
 
 	// Success path log — emits the (event_id, ticket_type_id, name)
@@ -215,7 +215,7 @@ func (s *service) CreateEvent(ctx context.Context, name string, totalTickets int
 }
 
 // compensateDanglingEvent deletes the event + its default ticket_type
-// in a single transaction. Called when a post-commit Redis SetInventory
+// in a single transaction. Called when a post-commit Redis runtime write
 // fails — the goal is to leave DB clean so a retry of CreateEvent can
 // proceed without colliding with the orphan rows.
 //

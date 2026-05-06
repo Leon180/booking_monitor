@@ -258,8 +258,6 @@ The current alert catalog:
 | `SagaMaxFailedAgeExceeded` | critical | Stuck failure-terminal orders >24h — manual review needed (watchdog will NOT auto-transition). As of D2 (Pattern A) the watchdog covers `failed` (legacy A4) + `expired` (Pattern A reservation TTL) + `payment_failed` (Pattern A webhook failure); all three reach Compensated via the same compensator. |
 | `KafkaConsumerStuck` | warning | Consumer rebalance retries — downstream dependency degraded |
 | `IdempotencyCacheGetErrors` | warning | `idempotency_cache_get_errors_total` rate > 0 for 1m — duplicate-charge protection suspended |
-| `TicketTypeCacheRedisErrors` | warning | `rate(cache_errors_total{cache="ticket_type",op=~"get\|set"}[5m]) > 0 for 5m` — ticket_type read-through cache's Redis path is errored. Cache is fail-soft (booking still works via PG fallback) but the +38% sold-out fast-path RPS gain from PR #90 is silently disabled. Distinct from `cache_misses_total` so a Redis outage doesn't masquerade as a cache-cold spike. **Severity warning + 5m soak deliberate**: the cache is a perf optimisation NOT a correctness control (unlike `IdempotencyCacheGetErrors`); 5m absorbs routine Redis restarts that would false-positive a 1m alert. |
-| `TicketTypeCacheMarshalErrors` | warning | `rate(cache_errors_total{cache="ticket_type",op="marshal"}[5m]) > 0 for 1m` — JSON marshal of the cache entry is failing. Theoretical for a fixed-shape DTO so any non-zero is a **CODE REGRESSION**, not a Redis incident. Operator action: file a bug, do NOT page Redis owner. Distinct alert from the Redis-error one because the remediation axis is completely different. |
 | `DBRollbackFailures` | warning | `db_rollback_failures_total` rate > 0 for 5m — UoW rollback failing (driver / connection-state bug) |
 | `RedisXAckFailures` | warning | `redis_xack_failures_total` rate > 0 for 5m — PEL grows unbounded; consumers redo work on rebalance |
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
@@ -328,14 +326,14 @@ docker compose stop postgres
 # Wait 2m+. Cleanup: docker compose start postgres.
 
 # InventoryDriftDetected — directly mutate Redis to disagree with DB, wait for
-# the recon process's drift sweep to flag it. Pick a known event_id from
-# `SELECT id FROM events WHERE available_tickets > 0 LIMIT 1`, then:
-docker exec booking_redis redis-cli SET event:<event-uuid>:qty 999999
+# the recon process's drift sweep to flag it. Pick a known ticket_type_id from
+# `SELECT id FROM event_ticket_types WHERE available_tickets > 0 LIMIT 1`, then:
+docker exec booking_redis redis-cli SET ticket_type_qty:<ticket-type-uuid> 999999
 # Default sweep interval is 60s + alert `for: 5m`, so wait ~6m and check
 # Prometheus → Alerts. The metric will fire with direction=cache_high
 # (Redis > DB beyond tolerance).
 # Cleanup: re-run app rehydrate (docker compose restart app) OR
-# manually `SET event:<uuid>:qty <db_available_tickets>`.
+# manually `SET ticket_type_qty:<uuid> <db_available_tickets>`.
 
 # InventoryDriftListEventsErrors / InventoryDriftCacheReadErrors —
 # stop the underlying dependency briefly. Both alerts are

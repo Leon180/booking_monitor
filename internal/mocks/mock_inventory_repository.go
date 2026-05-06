@@ -14,6 +14,7 @@ import (
 	reflect "reflect"
 	time "time"
 
+	domain "booking_monitor/internal/domain"
 	uuid "github.com/google/uuid"
 	gomock "go.uber.org/mock/gomock"
 )
@@ -43,24 +44,38 @@ func (m *MockInventoryRepository) EXPECT() *MockInventoryRepositoryMockRecorder 
 }
 
 // DeductInventory mocks base method.
-func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, eventID, ticketTypeID uuid.UUID, userID, count int, reservedUntil time.Time, amountCents int64, currency string) (bool, error) {
+func (m *MockInventoryRepository) DeductInventory(ctx context.Context, orderID, ticketTypeID uuid.UUID, userID, count int, reservedUntil time.Time) (domain.DeductInventoryResult, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeductInventory", ctx, orderID, eventID, ticketTypeID, userID, count, reservedUntil, amountCents, currency)
-	ret0, _ := ret[0].(bool)
+	ret := m.ctrl.Call(m, "DeductInventory", ctx, orderID, ticketTypeID, userID, count, reservedUntil)
+	ret0, _ := ret[0].(domain.DeductInventoryResult)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // DeductInventory indicates an expected call of DeductInventory.
-func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, orderID, eventID, ticketTypeID, userID, count, reservedUntil, amountCents, currency any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) DeductInventory(ctx, orderID, ticketTypeID, userID, count, reservedUntil any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, orderID, eventID, ticketTypeID, userID, count, reservedUntil, amountCents, currency)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeductInventory", reflect.TypeOf((*MockInventoryRepository)(nil).DeductInventory), ctx, orderID, ticketTypeID, userID, count, reservedUntil)
+}
+
+// DeleteTicketTypeRuntime mocks base method.
+func (m *MockInventoryRepository) DeleteTicketTypeRuntime(ctx context.Context, ticketTypeID uuid.UUID) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteTicketTypeRuntime", ctx, ticketTypeID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteTicketTypeRuntime indicates an expected call of DeleteTicketTypeRuntime.
+func (mr *MockInventoryRepositoryMockRecorder) DeleteTicketTypeRuntime(ctx, ticketTypeID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteTicketTypeRuntime", reflect.TypeOf((*MockInventoryRepository)(nil).DeleteTicketTypeRuntime), ctx, ticketTypeID)
 }
 
 // GetInventory mocks base method.
-func (m *MockInventoryRepository) GetInventory(ctx context.Context, eventID uuid.UUID) (int, bool, error) {
+func (m *MockInventoryRepository) GetInventory(ctx context.Context, ticketTypeID uuid.UUID) (int, bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetInventory", ctx, eventID)
+	ret := m.ctrl.Call(m, "GetInventory", ctx, ticketTypeID)
 	ret0, _ := ret[0].(int)
 	ret1, _ := ret[1].(bool)
 	ret2, _ := ret[2].(error)
@@ -68,35 +83,49 @@ func (m *MockInventoryRepository) GetInventory(ctx context.Context, eventID uuid
 }
 
 // GetInventory indicates an expected call of GetInventory.
-func (mr *MockInventoryRepositoryMockRecorder) GetInventory(ctx, eventID any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) GetInventory(ctx, ticketTypeID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInventory", reflect.TypeOf((*MockInventoryRepository)(nil).GetInventory), ctx, eventID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetInventory", reflect.TypeOf((*MockInventoryRepository)(nil).GetInventory), ctx, ticketTypeID)
 }
 
 // RevertInventory mocks base method.
-func (m *MockInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
+func (m *MockInventoryRepository) RevertInventory(ctx context.Context, ticketTypeID uuid.UUID, count int, compensationID string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RevertInventory", ctx, eventID, count, compensationID)
+	ret := m.ctrl.Call(m, "RevertInventory", ctx, ticketTypeID, count, compensationID)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RevertInventory indicates an expected call of RevertInventory.
-func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, eventID, count, compensationID any) *gomock.Call {
+func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, ticketTypeID, count, compensationID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, eventID, count, compensationID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, ticketTypeID, count, compensationID)
 }
 
-// SetInventory mocks base method.
-func (m *MockInventoryRepository) SetInventory(ctx context.Context, eventID uuid.UUID, count int) error {
+// SetTicketTypeMetadata mocks base method.
+func (m *MockInventoryRepository) SetTicketTypeMetadata(ctx context.Context, ticketType domain.TicketType) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetInventory", ctx, eventID, count)
+	ret := m.ctrl.Call(m, "SetTicketTypeMetadata", ctx, ticketType)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// SetInventory indicates an expected call of SetInventory.
-func (mr *MockInventoryRepositoryMockRecorder) SetInventory(ctx, eventID, count any) *gomock.Call {
+// SetTicketTypeMetadata indicates an expected call of SetTicketTypeMetadata.
+func (mr *MockInventoryRepositoryMockRecorder) SetTicketTypeMetadata(ctx, ticketType any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetInventory", reflect.TypeOf((*MockInventoryRepository)(nil).SetInventory), ctx, eventID, count)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTicketTypeMetadata", reflect.TypeOf((*MockInventoryRepository)(nil).SetTicketTypeMetadata), ctx, ticketType)
+}
+
+// SetTicketTypeRuntime mocks base method.
+func (m *MockInventoryRepository) SetTicketTypeRuntime(ctx context.Context, ticketType domain.TicketType) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetTicketTypeRuntime", ctx, ticketType)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetTicketTypeRuntime indicates an expected call of SetTicketTypeRuntime.
+func (mr *MockInventoryRepositoryMockRecorder) SetTicketTypeRuntime(ctx, ticketType any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTicketTypeRuntime", reflect.TypeOf((*MockInventoryRepository)(nil).SetTicketTypeRuntime), ctx, ticketType)
 }

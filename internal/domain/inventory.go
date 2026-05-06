@@ -2,23 +2,64 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+var ErrTicketTypeRuntimeMetadataMissing = errors.New("ticket_type runtime metadata missing")
+
+// DeductInventoryResult is the outcome of the Redis-side load-shed gate.
+//
+// Accepted=false with err=nil means "sold out" — no stream message was
+// produced and the caller should surface domain.ErrSoldOut.
+//
+// Accepted=true carries the runtime snapshot that the booking hot path
+// needs to construct a domain.Order without a synchronous Postgres
+// lookup.
+type DeductInventoryResult struct {
+	Accepted    bool
+	EventID     uuid.UUID
+	AmountCents int64
+	Currency    string
+}
 
 // InventoryRepository defines the interface for hot inventory management.
 // This is typically implemented by a fast in-memory store like Redis.
 //
 //go:generate mockgen -destination=../mocks/mock_inventory_repository.go -package=mocks . InventoryRepository
 type InventoryRepository interface {
-	// SetInventory sets the initial inventory count for an event.
-	SetInventory(ctx context.Context, eventID uuid.UUID, count int) error
+	// SetTicketTypeRuntime seeds BOTH Redis runtime keys for a ticket type:
+	//
+	//   - `ticket_type_meta:{id}`  immutable booking snapshot fields
+	//   - `ticket_type_qty:{id}`   live inventory counter
+	//
+	// Used by CreateEvent's success path: a freshly-created ticket_type
+	// must be immediately bookable without waiting for a background
+	// rehydrate.
+	SetTicketTypeRuntime(ctx context.Context, ticketType TicketType) error
+
+	// SetTicketTypeMetadata writes ONLY the immutable booking metadata key
+	// (`ticket_type_meta:{id}`) for a ticket type.
+	//
+	// Used by the booking hot path's cold-fill repair when qty exists but
+	// metadata is missing: the repair MUST NOT overwrite the live qty
+	// counter because Redis may legitimately be ahead of Postgres by the
+	// in-flight-booking delta.
+	SetTicketTypeMetadata(ctx context.Context, ticketType TicketType) error
+
+	// DeleteTicketTypeRuntime removes both runtime keys for a ticket type.
+	//
+	// Best-effort cleanup for rollback / compensation paths. Callers may
+	// ignore transient Redis failures if the primary source-of-truth action
+	// (e.g. DB row delete) already succeeded.
+	DeleteTicketTypeRuntime(ctx context.Context, ticketTypeID uuid.UUID) error
 
 	// DeductInventory atomically decrements the inventory count and,
 	// on success, publishes the booking onto orders:stream with the
-	// caller-provided orderID + reservedUntil + ticket_type/price
-	// snapshot embedded in the payload.
+	// caller-provided orderID + reservedUntil and the runtime metadata
+	// looked up from `ticket_type_meta:{id}`.
 	//
 	// orderID flows end-to-end (handler → Lua → stream → worker
 	// `domain.NewReservation` → DB) so the id the client receives at
@@ -40,36 +81,32 @@ type InventoryRepository interface {
 	// commitment; the D6 expiry sweeper later compares
 	// `WHERE reserved_until < NOW()` against this column.
 	//
-	// ticketTypeID + amountCents + currency are the D4.1 KKTIX-aligned
-	// snapshot. BookingService looks up the chosen ticket_type, derives
-	// (eventID, priceCents, currency) from it, and computes
-	// amountCents = priceCents × quantity. The values ride along on
-	// the same atomic XADD so a Pattern A reservation is fully
-	// described by one stream message (no second Redis trip / DB
-	// lookup at the worker boundary). Currency is already normalised
-	// to lowercase by the domain factory.
+	// ticketTypeID is the customer-facing identifier. Redis resolves the
+	// rest of the booking snapshot (`event_id`, `amount_cents`,
+	// `currency`) from `ticket_type_meta:{id}` inside the same Lua call,
+	// so the hot path avoids the synchronous Postgres `GetByID` lookup
+	// that PR #90 cached.
 	//
-	// Returns true if successful, false if insufficient inventory
-	// (ErrSoldOut). On false, NO stream message is produced — the
-	// orderID is silently discarded so the client gets a sold_out
-	// response with no order intent persisted.
+	// Sold-out returns `DeductInventoryResult{Accepted:false}, nil`.
+	// `ErrTicketTypeRuntimeMetadataMissing` means qty existed but the
+	// metadata key was absent; the Lua script restored the decrement
+	// before returning, so the caller may cold-fill metadata and retry
+	// once without leaking inventory or double-enqueueing a stream
+	// message.
 	DeductInventory(
 		ctx context.Context,
 		orderID uuid.UUID,
-		eventID uuid.UUID,
 		ticketTypeID uuid.UUID,
 		userID int,
 		count int,
 		reservedUntil time.Time,
-		amountCents int64,
-		currency string,
-	) (bool, error)
+	) (DeductInventoryResult, error)
 
 	// RevertInventory restores inventory count.
 	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
-	RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error
+	RevertInventory(ctx context.Context, ticketTypeID uuid.UUID, count int, compensationID string) error
 
-	// GetInventory returns the cached inventory count for an event,
+	// GetInventory returns the cached inventory count for a ticket type,
 	// and a `found` bool that distinguishes "key absent in Redis"
 	// (`found=false`) from "key present with value 0" (`found=true,
 	// qty=0` — the legitimate sold-out steady state).
@@ -86,5 +123,5 @@ type InventoryRepository interface {
 	// Returns the wrapped Redis error on transient infra failure
 	// (caller handles via metric bump + retry next sweep). The
 	// `(qty, found)` pair is only meaningful when `err == nil`.
-	GetInventory(ctx context.Context, eventID uuid.UUID) (qty int, found bool, err error)
+	GetInventory(ctx context.Context, ticketTypeID uuid.UUID) (qty int, found bool, err error)
 }

@@ -293,7 +293,7 @@
       "title": "Redis DLQ routed by reason (rate, 5m)",
       "type": "timeseries",
       "datasource": "Prometheus",
-      "description": "orders:dlq stream routes. malformed_parse = JSON broken; malformed_classified = passes parse but fails domain factory invariants; exhausted_retries = transient error budget burned.",
+      "description": "orders:dlq stream routes. malformed_reverted_legacy = parse failed but legacy hints let us revert inventory; malformed_unrecoverable = parse failed and inventory may have leaked; malformed_classified = parsed but failed deterministic invariants; exhausted_retries = transient error budget burned.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 59 },
       "targets": [
         {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,11 +38,11 @@ var (
 // the pools makes the per-script arg shape impossible to confuse.
 
 // deductArgsPool sizes the pooled slice to match deduct.lua's ARGV
-// count exactly (8: count, event_id, user_id, order_id,
-// reserved_until_unix, ticket_type_id, amount_cents, currency).
+// count exactly (5: count, user_id, order_id, reserved_until_unix,
+// ticket_type_id).
 var deductArgsPool = sync.Pool{
 	New: func() interface{} {
-		s := make([]interface{}, 8)
+		s := make([]interface{}, 5)
 		return &s
 	},
 }
@@ -73,20 +74,6 @@ var Module = fx.Options(
 	// this codebase layers cross-cutting concerns over storage /
 	// handler types. Storage code stays observability-unaware.
 	fx.Decorate(NewInstrumentedIdempotencyRepository),
-	// D4.1 follow-up: read-through cache for `domain.TicketTypeRepository.GetByID`.
-	// Layered ABOVE postgres.Module's tracing decorator (fx.Decorate
-	// stacks outermost-last), so a cache hit short-circuits before any
-	// PG span fires; a miss falls through to the existing tracing +
-	// postgres path. See ticket_type_cache.go doc-comment for what's
-	// cached / not cached + invalidation semantics.
-	fx.Decorate(func(
-		inner domain.TicketTypeRepository,
-		client *redis.Client,
-		cfg *config.Config,
-		logger *mlog.Logger,
-	) domain.TicketTypeRepository {
-		return NewTicketTypeCacheDecorator(inner, client, cfg.Redis.TicketTypeTTL, logger)
-	}),
 	fx.Provide(observability.NewQueueMetrics),
 	// Streams collector — XLEN / XPENDING / consumer-lag gauges per
 	// scrape. Wired here (not in bootstrap) because the *redis.Client
@@ -182,29 +169,74 @@ func NewRedisInventoryRepository(client *redis.Client, cfg *config.Config) domai
 	}
 }
 
-// inventoryKeyPrefix builds the canonical Redis key for an event's
-// inventory counter — `event:{uuid}:qty`. UUID's String() method
-// produces the canonical 36-char form; this matches what the deduct
-// / revert Lua scripts pattern-match on KEYS[1].
-const inventoryKeyPrefix = "event:"
+// Runtime key namespaces for booking hot-path state.
+//
+// Split rather than reusing one `ticket_type:*` prefix:
+//   - metadata invalidation must NEVER sweep qty keys
+//   - qty is mutable hot state; metadata is immutable booking snapshot
+const inventoryKeyPrefix = "ticket_type_qty:"
 const inventoryKeySuffix = ":qty"
+const ticketTypeMetaKeyPrefix = "ticket_type_meta:"
 
-func inventoryKey(eventID uuid.UUID) string {
-	return inventoryKeyPrefix + eventID.String() + inventoryKeySuffix
+const (
+	ticketTypeMetaFieldEventID    = "event_id"
+	ticketTypeMetaFieldPriceCents = "price_cents"
+	ticketTypeMetaFieldCurrency   = "currency"
+)
+
+func inventoryKey(ticketTypeID uuid.UUID) string {
+	return inventoryKeyPrefix + ticketTypeID.String()
 }
 
-// SetInventory writes the inventory counter for an event with the
-// configured TTL (`cfg.Redis.InventoryTTL`, default 30d). Long-by-
-// default so active events are re-upserted well before expiry by
-// operational flows (CreateEvent, saga revert, manual reset);
-// orphaned keys from deleted events eventually fall off Redis
-// instead of accumulating forever. Previously the TTL was 0 (never
-// expires) → unbounded key growth, see action-list L3.
-func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uuid.UUID, count int) error {
-	return r.client.Set(ctx, inventoryKey(eventID), count, r.inventoryTTL).Err()
+func ticketTypeMetaKey(ticketTypeID uuid.UUID) string {
+	return ticketTypeMetaKeyPrefix + ticketTypeID.String()
 }
 
-// GetInventory returns the cached qty for an event plus a `found`
+func ticketTypeMetaValues(ticketType domain.TicketType) map[string]interface{} {
+	return map[string]interface{}{
+		ticketTypeMetaFieldEventID:    ticketType.EventID().String(),
+		ticketTypeMetaFieldPriceCents: ticketType.PriceCents(),
+		ticketTypeMetaFieldCurrency:   ticketType.Currency(),
+	}
+}
+
+// SetTicketTypeRuntime seeds both hot-path runtime keys for a freshly
+// created ticket type.
+func (r *redisInventoryRepository) SetTicketTypeRuntime(ctx context.Context, ticketType domain.TicketType) error {
+	_, err := r.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HSet(ctx, ticketTypeMetaKey(ticketType.ID()), ticketTypeMetaValues(ticketType))
+		pipe.Expire(ctx, ticketTypeMetaKey(ticketType.ID()), r.inventoryTTL)
+		pipe.Set(ctx, inventoryKey(ticketType.ID()), ticketType.AvailableTickets(), r.inventoryTTL)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("redisInventoryRepository.SetTicketTypeRuntime ticket_type=%s: %w", ticketType.ID(), err)
+	}
+	return nil
+}
+
+// SetTicketTypeMetadata refreshes ONLY the immutable metadata key.
+func (r *redisInventoryRepository) SetTicketTypeMetadata(ctx context.Context, ticketType domain.TicketType) error {
+	_, err := r.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HSet(ctx, ticketTypeMetaKey(ticketType.ID()), ticketTypeMetaValues(ticketType))
+		pipe.Expire(ctx, ticketTypeMetaKey(ticketType.ID()), r.inventoryTTL)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("redisInventoryRepository.SetTicketTypeMetadata ticket_type=%s: %w", ticketType.ID(), err)
+	}
+	return nil
+}
+
+// DeleteTicketTypeRuntime removes both the metadata and qty keys.
+func (r *redisInventoryRepository) DeleteTicketTypeRuntime(ctx context.Context, ticketTypeID uuid.UUID) error {
+	if err := r.client.Del(ctx, ticketTypeMetaKey(ticketTypeID), inventoryKey(ticketTypeID)).Err(); err != nil {
+		return fmt.Errorf("redisInventoryRepository.DeleteTicketTypeRuntime ticket_type=%s: %w", ticketTypeID, err)
+	}
+	return nil
+}
+
+// GetInventory returns the cached qty for a ticket type plus a `found`
 // bool that distinguishes "key absent" from "key present with value 0".
 // Per the InventoryRepository interface contract, this distinction is
 // load-bearing for drift detection — a missing key is `cache_missing`
@@ -214,13 +246,13 @@ func (r *redisInventoryRepository) SetInventory(ctx context.Context, eventID uui
 // `redis.Nil` (key absent) → (0, false, nil).
 // Other Redis errors → (0, false, wrapped err); caller treats as
 // transient and retries next sweep.
-func (r *redisInventoryRepository) GetInventory(ctx context.Context, eventID uuid.UUID) (int, bool, error) {
-	val, err := r.client.Get(ctx, inventoryKey(eventID)).Int()
+func (r *redisInventoryRepository) GetInventory(ctx context.Context, ticketTypeID uuid.UUID) (int, bool, error) {
+	val, err := r.client.Get(ctx, inventoryKey(ticketTypeID)).Int()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return 0, false, nil
 		}
-		return 0, false, fmt.Errorf("redisInventoryRepository.GetInventory event=%s: %w", eventID, err)
+		return 0, false, fmt.Errorf("redisInventoryRepository.GetInventory ticket_type=%s: %w", ticketTypeID, err)
 	}
 	return val, true, nil
 }
@@ -228,71 +260,96 @@ func (r *redisInventoryRepository) GetInventory(ctx context.Context, eventID uui
 func (r *redisInventoryRepository) DeductInventory(
 	ctx context.Context,
 	orderID uuid.UUID,
-	eventID uuid.UUID,
 	ticketTypeID uuid.UUID,
 	userID int,
 	count int,
 	reservedUntil time.Time,
-	amountCents int64,
-	currency string,
-) (bool, error) {
-	key := inventoryKey(eventID)
-	keys := []string{key}
+) (domain.DeductInventoryResult, error) {
+	keys := []string{inventoryKey(ticketTypeID), ticketTypeMetaKey(ticketTypeID)}
 
 	// Reuse args slice from pool to avoid per-call allocation.
 	// The int→interface{} boxing still escapes, but the slice header doesn't.
-	// eventID + orderID + ticketTypeID are passed as canonical UUID strings
-	// so the Lua script can include them in the produced stream message
-	// verbatim. reservedUntil is converted to UTC unix seconds before the
-	// call.
+	// orderID + ticketTypeID are passed as canonical UUID strings so the
+	// Lua script can include them in the produced stream message verbatim.
+	// reservedUntil is converted to UTC unix seconds before the call.
 	//
 	// Wire-encoding note: go-redis encodes integer arguments (`count`,
-	// `userID`, `reservedUntil` unix seconds, `amountCents`) as RESP
+	// `userID`, `reservedUntil` unix seconds) as RESP
 	// integer frames (`:N\r\n`) — NOT bulk strings. Strings (UUID
-	// stringifications, `currency`) go as RESP bulk strings (`$N\r\n…`).
+	// stringifications) go as RESP bulk strings (`$N\r\n…`).
 	// Either way, **Redis presents every ARGV to the Lua script as a
 	// Lua string** (this is the RESP→Lua conversion contract; numbers
 	// are stringified by Redis itself). The deduct.lua script doesn't
-	// call `tonumber()` on user_id / order_id / amount_cents — only on
+	// call `tonumber()` on user_id / order_id — only on
 	// `count`, where DECRBY itself parses the string. The consumer side
 	// `parseMessage` re-parses each field with the matching `strconv.*`
 	// call. No floating-point conversion happens at any step, so the
-	// IEEE-754 exact-int range (≤ 2^53) is irrelevant — the fields
-	// round-trip bit-exact for any int64.
+	// fields round-trip bit-exact for the ids and timestamps we pass in.
 	argsPtr := deductArgsPool.Get().(*[]interface{})
 	args := *argsPtr
 	args[0] = count
-	args[1] = eventID.String()
-	args[2] = userID
-	args[3] = orderID.String()
-	args[4] = reservedUntil.UTC().Unix()
-	args[5] = ticketTypeID.String()
-	args[6] = amountCents
-	args[7] = currency
+	args[1] = userID
+	args[2] = orderID.String()
+	args[3] = reservedUntil.UTC().Unix()
+	args[4] = ticketTypeID.String()
 	defer deductArgsPool.Put(argsPtr)
 
 	script, ok := r.scripts["deduct"]
 	if !ok {
-		return false, errDeductScriptNotFound
+		return domain.DeductInventoryResult{}, errDeductScriptNotFound
 	}
 
-	res, err := script.Run(ctx, r.client, keys, args...).Int()
+	raw, err := script.Run(ctx, r.client, keys, args...).Result()
 	if err != nil {
-		return false, err
+		return domain.DeductInventoryResult{}, err
 	}
 
-	switch res {
-	case 1:
-		return true, nil
-	case -1:
-		return false, nil // Sold Out
+	res, ok := raw.([]interface{})
+	if !ok || len(res) == 0 {
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua result %T: %w", raw, errUnexpectedLuaResult)
+	}
+
+	status, ok := res[0].(string)
+	if !ok {
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua status %T: %w", res[0], errUnexpectedLuaResult)
+	}
+
+	switch status {
+	case "ok":
+		if len(res) != 4 {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected ok payload len=%d: %w", len(res), errUnexpectedLuaResult)
+		}
+		eventIDStr, ok1 := res[1].(string)
+		amountCentsStr, ok2 := res[2].(string)
+		currency, ok3 := res[3].(string)
+		if !ok1 || !ok2 || !ok3 {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: malformed ok payload: %w", errUnexpectedLuaResult)
+		}
+		eventID, parseEventErr := uuid.Parse(eventIDStr)
+		if parseEventErr != nil {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: parse event_id %q: %w", eventIDStr, parseEventErr)
+		}
+		amountCents, parseAmountErr := strconv.ParseInt(amountCentsStr, 10, 64)
+		if parseAmountErr != nil {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: parse amount_cents %q: %w", amountCentsStr, parseAmountErr)
+		}
+		return domain.DeductInventoryResult{
+			Accepted:    true,
+			EventID:     eventID,
+			AmountCents: amountCents,
+			Currency:    currency,
+		}, nil
+	case "sold_out":
+		return domain.DeductInventoryResult{Accepted: false}, nil
+	case "metadata_missing":
+		return domain.DeductInventoryResult{}, domain.ErrTicketTypeRuntimeMetadataMissing
 	default:
-		return false, fmt.Errorf("redis: unexpected lua result %d: %w", res, errUnexpectedLuaResult)
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua status %q: %w", status, errUnexpectedLuaResult)
 	}
 }
 
-func (r *redisInventoryRepository) RevertInventory(ctx context.Context, eventID uuid.UUID, count int, compensationID string) error {
-	keys := []string{inventoryKey(eventID), "saga:reverted:" + compensationID}
+func (r *redisInventoryRepository) RevertInventory(ctx context.Context, ticketTypeID uuid.UUID, count int, compensationID string) error {
+	keys := []string{inventoryKey(ticketTypeID), "saga:reverted:" + compensationID}
 
 	// Dedicated 1-element pool — see revertArgsPool comment for why
 	// it's split from the deduct path.

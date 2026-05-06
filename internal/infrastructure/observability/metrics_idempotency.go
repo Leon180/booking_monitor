@@ -55,9 +55,9 @@ var CacheMissesTotal = promauto.NewCounterVec(
 // runbook in monitoring.md explains operator response.
 //
 // Naming history: this counter pre-dates the generic
-// `CacheErrorsTotal{cache,op}` introduced for the ticket_type cache.
-// Kept on its own series for backward compatibility with existing
-// alert rules; new caches use the labelled counter below.
+// `CacheErrorsTotal{cache,op}` counter. Kept on its own series for
+// backward compatibility with existing alert rules; future caches can
+// use the labelled counter below.
 var IdempotencyCacheGetErrorsTotal = promauto.NewCounter(
 	prometheus.CounterOpts{
 		Name: "idempotency_cache_get_errors_total",

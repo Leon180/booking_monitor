@@ -286,13 +286,13 @@ type RedisConfig struct {
 	// that want faster shedding to a healthy replica.
 	MaxConsecutiveReadErrors int `yaml:"max_consecutive_read_errors" env:"REDIS_MAX_CONSECUTIVE_READ_ERRORS" env-default:"30"`
 
-	// InventoryTTL is the maximum lifetime of a `event:{uuid}:qty`
-	// inventory key. Long by default (30d) — active events are
-	// re-upserted by operational flows (CreateEvent, saga revert)
-	// well before expiry; the TTL exists so orphaned keys from deleted
-	// events fall off Redis instead of accumulating forever. Lower for
-	// tighter memory budgets; raise for events with very long sale
-	// windows (festival pre-sale, season-pass).
+	// InventoryTTL is the maximum lifetime of ticket-type runtime keys
+	// (`ticket_type_qty:{uuid}` + `ticket_type_meta:{uuid}`). Long by
+	// default (30d) — active ticket types are re-upserted by
+	// operational flows well before expiry; the TTL exists so orphaned
+	// keys from deleted events fall off Redis instead of accumulating
+	// forever. Lower for tighter memory budgets; raise for events with
+	// very long sale windows (festival pre-sale, season-pass).
 	InventoryTTL time.Duration `yaml:"inventory_ttl" env:"REDIS_INVENTORY_TTL" env-default:"720h"`
 
 	// IdempotencyTTL bounds how long an `Idempotency-Key`-keyed cached
@@ -300,18 +300,6 @@ type RedisConfig struct {
 	// window your callers use; raise for financial reconciliation
 	// flows that retry across days.
 	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
-
-	// TicketTypeTTL bounds how long a `ticket_type:{uuid}` cache entry
-	// (`BookingService.BookTicket`'s pricing-snapshot lookup) is retained.
-	// 5min default: BookTicket reads ONLY immutable fields (eventID,
-	// priceCents, currency, totalTickets) so a TTL cache is correctness-
-	// safe even without explicit invalidation on Decrement/Increment;
-	// 5min keeps the staleness window short enough that a future
-	// admin-driven price edit becomes visible quickly without aggressive
-	// cache invalidation infrastructure. Lower (e.g. 30s) if you start
-	// editing prices live; higher (e.g. 1h) for read-mostly catalogs
-	// where cache hit-rate dominates over freshness.
-	TicketTypeTTL time.Duration `yaml:"ticket_type_ttl" env:"REDIS_TICKET_TYPE_TTL" env-default:"5m"`
 
 	// DLQRetention is the bounded retention window for the
 	// `orders:dlq` stream. Translated to a Redis Streams MINID

@@ -28,7 +28,12 @@ type QueueMetrics interface {
 
 	// RecordDLQRoute increments per SUCCESSFUL message route to the
 	// Redis DLQ, labelled by reason. Distinguishes:
-	//   - "malformed_parse"      parseMessage failed (missing field, bad UUID)
+	//   - "malformed_reverted_legacy"
+	//                            parseMessage failed but legacy hints
+	//                            allowed Redis inventory to be reverted
+	//   - "malformed_unrecoverable"
+	//                            parseMessage failed and inventory
+	//                            could not be safely reverted
 	//   - "malformed_classified" handler returned a malformed-input error
 	//                            (the DLQ fast-path that bypasses retry budget)
 	//   - "exhausted_retries"    handler exceeded retry budget on transient errors

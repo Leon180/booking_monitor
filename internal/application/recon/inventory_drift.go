@@ -20,8 +20,8 @@ import (
 //
 // Drift semantics. For each event with `available_tickets > 0`:
 //
-//	dbQty    = events.available_tickets   (pulled via EventRepository.ListAvailable)
-//	cacheQty = GET event:{uuid}:qty        (pulled via InventoryRepository.GetInventory)
+//	dbQty    = event_ticket_types.available_tickets  (pulled per ticket_type)
+//	cacheQty = GET ticket_type_qty:{uuid}            (pulled via InventoryRepository.GetInventory)
 //	drift    = dbQty - cacheQty
 //
 // During healthy operation `drift` is small and POSITIVE: the Redis
@@ -70,11 +70,10 @@ type InventoryDriftDetector struct {
 // line is filterable independently of the Reconciler's
 // `component=recon` lines (the two sweepers cohabit one process).
 //
-// D4.1 follow-up: ticketType is now required to compute the per-event
-// available_tickets value. The legacy `events.available_tickets`
-// column is frozen post-D4.1 (no longer decremented by the worker), so
-// reading it would falsely report drift on every event — silent
-// failure G surfaced at multi-agent review.
+// D4.1 follow-up: ticketType is now required because the runtime keys
+// are ticket_type-scoped. The detector still groups findings back to
+// the event level so the existing gauge/alert semantics ("drifted
+// events") remain intact.
 func NewInventoryDriftDetector(
 	events domain.EventRepository,
 	ticketType domain.TicketTypeRepository,
@@ -194,88 +193,65 @@ const (
 // checkOne classifies one event's drift and emits metrics + logs.
 // Returns the outcome so Sweep can aggregate per-sweep counts.
 func (d *InventoryDriftDetector) checkOne(ctx context.Context, e domain.Event) checkOutcome {
-	cacheQty, found, err := d.inventory.GetInventory(ctx, e.ID())
+	ticketTypes, err := d.ticketType.ListByEventID(ctx, e.ID())
 	if err != nil {
-		// Distinguish ctx cancellation (graceful shutdown) from real
-		// Redis failure. Explicit context-error matching is the only
-		// safe pattern: `errors.Is(err, ctx.Err())` would silently
-		// degrade to `errors.Is(err, nil) == false` whenever ctx is
-		// still alive, so an actual context.Canceled bubbling up from
-		// a deeper call site would pollute the cache-read-error
-		// counter. Always test against the canonical sentinels.
+		d.metrics.IncCacheReadErrors()
+		d.log.Warn(ctx, "drift: ticket_type list failed, will retry next sweep",
+			tag.EventID(e.ID()), tag.Error(err))
+		return checkOutcomeSkipped
+	}
+	for _, tt := range ticketTypes {
+		outcome := d.checkTicketType(ctx, e, tt)
+		if outcome != checkOutcomeClean {
+			return outcome
+		}
+	}
+
+	// Within tolerance — no metric emission, no log line.
+	return checkOutcomeClean
+}
+
+func (d *InventoryDriftDetector) checkTicketType(ctx context.Context, e domain.Event, tt domain.TicketType) checkOutcome {
+	cacheQty, found, err := d.inventory.GetInventory(ctx, tt.ID())
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			d.log.Info(ctx, "drift: cache read aborted by ctx cancellation",
-				tag.EventID(e.ID()), tag.Error(err))
+				tag.EventID(e.ID()), tag.TicketTypeID(tt.ID()), tag.Error(err))
 			return checkOutcomeClean
 		}
 		d.metrics.IncCacheReadErrors()
 		d.log.Warn(ctx, "drift: cache read failed, will retry next sweep",
-			tag.EventID(e.ID()), tag.Error(err))
+			tag.EventID(e.ID()), tag.TicketTypeID(tt.ID()), tag.Error(err))
 		return checkOutcomeSkipped
 	}
 
-	// D4.1 follow-up: dbQty is the SUM across event_ticket_types for
-	// this event, NOT events.available_tickets (frozen post-D4.1).
-	// Aggregate-across-ticket-types matches the Redis key's event-id
-	// granularity. A ListByEventID + sum-in-Go variant would also work
-	// but adds a per-event allocation; the dedicated SUM query is
-	// cheaper at sweep cadence.
-	dbQty, err := d.ticketType.SumAvailableByEventID(ctx, e.ID())
-	if err != nil {
-		// Same "skip + retry next sweep" discipline as cache read
-		// failures — a transient DB blip shouldn't sink the sweep.
-		// Distinct error counter would be ideal but the existing
-		// CacheReadErrors / ListEventsErrors pair already covers the
-		// two extremes; the per-event SUM failure mode is a transient
-		// DB issue that surfaces aggregate-level on next sweep via
-		// ListEventsErrors anyway.
-		d.metrics.IncCacheReadErrors()
-		d.log.Warn(ctx, "drift: ticket_type SUM failed, will retry next sweep",
-			tag.EventID(e.ID()), tag.Error(err))
-		return checkOutcomeSkipped
-	}
+	dbQty := tt.AvailableTickets()
 	drift := dbQty - cacheQty
-
-	// Branch 1 — cache_missing. The Redis key is ABSENT (`found==false`),
-	// not just zero. A genuinely-zero key means "decremented all the
-	// way down to sold-out" which is a `cache_low_excess` (worker is
-	// stuck) — NOT `cache_missing` (rehydrate didn't fire). Treating
-	// the two the same would route the operator to the wrong branch
-	// of the runbook.
 	if !found && dbQty > 0 {
 		d.metrics.IncDriftDetected("cache_missing")
 		d.log.Warn(ctx, "drift: cache key absent with positive DB inventory",
 			tag.EventID(e.ID()),
+			tag.TicketTypeID(tt.ID()),
 			mlog.Int("db_qty", dbQty),
 		)
 		return checkOutcomeDrifted
 	}
-
-	// Branch 2 — cache_high (drift < 0). Cache has MORE than DB. This
-	// should never happen in healthy operation; only paths producing
-	// it are saga-compensation desync or manual SetInventory beyond
-	// the reset baseline. Always a counter bump regardless of magnitude.
 	if drift < 0 {
 		d.metrics.IncDriftDetected("cache_high")
 		d.log.Error(ctx, "drift: cache exceeds DB — saga or manual desync suspected",
 			tag.EventID(e.ID()),
+			tag.TicketTypeID(tt.ID()),
 			mlog.Int("db_qty", dbQty),
 			mlog.Int("cache_qty", cacheQty),
 			mlog.Int("drift", drift),
 		)
 		return checkOutcomeDrifted
 	}
-
-	// Branch 3 — cache_low_excess. drift > 0 (cache lower than DB) is
-	// EXPECTED during in-flight bookings. Only flag when it exceeds
-	// the configured tolerance — sustained large positive drift means
-	// either the worker is failing to commit (lost messages) or the
-	// reconciler is leaking inventory via force-fail (DEF-CRIT path
-	// that was supposedly closed; this counter is the canary).
 	if drift > d.cfg.AbsoluteTolerance {
 		d.metrics.IncDriftDetected("cache_low_excess")
 		d.log.Warn(ctx, "drift: cache below DB exceeds tolerance",
 			tag.EventID(e.ID()),
+			tag.TicketTypeID(tt.ID()),
 			mlog.Int("db_qty", dbQty),
 			mlog.Int("cache_qty", cacheQty),
 			mlog.Int("drift", drift),
@@ -283,7 +259,5 @@ func (d *InventoryDriftDetector) checkOne(ctx context.Context, e domain.Event) c
 		)
 		return checkOutcomeDrifted
 	}
-
-	// Within tolerance — no metric emission, no log line.
 	return checkOutcomeClean
 }

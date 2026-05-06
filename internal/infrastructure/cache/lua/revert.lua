@@ -1,4 +1,4 @@
--- KEYS[1]: inventory_key (event:{id}:qty)
+-- KEYS[1]: inventory_key (ticket_type_qty:{id})
 -- KEYS[2]: idempotency_key (saga:reverted:{compensation_id})
 -- ARGV[1]: count
 --

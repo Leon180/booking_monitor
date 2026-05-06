@@ -154,7 +154,7 @@ reset-db: ## Reset database — truncate orders/events/outbox + clear Redis cach
 	# on the next test run because the worker's Subscribe loop never had
 	# a NOGROUP event to recover from.
 	@docker exec -e PASS=$(REDIS_PASSWORD) booking_redis sh -c '\
-		for pat in "event:*:qty" "idempotency:*" "saga:reverted:*"; do \
+		for pat in "ticket_type_qty:*" "ticket_type_meta:*" "idempotency:*" "saga:reverted:*"; do \
 			redis-cli -a "$$PASS" --no-auth-warning --scan --pattern "$$pat" \
 				| xargs -r redis-cli -a "$$PASS" --no-auth-warning DEL > /dev/null ; \
 		done'
@@ -192,4 +192,3 @@ migrate-force: ## Force set migration version
 migrate-status: ## Show the current migration version (N5)
 	@test -n "$(DB_URL)" || { echo "MIGRATE_DB_URL is not set. Copy .env.example to .env and fill it in."; exit 1; }
 	migrate -path deploy/postgres/migrations -database "$(DB_URL)" version
-

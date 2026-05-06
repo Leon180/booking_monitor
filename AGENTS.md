@@ -169,6 +169,8 @@ Throughput regressions are tracked under `docs/benchmarks/`. The directory layou
 
 **Phase 2 boundary** (2026-04-30): first project-review checkpoint ran 8-dimension parallel-agent audit; report at [`docs/checkpoints/20260430-phase2-review.md`](docs/checkpoints/20260430-phase2-review.md). Grade A−. One verified correctness gap (reconciler max-age force-fail leaks Redis inventory) + four ops Criticals + 9 Important findings → cleanup PR scoped from action plan rows 1–9. See full history in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
 
+**Active booking-hot-path design note (post-PR #90).** Read [`docs/design/redis_runtime_metadata_scaling.md`](docs/design/redis_runtime_metadata_scaling.md) before reviewing or editing booking throughput / Redis programmability / horizontal-scaling work. It records the planned runtime-metadata follow-up (`ticket_type_meta` + `ticket_type_qty`), why `amount_cents` is frozen at reservation time, the current Lua-vs-Redis-Functions trade-off, and the topology constraints that still block a true Redis Cluster sharding story.
+
 ## Logging Conventions (post-PR #18)
 - **Pattern A — long-lived components**: inject `*log.Logger` via constructor and decorate with `component=<subsystem>` via `With()` ONCE at construction (e.g., `worker_service`, `outbox_relay`, `saga_compensator`). Use `l.Error(ctx, "msg", tag.OrderID(id))` — ctx-aware methods enrich with correlation/trace ids automatically.
 - **Pattern B — call-site-local code**: handlers, middleware, init paths use package-level `log.Error(ctx, "msg", tag.UserID(uid))`. Reads the logger from ctx via `FromContext`, falls back to Nop when unset.

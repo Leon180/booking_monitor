@@ -101,6 +101,7 @@ services:
     restart: unless-stopped
     depends_on:
       - postgres
+      - redis
     # Healthcheck targets the metrics listener's /healthz endpoint.
     # Couples liveness to the listener bind, NOT to downstream deps —
     # mirrors the app service's /livez convention. Caveat: setting
@@ -116,6 +117,8 @@ services:
       start_period: 15s
     environment:
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
+      - REDIS_ADDR=${REDIS_ADDR:?REDIS_ADDR is required}
+      - REDIS_PASSWORD=${REDIS_PASSWORD-}
       - APP_NAME=booking_recon
       - WORKER_METRICS_ADDR=${WORKER_METRICS_ADDR:-:9091}
       # All RECON_* knobs fall back to defaults from config.go header

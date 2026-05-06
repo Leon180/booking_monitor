@@ -60,13 +60,27 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte) err
 	)
 
 	// 1. Rollback PostgreSQL Inventory & Ensure Idempotency via UoW
+	ticketTypeIDForRevert := event.TicketTypeID
 	errUow := s.uow.Do(ctx, func(repos *application.Repositories) error {
 		order, err := repos.Order.GetByID(ctx, event.OrderID)
 		if err != nil {
 			return fmt.Errorf("orderRepo.GetByID order_id=%s: %w", event.OrderID, err)
 		}
 		if order.Status() == domain.OrderStatusCompensated {
-			// Idempotent: already rolled back in DB
+			// Idempotent DB-side short-circuit. We still need a resolved
+			// ticket_type_id for the Redis revert below: a previous
+			// delivery may have marked the order compensated and then
+			// failed on RevertInventory. Retrying only the Redis side is
+			// safe because revert.lua is idempotent on compensationID.
+			//
+			// For modern payloads event.TicketTypeID is already set; for
+			// legacy rolling-upgrade payloads we must re-run the fallback
+			// resolution so ticketTypeIDForRevert is non-zero.
+			ticketTypeID, err := s.resolveTicketTypeID(ctx, repos, event)
+			if err != nil {
+				return err
+			}
+			ticketTypeIDForRevert = ticketTypeID
 			return nil
 		}
 
@@ -94,12 +108,12 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte) err
 		//     choice — wrong row means corrupting the visible counter,
 		//     no row means manual review (the order's `failed` status
 		//     is preserved so ops can find it). The Redis revert below
-		//     STILL runs because Redis is keyed by event_id and is
-		//     untouched by the ambiguity.
+		//     also skips because the runtime key is ticket_type scoped.
 		ticketTypeID, err := s.resolveTicketTypeID(ctx, repos, event)
 		if err != nil {
 			return err // already wrapped + logged inside resolveTicketTypeID
 		}
+		ticketTypeIDForRevert = ticketTypeID
 		if ticketTypeID != uuid.Nil {
 			if err := repos.TicketType.IncrementTicket(ctx, ticketTypeID, event.Quantity); err != nil {
 				return fmt.Errorf("ticketTypeRepo.IncrementTicket ticket_type=%s: %w", ticketTypeID, err)
@@ -127,7 +141,14 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte) err
 	// by the Lua script via an EXISTS-then-SET guard on a compensation
 	// key (see revert.lua for the crash-safety trade-off).
 	compensationID := fmt.Sprintf("order:%s", event.OrderID)
-	if err := s.inventoryRepo.RevertInventory(ctx, event.EventID, event.Quantity, compensationID); err != nil {
+	if ticketTypeIDForRevert == uuid.Nil {
+		s.log.Warn(ctx, "skipping Redis inventory revert because ticket_type_id is unavailable",
+			tag.OrderID(event.OrderID),
+			tag.EventID(event.EventID),
+		)
+		return nil
+	}
+	if err := s.inventoryRepo.RevertInventory(ctx, ticketTypeIDForRevert, event.Quantity, compensationID); err != nil {
 		s.log.Error(ctx, "failed to rollback Redis inventory",
 			tag.OrderID(event.OrderID),
 			tag.Error(err),
