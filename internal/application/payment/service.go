@@ -321,7 +321,19 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 	amount := order.AmountCents()
 	currency := order.Currency()
 
-	intent, err := s.gateway.CreatePaymentIntent(ctx, orderID, amount, currency)
+	// metadata threads orderID through the gateway → webhook round-trip.
+	// The D5 webhook handler reads `metadata.order_id` as the PRIMARY
+	// lookup key; `payment_intent_id` is only the fallback. This rescues
+	// the orphan-repair race documented at line 331 below: even if
+	// `SetPaymentIntentID` fails after gateway success, the eventual
+	// webhook still resolves back to the right order.
+	//
+	// Stripe convention: metadata is a small free-form map — keys
+	// caller-defined, values stringified. A real adapter would pass
+	// this verbatim to `paymentIntents.create({metadata: ...})`.
+	intent, err := s.gateway.CreatePaymentIntent(ctx, orderID, amount, currency, map[string]string{
+		"order_id": orderID.String(),
+	})
 	if err != nil {
 		s.log.Error(ctx, "CreatePaymentIntent: gateway failed",
 			tag.OrderID(orderID), tag.Error(err))
@@ -329,17 +341,32 @@ func (s *service) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (d
 	}
 
 	if err := s.orderRepo.SetPaymentIntentID(ctx, orderID, intent.ID); err != nil {
-		// ErrOrderNotFound here means the row got flipped between our
-		// GetByID and the UPDATE (most likely the webhook beat us, the
-		// D6 sweeper ran, OR — post-fixup — reserved_until elapsed
-		// during the gateway round-trip and the SQL predicate's new
-		// `reserved_until > NOW()` guard rejected the write).
-		// Surface verbatim so the handler can return 404 / 409 with
-		// a clear explanation.
-		if errors.Is(err, domain.ErrOrderNotFound) {
+		// D5 widened SetPaymentIntentID's contract from "0 rows →
+		// ErrOrderNotFound" to a 3-sentinel disambiguation. Each branch
+		// here returns a distinct sentinel so the handler can map to a
+		// precise HTTP code + public message:
+		//   - ErrOrderNotFound        404 — row truly gone
+		//   - ErrReservationExpired   409 — reserved_until elapsed during
+		//                                   gateway round-trip; client
+		//                                   should re-book (same race the
+		//                                   SQL predicate has documented
+		//                                   since D4)
+		//   - ErrInvalidTransition    409 — status flipped (webhook /
+		//                                   sweeper raced ahead) OR a
+		//                                   different intent_id is
+		//                                   already on the row (violates
+		//                                   PaymentIntentCreator
+		//                                   idempotency — should be
+		//                                   impossible with a real
+		//                                   gateway)
+		switch {
+		case errors.Is(err, domain.ErrOrderNotFound),
+			errors.Is(err, domain.ErrReservationExpired),
+			errors.Is(err, domain.ErrInvalidTransition):
 			s.log.Info(ctx, "CreatePaymentIntent: order state changed between read and write",
 				tag.OrderID(orderID),
 				mlog.String("gateway_intent_id", intent.ID),
+				tag.Error(err),
 			)
 			return domain.PaymentIntent{}, err
 		}

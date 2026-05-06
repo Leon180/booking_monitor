@@ -29,6 +29,8 @@ import (
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/api/ops"
+	"booking_monitor/internal/infrastructure/api/testapi"
+	"booking_monitor/internal/infrastructure/api/webhook"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
@@ -79,6 +81,25 @@ func runServer(_ *cobra.Command, _ []string) {
 		fx.Provide(
 			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentGateway))),
 			payment.NewService,
+		),
+		// D5 webhook service + metrics adapters. The handler itself
+		// (api/webhook) is wired via api.Module; here we satisfy its
+		// dependencies (payment.WebhookService + the two metrics
+		// interfaces). The application service is gated on the
+		// PAYMENT_WEBHOOK_SECRET being non-empty at handler-construction
+		// time — see api/webhook/module.go::newHandlerFromConfig.
+		fx.Provide(
+			func(
+				orderRepo domain.OrderRepository,
+				uow application.UnitOfWork,
+				metrics payment.WebhookMetrics,
+				cfg *config.Config,
+				logger *mlog.Logger,
+			) payment.WebhookService {
+				return payment.NewWebhookService(orderRepo, uow, metrics, cfg.Payment.WebhookExpectedLiveMode, logger)
+			},
+			bootstrap.NewPrometheusWebhookMetrics,
+			bootstrap.NewPrometheusWebhookHandlerMetrics,
 		),
 		// Worker fx wiring lives here (not in application/module.go)
 		// because the worker subpackage imports `application` for shared
@@ -202,6 +223,8 @@ func installServer(
 	handler booking.BookingHandler,
 	idempotencyRepo domain.IdempotencyRepository,
 	healthHandler *ops.HealthHandler,
+	webhookHandler *webhook.Handler,
+	testHandler *testapi.Handler,
 	logger *mlog.Logger,
 	cfg *config.Config,
 	workerSvc worker.Service,
@@ -213,7 +236,7 @@ func installServer(
 		return fmt.Errorf("installServer: %w", err)
 	}
 
-	engine, err := buildGinEngine(cfg, logger, handler, idempotencyRepo, healthHandler)
+	engine, err := buildGinEngine(cfg, logger, handler, idempotencyRepo, healthHandler, webhookHandler, testHandler)
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
@@ -254,7 +277,15 @@ func installServer(
 // owns the route topology and benefits from compile-time type checks.
 // `api.Module` remains the single fx import for runtime wiring; the
 // type imports here are a separate concern from fx graph composition.
-func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.BookingHandler, idempotencyRepo domain.IdempotencyRepository, healthHandler *ops.HealthHandler) (*gin.Engine, error) {
+func buildGinEngine(
+	cfg *config.Config,
+	logger *mlog.Logger,
+	handler booking.BookingHandler,
+	idempotencyRepo domain.IdempotencyRepository,
+	healthHandler *ops.HealthHandler,
+	webhookHandler *webhook.Handler,
+	testHandler *testapi.Handler,
+) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -272,6 +303,18 @@ func buildGinEngine(cfg *config.Config, logger *mlog.Logger, handler booking.Boo
 	// are operational endpoints with their own contract (k8s probe
 	// targets) and must not move with API versioning.
 	ops.RegisterHealthRoutes(r, healthHandler)
+
+	// D5 webhook listener — at the root, NOT under /api/v1. Provider
+	// source IPs are unpredictable + signature-authenticated; nginx's
+	// /api/ rate-limit zone would throttle legitimate redelivery.
+	webhook.RegisterRoutes(r, webhookHandler)
+
+	// D5 test endpoints — gated. Production deployments leave the flag
+	// false; the route group never mounts so /test/* returns 404
+	// (not 401), making the surface impossible to enable accidentally.
+	if cfg.Server.EnableTestEndpoints {
+		testapi.RegisterRoutes(r, testHandler)
+	}
 
 	v1 := r.Group(apiV1Prefix)
 	// Body-size cap on the versioned API group. Applied here (not at

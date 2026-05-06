@@ -749,3 +749,73 @@ groups:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#kafkaconsumerstuck"
           summary: "Kafka consumer stuck on topic {{ $labels.topic }}"
           description: "kafka_consumer_retry_total is averaging {{ $value }} retries/sec over 5m on topic {{ $labels.topic }}. Check downstream DB / Redis / payment gateway health."
+
+      - alert: PaymentWebhookSignatureFailing
+        # D5 — provider sent a request whose Stripe-Signature didn't
+        # verify. Sustained > 0.1/s usually means secret rotation is
+        # half-done (we hold the old secret, provider is signing with
+        # the new one or vice versa); a steady probing pattern from a
+        # bad actor would also surface here. 5m soak window keeps the
+        # alert off during the brief window after a deploy when one
+        # node has the new env var and another doesn't.
+        expr: |
+          sum(rate(payment_webhook_signature_invalid_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#paymentwebhooksignaturefailing"
+          summary: "Payment webhook signature verification failing ({{ $value | humanize }}/s over 5m)"
+          description: "Sustained signature verification failures. Check payment_webhook_signature_invalid_total{reason} label split — `mismatch` dominant suggests secret rotation drift; `skew_exceeded` suggests clock issues at the provider edge; `missing` / `malformed` suggests probing or misrouted traffic."
+
+      - alert: PaymentWebhookUnknownIntentSurging
+        # D5 — webhook arrived with neither metadata.order_id nor a
+        # matching payment_intent_id row. This is the rescue path for
+        # the SetPaymentIntentID race orphan: we 500 so the provider
+        # retries while operators investigate. A surge means many
+        # orders had their gateway intent succeed but the DB write
+        # fail (or someone is sending us garbage). Critical because
+        # every count is potentially "user paid but has no order".
+        expr: |
+          sum(rate(payment_webhook_unknown_intent_total{reason="not_found"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#paymentwebhookunknownintentsurging"
+          summary: "Payment webhook unknown-intent rate elevated ({{ $value | humanize }}/s over 5m)"
+          description: "Webhook handler couldn't resolve {{ $value | humanize }}/s of incoming events to any order. Likely cause: SetPaymentIntentID race in /pay (gateway intent created but DB write failed). Investigate payment service Error logs for `SetPaymentIntentID failed AFTER gateway succeeded` and reconcile via gateway dashboard."
+
+      - alert: PaymentWebhookLateSuccessAfterExpiry
+        # D5 — single-event paging. A `succeeded` webhook arrived after
+        # the reservation's `reserved_until` elapsed — money moved at
+        # the provider but our hold is dead. We walked the order to
+        # Expired + emitted `order.failed` so saga reverts inventory,
+        # but a HUMAN must initiate the provider-side refund (e.g.
+        # Stripe `refunds.create`). Every count = one refund ticket.
+        expr: |
+          increase(payment_webhook_late_success_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#paymentwebhooklatesuccessafterexpiry"
+          summary: "Late-success webhook on expired reservation — manual refund required"
+          description: "{{ $value }} late-success event(s) in the last 5m. Order(s) need provider-side refund. Check Loki logs for `late success on expired reservation — refund required` and the `detected_at` label split (service_check vs sql_predicate) to understand the race window."
+
+      - alert: PaymentWebhookIntentMismatch
+        # D5 — single-event paging. metadata.order_id resolved to an
+        # order whose persisted payment_intent_id is a DIFFERENT value
+        # from the webhook's object.id. Either an attacker forged
+        # metadata, a leaked test fixture drifted into prod, or a real
+        # provider bug. The webhook handler refuses to flip the order
+        # — humans must investigate before any auto-resolution.
+        expr: |
+          increase(payment_webhook_intent_mismatch_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#paymentwebhookintentmismatch"
+          summary: "Payment webhook intent ID mismatch — possible forgery or fixture leak"
+          description: "{{ $value }} mismatch event(s) in the last 5m. Webhook handler refused to flip order(s). Check Loki logs for `webhook: intent id mismatch on metadata-resolved order` to extract envelope_id + order_id + the two intent ids; investigate before any manual resolution."

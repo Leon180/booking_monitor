@@ -28,15 +28,27 @@ import (
 
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/ops"
+	"booking_monitor/internal/infrastructure/api/testapi"
+	"booking_monitor/internal/infrastructure/api/webhook"
 )
 
 // Module composes the subpackage modules so consumers (cmd/booking-cli/
 // server.go) wire one module and get the entire HTTP boundary.
 //
 // Order is irrelevant — fx resolves Provides via the dependency graph
-// and Decorates after Provides. The two named children
-// (api/booking, api/ops) appear in fx error logs and graph dumps.
+// and Decorates after Provides. Children appear in fx error logs and
+// graph dumps:
+//
+//   - api/booking   customer-facing /api/v1/* endpoints
+//   - api/ops       operator probes (/livez, /readyz)
+//   - api/webhook   D5 inbound payment-provider webhook (/webhook/payment)
+//   - api/testapi   dev-only /test/* endpoints (gated by
+//                   `cfg.Server.EnableTestEndpoints`; the *Handler
+//                   is provided unconditionally but routes only mount
+//                   when the gate is true)
 var Module = fx.Module("api",
 	booking.Module,
 	ops.Module,
+	webhook.Module,
+	testapi.Module,
 )

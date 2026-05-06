@@ -1,0 +1,52 @@
+-- 000015_orders_payment_intent_id_unique_idx.up.sql
+-- D5 — partial UNIQUE index on `orders.payment_intent_id`.
+--
+-- Why a partial unique index.
+--   D5 webhook handler resolves an inbound payment_intent.* event to its
+--   order via two paths:
+--     1. Primary: `payload.metadata.order_id` (`/pay` writes the order
+--        UUID into Stripe-shape metadata when creating the intent).
+--     2. Fallback: `WHERE payment_intent_id = $1` lookup against this
+--        table — used when metadata is missing/malformed (legacy intent)
+--        or as the rescue path for the SetPaymentIntentID race documented
+--        in `internal/application/payment/service.go:331`.
+--
+--   Without an index, the fallback degenerates to a sequential scan on
+--   what will eventually be a large `orders` table; without UNIQUE,
+--   nothing at the DB level prevents two rows from sharing the same
+--   `payment_intent_id` (a reality the PaymentIntentCreator idempotency
+--   contract already guarantees, but defence-in-depth — repeating the
+--   guarantee at the persistence boundary catches future repo bugs).
+--
+-- Why partial (`WHERE payment_intent_id IS NOT NULL`).
+--   The vast majority of `orders` rows live in `awaiting_payment` (or
+--   eventual terminal states reached without ever calling /pay) — those
+--   rows have NULL `payment_intent_id` forever. Including NULLs in a
+--   unique index is technically allowed (Postgres treats NULLs as
+--   distinct) but bloats the index for zero benefit. Partial keeps the
+--   index ~1:1 with rows that actually completed `/pay`.
+--
+-- Why NOT CONCURRENTLY.
+--   The repo's migration tool (`make migrate-up` runs `migrate ... up`,
+--   golang-migrate) wraps each `*.up.sql` in a transaction by default.
+--   `CREATE INDEX CONCURRENTLY` cannot run inside a transaction.
+--   Switching to a non-tx migration path is out of scope for D5 — the
+--   demo / portfolio scale of `orders` is small enough that the brief
+--   ACCESS EXCLUSIVE lock during a non-concurrent CREATE is in the
+--   millisecond range. A follow-up PR will add `make migrate-up-concurrent`
+--   + a `_concurrent` migration variant + production zero-downtime
+--   tooling (see `docs/post_phase2_roadmap.md` D5 follow-ups). Same
+--   tradeoff was made in migrations 000011 + 000013.
+--
+-- What this migration does NOT do:
+--   * No FK from `orders.payment_intent_id` to a `payment_intents` table —
+--     we don't persist intent objects locally; the gateway is the source
+--     of truth. The string is opaque to us.
+--   * No CHECK constraint on the format. Real Stripe ids are
+--     `pi_<26 hex>` but we don't bind to that surface — the mock uses
+--     the full order UUID hex, and a future provider might use a
+--     different shape. Keep the column free.
+
+CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_intent_id_unique_idx
+    ON orders (payment_intent_id)
+ WHERE payment_intent_id IS NOT NULL;

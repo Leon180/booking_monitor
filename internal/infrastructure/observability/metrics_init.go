@@ -123,4 +123,28 @@ func init() {
 	for _, direction := range []string{"cache_missing", "cache_high", "cache_low_excess"} {
 		InventoryDriftDetectedTotal.WithLabelValues(direction)
 	}
+
+	// D5 webhook label prewarm. Mirrors the recon / saga / drift
+	// rationale: alerts need a 0-value series to evaluate against
+	// before the first event fires. Without prewarm, an alert like
+	// `rate(payment_webhook_signature_invalid_total{reason="mismatch"}[5m]) > 0.1`
+	// can't fire because there's no series for `reason="mismatch"`
+	// until the first request — and dashboards show "no data" rather
+	// than the safer "0 so far".
+	for _, result := range []string{"succeeded", "failed", "unsupported", "unexpected_status", "persist_failed"} {
+		PaymentWebhookReceivedTotal.WithLabelValues(result)
+	}
+	for _, reason := range []string{"missing", "malformed", "skew_exceeded", "mismatch", "config_error"} {
+		PaymentWebhookSignatureInvalidTotal.WithLabelValues(reason)
+	}
+	for _, reason := range []string{"not_found", "cross_env_livemode"} {
+		PaymentWebhookUnknownIntentTotal.WithLabelValues(reason)
+	}
+	for _, status := range []string{"paid", "payment_failed", "expired", "compensated"} {
+		PaymentWebhookDuplicateTotal.WithLabelValues(status)
+	}
+	for _, detectedAt := range []string{"service_check", "sql_predicate", "post_terminal"} {
+		PaymentWebhookLateSuccessTotal.WithLabelValues(detectedAt)
+	}
+	// IntentMismatch is unlabelled; nothing to prewarm.
 }

@@ -66,6 +66,12 @@ silence / inhibit / notification log.
 - [OutboxPendingBacklog](#outboxpendingbacklog)
 - [OutboxPendingCollectorDown](#outboxpendingcollectordown)
 
+### Payment webhook (D5)
+- [PaymentWebhookSignatureFailing](#paymentwebhooksignaturefailing)
+- [PaymentWebhookUnknownIntentSurging](#paymentwebhookunknownintentsurging)
+- [PaymentWebhookLateSuccessAfterExpiry](#paymentwebhooklatesuccessafterexpiry)
+- [PaymentWebhookIntentMismatch](#paymentwebhookintentmismatch)
+
 ### Meta (scrape health)
 - [TargetDown](#targetdown)
 
@@ -689,3 +695,85 @@ docker stop booking_payment_worker
 # Verify: open Prometheus UI → Alerts → TargetDown firing for job=payment-worker
 docker start booking_payment_worker  # to recover
 ```
+
+---
+
+## PaymentWebhookSignatureFailing
+
+**Symptom.** `payment_webhook_signature_invalid_total` rate > 0.1/s sustained 5m. Severity warning. Dashboard: *Payment Webhook* row → "Signature failures by reason" panel.
+
+**Diagnosis.**
+1. Look at the `reason` label split:
+   - `mismatch` dominant → secret rotation drift (we hold the old secret while the provider signs with the new one, or vice versa)
+   - `skew_exceeded` dominant → clock issue at the provider edge (or our pod)
+   - `missing` / `malformed` dominant → probing or misrouted traffic, NOT a real provider
+2. Compare with the most recent `PAYMENT_WEBHOOK_SECRET` rotation timestamp (deploy log, k8s secret history).
+3. Loki query: `{component="payment_webhook_handler"} |= "signature invalid"` — examines the rejected `Stripe-Signature` headers for forensic detail.
+
+**Action.**
+- `mismatch` after a recent rotation → finish the rotation (deploy the new secret to all nodes). If the rotation is recent, expect the alert to clear within the deploy window.
+- `mismatch` with no rotation → potential incident; check provider dashboard for unauthorised webhook endpoints or compromised api keys, rotate immediately.
+- `skew_exceeded` → check NTP sync on app pods (`timedatectl status` inside container); raise `PAYMENT_WEBHOOK_REPLAY_TOLERANCE` only as a last resort (a wide tolerance is a replay-attack window).
+- `missing` / `malformed` → likely benign probing; tighten ingress CIDR allowlist if persistent.
+
+**Escalation.** Page on-call only if `mismatch` rate > 1/s OR sustained > 30m without operator response — by then the provider is auto-disabling the endpoint per their retry policy.
+
+---
+
+## PaymentWebhookUnknownIntentSurging
+
+**Symptom.** `payment_webhook_unknown_intent_total{reason="not_found"}` rate > 0.05/s sustained 5m. Severity critical. Every count is potentially "user paid but has no resolved order".
+
+**Diagnosis.**
+1. The most likely cause is the `SetPaymentIntentID` race in `/pay`: gateway intent created successfully, but the DB write that persists `payment_intent_id` failed → webhook arrives with no metadata or matching intent_id row. App log: `CreatePaymentIntent: SetPaymentIntentID failed AFTER gateway succeeded`.
+2. Cross-check provider dashboard: filter PaymentIntents by status=`succeeded` AND `metadata.order_id` set AND no matching `orders.payment_intent_id` row in our DB.
+3. Loki: `{component="payment_webhook"} |= "unknown intent — neither metadata nor lookup matched"` — extracts the `intent_id` for each orphan.
+
+**Action.**
+- For each orphan: read `metadata.order_id` from the provider's intent → query `SELECT * FROM orders WHERE id = $1`. If the order is still in `awaiting_payment`, manually `UPDATE orders SET payment_intent_id = $1 WHERE id = $2` so the next webhook redelivery resolves cleanly.
+- If `/pay` Error logs are spiking concurrent with this alert, treat as a DB outage incident — fix root cause before backfilling intent ids.
+- After resolving, the provider will retry the webhook (we returned 500); the row will resolve on retry naturally.
+
+**Escalation.** Critical — page on-call immediately. Money has moved without a paid order in our DB; the customer experience is "paid but no ticket". Resolution is manual + per-event.
+
+---
+
+## PaymentWebhookLateSuccessAfterExpiry
+
+**Symptom.** `payment_webhook_late_success_total` increase > 0 in last 5m. Severity critical. Single-event paging — every count is one ticket needing a manual provider-side refund.
+
+**Diagnosis.**
+1. Loki: `{component="payment_webhook"} |= "late success on expired reservation — refund required"` — extracts `order_id`, `intent_id`, `reserved_until`, and the `detected_at` label (`service_check` vs `sql_predicate`).
+2. Confirm the order is now in `expired` status (the handler walked it there + emitted `order.failed` for saga to revert inventory): `SELECT id, status FROM orders WHERE id = $ORDER_ID`.
+3. Check the `detected_at` label split on the dashboard panel:
+   - `service_check` dominant → reservation TTL is too short for the median Stripe Elements latency; consider raising `BOOKING_RESERVATION_WINDOW`
+   - `sql_predicate` dominant → narrow race between service-level check and the UoW; usually ms-level and fine
+
+**Action.**
+- For each occurrence, initiate a refund on the provider side. Stripe: `POST /v1/refunds {payment_intent: <intent_id>}`; mock provider: no-op (refund is provider-side).
+- Add an audit-log note on the order: `INSERT INTO order_status_history (order_id, from_status, to_status, note) VALUES ($1, 'expired', 'refunded_by_ops', 'late_success after expiry — manual refund issued')` (replace `note` column name with whatever you've added; D5 doesn't add a column).
+- If the rate is sustained (multiple per hour), raise `BOOKING_RESERVATION_WINDOW` until the typical `detected_at=service_check` rate falls back to 0.
+
+**Escalation.** Critical — single-event paging. Customer-impacting and money-touching; never auto-resolve.
+
+---
+
+## PaymentWebhookIntentMismatch
+
+**Symptom.** `payment_webhook_intent_mismatch_total` increase > 0 in last 5m. Severity critical. Single-event paging.
+
+**Diagnosis.**
+1. Loki: `{component="payment_webhook"} |= "intent id mismatch on metadata-resolved order"` — extracts `envelope_id`, `order_id`, `order_intent_id`, and `webhook_intent_id`.
+2. The webhook handler refused to flip the order. Three plausible causes:
+   - **Forged metadata** — attacker discovered our webhook secret AND knows a valid order id. Treat as security incident; rotate `PAYMENT_WEBHOOK_SECRET` immediately.
+   - **Test fixture leak** — a dev/integration env's webhook envelope drifted into prod (cross-env routing bug). Check provider dashboard's webhook delivery log against the envelope_id; if it came from a non-prod endpoint, fix the routing config.
+   - **Provider bug** — vanishingly rare but possible. Open a provider support ticket with the envelope id.
+3. Verify the order's persisted `payment_intent_id` against the provider dashboard's actual intent for that order: `SELECT payment_intent_id FROM orders WHERE id = $ORDER_ID`. If it matches an actual provider intent that the customer paid against, the webhook arrived for a DIFFERENT intent — confirms forgery / fixture leak.
+
+**Action.**
+- DO NOT auto-resolve. The handler already refused to flip; a human must investigate.
+- If forgery confirmed → rotate `PAYMENT_WEBHOOK_SECRET`, audit other recent webhooks for the same envelope shape.
+- If fixture leak confirmed → fix routing config; the webhook will not retry (we returned 500 but the upstream issue is no longer reproducible).
+- Document in incident log; this should be vanishingly rare in steady state.
+
+**Escalation.** Critical — single-event paging. Potential security incident; loop in security on-call.

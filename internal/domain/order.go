@@ -68,6 +68,28 @@ var (
 	// "real bug" (where logic produced a transition that should never
 	// happen).
 	ErrInvalidTransition = errors.New("invalid order status transition")
+
+	// ErrReservationExpired is returned by repository methods that
+	// guard transitions on `reserved_until > NOW()` — currently
+	// `SetPaymentIntentID` (D4) and the new race-aware `MarkPaid` (D5).
+	// Distinguishes the "reservation already past TTL" case from the
+	// generic ErrInvalidTransition / ErrOrderNotFound umbrellas so the
+	// caller can route precisely:
+	//
+	//   - D4 `/pay` translates to 409 with a clear "reservation expired
+	//     during payment setup" message so the client can re-book
+	//     instead of seeing a generic 404 / 409.
+	//   - D5 webhook handler routes a `succeeded` event whose SQL
+	//     predicate fired (reserved_until ≤ NOW() between service-level
+	//     check and the UPDATE) into the late-success refund path
+	//     (MarkExpired + emit `order.failed` + critical alert).
+	//     Without this sentinel the orphan-repair branch of
+	//     `handleSuccess` would bubble out as a generic 500.
+	//
+	// Both callers also encounter this from non-orphan paths (the
+	// reservation can elapse during the gateway round-trip even when
+	// `payment_intent_id` was already set on a prior /pay call).
+	ErrReservationExpired = errors.New("reservation expired")
 )
 
 // IsMalformedOrderInput reports whether err originated from a
@@ -616,31 +638,58 @@ type OrderRepository interface {
 
 	// Pattern A methods (D2; the canonical post-Phase-3 path):
 	MarkAwaitingPayment(ctx context.Context, id uuid.UUID) error // Pending → AwaitingPayment
-	MarkPaid(ctx context.Context, id uuid.UUID) error            // AwaitingPayment → Paid (terminal)
-	MarkExpired(ctx context.Context, id uuid.UUID) error         // AwaitingPayment → Expired
-	MarkPaymentFailed(ctx context.Context, id uuid.UUID) error   // AwaitingPayment → PaymentFailed
+	// MarkPaid (D5 race-aware): AwaitingPayment → Paid (terminal),
+	// guarded on `reserved_until > NOW()` at the SQL level. 0-rows is
+	// disambiguated to one of:
+	//   - ErrOrderNotFound        row gone
+	//   - ErrReservationExpired   status awaiting_payment but reserved_until ≤ NOW()
+	//   - ErrInvalidTransition    status not awaiting_payment (paid / expired / etc.)
+	// See repository implementation for the full SQL pattern.
+	MarkPaid(ctx context.Context, id uuid.UUID) error
+	MarkExpired(ctx context.Context, id uuid.UUID) error       // AwaitingPayment → Expired
+	MarkPaymentFailed(ctx context.Context, id uuid.UUID) error // AwaitingPayment → PaymentFailed
 
 	// SetPaymentIntentID persists the gateway-assigned PaymentIntent id
 	// onto an order. Race-safe: the SQL UPDATE includes
-	// `WHERE status = 'awaiting_payment' AND
+	// `WHERE status = 'awaiting_payment' AND reserved_until > NOW() AND
 	//        (payment_intent_id IS NULL OR payment_intent_id = $2)`
 	// so concurrent /pay calls with the same gateway-idempotent intent
 	// (which our PaymentIntentCreator contract guarantees) end up with
 	// the same row state, and a /pay call against an order that's been
 	// flipped (Paid / Expired / PaymentFailed by webhook or sweeper)
-	// safely 0-rows-affected → ErrOrderNotFound.
+	// safely 0-rows-affected.
 	//
-	// Returns:
-	//   - nil                  intent id persisted (or already set to the same value)
-	//   - ErrOrderNotFound     no awaiting-payment row matched (gone or
-	//                          status-flipped between read and write)
-	//   - other errors         wrapped DB failure
+	// 0-rows is disambiguated via a follow-up GetByID into one of three
+	// sentinels (matching MarkPaid's contract — D5 webhook handler relies
+	// on the precise classification to route SetPaymentIntentID failures
+	// during the orphan-repair branch into the correct path):
+	//   - ErrOrderNotFound        row truly gone
+	//   - ErrReservationExpired   status awaiting_payment but reserved_until ≤ NOW()
+	//   - ErrInvalidTransition    status no longer awaiting_payment, OR
+	//                             intent_id mismatch (already set to a
+	//                             different value)
+	//   - other errors            wrapped DB / disambiguation failure
 	//
 	// Why no domain-level WithPaymentIntent transition: setting the
 	// intent doesn't change order status (status stays AwaitingPayment
 	// until the D5 webhook flips it to Paid or PaymentFailed); it's
 	// just a column write. Doing it at the SQL level lets the DB
-	// enforce the awaiting_payment + IS NULL predicate atomically
-	// without a read-then-write race.
+	// enforce the awaiting_payment + reserved_until + IS NULL predicate
+	// atomically without a read-then-write race.
 	SetPaymentIntentID(ctx context.Context, id uuid.UUID, paymentIntentID string) error
+
+	// FindByPaymentIntentID is the D5 webhook fallback path — used only
+	// when the inbound `payment_intent.*` envelope's
+	// `metadata.order_id` is missing/malformed (legacy intent created
+	// before the metadata field landed) or the order's
+	// payment_intent_id was set on a prior /pay call but somehow not
+	// surfaced via metadata.
+	//
+	// Backed by the partial UNIQUE index `orders_payment_intent_id_unique_idx`
+	// (migration 000015) — lookup is O(log n) and the UNIQUE constraint
+	// enforces the PaymentIntentCreator idempotency contract at the DB
+	// level (each gateway-issued intent maps to at most one order).
+	//
+	// Returns ErrOrderNotFound when no row matches.
+	FindByPaymentIntentID(ctx context.Context, paymentIntentID string) (Order, error)
 }

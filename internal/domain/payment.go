@@ -156,6 +156,26 @@ type PaymentIntent struct {
 	// Currency is the ISO 4217 three-letter code ("USD", "TWD", etc.)
 	// in lowercase per Stripe convention.
 	Currency string
+
+	// Metadata is the gateway-side attribute bag — Stripe's convention
+	// for threading caller-controlled context through to the eventual
+	// webhook delivery (`{"order_id": "<uuid>"}`). The D5 webhook
+	// handler reads `metadata["order_id"]` as the PRIMARY lookup key
+	// when resolving an inbound `payment_intent.*` event back to its
+	// order, falling back to `payment_intent_id` only when metadata is
+	// missing or malformed (legacy intent created before this field
+	// was added, or a foreign / cross-env event).
+	//
+	// Why metadata instead of just relying on payment_intent_id:
+	// `service.CreatePaymentIntent` has a documented race
+	// (internal/application/payment/service.go:331) where the gateway
+	// successfully registers the intent but the `SetPaymentIntentID`
+	// UPDATE fails — leaving an "orphan" intent on the gateway side
+	// with no payment_intent_id row on our side. The customer can
+	// still complete payment via Stripe Elements; the resulting
+	// webhook is the ONLY signal we get that the money moved.
+	// metadata.order_id rescues that path.
+	Metadata map[string]string
 }
 
 // PaymentIntentCreator is the Pattern A write port — creates a
@@ -176,7 +196,7 @@ type PaymentIntent struct {
 // cache. The application service can call CreatePaymentIntent every
 // time and rely on the gateway returning the cached intent.
 type PaymentIntentCreator interface {
-	CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (PaymentIntent, error)
+	CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string, metadata map[string]string) (PaymentIntent, error)
 }
 
 // PaymentGateway is the combined port retained for adapters that

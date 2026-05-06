@@ -32,13 +32,25 @@ var ErrInvalidPaymentEvent = errors.New("invalid payment event")
 // HTTP 409 Conflict.
 var ErrOrderNotAwaitingPayment = errors.New("order not awaiting payment")
 
-// ErrReservationExpired is returned by CreatePaymentIntent when the
-// order's `reserved_until` has elapsed at request time. The reservation
-// is logically dead — the D6 sweeper hasn't transitioned it yet, but
-// charging would soft-lock inventory beyond the user's promised
-// window. Surface as 409 Conflict; the client should re-book to get
-// a fresh reservation.
-var ErrReservationExpired = errors.New("reservation expired")
+// ErrReservationExpired is a backwards-compat alias for
+// `domain.ErrReservationExpired` — the single canonical sentinel
+// returned across the service-level pre-check
+// (`CreatePaymentIntent`'s `!order.ReservedUntil().After(now)` guard)
+// and the SQL-level predicates in D5 (`SetPaymentIntentID` /
+// `MarkPaid`). New code in this package SHOULD prefer the
+// `domain.ErrReservationExpired` form; the alias exists so existing
+// imports and callers continue to compile without qualification
+// changes. `errors.Is` works with either form because they are the
+// same pointer.
+//
+// DO NOT REASSIGN this var to a fresh sentinel — that would silently
+// split "reservation expired" into two non-equivalent values across
+// packages. If you find yourself wanting a new sentinel, define it in
+// `domain` and add a separate alias here.
+//
+// Surface as 409 Conflict; the client should re-book to get a fresh
+// reservation.
+var ErrReservationExpired = domain.ErrReservationExpired
 
 // ErrOrderMissingPriceSnapshot is returned by CreatePaymentIntent when
 // the order is in `awaiting_payment` AND the reservation is still
@@ -62,7 +74,7 @@ var ErrReservationExpired = errors.New("reservation expired")
 // distinguish data-integrity bugs from routine state transitions.
 var ErrOrderMissingPriceSnapshot = errors.New("order missing price snapshot")
 
-//go:generate mockgen -source=payment_service.go -destination=../mocks/payment_service_mock.go -package=mocks
+//go:generate mockgen -source=port.go -destination=../../mocks/payment_service_mock.go -package=mocks
 
 // Service defines the application-layer port for the payment
 // pipeline. Two responsibilities today:

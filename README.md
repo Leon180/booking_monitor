@@ -206,9 +206,12 @@ sequenceDiagram
 |--------|------|-------------|
 | POST | `/api/v1/book` | Submit a booking. Returns **202 Accepted** + an `order_id` to track it (see **Booking flow** below). |
 | GET | `/api/v1/orders/:id` | Look up the latest status of one order by `order_id`. May return 404 in a brief window after `POST /book` (see **Booking flow**). |
+| POST | `/api/v1/orders/:id/pay` | **D4** Pattern A — create a Stripe-shape `PaymentIntent` for a reservation. Returns 200 with `{order_id, payment_intent_id, client_secret, amount_cents, currency}`. Idempotent on `order_id` (gateway-side). Status guards: 409 if not `awaiting_payment`, 409 if reservation expired, 404 if order not found. |
 | GET | `/api/v1/history` | Order history `?page=1&size=10&status=confirmed` |
 | POST | `/api/v1/events` | Create event `{ name, total_tickets, price_cents, currency }`. D4.1 atomically provisions a default ticket_type carrying the price snapshot; the response surfaces `ticket_types[].id` for booking. |
 | GET | `/api/v1/events/:id` | **Stub** — returns `{"message": "View event", "event_id": ...}` + bumps `page_views_total` for conversion tracking. Does NOT load event details (deferred to Phase 3 demo). |
+| POST | `/webhook/payment` | **D5** Pattern A — inbound payment-provider webhook (Stripe-shape envelope). Verifies HMAC-SHA256 signature against `PAYMENT_WEBHOOK_SECRET`, dispatches on event type: `payment_intent.succeeded` → MarkPaid; `payment_intent.payment_failed` → MarkPaymentFailed + emit `order.failed` (saga compensation). Idempotent on duplicate provider redelivery via DB terminal status. Mounted at the engine root (NOT under `/api/v1`); auth is the signature, not network. |
+| POST | `/test/payment/confirm/:order_id` | **D5 (test-only)** Mock provider's webhook emit — gated by `ENABLE_TEST_ENDPOINTS` (off by default in prod). Reads the order's `payment_intent_id`, builds a Stripe-shape envelope with `metadata.order_id`, signs it with the same webhook secret, and POSTs to `/webhook/payment`. Used by integration tests + dev demos to drive the full pipeline without a real provider. Query: `?outcome=succeeded\|failed`. |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/livez` | Liveness probe — always 200 if process is up (no downstream deps) |
 | GET | `/readyz` | Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 + per-dep JSON otherwise |

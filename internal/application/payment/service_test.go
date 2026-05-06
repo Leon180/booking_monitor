@@ -316,7 +316,7 @@ func TestCreatePaymentIntent_HappyPath(t *testing.T) {
 
 	gomock.InOrder(
 		repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil),
-		gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(4000), "usd").Return(wantIntent, nil),
+		gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(4000), "usd", gomock.Any()).Return(wantIntent, nil),
 		repo.EXPECT().SetPaymentIntentID(gomock.Any(), orderID, "pi_test_123").Return(nil),
 	)
 
@@ -449,7 +449,7 @@ func TestCreatePaymentIntent_GatewayError(t *testing.T) {
 	gwErr := errors.New("gateway 503")
 
 	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
-	gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(2000), "usd").Return(domain.PaymentIntent{}, gwErr)
+	gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(2000), "usd", gomock.Any()).Return(domain.PaymentIntent{}, gwErr)
 
 	_, err := svc.CreatePaymentIntent(context.Background(), orderID)
 	require.Error(t, err)
@@ -470,7 +470,7 @@ func TestCreatePaymentIntent_PersistRaceLost(t *testing.T) {
 
 	gomock.InOrder(
 		repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil),
-		gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(2000), "usd").Return(intent, nil),
+		gw.EXPECT().CreatePaymentIntent(gomock.Any(), orderID, int64(2000), "usd", gomock.Any()).Return(intent, nil),
 		repo.EXPECT().SetPaymentIntentID(gomock.Any(), orderID, "pi_race").Return(domain.ErrOrderNotFound),
 	)
 

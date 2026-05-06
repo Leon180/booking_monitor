@@ -45,6 +45,16 @@ type MockGateway struct {
 	// real Stripe / Adyen adapters enforce via their `Idempotency-Key`
 	// header.
 	intents sync.Map // map[uuid.UUID]domain.PaymentIntent
+
+	// intentMetadataMu serialises metadata-edit-on-cache-hit. Without
+	// it two concurrent CreatePaymentIntent calls with different
+	// metadata could race on the `Load(copy) → mutate → Store`
+	// sequence; the lock makes the read+write effectively atomic for
+	// the duration of the mutation. Coarse-grained (one mutex for
+	// the whole map) — fine for a mock; a real adapter would not
+	// have this concern because metadata edits go through the
+	// gateway API.
+	intentMetadataMu sync.Mutex
 }
 
 // NewMockGateway creates a new mock gateway with default settings.
@@ -168,7 +178,7 @@ func (g *MockGateway) GetStatus(ctx context.Context, orderID uuid.UUID) (domain.
 // rationale as GetStatus — a real adapter would call
 // `POST /v1/payment_intents` over HTTP and respect ctx.Done().
 // Caller writes propagate the timeout boundary; we don't break it.
-func (g *MockGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string) (domain.PaymentIntent, error) {
+func (g *MockGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID, amountCents int64, currency string, metadata map[string]string) (domain.PaymentIntent, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.PaymentIntent{}, err
 	}
@@ -178,10 +188,36 @@ func (g *MockGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID
 	// against the cached intent so a buggy caller passing different
 	// amounts on retry surfaces loudly rather than silently using the
 	// first call's amount.
+	//
+	// Metadata is NOT validated against the cache — Stripe accepts
+	// caller-controlled metadata edits on subsequent calls. A real
+	// adapter passes the latest metadata through to the gateway via
+	// `PaymentIntent.update`. Our mock just refreshes the cached value
+	// so tests that exercise metadata-edit behaviour see the new
+	// payload (and the eventual webhook emission picks it up).
+	//
+	// Race-safety on metadata edits: two concurrent CreatePaymentIntent
+	// calls with different metadata would otherwise race on the
+	// `Load(copy) → mutate copy → Store` sequence below (last writer
+	// wins, but observers can see either value). Serialise via the
+	// per-orderID mutex slot held under `intentMetadataMu` so concurrent
+	// tests / callers see a consistent post-update view. The first-time
+	// creation path still uses LoadOrStore (it's already race-free).
 	if cached, ok := g.intents.Load(orderID); ok {
 		intent := cached.(domain.PaymentIntent)
 		if intent.AmountCents != amountCents || intent.Currency != currency {
 			return domain.PaymentIntent{}, errors.New("CreatePaymentIntent: cached intent has different amount/currency — caller passed inconsistent params on retry")
+		}
+		if metadata != nil {
+			g.intentMetadataMu.Lock()
+			// Re-load under the lock so concurrent updates serialise
+			// against the latest cached struct rather than the snapshot
+			// we read before acquiring the lock.
+			cached, _ = g.intents.Load(orderID)
+			intent = cached.(domain.PaymentIntent)
+			intent.Metadata = metadata
+			g.intents.Store(orderID, intent)
+			g.intentMetadataMu.Unlock()
 		}
 		return intent, nil
 	}
@@ -209,6 +245,7 @@ func (g *MockGateway) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID
 		ClientSecret: "pi_" + orderHex + "_secret_" + uuid.NewString(),
 		AmountCents:  amountCents,
 		Currency:     currency,
+		Metadata:     metadata,
 	}
 	if actual, loaded := g.intents.LoadOrStore(orderID, intent); loaded {
 		// Race: another goroutine stored first. Return their value

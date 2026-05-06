@@ -335,6 +335,19 @@ func (d *orderRepositoryTracingDecorator) SetPaymentIntentID(ctx context.Context
 	return err
 }
 
+func (d *orderRepositoryTracingDecorator) FindByPaymentIntentID(ctx context.Context, paymentIntentID string) (domain.Order, error) {
+	// Same redaction posture as SetPaymentIntentID — intent id never
+	// makes it into span attrs.
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "FindByPaymentIntentID")
+	defer span.End()
+
+	order, err := d.next.FindByPaymentIntentID(ctx, paymentIntentID)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return order, err
+}
+
 // --- TicketTypeRepositoryDecorator (D4.1) ---
 
 type ticketTypeRepositoryTracingDecorator struct {

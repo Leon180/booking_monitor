@@ -530,14 +530,111 @@ func (r *postgresOrderRepository) MarkAwaitingPayment(ctx context.Context, id uu
 	return r.transitionStatus(ctx, id, domain.OrderStatusAwaitingPayment, domain.OrderStatusPending)
 }
 
-// MarkPaid atomically transitions AwaitingPayment → Paid (terminal).
-// Triggered by the POST /webhook/payment success callback (D5).
+// MarkPaid atomically transitions AwaitingPayment → Paid (terminal),
+// guarded on `reserved_until > NOW()` so a `succeeded` webhook
+// arriving after the reservation window elapsed cannot flip the row
+// to Paid. The D5 webhook handler routes a 0-rows ErrReservationExpired
+// result into a late-success refund path (MarkExpired + emit
+// `order.failed` to saga + critical alert; see
+// `internal/application/payment/webhook_service.go`). Without this
+// clause, a customer paying after their hold expired would land in
+// the "user paid for an expired reservation" UX bug — the same race
+// SetPaymentIntentID's predicate already documents.
 //
-// Strictly AwaitingPayment-only as source; not Pending → Paid. The
-// webhook only fires after a payment intent was created, which only
-// happens after the order is in AwaitingPayment.
+// Why a bespoke SQL block instead of the generic `transitionStatus`
+// helper: that helper takes only `from ...OrderStatus` predicates;
+// MarkPaid additionally needs the wall-clock-comparison predicate.
+// Adding a `reservedUntil` parameter to `transitionStatus` for a
+// single caller would clutter every other transition with an
+// unused argument. The disambiguation tail mirrors `transitionStatus`
+// so the contract stays uniform — 0 rows resolves to one of three
+// sentinels via a follow-up GetByID:
+//
+//	ErrOrderNotFound        row truly gone
+//	ErrReservationExpired   status awaiting_payment but reserved_until ≤ NOW()
+//	ErrInvalidTransition    status not awaiting_payment
+//
+// The CTE shape (FOR UPDATE-locked source read + UPDATE FROM that
+// read + INSERT into history from RETURNING) is the same as
+// `transitionStatus` so the audit-log invariant holds: status change
+// and history insert always succeed or fail atomically together.
 func (r *postgresOrderRepository) MarkPaid(ctx context.Context, id uuid.UUID) error {
-	return r.transitionStatus(ctx, id, domain.OrderStatusPaid, domain.OrderStatusAwaitingPayment)
+	const sqlStmt = `
+		WITH before AS (
+			SELECT id, status FROM orders WHERE id = $1 FOR UPDATE
+		),
+		transitioned AS (
+			UPDATE orders
+			   SET status = 'paid', updated_at = NOW()
+			  FROM before
+			 WHERE orders.id = before.id
+			   AND before.status = 'awaiting_payment'
+			   AND orders.reserved_until > NOW()
+			RETURNING orders.id, before.status AS from_status
+		)
+		INSERT INTO order_status_history (order_id, from_status, to_status)
+		SELECT id, from_status, 'paid' FROM transitioned`
+
+	res, err := r.exec.ExecContext(ctx, sqlStmt, id)
+	if err != nil {
+		return fmt.Errorf("orderRepository.MarkPaid id=%s: %w", id, err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orderRepository.MarkPaid rows id=%s: %w", id, err)
+	}
+	if rowsAffected == 1 {
+		return nil
+	}
+	return r.classifyPaidGuardFailure(ctx, id, "")
+}
+
+// classifyPaidGuardFailure runs the GetByID disambiguation shared by
+// MarkPaid and SetPaymentIntentID. Both repository calls guard on
+// `status = 'awaiting_payment' AND reserved_until > NOW()` and need to
+// distinguish "row gone" / "reservation expired" / "status no longer
+// awaiting_payment" so the D5 webhook handler can route precisely.
+//
+// `expectedIntentID` is the orderID-keyed intent we wanted to write
+// (only set by SetPaymentIntentID; MarkPaid passes ""). When non-empty
+// AND the row is still in awaiting_payment with live reserved_until,
+// the only remaining reason a 0-rows could have happened is an intent
+// id mismatch with what's already on the row — that resolves to
+// ErrInvalidTransition (intent uniqueness is part of the same logical
+// transition guard).
+func (r *postgresOrderRepository) classifyPaidGuardFailure(ctx context.Context, id uuid.UUID, expectedIntentID string) error {
+	cur, getErr := r.GetByID(ctx, id)
+	if errors.Is(getErr, domain.ErrOrderNotFound) {
+		return domain.ErrOrderNotFound
+	}
+	if getErr != nil {
+		return fmt.Errorf("orderRepository.classifyPaidGuardFailure id=%s: %w", id, getErr)
+	}
+	if cur.Status() != domain.OrderStatusAwaitingPayment {
+		return fmt.Errorf("orderRepository id=%s status=%s: %w", id, cur.Status(), domain.ErrInvalidTransition)
+	}
+	// status is awaiting_payment. Two remaining reasons the predicate
+	// failed:
+	//   1. reserved_until ≤ NOW() (always possible)
+	//   2. intent id mismatch (only if expectedIntentID was passed)
+	// Order matters: check reservation FIRST so the late-success
+	// refund path is reachable even when the row also has a different
+	// intent id (rare but possible — gateway returned an intent we
+	// couldn't persist, then the caller retried with a fresh intent).
+	if !cur.ReservedUntil().After(time.Now()) {
+		return fmt.Errorf("orderRepository id=%s: %w", id, domain.ErrReservationExpired)
+	}
+	if expectedIntentID != "" && cur.PaymentIntentID() != "" && cur.PaymentIntentID() != expectedIntentID {
+		return fmt.Errorf("orderRepository id=%s: intent id mismatch (have=%q want=%q): %w",
+			id, cur.PaymentIntentID(), expectedIntentID, domain.ErrInvalidTransition)
+	}
+	// Got here = the row legitimately matches the predicate but the
+	// UPDATE saw 0 rows. Most likely a transient race between the
+	// UPDATE's snapshot and the disambiguating GetByID's snapshot
+	// (the row flipped Paid/Expired and back, somehow). Surface as a
+	// non-sentinel error so it's loud rather than silent.
+	return fmt.Errorf("orderRepository id=%s: 0 rows under apparently-valid predicate (status=%s reserved_until=%s)",
+		id, cur.Status(), cur.ReservedUntil().Format(time.RFC3339))
 }
 
 // MarkExpired atomically transitions AwaitingPayment → Expired.
@@ -613,13 +710,52 @@ func (r *postgresOrderRepository) SetPaymentIntentID(ctx context.Context, id uui
 		return fmt.Errorf("orderRepository.SetPaymentIntentID rows id=%s: %w", id, err)
 	}
 	if rowsAffected == 0 {
-		// 0 rows = order doesn't exist, status isn't awaiting_payment,
-		// or already has a different intent_id. ErrOrderNotFound is
-		// the closest existing sentinel; the application service can
-		// re-read the order to disambiguate if needed.
-		return domain.ErrOrderNotFound
+		// 0 rows: disambiguate via GetByID into one of three sentinels
+		// (matches MarkPaid's contract). The D5 webhook handler relies
+		// on this precise classification to route the orphan-repair
+		// branch into the late-success / re-read / propagate paths
+		// instead of bubbling all of them out as a generic 500. D4 /pay
+		// also benefits — `ErrReservationExpired` lets the handler
+		// return a clear "reservation expired" message instead of a
+		// generic 404.
+		return r.classifyPaidGuardFailure(ctx, id, paymentIntentID)
 	}
 	return nil
+}
+
+// FindByPaymentIntentID is the D5 webhook fallback path — looks up an
+// order by its `payment_intent_id`. Used when an inbound
+// `payment_intent.*` envelope's `metadata.order_id` is absent or
+// malformed; metadata.order_id remains the primary lookup so this
+// path only fires for legacy intents (created before the metadata
+// field landed) or in rescue scenarios.
+//
+// Backed by `orders_payment_intent_id_unique_idx` (migration 000015 —
+// partial unique on `payment_intent_id WHERE payment_intent_id IS NOT
+// NULL`). The UNIQUE constraint enforces the PaymentIntentCreator
+// idempotency contract at the persistence layer (each gateway-issued
+// intent maps to at most one order); without it, a future repository
+// bug could write two orders with the same intent_id and this method
+// would silently return whichever postgres picked.
+func (r *postgresOrderRepository) FindByPaymentIntentID(ctx context.Context, paymentIntentID string) (domain.Order, error) {
+	if paymentIntentID == "" {
+		// Defensive: a "" lookup would match the partial-index
+		// exclusion clause and return zero rows, but the call site
+		// only reaches here when the webhook handler couldn't read
+		// metadata.order_id either — surfacing the empty input loudly
+		// is better than silently NotFound-ing.
+		return domain.Order{}, fmt.Errorf("orderRepository.FindByPaymentIntentID: empty payment_intent_id")
+	}
+	var row orderRow
+	err := row.scanInto(r.exec.QueryRowContext(ctx,
+		"SELECT "+orderColumns+" FROM orders WHERE payment_intent_id = $1", paymentIntentID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Order{}, domain.ErrOrderNotFound
+		}
+		return domain.Order{}, fmt.Errorf("orderRepository.FindByPaymentIntentID intent=%s: %w", paymentIntentID, err)
+	}
+	return row.toDomain(), nil
 }
 
 // --- OutboxRepository ---

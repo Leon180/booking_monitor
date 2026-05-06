@@ -58,6 +58,21 @@ func (mr *MockOrderRepositoryMockRecorder) Create(ctx, order any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Create", reflect.TypeOf((*MockOrderRepository)(nil).Create), ctx, order)
 }
 
+// FindByPaymentIntentID mocks base method.
+func (m *MockOrderRepository) FindByPaymentIntentID(ctx context.Context, paymentIntentID string) (domain.Order, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindByPaymentIntentID", ctx, paymentIntentID)
+	ret0, _ := ret[0].(domain.Order)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindByPaymentIntentID indicates an expected call of FindByPaymentIntentID.
+func (mr *MockOrderRepositoryMockRecorder) FindByPaymentIntentID(ctx, paymentIntentID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindByPaymentIntentID", reflect.TypeOf((*MockOrderRepository)(nil).FindByPaymentIntentID), ctx, paymentIntentID)
+}
+
 // FindStuckCharging mocks base method.
 func (m *MockOrderRepository) FindStuckCharging(ctx context.Context, minAge time.Duration, limit int) ([]domain.StuckCharging, error) {
 	m.ctrl.T.Helper()

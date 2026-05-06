@@ -345,6 +345,15 @@ func TestOrderRepository_StateMachine_LegalTransitions(t *testing.T) {
 			_, err := repo.Create(ctx, o)
 			require.NoError(t, err)
 
+			// D5 made MarkPaid SQL guard on `reserved_until > NOW()`.
+			// `newOrder` produces a Pending row without a reservation
+			// time; for paths that traverse AwaitingPayment → Paid, we
+			// have to backfill a future reserved_until before the
+			// MarkAwaitingPayment step so the eventual MarkPaid passes.
+			// Direct SQL because no domain method updates just the time.
+			_, err = h.DB.Exec(`UPDATE orders SET reserved_until = NOW() + INTERVAL '15 minutes' WHERE id = $1`, o.ID())
+			require.NoError(t, err)
+
 			for _, s := range tt.path {
 				require.NoError(t, s(repo, ctx, o.ID()))
 			}
@@ -767,7 +776,10 @@ func TestOrderRepository_SetPaymentIntentID_Idempotent(t *testing.T) {
 // TestOrderRepository_SetPaymentIntentID_RejectsDifferentIntent:
 // defensive — under PaymentIntentCreator's idempotency contract this
 // can't happen, but we pin it so a buggy adapter can't silently
-// overwrite a stored intent.
+// overwrite a stored intent. D5 widened the 0-rows contract to
+// distinguish this case (intent mismatch) from the "row gone" case;
+// this test asserts the ErrInvalidTransition sentinel (not the old
+// ErrOrderNotFound umbrella).
 func TestOrderRepository_SetPaymentIntentID_RejectsDifferentIntent(t *testing.T) {
 	h, repo := repoHarness(t)
 	h.Reset(t)
@@ -782,8 +794,8 @@ func TestOrderRepository_SetPaymentIntentID_RejectsDifferentIntent(t *testing.T)
 
 	err = repo.SetPaymentIntentID(ctx, o.ID(), "pi_second")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
-		"different intent_id on a row that already has one must 0-rows-affected → ErrOrderNotFound")
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
+		"different intent_id on a row that already has one resolves to ErrInvalidTransition (D5 3-sentinel contract — distinguishes from 'row gone')")
 
 	got, err := repo.GetByID(ctx, o.ID())
 	require.NoError(t, err)
@@ -808,8 +820,8 @@ func TestOrderRepository_SetPaymentIntentID_RejectsNonAwaitingPayment(t *testing
 
 	err = repo.SetPaymentIntentID(ctx, pending.ID(), "pi_should_not_apply")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
-		"Pending order must reject SetPaymentIntentID — only AwaitingPayment qualifies")
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
+		"Pending order resolves to ErrInvalidTransition under D5's 3-sentinel contract")
 
 	awaiting := newReservation(t, eventID, 8, 1)
 	_, err = repo.Create(ctx, awaiting)
@@ -818,8 +830,8 @@ func TestOrderRepository_SetPaymentIntentID_RejectsNonAwaitingPayment(t *testing
 
 	err = repo.SetPaymentIntentID(ctx, awaiting.ID(), "pi_too_late")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
-		"Paid order (webhook already landed) must reject SetPaymentIntentID")
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
+		"Paid order (webhook already landed) resolves to ErrInvalidTransition")
 }
 
 // TestOrderRepository_SetPaymentIntentID_OrderNotFound: bogus uuid
@@ -866,8 +878,8 @@ func TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation(t *testing
 
 	err = repo.SetPaymentIntentID(ctx, id, "pi_too_late")
 	require.Error(t, err)
-	assert.ErrorIs(t, err, domain.ErrOrderNotFound,
-		"expired-reservation order must reject the persist write — closes the gateway-round-trip-elapsed-window race")
+	assert.ErrorIs(t, err, domain.ErrReservationExpired,
+		"expired-reservation order resolves to ErrReservationExpired (D5 3-sentinel contract — D5 webhook handler routes this to the late-success refund path)")
 
 	// Verify the row's payment_intent_id is still NULL (the rejected
 	// UPDATE didn't accidentally write).
@@ -875,4 +887,180 @@ func TestOrderRepository_SetPaymentIntentID_RejectsExpiredReservation(t *testing
 	require.NoError(t, err)
 	assert.Empty(t, got.PaymentIntentID(),
 		"rejected SetPaymentIntentID must NOT write the column")
+}
+
+// ─── D5: MarkPaid race-aware SQL ─────────────────────────────────────
+
+// TestOrderRepository_MarkPaid_HappyPath: AwaitingPayment + live
+// reserved_until → flips to Paid + audit row written.
+func TestOrderRepository_MarkPaid_HappyPath(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.MarkPaid(ctx, o.ID()))
+
+	got, err := repo.GetByID(ctx, o.ID())
+	require.NoError(t, err)
+	assert.Equal(t, domain.OrderStatusPaid, got.Status())
+
+	// History row written via the same CTE.
+	var historyCount int
+	require.NoError(t, h.DB.QueryRow(`
+		SELECT count(*) FROM order_status_history
+		 WHERE order_id = $1 AND from_status = 'awaiting_payment' AND to_status = 'paid'
+	`, o.ID()).Scan(&historyCount))
+	assert.Equal(t, 1, historyCount, "MarkPaid CTE must write a single history row atomically")
+}
+
+// TestOrderRepository_MarkPaid_OrderNotFound: nonexistent uuid →
+// ErrOrderNotFound.
+func TestOrderRepository_MarkPaid_OrderNotFound(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	err := repo.MarkPaid(context.Background(), uuid.New())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound)
+}
+
+// TestOrderRepository_MarkPaid_NonAwaitingPayment_InvalidTransition:
+// already-Paid (or any other status) → ErrInvalidTransition.
+func TestOrderRepository_MarkPaid_NonAwaitingPayment_InvalidTransition(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.MarkPaid(ctx, o.ID())) // first call OK
+
+	err = repo.MarkPaid(ctx, o.ID()) // second call: row is now Paid
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition,
+		"MarkPaid against a non-awaiting_payment row must surface ErrInvalidTransition (D5 3-sentinel contract)")
+}
+
+// TestOrderRepository_MarkPaid_ExpiredReservation_ReservationExpired:
+// AwaitingPayment + reserved_until past → ErrReservationExpired. The
+// D5 webhook handler reads this sentinel to route into the late-
+// success refund path.
+func TestOrderRepository_MarkPaid_ExpiredReservation_ReservationExpired(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	// Construct directly via Reconstruct + Create (NewReservation
+	// rejects past times).
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+	expiredAt := time.Now().Add(-1 * time.Minute)
+	stale := domain.ReconstructOrder(id, 9, eventID, uuid.Nil, 1,
+		domain.OrderStatusAwaitingPayment,
+		time.Now().Add(-16*time.Minute),
+		expiredAt,
+		"", 0, "")
+	_, err = repo.Create(ctx, stale)
+	require.NoError(t, err)
+
+	err = repo.MarkPaid(ctx, id)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrReservationExpired,
+		"expired reservation must surface ErrReservationExpired so the D5 handler routes to late-success path")
+
+	// Status must remain awaiting_payment so the late-success handler
+	// can transition it to expired itself.
+	got, err := repo.GetByID(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, domain.OrderStatusAwaitingPayment, got.Status(),
+		"rejected MarkPaid must NOT mutate the row")
+}
+
+// ─── D5: FindByPaymentIntentID + partial unique index (000015) ──────
+
+// TestOrderRepository_FindByPaymentIntentID_HappyPath: reverse lookup
+// returns the order. Backs the D5 webhook fallback path when
+// metadata.order_id is absent or malformed.
+func TestOrderRepository_FindByPaymentIntentID_HappyPath(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+	o := newReservation(t, eventID, 7, 1)
+	_, err := repo.Create(ctx, o)
+	require.NoError(t, err)
+	require.NoError(t, repo.SetPaymentIntentID(ctx, o.ID(), "pi_lookup_target"))
+
+	got, err := repo.FindByPaymentIntentID(ctx, "pi_lookup_target")
+	require.NoError(t, err)
+	assert.Equal(t, o.ID(), got.ID())
+	assert.Equal(t, "pi_lookup_target", got.PaymentIntentID())
+}
+
+// TestOrderRepository_FindByPaymentIntentID_NotFound: returns the
+// canonical sentinel.
+func TestOrderRepository_FindByPaymentIntentID_NotFound(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	_, err := repo.FindByPaymentIntentID(context.Background(), "pi_nonexistent")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrOrderNotFound)
+}
+
+// TestOrderRepository_FindByPaymentIntentID_RejectsEmptyID: defensive
+// — empty input is a programming bug at the call site, not a
+// silently-NotFound result.
+func TestOrderRepository_FindByPaymentIntentID_RejectsEmptyID(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	_, err := repo.FindByPaymentIntentID(context.Background(), "")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, domain.ErrOrderNotFound,
+		"empty intent_id must surface a loud error, not silently NotFound")
+}
+
+// TestOrderRepository_PartialUniqueIndex_OnPaymentIntentID: the
+// migration-000015 partial unique constraint must prevent two orders
+// from sharing the same payment_intent_id, while leaving NULL rows
+// untouched. Pins the safety net under FindByPaymentIntentID's
+// "always returns at most one row" contract.
+func TestOrderRepository_PartialUniqueIndex_OnPaymentIntentID(t *testing.T) {
+	h, repo := repoHarness(t)
+	h.Reset(t)
+
+	ctx := context.Background()
+	eventID := seedEventForOrder(t, h)
+
+	// Two reservations, both should be allowed to have NULL intent
+	// (partial unique excludes NULL).
+	a := newReservation(t, eventID, 1, 1)
+	_, err := repo.Create(ctx, a)
+	require.NoError(t, err)
+	b := newReservation(t, eventID, 2, 1)
+	_, err = repo.Create(ctx, b)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.SetPaymentIntentID(ctx, a.ID(), "pi_shared_intent"),
+		"first SetPaymentIntentID must succeed")
+
+	// Direct UPDATE bypasses the SQL predicate's `OR payment_intent_id = $2`
+	// safeguard so we can probe the DB-level UNIQUE constraint
+	// directly. SetPaymentIntentID's predicate would 0-rows-affected
+	// here for a different reason (status guard), masking the
+	// constraint we want to assert.
+	_, err = h.DB.Exec(`UPDATE orders SET payment_intent_id = 'pi_shared_intent' WHERE id = $1`, b.ID())
+	require.Error(t, err, "partial unique index must reject the duplicate non-NULL value")
 }
