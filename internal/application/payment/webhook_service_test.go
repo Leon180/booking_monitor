@@ -167,9 +167,11 @@ func TestHandleWebhook_OrphanRepair_PersistsIntentBeforeMarkPaid(t *testing.T) {
 	orderID := uuid.New()
 	eventID := uuid.New()
 	intentID := "pi_orphan_999"
-	// payment_intent_id is empty — this is the SetPaymentIntentID race orphan.
-	order := reservedOrder(orderID, eventID, intentID, time.Now().Add(10*time.Minute))
-	order = domain.ReconstructOrder(orderID, 1, eventID, uuid.New(), 1,
+	// payment_intent_id intentionally empty — this is the
+	// SetPaymentIntentID race orphan. Constructed inline (not via
+	// reservedOrder, which threads in a non-empty intent_id) so the
+	// orphan-repair branch in handleSuccess actually fires.
+	order := domain.ReconstructOrder(orderID, 1, eventID, uuid.New(), 1,
 		domain.OrderStatusAwaitingPayment,
 		time.Now(), time.Now().Add(10*time.Minute),
 		"", 4000, "usd")

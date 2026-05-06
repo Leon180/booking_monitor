@@ -150,8 +150,6 @@ type ReconConfig struct {
 	BatchSize int `yaml:"batch_size" env:"RECON_BATCH_SIZE" env-default:"100"`
 }
 
-// SagaConfig holds the tunables for the `saga-watchdog` subcommand
-// (A5) — the sweeper that re-drives stuck-Failed orders through the
 // PaymentConfig holds the tunables for the D4 `/pay` + D5 webhook
 // surfaces. Most knobs are webhook-side because the gateway-side
 // idempotency + per-event price snapshot eliminate the configuration
@@ -195,6 +193,8 @@ type PaymentConfig struct {
 	WebhookLoopbackURL string `yaml:"webhook_loopback_url" env:"PAYMENT_WEBHOOK_LOOPBACK_URL" env-default:"http://127.0.0.1:8080/webhook/payment"`
 }
 
+// SagaConfig holds the tunables for the `saga-watchdog` subcommand
+// (A5) — the sweeper that re-drives stuck-Failed orders through the
 // existing (idempotent) compensator. Same shape as ReconConfig but
 // distinct so the two sweepers can tune independently:
 //
