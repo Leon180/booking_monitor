@@ -183,12 +183,24 @@ func buildEnvelope(orderID uuid.UUID, intentID string, amountCents int64, curren
 // signEnvelope produces the Stripe-shape `t=<unix>,v1=<hex>` header
 // over the marshaled envelope bytes. Same algorithm the verifier
 // expects.
+//
+// CAREFUL: capture the unix timestamp ONCE. A previous version called
+// `now.Unix()` separately for the MAC input and the header value;
+// crossing a second boundary between the two reads produced a header
+// whose `t=` did not match the `t` mixed into the HMAC, and the
+// verifier (which always uses the header's `t` to reconstruct the
+// signed payload) would compute a different MAC and reject the
+// loopback delivery as `mismatch`. The bug surfaced as intermittent
+// 401s in the test endpoint that were impossible to reproduce
+// deterministically.
 func signEnvelope(secret []byte, body []byte, now time.Time) string {
+	tsec := now.Unix()
+	tsecStr := strconv.FormatInt(tsec, 10)
 	mac := hmac.New(sha256.New, secret)
-	mac.Write(strconv.AppendInt(nil, now.Unix(), 10))
+	mac.Write([]byte(tsecStr))
 	mac.Write([]byte{'.'})
 	mac.Write(body)
-	return "t=" + strconv.FormatInt(now.Unix(), 10) + ",v1=" + hex.EncodeToString(mac.Sum(nil))
+	return "t=" + tsecStr + ",v1=" + hex.EncodeToString(mac.Sum(nil))
 }
 
 // postToWebhook delivers the signed envelope to our own webhook

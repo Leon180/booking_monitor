@@ -144,6 +144,27 @@ func isTerminalForWebhook(s domain.OrderStatus) bool {
 	return false
 }
 
+// isFailureTerminalAfterPay reports whether `s` is one of the terminal
+// failure states a `succeeded` webhook should NOT be silently 200'd
+// against. The customer's money moved at the provider AFTER we
+// declared the booking dead (D6 expired the reservation, or saga
+// compensated, or D5 itself recorded a prior payment_failure that
+// then resolved into a successful charge on retry). All three paths
+// share the same operational consequence: a manual refund is
+// required, even though no further DB transition is possible.
+//
+// `paid` is intentionally NOT included — a `succeeded` event landing
+// on an already-paid order is the canonical clean redelivery.
+func isFailureTerminalAfterPay(s domain.OrderStatus) bool {
+	switch s {
+	case domain.OrderStatusExpired,
+		domain.OrderStatusPaymentFailed,
+		domain.OrderStatusCompensated:
+		return true
+	}
+	return false
+}
+
 func (s *webhookService) HandleWebhook(ctx context.Context, env Envelope) error {
 	// 1. Cross-env guard. A test-mode signature reaching a prod
 	//    listener should ACK without retry storm.
@@ -193,9 +214,31 @@ func (s *webhookService) HandleWebhook(ctx context.Context, env Envelope) error 
 		return ErrWebhookIntentMismatch
 	}
 
-	// 4. Idempotency — duplicate redelivery against an already-resolved
-	//    order returns 200 no-op so the provider stops retrying.
+	// 4. Idempotency dispatch — order status determines whether this is
+	//    a clean redelivery or a money-moved-after-failure incident.
+	//
+	//    Event type matters here. A `succeeded` event landing on a
+	//    failure-terminal status (expired / payment_failed / compensated)
+	//    is NOT a clean duplicate: D6 already gave up on the
+	//    reservation OR saga already reverted inventory, but the
+	//    customer ALSO completed payment at the provider. Money moved
+	//    after we declared the booking dead — same money-loss shape as
+	//    handleLateSuccess's other branches, just detected at a later
+	//    point. Route through handleLateSuccess so the
+	//    `payment_webhook_late_success_total{detected_at="post_terminal"}`
+	//    metric + critical alert + Error log fire (and trigger the
+	//    operator's manual provider-side refund). The handler's own
+	//    UoW will hit ErrInvalidTransition on MarkExpired (the row is
+	//    already terminal), the re-read confirms terminal, and we
+	//    return 200 — no duplicate DB transition, no double saga emit,
+	//    but a paper trail for the refund.
+	//
+	//    `paid` is the only event where every redelivery is a true
+	//    no-op (succeeded webhook + already-paid order = clean retry).
 	if isTerminalForWebhook(order.Status()) {
+		if env.Type == EventTypePaymentIntentSucceeded && isFailureTerminalAfterPay(order.Status()) {
+			return s.handleLateSuccess(ctx, order, obj.ID, "post_terminal")
+		}
 		s.log.Info(ctx, "webhook: duplicate against terminal order",
 			tag.OrderID(orderID),
 			tag.Status(string(order.Status())),

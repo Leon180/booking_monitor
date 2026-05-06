@@ -42,6 +42,14 @@ services:
       - GOMEMLIMIT=${GOMEMLIMIT:-}
       - OTEL_TRACES_SAMPLER_RATIO=${OTEL_TRACES_SAMPLER_RATIO:-1}
       - ENABLE_PPROF=${ENABLE_PPROF:-false}
+      # D5 — webhook handler refuses to start with an empty secret
+      # (HMAC of an empty key is forgeable). `:?` so docker-compose
+      # fails the up command with a clear message instead of letting
+      # fx surface "PAYMENT_WEBHOOK_SECRET is empty" mid-startup.
+      - PAYMENT_WEBHOOK_SECRET=${PAYMENT_WEBHOOK_SECRET:?PAYMENT_WEBHOOK_SECRET is required (see .env.example for a dev value)}
+      - PAYMENT_WEBHOOK_REPLAY_TOLERANCE=${PAYMENT_WEBHOOK_REPLAY_TOLERANCE:-5m}
+      - PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE=${PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE:-false}
+      - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-false}
 
   nginx:
     image: nginx:1.27-alpine

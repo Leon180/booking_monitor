@@ -143,7 +143,7 @@ func init() {
 	for _, status := range []string{"paid", "payment_failed", "expired", "compensated"} {
 		PaymentWebhookDuplicateTotal.WithLabelValues(status)
 	}
-	for _, detectedAt := range []string{"service_check", "sql_predicate"} {
+	for _, detectedAt := range []string{"service_check", "sql_predicate", "post_terminal"} {
 		PaymentWebhookLateSuccessTotal.WithLabelValues(detectedAt)
 	}
 	// IntentMismatch is unlabelled; nothing to prewarm.

@@ -267,6 +267,51 @@ func TestHandleWebhook_LateSuccess_ServiceCheck_RoutesToExpiredPath(t *testing.T
 	assert.Empty(t, metrics.received, "late_success path does NOT count as a normal receipt")
 }
 
+// Codex round-5 P1 fix: a `succeeded` webhook arriving AFTER D6 has
+// already moved the order to `expired` (or saga to `compensated`)
+// used to classify as a clean duplicate and silently 200-ACK; money
+// had moved at the provider but no late_success metric / log fired.
+// Verify the fix routes through handleLateSuccess with
+// `detected_at="post_terminal"` so the manual refund alert pages,
+// and the inner UoW's MarkExpired-on-terminal-row hits the
+// ErrInvalidTransition→re-read→terminal path cleanly (no double
+// transition, no duplicate saga emit).
+func TestHandleWebhook_LateSuccess_PostTerminal_SucceededOnExpired(t *testing.T) {
+	ctrl, svc, repo, uow, metrics := newWebhookFixture(t, false)
+	defer ctrl.Finish()
+
+	orderID := uuid.New()
+	eventID := uuid.New()
+	intentID := "pi_late_post_terminal"
+
+	expired := domain.ReconstructOrder(
+		orderID, 1, eventID, uuid.New(), 1,
+		domain.OrderStatusExpired,
+		time.Now().Add(-20*time.Minute),
+		time.Now().Add(-5*time.Minute),
+		intentID, 4000, "usd",
+	)
+	gomock.InOrder(
+		repo.EXPECT().GetByID(gomock.Any(), orderID).Return(expired, nil), // outer resolve
+	)
+
+	uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, fn func(*application.Repositories) error) error {
+			repo.EXPECT().MarkExpired(gomock.Any(), orderID).Return(domain.ErrInvalidTransition)
+			return fn(&application.Repositories{Order: repo})
+		},
+	)
+	// handleLateSuccess re-read after the UoW returned ErrInvalidTransition.
+	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(expired, nil)
+
+	err := svc.HandleWebhook(context.Background(), envelope(orderID, intentID, payment.EventTypePaymentIntentSucceeded))
+	require.NoError(t, err, "succeeded-on-terminal-failure must NOT 5xx — handler logs + metrics + 200")
+	assert.Equal(t, []string{"post_terminal"}, metrics.lateSuccess,
+		"succeeded event on expired order must emit late_success{detected_at=post_terminal}")
+	assert.Empty(t, metrics.duplicate,
+		"this is NOT a duplicate — money moved AFTER reservation died; do not silently swallow")
+}
+
 func TestHandleWebhook_LateSuccess_SQLPredicate_RoutesToExpiredPath(t *testing.T) {
 	ctrl, svc, repo, uow, metrics := newWebhookFixture(t, false)
 	defer ctrl.Finish()
