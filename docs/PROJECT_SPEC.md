@@ -741,6 +741,8 @@ If the retry still reports `metadata_missing`, the request fails with 500 and **
 
 **Why Redis HASH, not JSON.** Lua needs only three immutable fields. Redis HASH avoids JSON marshal/unmarshal cost, avoids module dependencies, and lets the hot path stay entirely inside the script.
 
+**Active follow-up note.** The broader planning note for this area is [docs/design/redis_runtime_metadata_scaling.md](design/redis_runtime_metadata_scaling.md). It records why `amount_cents` is frozen at reservation time, when a longer Lua script is still acceptable, the current Lua-vs-Redis-Functions trade-off, and the topology constraints that still block a true Redis Cluster sharding story.
+
 ---
 
 ## 7. Observability
@@ -1031,6 +1033,7 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | File | Purpose |
 |------|---------|
 | `docs/scaling_roadmap.md` | Stage 1-4 evolution plan |
+| `docs/design/redis_runtime_metadata_scaling.md` | Active planning note for the post-PR #90 booking hot path, Redis Functions trade-offs, and cluster-friendly topology |
 | `docs/architecture/current_monolith.md` | Phase 7.7 Mermaid diagram |
 | `docs/architecture/future_robust_monolith.md` | Phases 8-11 target architecture |
 | `docs/adr/0001_async_queue_selection.md` | Redis Streams vs Kafka decision |

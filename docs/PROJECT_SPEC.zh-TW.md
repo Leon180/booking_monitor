@@ -727,6 +727,8 @@ PR #90 用 `TicketTypeRepository.GetByID` 的 read-through cache 補回了一部
 
 **為什麼用 Redis HASH,不用 JSON。** Lua 只需要三個 immutable 欄位。用 Redis HASH 可以省掉 JSON marshal/unmarshal 成本,不用依賴額外 module,也能讓熱路徑完整留在 script 內。
 
+**Active follow-up note。** 這塊更完整的規劃筆記在 [docs/design/redis_runtime_metadata_scaling.zh-TW.md](design/redis_runtime_metadata_scaling.zh-TW.md)。它記錄了為什麼 `amount_cents` 要在 reservation 時間點凍結、Lua script 變長到什麼程度仍合理,以及團隊目前對 Redis Functions 與未來 cluster-friendly key / queue topology 的看法。
+
 ---
 
 ## 7. 可觀測性
@@ -1017,6 +1019,7 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | 檔案 | 用途 |
 |------|------|
 | `docs/scaling_roadmap.md` | Stage 1-4 演進計劃 |
+| `docs/design/redis_runtime_metadata_scaling.zh-TW.md` | PR #90 之後 booking hot path、Redis Functions 取捨與 cluster-friendly topology 的 active planning note |
 | `docs/architecture/current_monolith.md` | Phase 7.7 Mermaid 圖 |
 | `docs/architecture/future_robust_monolith.md` | Phases 8-11 目標架構 |
 | `docs/adr/0001_async_queue_selection.md` | Redis Streams vs Kafka 決策紀錄 |
