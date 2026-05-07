@@ -32,6 +32,14 @@ interface State {
   order: OrderResponse | null;
   error: string | null;
   log: string[];
+  // inFlight gates the Restart button independently of phase. Codex
+  // round-3 P2: if a /pay or /test/payment/confirm error left phase
+  // stuck at 'paying', Restart was disabled (phase==='paying') AND
+  // action buttons were hidden (canAct false because order had moved
+  // past awaiting_payment), making the demo unrecoverable without a
+  // page reload. inFlight tracks "an async call is mid-flight" and
+  // is the ONLY thing that should block Restart.
+  inFlight: boolean;
 }
 
 const INITIAL_STATE: State = {
@@ -42,6 +50,7 @@ const INITIAL_STATE: State = {
   order: null,
   error: null,
   log: [],
+  inFlight: false,
 };
 
 function uuidv4(): string {
@@ -93,7 +102,7 @@ function App() {
   // for user_id=1, and starts the 1Hz poller. Each click resets
   // state — intentional: the demo is single-shot, replay = restart.
   const startBooking = useCallback(async () => {
-    setState({ ...INITIAL_STATE, phase: 'creating' });
+    setState({ ...INITIAL_STATE, phase: 'creating', inFlight: true });
     tickRef.current = 0;
     try {
       const evt = await createEvent({
@@ -116,11 +125,12 @@ function App() {
         ...s,
         phase: 'booked',
         orderId: booking.order_id,
+        inFlight: false,
       }));
     } catch (err) {
       const msg = errorOf(err);
       log(`ERROR: ${msg}`);
-      setState((s) => ({ ...s, phase: 'terminal', error: msg }));
+      setState((s) => ({ ...s, phase: 'terminal', error: msg, inFlight: false }));
     }
   }, [log]);
 
@@ -133,16 +143,24 @@ function App() {
   const pay = useCallback(async (outcome: 'succeeded' | 'failed') => {
     if (!state.orderId) return;
     const intent: Intent = outcome === 'succeeded' ? 'paying_succeeded' : 'paying_failed';
-    setState((s) => ({ ...s, phase: 'paying', intent }));
+    setState((s) => ({ ...s, phase: 'paying', intent, inFlight: true }));
     try {
       const intentResp = await payOrder(state.orderId);
       log(`pay 200: payment_intent_id=${intentResp.payment_intent_id}`);
       const confirm = await confirmTestPayment(state.orderId, outcome);
       log(`test/confirm 200: outcome=${outcome}, forwarded=${confirm.forwarded}, webhook_status=${confirm.webhook_status}`);
+      setState((s) => ({ ...s, inFlight: false }));
     } catch (err) {
+      // Realistic demo errors that hit this branch: order expired
+      // between row appearing and Pay click (409), /test/* disabled
+      // server-side (404), webhook forwarding failure. Codex round-3
+      // P2: clearing inFlight here re-enables Restart so the user
+      // can recover without a page reload. Phase stays at 'paying'
+      // because the intent-aware display + the visible error block
+      // already explain the situation.
       const msg = errorOf(err);
       log(`ERROR: ${msg}`);
-      setState((s) => ({ ...s, error: msg }));
+      setState((s) => ({ ...s, error: msg, inFlight: false }));
     }
   }, [state.orderId, log]);
 
@@ -208,7 +226,7 @@ function App() {
       </header>
 
       <section className="control">
-        <button onClick={startBooking} disabled={state.phase === 'creating' || state.phase === 'paying'}>
+        <button onClick={startBooking} disabled={state.inFlight}>
           {state.phase === 'idle' ? 'Start a fresh booking' : 'Restart with a new event'}
         </button>
 
