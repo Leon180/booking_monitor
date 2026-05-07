@@ -15,6 +15,15 @@
 # Usage: docker compose up -d (with CORS_ALLOWED_ORIGINS set in env)
 #        scripts/d8_smoke.sh
 #
+# API_ORIGIN defaults to http://localhost (nginx on host port 80) —
+# the only host-published surface in docker-compose.yml. The `app`
+# service publishes pprof:6060 only, NOT 8080, so a smoke targeting
+# :8080 from the host would fail to connect (Codex round-1 P2).
+# nginx forwards /api/* + /livez + OPTIONS verbatim to the upstream
+# Go app, so the CORS middleware runs identically. Override
+# API_ORIGIN=http://localhost:8080 if you're running the Go binary
+# directly on the host (`make run-server`) instead of via compose.
+#
 # Codex round-4 execution note: header grep is case-insensitive
 # (`-i`) and CRLF-tolerant (`^Header:` anchored, `\r?$` implied
 # because `grep` matches line-by-line on `curl -i` output where
@@ -22,7 +31,7 @@
 
 set -euo pipefail
 
-API_ORIGIN="${API_ORIGIN:-http://localhost:8080}"
+API_ORIGIN="${API_ORIGIN:-http://localhost}"
 ALLOWED_ORIGIN="${ALLOWED_ORIGIN:-http://localhost:5173}"
 DISALLOWED_ORIGIN="${DISALLOWED_ORIGIN:-http://evil.example}"
 
