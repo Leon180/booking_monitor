@@ -347,6 +347,14 @@ type AppConfig struct {
 	Version  string `yaml:"version" env:"APP_VERSION" env-default:"1.0.0"`
 	LogLevel string `yaml:"log_level" env:"LOG_LEVEL" env-default:"info"`
 	WorkerID string `yaml:"worker_id" env:"WORKER_ID" env-default:"worker-1"`
+	// Env is the deployment environment label (e.g. "production",
+	// "staging", "development"). Used by Validate() to gate
+	// production-only invariants (no localhost Redis/Kafka, no
+	// /test/* endpoints). Empty string is normalised to
+	// "production" by normalizedAppEnv() — fail-closed so a
+	// bypass-cleanenv literal can't accidentally relax production
+	// guards.
+	Env string `yaml:"env" env:"APP_ENV" env-default:"production"`
 }
 
 type ServerConfig struct {
@@ -378,6 +386,15 @@ type ServerConfig struct {
 	// GKE / EKS setups). In yaml write as a sequence; env vars are
 	// parsed as a comma-separated list (env-separator:",").
 	TrustedProxies []string `yaml:"trusted_proxies" env:"TRUSTED_PROXIES" env-separator:"," env-default:"10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"`
+
+	// CORSAllowedOrigins is the exact-match allow-list of Origins
+	// the API will echo via Access-Control-Allow-Origin. Empty
+	// disables the CORS middleware entirely (production-safe
+	// default — same-origin / non-browser callers are unaffected).
+	// For the D8-minimal browser demo, set to
+	// "http://localhost:5173,http://127.0.0.1:5173" so Vite dev
+	// server on either loopback variant works.
+	CORSAllowedOrigins []string `yaml:"cors_allowed_origins" env:"CORS_ALLOWED_ORIGINS" env-separator:","`
 }
 
 type RedisConfig struct {
@@ -623,13 +640,26 @@ func (c *Config) Validate() error {
 
 	// Redis / Kafka defaults are fine for local dev, but in production
 	// (APP_ENV=production) we reject the localhost defaults so ops can't
-	// ship on a silent localhost connection.
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+	// ship on a silent localhost connection. Reads the typed AppConfig
+	// field via normalizedAppEnv() so a `&Config{...}` literal that
+	// bypasses cleanenv's env-default still hits the production-fail-closed
+	// branch (was os.Getenv("APP_ENV") which would return "" for that
+	// path → guards would silently relax).
+	if normalizedAppEnv(c.App.Env) == "production" {
 		if isLocalhostAddr(c.Redis.Addr) {
 			missing = append(missing, "redis.addr / REDIS_ADDR (localhost default not permitted in production)")
 		}
 		if isLocalhostBrokers(c.Kafka.Brokers) {
 			missing = append(missing, "kafka.brokers / KAFKA_BROKERS (localhost default not permitted in production)")
+		}
+		// Test endpoints (POST /test/payment/confirm/:order_id, etc.) are
+		// for integration tests + the D8-minimal browser demo. They
+		// bypass the real payment provider and forge webhooks — shipping
+		// production with this enabled would let anyone confirm/expire
+		// any order id by URL guess. Reject the combination at startup
+		// so it can never reach a live deployment.
+		if c.Server.EnableTestEndpoints {
+			missing = append(missing, "server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS (forbidden when APP_ENV=production)")
 		}
 	}
 
@@ -753,6 +783,21 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// normalizedAppEnv returns the canonical lower-cased deployment
+// environment label, normalising empty / whitespace to "production".
+// Fail-closed: a `&Config{...}` literal that bypasses cleanenv's
+// env-default would otherwise leave AppConfig.Env="" and silently
+// relax production guards (no localhost-redis check, /test/* routes
+// permitted). Empty → production keeps Validate() honest in every
+// construction path.
+func normalizedAppEnv(env string) string {
+	env = strings.ToLower(strings.TrimSpace(env))
+	if env == "" {
+		return "production"
+	}
+	return env
 }
 
 // isLocalhostAddr returns true if the string matches the unconfigured

@@ -293,6 +293,12 @@ func buildGinEngine(
 		return nil, fmt.Errorf("buildGinEngine: SetTrustedProxies: %w", err)
 	}
 
+	// CORS — must run BEFORE Combined so OPTIONS preflights short-circuit
+	// at 204 without allocating a correlation id or generating an access
+	// log line. Empty allow-list disables the middleware (production-safe
+	// default — same-origin / non-browser callers are unaffected).
+	r.Use(middleware.CORS(cfg.Server.CORSAllowedOrigins))
+
 	// Single combined middleware: logger + correlation ID in ONE
 	// context.WithValue + ONE c.Request.WithContext (see Phase 14 GC work).
 	r.Use(middleware.Combined(logger))
