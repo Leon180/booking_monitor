@@ -208,6 +208,11 @@ A single-page Vite + React + TS app at [demo/](demo/) exercises the full Pattern
 
 ```bash
 # 1. Start the API stack with CORS + test endpoints enabled
+# APP_ENV=development is required: docker-compose.yml passes
+# APP_ENV=${APP_ENV:-production} into the container, which wins over
+# config/config.yml (cleanenv precedence: env > yaml). Without this
+# the container starts as production and rejects ENABLE_TEST_ENDPOINTS.
+export APP_ENV=development
 export CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 export ENABLE_TEST_ENDPOINTS=true
 export PAYMENT_WEBHOOK_SECRET=demo_secret_local_only

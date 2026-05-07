@@ -24,14 +24,16 @@ The whole D1–D6 arc, in 30 seconds:
 
   ```bash
   # From repo root, NOT this directory
+  export APP_ENV=development
   export CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
   export ENABLE_TEST_ENDPOINTS=true
   export PAYMENT_WEBHOOK_SECRET=demo_secret_local_only
   docker compose up -d
   ```
 
+  - `APP_ENV=development` is **required** because `docker-compose.yml` passes `APP_ENV=${APP_ENV:-production}` into the container, which wins over `config/config.yml`'s yaml value (cleanenv precedence: env > yaml > env-default). Without this export the container starts as production and the PR #96 guard rejects `ENABLE_TEST_ENDPOINTS=true` at startup. (`make run-server` host-side does NOT need this — it reads the yaml directly.)
   - `CORS_ALLOWED_ORIGINS` lets the browser fetch from this app (5173 is the Vite dev server default; 127.0.0.1 covers OS configs that don't alias localhost).
-  - `ENABLE_TEST_ENDPOINTS=true` mounts `/test/payment/confirm/:order_id`. The `APP_ENV` guard from PR #96 rejects this combination when `APP_ENV=production`, so the compose stack must run with `APP_ENV` unset (defaults to `production` via env-default, but the local-dev `config/config.yml` overrides it to `development` per cleanenv precedence).
+  - `ENABLE_TEST_ENDPOINTS=true` mounts `/test/payment/confirm/:order_id`.
 
 ## Run the dev server
 

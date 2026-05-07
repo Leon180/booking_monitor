@@ -166,11 +166,21 @@ export function payOrder(orderId: string) {
 // provider would do. Only mounted when ENABLE_TEST_ENDPOINTS=true.
 // outcome="succeeded" → marks paid; "failed" → marks payment_failed
 // + emits order.failed for saga to revert Redis inventory.
+//
+// Response shape mirrors the actual handler at
+// internal/infrastructure/api/testapi/payment_confirm.go:147 —
+// `{"forwarded": true, "webhook_status": <int>}` — NOT the
+// `{status}` shape the original DTO claimed. Codex round-1 P2.
+export interface TestConfirmResponse {
+  forwarded: boolean;
+  webhook_status: number;
+}
+
 export function confirmTestPayment(
   orderId: string,
   outcome: 'succeeded' | 'failed',
 ) {
-  return jsonRequest<{ status: string }>(
+  return jsonRequest<TestConfirmResponse>(
     `${testBase}/payment/confirm/${orderId}?outcome=${outcome}`,
     { method: 'POST', body: '{}' },
   );

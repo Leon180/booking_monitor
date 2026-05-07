@@ -107,14 +107,20 @@ function App() {
   }, [log]);
 
   // ── Action: pay (POST /pay → POST /test/payment/confirm) ────────
+  // Intent encodes the REQUESTED outcome (succeeded vs failed) so
+  // intent.ts can show the right terminal even if the saga flips
+  // payment_failed → compensated between two 1 Hz polls. Codex
+  // round-1 P1: a single 'paying' intent collapsed both flows and
+  // rendered "Expired + compensated" for a declined payment.
   const pay = useCallback(async (outcome: 'succeeded' | 'failed') => {
     if (!state.orderId) return;
-    setState((s) => ({ ...s, phase: 'paying', intent: 'paying' }));
+    const intent: Intent = outcome === 'succeeded' ? 'paying_succeeded' : 'paying_failed';
+    setState((s) => ({ ...s, phase: 'paying', intent }));
     try {
-      const intent = await payOrder(state.orderId);
-      log(`pay 200: payment_intent_id=${intent.payment_intent_id}`);
+      const intentResp = await payOrder(state.orderId);
+      log(`pay 200: payment_intent_id=${intentResp.payment_intent_id}`);
       const confirm = await confirmTestPayment(state.orderId, outcome);
-      log(`test/confirm 200: outcome=${outcome}, status=${confirm.status}`);
+      log(`test/confirm 200: outcome=${outcome}, forwarded=${confirm.forwarded}, webhook_status=${confirm.webhook_status}`);
     } catch (err) {
       const msg = errorOf(err);
       log(`ERROR: ${msg}`);

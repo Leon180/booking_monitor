@@ -208,6 +208,11 @@ D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga co
 
 ```bash
 # 1. 把 API stack 跟 CORS、test endpoints 一起開起來
+# APP_ENV=development 必設:docker-compose.yml 會把
+# APP_ENV=${APP_ENV:-production} 傳進 container,而這個 env 值會
+# 覆蓋 config/config.yml(cleanenv 優先序:env > yaml)。沒設的話
+# container 會以 production 啟動,然後拒絕 ENABLE_TEST_ENDPOINTS。
+export APP_ENV=development
 export CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 export ENABLE_TEST_ENDPOINTS=true
 export PAYMENT_WEBHOOK_SECRET=demo_secret_local_only

@@ -12,7 +12,14 @@
 // the pair. This is the same model Stripe Elements uses internally
 // for confirm-card flows.
 
-export type Intent = 'booking' | 'paying' | 'expiring';
+// Intent splits paying into _succeeded and _failed because the saga
+// compensator can flip a `payment_failed` order to `compensated`
+// between two 1 Hz polls — and a `(paying, compensated)` pair is
+// indistinguishable from `(expiring, compensated)` without the
+// requested-outcome bit. Codex round-1 P1: the original `paying`
+// intent fell through to the booking display on `compensated` and
+// rendered "Expired + compensated" for a declined payment.
+export type Intent = 'booking' | 'paying_succeeded' | 'paying_failed' | 'expiring';
 
 export type DisplayKind = 'pending' | 'success' | 'failure' | 'info';
 
@@ -47,22 +54,58 @@ function forStatus(
   status: OrderStatus,
   order: OrderResponse,
 ): Display {
-  // Intent: paying — user clicked "Pay" and we're waiting for the
-  // provider webhook to flip the status.
-  if (intent === 'paying') {
+  // Intent: paying_succeeded — user clicked "Pay (succeeded)" and we
+  // expect the mock webhook to flip the order to paid.
+  if (intent === 'paying_succeeded') {
     switch (status) {
       case 'awaiting_payment':
-        return pending('Awaiting payment intent…', 'PaymentIntent created; waiting for the provider webhook.');
+        return pending('Awaiting payment intent…', 'PaymentIntent created; waiting for the mock webhook.');
       case 'charging':
         return pending('Charging…', 'Provider has confirmed; webhook flipping order to paid.');
       case 'paid':
         return success('Paid', `Order ${short(order.id)} settled at ${formatPrice(order)}.`);
       case 'payment_failed':
-        return failure('Payment failed', 'Saga compensator is reverting Redis inventory; the order is closed.');
+        return failure(
+          'Provider declined unexpectedly',
+          'You asked for a successful confirm but the webhook surfaced a decline; saga is reverting.',
+        );
+      case 'compensated':
+        return failure(
+          'Provider declined unexpectedly + compensated',
+          'Saga compensator restored Redis inventory after an unexpected decline.',
+        );
       default:
-        // Edge: user clicked "Pay" but the order moved sideways
-        // (manual /test/payment/confirm with outcome=failed elsewhere,
-        // or a recon force-fail). Show the observed terminal honestly.
+        return forStatus('booking', status, order);
+    }
+  }
+
+  // Intent: paying_failed — user clicked "Pay (mock failed)" so we
+  // EXPECT the order to land in payment_failed → compensated. The
+  // saga can run between polls, so compensated is a legitimate first
+  // observed terminal — show it as "Declined + compensated", not
+  // "Expired + compensated" (which is the let-it-expire flow).
+  if (intent === 'paying_failed') {
+    switch (status) {
+      case 'awaiting_payment':
+        return pending('Declining…', 'PaymentIntent created; mock webhook with outcome=failed in flight.');
+      case 'charging':
+        return pending('Declining…', 'Provider has confirmed (will fail per request); webhook in flight.');
+      case 'payment_failed':
+        return failure('Declined', 'Provider declined as requested; saga is reverting Redis inventory.');
+      case 'compensated':
+        return failure(
+          'Declined + compensated',
+          'Provider declined as requested; saga compensator restored Redis inventory.',
+        );
+      case 'paid':
+        // Edge: user asked for failure but the webhook somehow
+        // succeeded (race between two /test/payment/confirm calls).
+        // Show the truth.
+        return success(
+          'Paid (despite decline request)',
+          'A succeeded webhook landed before the failed one — race between two confirm calls.',
+        );
+      default:
         return forStatus('booking', status, order);
     }
   }
@@ -91,8 +134,9 @@ function forStatus(
       case 'charging':
         // Edge: user said "let it expire" but somehow paid (a stale
         // /pay click that landed before the user changed mind). Show
-        // the truth, not the intent.
-        return forStatus('paying', status, order);
+        // the truth, not the intent. Treat as a successful pay since
+        // that's what the observed status says happened.
+        return forStatus('paying_succeeded', status, order);
       default:
         return info(`Status: ${status}`, 'Unrecognised state for an expiring intent.');
     }
