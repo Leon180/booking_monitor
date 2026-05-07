@@ -51,8 +51,26 @@ function uuidv4(): string {
   return globalThis.crypto.randomUUID();
 }
 
-function isTerminal(status: string): boolean {
-  return ['paid', 'payment_failed', 'expired', 'compensated'].includes(status);
+// Stop the 1 Hz poller only when the order has truly settled. In this
+// system payment_failed and expired are TRANSITIONAL — D5's webhook
+// handler / D6's expiry sweeper emit `order.failed`, then the saga
+// flips the row to `compensated`. Stopping at payment_failed or
+// expired would freeze the UI mid-flow and never show the promised
+// "+ compensated" terminal (Codex round-2 P1).
+//
+// Note that `paid` is a true terminal — no compensation expected
+// because no inventory needs reverting on a successful payment.
+function isFinalTerminal(status: string): boolean {
+  return ['paid', 'compensated'].includes(status);
+}
+
+// Whether the user can take an action (Pay / Let-it-expire) on this
+// order. Only valid while the row exists AND is still awaiting_payment
+// — Codex round-2 P2: a click during the 202 → first-poll async
+// window would call /pay before GET /orders/:id has observed the
+// row, surfacing a 404/409 that makes the demo look broken.
+function canAct(order: OrderResponse | null): boolean {
+  return order?.status === 'awaiting_payment';
 }
 
 function App() {
@@ -139,9 +157,12 @@ function App() {
   }, [log]);
 
   // ── 1Hz poller ──────────────────────────────────────────────────
+  // Continues polling through transitional terminals (payment_failed,
+  // expired) so the user sees the saga compensator flip them to
+  // `compensated`. Only stops at true finals — see isFinalTerminal.
   useEffect(() => {
     if (!state.orderId) return;
-    if (state.order && isTerminal(state.order.status)) return;
+    if (state.order && isFinalTerminal(state.order.status)) return;
 
     const id = window.setInterval(async () => {
       try {
@@ -153,7 +174,7 @@ function App() {
           return {
             ...s,
             order,
-            phase: isTerminal(order.status) ? 'terminal' : s.phase,
+            phase: isFinalTerminal(order.status) ? 'terminal' : s.phase,
             log: transitioned ? [...s.log, `${new Date().toLocaleTimeString()}  poll: ${order.status}`] : s.log,
           };
         });
@@ -171,7 +192,11 @@ function App() {
   }, [state.orderId, state.order, log]);
 
   const display = deriveDisplay(state.intent, state.order);
-  const showActions = state.phase === 'booked' && !isTerminal(state.order?.status ?? '');
+  // Only render Pay / Let-it-expire while the row truly is
+  // awaiting_payment. Hides the buttons during the async-processing
+  // window (state.order still null after 202) so a quick click
+  // can't fire /pay before the worker has persisted the row.
+  const showActions = state.phase === 'booked' && canAct(state.order);
 
   return (
     <main className="demo">
