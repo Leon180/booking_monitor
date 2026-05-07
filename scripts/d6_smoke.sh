@@ -43,9 +43,13 @@ require_cmd docker
 # 1. Override + restart relevant services so the new reservation
 #    window propagates. `--force-recreate` is the explicit knob (a
 #    plain `up -d` reuses the existing container with the OLD env).
-log "exporting BOOKING_RESERVATION_WINDOW=${RESERVATION_WINDOW} and recreating app + worker + expiry_sweeper"
+log "exporting BOOKING_RESERVATION_WINDOW=${RESERVATION_WINDOW} and recreating app + payment_worker + expiry_sweeper"
 export BOOKING_RESERVATION_WINDOW="${RESERVATION_WINDOW}"
-docker compose up -d --force-recreate app worker expiry_sweeper >/dev/null
+# Service names match docker-compose.yml: `app`, `payment_worker`,
+# `expiry_sweeper`. Round-3 PR-review fix: this used to say `worker`
+# (no such service), which would fail with "no such service" before
+# the smoke ever reached `/book`.
+docker compose up -d --force-recreate app payment_worker expiry_sweeper >/dev/null
 
 # Wait for app /livez before issuing API calls.
 log "waiting for app /livez (30s budget)"

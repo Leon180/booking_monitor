@@ -145,6 +145,38 @@ func TestSweep_OverAged_StillExpiresWithMaxAgeLabel(t *testing.T) {
 		"max-age counter increments alongside expired_overaged outcome")
 }
 
+// Codex round-3 P2 regression: when the UoW fails on an overaged
+// row, the row stays awaiting_payment (rolled back). The max-age
+// counter MUST NOT increment in that case — otherwise
+// `ExpiryMaxAgeExceeded` fires (paging on-call) but the runbook's
+// claim "the row is now expired" is wrong, and the next-tick retry
+// would double-count. The fix moves IncMaxAgeExceeded() into the
+// uowErr == nil branch alongside OutcomeExpiredOveraged.
+func TestSweep_OverAged_UoWFails_MaxAgeCounterNotIncremented(t *testing.T) {
+	ctrl, s, repo, uow, rec := fixture(t)
+	defer ctrl.Finish()
+
+	orderID, eventID := uuid.New(), uuid.New()
+	row := domain.ExpiredReservation{ID: orderID, Age: 25 * time.Hour}
+	order := awaitingOrder(orderID, eventID, time.Now().Add(-25*time.Hour))
+
+	repo.EXPECT().FindExpiredReservations(gomock.Any(), gomock.Any(), gomock.Any()).Return([]domain.ExpiredReservation{row}, nil)
+	repo.EXPECT().GetByID(gomock.Any(), orderID).Return(order, nil)
+
+	// MarkExpired fails inside the UoW (DB lock timeout). UoW
+	// rolls back; row stays awaiting_payment.
+	repos := &application.Repositories{Order: repo}
+	repo.EXPECT().MarkExpired(gomock.Any(), orderID).Return(errors.New("db lock timeout"))
+	uowDoInvokes(uow, repos, nil)
+	expectCountSucceeds(repo, 1, 25*time.Hour) // row still overdue per post-sweep count
+
+	require.NoError(t, s.Sweep(context.Background()))
+	assert.Equal(t, []string{"transition_error"}, rec.resolved,
+		"UoW failure must classify as transition_error, NOT expired_overaged")
+	assert.Equal(t, 0, rec.maxAgeExceeded,
+		"max-age counter MUST NOT increment when UoW fails — counter must reflect successfully expired rows, not retry attempts (round-3 P2 fix)")
+}
+
 // ── per-row failure branches ────────────────────────────────────────
 
 func TestSweep_AlreadyTerminal_PreUoWStatusGuard(t *testing.T) {

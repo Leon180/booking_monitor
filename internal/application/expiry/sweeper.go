@@ -270,7 +270,16 @@ func (s *Sweeper) resolve(parent context.Context, e domain.ExpiredReservation) {
 			mlog.Duration("age", e.Age),
 			mlog.Duration("max_age", s.cfg.MaxAge),
 		)
-		s.metrics.IncMaxAgeExceeded()
+		// IncMaxAgeExceeded() is INTENTIONALLY NOT called here.
+		// The counter feeds `ExpiryMaxAgeExceeded` (critical, single-
+		// event paging) whose runbook says "the row is now expired".
+		// Incrementing pre-UoW would let the alert fire on rows that
+		// haven't actually been expired (UoW failure rolls back, row
+		// stays awaiting_payment, counter then double-counts on the
+		// next-tick retry). The increment lives next to
+		// `OutcomeExpiredOveraged` in the success branch below — the
+		// counter then reflects "successfully expired-overaged rows",
+		// which is what the alert + runbook actually mean.
 	}
 
 	// 4. Atomic transition + outbox emit. Same UoW shape as D5's
@@ -322,6 +331,11 @@ func (s *Sweeper) resolve(parent context.Context, e domain.ExpiredReservation) {
 	if uowErr == nil {
 		if overAged {
 			s.metrics.IncResolved(OutcomeExpiredOveraged)
+			// IncMaxAgeExceeded fires HERE (not pre-UoW) so the
+			// `ExpiryMaxAgeExceeded` alert reflects "rows we
+			// successfully expired past MaxAge", not "rows we attempted
+			// to expire but rolled back". Codex round-3 P2 fix.
+			s.metrics.IncMaxAgeExceeded()
 			s.log.Warn(parent, "expiry sweeper: expired (overaged)",
 				tag.OrderID(e.ID), mlog.Duration("age", e.Age))
 		} else {
