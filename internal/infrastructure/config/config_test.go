@@ -16,7 +16,16 @@ import (
 // independently.
 func validBase() *config.Config {
 	return &config.Config{
-		App:    config.AppConfig{},
+		// Explicit non-production env so the production-only guards
+		// (no localhost Redis/Kafka, no /test/* endpoints) don't
+		// trigger on the baseline. Without this, an empty Env would
+		// normalise to "production" via normalizedAppEnv, which is
+		// fine today (Redis/Kafka zero-values bypass localhost
+		// checks, EnableTestEndpoints is false), but the moment a
+		// future production guard keys on something validBase
+		// happens to set, this test silently starts asserting a
+		// production config — the opposite of intent.
+		App:    config.AppConfig{Env: "development"},
 		Server: config.ServerConfig{Port: "8080"},
 		Postgres: config.PostgresConfig{
 			DSN: "postgres://u:p@h/db?sslmode=disable",
@@ -166,6 +175,58 @@ func TestValidate_InventoryDriftRejections(t *testing.T) {
 		c.InventoryDrift.AbsoluteTolerance = 0
 		require.NoError(t, c.Validate())
 	})
+}
+
+// TestValidate_AppEnvProductionGuards covers the env-pair guard added
+// for D8: when AppConfig.Env normalises to "production", the
+// /test/* endpoint group MUST stay disabled. Empty / whitespace /
+// mixed-case Env all normalise to "production" so a literal config
+// that bypasses cleanenv's env-default ("") still hits the guard
+// (fail-closed). Non-production envs let the demo / integration
+// tests enable /test/* freely.
+func TestValidate_AppEnvProductionGuards(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		env         string
+		enableTests bool
+		wantErr     bool
+		errSubstr   string
+	}{
+		{"empty env normalises to production — test endpoints rejected",
+			"", true, true, "ENABLE_TEST_ENDPOINTS"},
+		{"whitespace env normalises to production — test endpoints rejected",
+			"  ", true, true, "ENABLE_TEST_ENDPOINTS"},
+		{"mixed-case PRODUCTION normalises — test endpoints rejected",
+			"PRODUCTION", true, true, "ENABLE_TEST_ENDPOINTS"},
+		{"production with test endpoints disabled — passes",
+			"production", false, false, ""},
+		{"empty env with test endpoints disabled — passes (closed default)",
+			"", false, false, ""},
+		{"development with test endpoints enabled — passes",
+			"development", true, false, ""},
+		{"staging with test endpoints enabled — passes",
+			"staging", true, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validBase()
+			c.App.Env = tt.env
+			c.Server.EnableTestEndpoints = tt.enableTests
+
+			err := c.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate must reject %s", tt.name)
+				assert.Contains(t, err.Error(), tt.errSubstr,
+					"error must name the offending field for diagnosability")
+				return
+			}
+			require.NoError(t, err, "Validate must accept %s", tt.name)
+		})
+	}
 }
 
 // TestValidate_AggregatesAllMissing confirms multiple missing fields

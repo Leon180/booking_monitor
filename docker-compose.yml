@@ -50,6 +50,10 @@ services:
       - PAYMENT_WEBHOOK_REPLAY_TOLERANCE=${PAYMENT_WEBHOOK_REPLAY_TOLERANCE:-5m}
       - PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE=${PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE:-false}
       - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-false}
+      # D8 — CORS allow-list for the browser demo (Vite dev server on
+      # localhost:5173). Empty default disables the middleware so
+      # production deployments don't accidentally widen the surface.
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       # D6 — forward BOOKING_RESERVATION_WINDOW so smoke / demo can
       # override (e.g. 20s for `scripts/d6_smoke.sh`) without rebuild.
       # Default 15m matches BookingConfig.ReservationWindow's

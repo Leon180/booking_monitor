@@ -2,6 +2,14 @@ app:
   name: "booking_monitor"
   version: "1.0.0"
   log_level: "info"
+  # `env: development` so a host-side `make run-server` reading this
+  # file (no APP_ENV exported) sees a non-production label and the
+  # localhost Redis/Kafka guards in Validate() don't reject the
+  # local-dev addresses below. cleanenv precedence is env > yaml >
+  # env-default, so production deployments are unaffected — they
+  # set APP_ENV=production via env (docker-compose.yml does this
+  # explicitly), which wins over this yaml value.
+  env: "development"
 
 server:
   port: "8080"
