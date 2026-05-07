@@ -72,6 +72,12 @@ silence / inhibit / notification log.
 - [PaymentWebhookLateSuccessAfterExpiry](#paymentwebhooklatesuccessafterexpiry)
 - [PaymentWebhookIntentMismatch](#paymentwebhookintentmismatch)
 
+### Reservation expiry sweeper (D6)
+- [ExpiryOldestOverdueAge](#expiryoldestoverdueage)
+- [ExpiryProcessingErrors](#expiryprocessingerrors)
+- [ExpiryFindErrors](#expiryfinderrors)
+- [ExpiryMaxAgeExceeded](#expirymaxageexceeded)
+
 ### Meta (scrape health)
 - [TargetDown](#targetdown)
 
@@ -777,3 +783,90 @@ docker start booking_payment_worker  # to recover
 - Document in incident log; this should be vanishingly rare in steady state.
 
 **Escalation.** Critical — single-event paging. Potential security incident; loop in security on-call.
+
+---
+
+## ExpiryOldestOverdueAge
+
+**Symptom.** `expiry_oldest_overdue_age_seconds > 300` sustained 5m. Severity warning. Dashboard: *Reservation Expiry* row → "Oldest overdue age" panel.
+
+**Diagnosis.**
+1. Cross-check `ExpiryProcessingErrors` first — if it's also firing, the sweeper IS running but per-row resolves are erroring; that's the root cause and this alert is a downstream symptom.
+2. `expiry_backlog_after_sweep` — if non-zero in steady state, BatchSize is too small for current eligibility rate (the sweeper drains 100 per tick by default; if 200+ rows hit `reserved_until` per 30s, backlog grows).
+3. Dashboard: *Reservation Expiry* → "Backlog vs sweep cadence" panel. Sweep duration (`expiry_sweep_duration_seconds`) approaching SweepInterval = sweeper-time-bound, NOT batch-bound.
+4. `up{job="expiry-sweeper"} == 0` would surface as `TargetDown` first; if that's not firing, the sweeper IS being scraped.
+
+**Action.**
+- If `ExpiryProcessingErrors` is the upstream cause → triage that alert's runbook first.
+- If pure throughput problem → bump `EXPIRY_BATCH_SIZE` (default 100) to 1000+ transiently. Sweeper picks up the new value on its next pod restart.
+- If sweeper has been off for a long time and is now catching up → expect the gauge to drain over `(backlog × SweepInterval / BatchSize)`. At default cadence: 12k overdue rows drains in 1h.
+- For sustained high traffic, lower `EXPIRY_SWEEP_INTERVAL` from 30s to 15s (more frequent ticks, smaller batches) — but check Postgres index scan cost first.
+
+**Escalation.** Warning. Critical only if backlog is growing AND `ExpiryProcessingErrors` / `ExpiryFindErrors` is also firing (compound failure mode).
+
+---
+
+## ExpiryProcessingErrors
+
+**Symptom.** Per-row resolve failure rate > 0/s sustained 5m. Severity warning. The label split distinguishes the runbook:
+
+- `getbyid_error` → DB read trouble after the find query
+- `outbox_error` / `transition_error` → DB write trouble inside the UoW
+- `marshal_error` → code regression (`json.Marshal(OrderFailedEvent)` failed; theoretical for fixed-shape struct today)
+
+**Diagnosis.**
+1. Loki: `{component="expiry_sweeper"} |= "UoW failed"` — extracts per-row Order ID + the underlying SQL error.
+2. `db_pool_wait_count` — sustained pool exhaustion produces transient `transition_error`s under load.
+3. `pg_locks` for advisory lock 2001 (rehydrate) or row-level locks on `orders` — saga compensator running concurrently can serialise on the same rows.
+4. `outbox_pending_collector_errors_total` — independent signal that the outbox layer is unhealthy in general.
+
+**Action.**
+- `getbyid_error` dominant → check Postgres connection pool + replica lag (we read from the primary, but a misconfigured pool could still throttle).
+- `outbox_error` / `transition_error` dominant → likely lock contention with the saga consumer or saga watchdog. Stagger sweep cadences (`EXPIRY_SWEEP_INTERVAL` 30s vs `SAGA_WATCHDOG_INTERVAL` 60s already mostly does this).
+- `marshal_error` > 0 → CODE BUG. Roll back the most recent deploy; file an incident.
+- All branches retry next sweep automatically. The `expiry_oldest_overdue_age_seconds` gauge is the SLO signal — if it's stable while errors are firing, the sweeper is at the noise floor.
+
+**Escalation.** Warning. Critical if `marshal_error` > 0 (code regression) OR if the gauge climbs alongside the error rate.
+
+---
+
+## ExpiryFindErrors
+
+**Symptom.** `expiry_find_expired_errors_total` rate > 0/s sustained 2m. Severity critical. Covers BOTH the find query (`FindExpiredReservations`) AND the post-sweep count query (`CountOverdueAfterCutoff`) failures — the operator response is identical (DB blind).
+
+**Critical caveat.** When this fires, `expiry_oldest_overdue_age_seconds` and `expiry_backlog_after_sweep` are **held at last-known-good** (NOT zeroed). Reading those gauges during this alert is misleading — they pre-date the failure.
+
+**Diagnosis.**
+1. Postgres up? `up{job=~"postgres-exporter"} == 0` would also fire; if not, Postgres process is alive but the query specifically is failing.
+2. Migration 000012 partial index `idx_orders_awaiting_payment_reserved_until` exists? `\d orders` in psql — if missing, the find query likely Seq Scan'd into a timeout.
+3. Connection pool: `db_pool_wait_count` against `expiry_sweeper` — sustained pool exhaustion under load presents as Find timeouts.
+4. Loki: `{component="expiry_sweeper"} |= "find expired"` OR `|= "count overdue"` — the WARN log includes the underlying SQL error.
+
+**Action.**
+- Missing index → re-run `make migrate-up`; if the migration tooling is wedged, the manual `CREATE INDEX` statement is in `deploy/postgres/migrations/000012_pattern_a_schema.up.sql:104-106`.
+- Postgres health → standard DB triage; expiry sweeper recovers automatically once the query succeeds.
+- Sustained > 30m with no DB-side cause → check sweeper's connection limit / pool config in `internal/infrastructure/persistence/postgres`.
+
+**Escalation.** Critical — DB blind affects backlog accounting. Page on-call.
+
+---
+
+## ExpiryMaxAgeExceeded
+
+**Symptom.** `expiry_max_age_total` increment > 0 in last 1h. Severity critical. **Single-event paging**, but the alert is informational, not remedial — D6 has already expired the row by the time the alert fires.
+
+**Why this is informational, not actionable on the row.** D6 plan v4 §B (round-1 P1 contract): D6 always expires eligible rows; MaxAge is a labeling/alerting threshold only. The transition has fired, the saga compensator is reverting Redis, the row's audit trail in `order_status_history` shows `awaiting_payment → expired`. The question this alert asks is **"why did the row sit overdue for > 24h before the sweeper caught it?"** — the answer drives operational improvements, not row repair.
+
+**Diagnosis.**
+1. Sweeper uptime: `count_over_time(up{job="expiry-sweeper"}[24h])` — was the sweeper running for the past day? Gaps point at deploys, container crashes, k8s CronJob mis-fires.
+2. `kubectl get pods -l app=expiry-sweeper` (or `docker ps | grep expiry`) — is the sweeper currently alive?
+3. `expiry_oldest_overdue_age_seconds` history — did it climb gradually (sustained throughput problem) or spike suddenly (sweeper outage)?
+4. Loki: `{component="expiry_sweeper"} |= "exited"` — last clean shutdown vs OOMKill.
+
+**Action.**
+- Confirm the row IS now `expired` (`SELECT status FROM orders WHERE id = $ORDER_ID`).
+- Confirm saga compensator picked it up (`SELECT status FROM orders WHERE id = $ORDER_ID` should eventually become `compensated`).
+- Identify the sweeper outage cause; file an SRE ticket if not obvious.
+- If a fleet-wide deploy stuck the sweeper for 24h+, verify NO other long-overdue rows are in the pipeline (`expiry_backlog_after_sweep`).
+
+**Escalation.** Critical informational — page so the operational gap gets visibility, but the row itself doesn't need direct intervention.

@@ -142,15 +142,17 @@ sequenceDiagram
         end
     else TTL 過期未付款(D6)
         rect rgb(255, 245, 245)
-        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until < NOW()
-        P-->>SW: 卡住的列
-        SW->>R: revert.lua INCRBY
-        SW->>P: status awaiting_payment → expired
+        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
+        P-->>SW: 過期的列
+        SW->>P: UoW {MarkExpired + emit order.failed}
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator(獨立 process)<br/>跑 revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
-這個流程做完時會打 `v0.5.0` tag。
+D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga compensator 負責(透過 `saga:reverted:order:<id>` SETNX 保證冪等)。形狀跟 D5 失敗路徑一樣;D6 不會直接呼叫 `revert.lua`。
+
+`v0.5.0` 在這個流程完成時打 tag(D1–D6)。
 
 ## 特色
 

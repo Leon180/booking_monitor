@@ -433,6 +433,39 @@ curl -X POST 'http://localhost:8080/test/payment/confirm/<order_id>?outcome=fail
 
 這個端點刻意**不**綁在 `/pay` 自動觸發 — 把 mock 確認當成顯式 operator 動作有兩個好處:保留 D4 的 client-confirm 契約(真實 Stripe Elements 也得先 confirm 才會發 webhook),以及讓 D6 的過期 sweeper demo 有效(略過 confirm → reservation 真的會過期)。
 
+### D6 — 預訂過期 sweeper
+
+D6 是一個 sweeper 子指令(`booking-cli expiry-sweeper`)— **不是** HTTP 端點。週期性掃描 `orders WHERE status='awaiting_payment' AND reserved_until <= NOW() - $1::interval`(以資料庫 NOW() 為時間源),透過 `MarkExpired` 把每筆 row 原子地轉成 `expired`,並在同一個 UoW 內 emit `order.failed` 到 outbox。既有的 saga compensator(D2 已把 `MarkCompensated` 擴大接受 `Expired → Compensated`)收到 `order.failed` 後會用 `revert.lua` 回補 Redis 端的庫存扣減。
+
+**兩種執行模式**(跟 recon + saga-watchdog 對齊):
+- 預設 loop:ticker 驅動,跑到 SIGTERM。Container 部署。
+- `--once`:跑一次 sweep 後 exit。k8s CronJob 部署。
+
+**Tunables**(env 或 config.yml 的 `expiry:` 區塊;完整定義在 `internal/infrastructure/config/config.go`):
+
+| Var | Default | 說明 |
+|---|---|---|
+| `EXPIRY_SWEEP_INTERVAL` | `30s` | Loop 週期。比 saga-watchdog 的 60s 短 — 每一次 tick 內「row 過了 `reserved_until` 但還沒被掃」都是一個被 soft-lock 的 Redis 座位。 |
+| `EXPIRY_GRACE_PERIOD` | `2s` | 給 in-flight D5 webhook 的禮讓時間。**驗證 `>= 0`**(0 = 合法的 tight mode)。不影響正確性 — D5 的 `MarkPaid` predicate 自己有 `reserved_until > NOW()` 守門 — 但能消掉 noisy 的 benign-race log。 |
+| `EXPIRY_MAX_AGE` | `24h` | **純標記/告警 — 不會阻止 transition。** 過 MaxAge 的 row 會拿到 `expired_overaged` outcome label + `expiry_max_age_total` +1,但**仍然會被 expire**。Saga 的「skip + alert」理由(Redis 狀態未知)在此不適用:D6 不直接碰 Redis,saga compensator 的 `saga:reverted:order:<id>` SETNX 守門讓重發是冪等的。 |
+| `EXPIRY_BATCH_SIZE` | `100` | 每次 sweep 處理的 row 數。預設 cadence 下:每小時 12k 筆 drainage cap。 |
+
+**並發 webhook race 三種情境(plan v4 §E 已驗證):**
+
+1. **D6 先贏,D5 `succeeded` 後到。** D5 的 `MarkPaid` SQL predicate 失敗(`reserved_until > NOW()` 為 false);路由到 `handleLateSuccess`;fallback UoW 裡的 MarkExpired 也是 `ErrInvalidTransition`(已 expire)→ terminal-already log + 200。**只有 D6 emit 一次** `order.failed`。
+2. **D5 `payment_failed` 先贏,D6 後 sweep。** D5 emit `order.failed`(它自己的 UoW)。D6 的 MarkExpired 回 `ErrInvalidTransition` → outcome `already_terminal`,D6 不 emit。**只有 D5 emit 一次** `order.failed`。
+3. **未來 reservation row。** D6 的 `FindExpiredReservations` 根本不會回傳。
+
+淨效果:任何 concurrent path 下每筆 order 最多只有一個 `order.failed` event;saga compensator 的 `saga:reverted:order:<id>` SETNX 提供第二層冪等保險。
+
+**分層 — 為什麼 D6 不直接呼叫 `revert.lua`:** D6 負責「時序」(何時讓 row 過期);saga 負責「庫存回補」(怎麼讓 Redis 一致)。形狀跟 D5 的失敗路徑一樣。理由:
+- 沿用 compensator 的 SETNX 冪等守門。
+- Compensator 處理 legacy v<3 fallback + 多 ticket_type 損壞情境 — D6 直接呼叫 Redis 等於要把這些都重做。
+- 解耦讓 compensator 在 D6 爆量時可以慢慢追,不會 back-pressure sweeper。
+- 失敗隔離 — Redis 在 D6 期間出問題不會讓 SQL transition 失敗。
+
+**跟 D5 的 late-success 串連:**當 `succeeded` webhook 在 D6 已經把 row 翻成 `expired`(或 saga 翻成 `compensated`)之後才到,D5 webhook handler 透過 `handleLateSuccess` 路徑把 `detected_at="post_terminal"` 計入 → `payment_webhook_late_success_total{detected_at="post_terminal"}` +1 + `PaymentWebhookLateSuccessAfterExpiry` 告警 page。Operators 可以在 Grafana 上 join「過去 5m 有 N 筆過期 + 其中 Y 筆收到 late-success 退款工單」這兩條時間序列。
+
 ### GET /api/v1/orders/:id
 用 id 輪詢一筆訂票的最終狀態。id 是 `POST /api/v1/book` 回應裡的 UUID v7。
 

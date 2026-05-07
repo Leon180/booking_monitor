@@ -211,6 +211,35 @@ func (d *orderRepositoryTracingDecorator) FindStuckFailed(ctx context.Context, m
 	return stuck, err
 }
 
+func (d *orderRepositoryTracingDecorator) FindExpiredReservations(ctx context.Context, gracePeriod time.Duration, limit int) ([]domain.ExpiredReservation, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "FindExpiredReservations", trace.WithAttributes(
+		attribute.String("grace_period", gracePeriod.String()),
+		attribute.Int("limit", limit),
+	))
+	defer span.End()
+
+	expired, err := d.next.FindExpiredReservations(ctx, gracePeriod, limit)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.SetAttributes(attribute.Int("found", len(expired)))
+	return expired, err
+}
+
+func (d *orderRepositoryTracingDecorator) CountOverdueAfterCutoff(ctx context.Context, gracePeriod time.Duration) (int, time.Duration, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "CountOverdueAfterCutoff", trace.WithAttributes(
+		attribute.String("grace_period", gracePeriod.String()),
+	))
+	defer span.End()
+
+	count, oldest, err := d.next.CountOverdueAfterCutoff(ctx, gracePeriod)
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.SetAttributes(attribute.Int("backlog_count", count))
+	return count, oldest, err
+}
+
 func (d *orderRepositoryTracingDecorator) MarkCharging(ctx context.Context, id uuid.UUID) error {
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "MarkOrderCharging", trace.WithAttributes(
 		attribute.String("order_id", id.String()),

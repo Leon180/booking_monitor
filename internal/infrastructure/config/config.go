@@ -21,6 +21,7 @@ type Config struct {
 	InventoryDrift InventoryDriftConfig `yaml:"inventory_drift"`
 	Booking        BookingConfig        `yaml:"booking"`
 	Payment        PaymentConfig        `yaml:"payment"`
+	Expiry         ExpiryConfig         `yaml:"expiry"`
 }
 
 // BookingConfig holds the tunables for `BookingService.BookTicket` —
@@ -191,6 +192,66 @@ type PaymentConfig struct {
 	// the configured server port — override for tests / containers.
 	// Only consulted when `Server.EnableTestEndpoints` is true.
 	WebhookLoopbackURL string `yaml:"webhook_loopback_url" env:"PAYMENT_WEBHOOK_LOOPBACK_URL" env-default:"http://127.0.0.1:8080/webhook/payment"`
+}
+
+// ExpiryConfig holds the tunables for the `expiry-sweeper` subcommand
+// (D6) — the sweeper that transitions overdue `awaiting_payment`
+// reservations to `expired` and emits `order.failed` so the saga
+// compensator reverts Redis inventory.
+//
+// Structurally similar to SagaConfig but with no analog of
+// `StuckThreshold` — D6's eligibility check is `reserved_until <=
+// NOW() - GracePeriod` itself (the threshold IS the deadline). Saga
+// separates StuckThreshold from the deadline because the saga
+// consumer races the watchdog for the same row; D6 has no such
+// consumer-side path (the customer already missed their window).
+//
+// Defaults are aligned with the v0.5.0 demo arc — sub-minute end-to-
+// end (book → expired → compensated) with `BOOKING_RESERVATION_WINDOW=20s`
+// in the smoke env. Production would typically run with the default
+// 15-minute reservation window and pick up corresponding values for
+// SweepInterval if the sweeper-cadence-vs-volume tradeoff shifts.
+type ExpiryConfig struct {
+	// SweepInterval — how often the sweeper loop fires. Default 30s,
+	// lower than SagaConfig.WatchdogInterval's 60s because every tick
+	// of "row past reserved_until but not swept" is a soft-locked
+	// Redis seat. Floor of 30s gives the partial-index scan
+	// comfortable margin and matches the cadence implied by
+	// migration 000012's design comment.
+	SweepInterval time.Duration `yaml:"sweep_interval" env:"EXPIRY_SWEEP_INTERVAL" env-default:"30s"`
+
+	// ExpiryGracePeriod — polite head-start for in-flight D5 webhooks.
+	// Default 2s ≈ typical D5 webhook end-to-end latency.
+	//
+	// **Validation: `>= 0`** (NOT `> 0`). 0 is a legal "tight mode"
+	// — the sweeper hits a row the moment `reserved_until` ticks past
+	// `NOW()`. Tradeoff: more `already_terminal` log lines from
+	// concurrent succeeded webhooks, but tighter inventory recovery.
+	// Correctness-wise, the grace doesn't matter — D5's MarkPaid SQL
+	// has its own `reserved_until > NOW()` predicate so a true late-
+	// success still routes to `handleLateSuccess`. The grace just
+	// reduces benign-race noise.
+	ExpiryGracePeriod time.Duration `yaml:"expiry_grace_period" env:"EXPIRY_GRACE_PERIOD" env-default:"2s"`
+
+	// MaxAge — labeling/alerting threshold. **Does NOT gate the
+	// transition.** Rows past MaxAge get the `expired_overaged`
+	// outcome label + bump the dedicated `expiry_max_age_total`
+	// counter (consumed by the `ExpiryMaxAgeExceeded` alert), but
+	// they ARE still expired + emit `order.failed`. Skipping ancient
+	// rows would re-create the soft-lock problem D6 exists to solve.
+	//
+	// Saga's "skip + alert" rationale (Redis state unknown) does NOT
+	// apply: D6 doesn't touch Redis directly, and the saga
+	// compensator's `saga:reverted:order:<id>` SETNX guard makes the
+	// re-emit idempotent.
+	MaxAge time.Duration `yaml:"max_age" env:"EXPIRY_MAX_AGE" env-default:"24h"`
+
+	// BatchSize — orders processed per sweep cycle. Default 100
+	// (matches recon + saga). At default cadence: 100 × 120 = 12k
+	// rows/h drainage cap, comfortably above realistic abandonment
+	// peak. Bumpable transiently to 1000+ for backlog recovery after
+	// a long sweeper outage.
+	BatchSize int `yaml:"batch_size" env:"EXPIRY_BATCH_SIZE" env-default:"100"`
 }
 
 // SagaConfig holds the tunables for the `saga-watchdog` subcommand

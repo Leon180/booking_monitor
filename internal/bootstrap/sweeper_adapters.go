@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"booking_monitor/internal/application/expiry"
 	"booking_monitor/internal/application/recon"
 	"booking_monitor/internal/application/saga"
 	"booking_monitor/internal/infrastructure/config"
@@ -165,4 +166,55 @@ func (prometheusSagaMetrics) ObserveResolveDuration(seconds float64) {
 }
 func (prometheusSagaMetrics) ObserveResolveAge(seconds float64) {
 	observability.SagaWatchdogResolveAgeSeconds.Observe(seconds)
+}
+
+// ── expiry sweeper (D6) ──────────────────────────────────────────────
+
+// NewExpiryConfig translates the wire-format ExpiryConfig into the
+// application-layer expiry.Config and validates it. Used by
+// `cmd/booking-cli/expiry_sweeper.go` via fx.Provide.
+func NewExpiryConfig(cfg *config.Config) (expiry.Config, error) {
+	c := expiry.Config{
+		SweepInterval:     cfg.Expiry.SweepInterval,
+		ExpiryGracePeriod: cfg.Expiry.ExpiryGracePeriod,
+		MaxAge:            cfg.Expiry.MaxAge,
+		BatchSize:         cfg.Expiry.BatchSize,
+	}
+	if err := c.Validate(); err != nil {
+		return expiry.Config{}, err
+	}
+	return c, nil
+}
+
+// prometheusExpiryMetrics implements expiry.Metrics. Same shape /
+// rationale as prometheusSagaMetrics; differs only in label / counter
+// names (see `observability/metrics_expiry.go` for the full set).
+type prometheusExpiryMetrics struct{}
+
+// NewPrometheusExpiryMetrics is the fx-friendly constructor.
+func NewPrometheusExpiryMetrics() expiry.Metrics { return prometheusExpiryMetrics{} }
+
+func (prometheusExpiryMetrics) IncResolved(outcome string) {
+	observability.ExpirySweepResolvedTotal.WithLabelValues(outcome).Inc()
+}
+func (prometheusExpiryMetrics) IncMaxAgeExceeded() {
+	observability.ExpiryMaxAgeTotal.Inc()
+}
+func (prometheusExpiryMetrics) IncFindExpiredErrors() {
+	observability.ExpiryFindExpiredErrorsTotal.Inc()
+}
+func (prometheusExpiryMetrics) SetOldestOverdueAge(seconds float64) {
+	observability.ExpiryOldestOverdueAgeSeconds.Set(seconds)
+}
+func (prometheusExpiryMetrics) SetBacklogAfterSweep(count int) {
+	observability.ExpiryBacklogAfterSweep.Set(float64(count))
+}
+func (prometheusExpiryMetrics) ObserveResolveDuration(seconds float64) {
+	observability.ExpiryResolveDurationSeconds.Observe(seconds)
+}
+func (prometheusExpiryMetrics) ObserveSweepDuration(seconds float64) {
+	observability.ExpirySweepDurationSeconds.Observe(seconds)
+}
+func (prometheusExpiryMetrics) ObserveResolveAge(seconds float64) {
+	observability.ExpiryResolveAgeSeconds.Observe(seconds)
 }

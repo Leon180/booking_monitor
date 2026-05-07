@@ -142,15 +142,17 @@ sequenceDiagram
         end
     else TTL expires without payment (D6)
         rect rgb(255, 245, 245)
-        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until < NOW()
-        P-->>SW: stuck rows
-        SW->>R: revert.lua INCRBY
-        SW->>P: status awaiting_payment → expired
+        SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
+        P-->>SW: overdue rows
+        SW->>P: UoW {MarkExpired + emit order.failed}
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator (separate process)<br/>runs revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
-`v0.5.0` will be tagged when this flow is complete.
+D6's job is timing — when does the row expire. The saga compensator owns inventory revert (idempotent via `saga:reverted:order:<id>` SETNX). Same shape as D5's failure path; D6 doesn't call `revert.lua` directly.
+
+`v0.5.0` ships with this flow complete (D1–D6).
 
 ## Features
 

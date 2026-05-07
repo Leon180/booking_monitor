@@ -43,6 +43,22 @@ func (m *MockOrderRepository) EXPECT() *MockOrderRepositoryMockRecorder {
 	return m.recorder
 }
 
+// CountOverdueAfterCutoff mocks base method.
+func (m *MockOrderRepository) CountOverdueAfterCutoff(ctx context.Context, gracePeriod time.Duration) (int, time.Duration, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CountOverdueAfterCutoff", ctx, gracePeriod)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(time.Duration)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// CountOverdueAfterCutoff indicates an expected call of CountOverdueAfterCutoff.
+func (mr *MockOrderRepositoryMockRecorder) CountOverdueAfterCutoff(ctx, gracePeriod any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CountOverdueAfterCutoff", reflect.TypeOf((*MockOrderRepository)(nil).CountOverdueAfterCutoff), ctx, gracePeriod)
+}
+
 // Create mocks base method.
 func (m *MockOrderRepository) Create(ctx context.Context, order domain.Order) (domain.Order, error) {
 	m.ctrl.T.Helper()
@@ -71,6 +87,21 @@ func (m *MockOrderRepository) FindByPaymentIntentID(ctx context.Context, payment
 func (mr *MockOrderRepositoryMockRecorder) FindByPaymentIntentID(ctx, paymentIntentID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindByPaymentIntentID", reflect.TypeOf((*MockOrderRepository)(nil).FindByPaymentIntentID), ctx, paymentIntentID)
+}
+
+// FindExpiredReservations mocks base method.
+func (m *MockOrderRepository) FindExpiredReservations(ctx context.Context, gracePeriod time.Duration, limit int) ([]domain.ExpiredReservation, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindExpiredReservations", ctx, gracePeriod, limit)
+	ret0, _ := ret[0].([]domain.ExpiredReservation)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindExpiredReservations indicates an expected call of FindExpiredReservations.
+func (mr *MockOrderRepositoryMockRecorder) FindExpiredReservations(ctx, gracePeriod, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindExpiredReservations", reflect.TypeOf((*MockOrderRepository)(nil).FindExpiredReservations), ctx, gracePeriod, limit)
 }
 
 // FindStuckCharging mocks base method.

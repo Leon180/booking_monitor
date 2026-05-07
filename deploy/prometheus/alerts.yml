@@ -819,3 +819,78 @@ groups:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#paymentwebhookintentmismatch"
           summary: "Payment webhook intent ID mismatch — possible forgery or fixture leak"
           description: "{{ $value }} mismatch event(s) in the last 5m. Webhook handler refused to flip order(s). Check Loki logs for `webhook: intent id mismatch on metadata-resolved order` to extract envelope_id + order_id + the two intent ids; investigate before any manual resolution."
+
+      - alert: ExpiryOldestOverdueAge
+        # D6 — sweeper falling behind. Healthy sweepers keep oldest
+        # overdue under SweepInterval + ExpiryGracePeriod + small
+        # constant ≈ 35s; > 5min sustained means rows are sitting
+        # eligible-but-unprocessed (BatchSize too small for current
+        # eligibility rate, OR per-row resolves erroring out). Cause:
+        # diagnose ExpiryProcessingErrors first.
+        expr: |
+          expiry_oldest_overdue_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#expiryoldestoverdueage"
+          summary: "Expiry sweeper falling behind ({{ $value | humanizeDuration }} oldest overdue, > 5m sustained)"
+          description: "Oldest awaiting_payment row past reserved_until is {{ $value | humanizeDuration }} old, sustained > 5m. Sweeper isn't keeping up — soft-locked Redis seats accumulating. Check expiry_sweep_resolved_total{outcome=~\"...error\"} for per-row failures; bump EXPIRY_BATCH_SIZE if eligibility rate exceeds drainage rate."
+
+      - alert: ExpiryProcessingErrors
+        # D6 — per-row resolve failure rate. Distinct from
+        # ExpiryFindErrors (which is "we cannot SCAN") and from the
+        # max-age signal. Catches transient DB lock contention,
+        # outbox writes failing, GetByID flapping. Sustained = the
+        # sweeper is running but rows aren't draining; older entries
+        # accumulate as `expiry_oldest_overdue_age_seconds` climbs
+        # toward `ExpiryOldestOverdueAge`'s 5min threshold.
+        expr: |
+          rate(expiry_sweep_resolved_total{outcome=~"getbyid_error|marshal_error|outbox_error|transition_error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#expiryprocessingerrors"
+          summary: "Expiry sweeper per-row processing errors elevated ({{ $value | humanize }}/s over 5m)"
+          description: "Sustained per-row resolve failures. Check expiry_sweep_resolved_total{outcome} label split: `getbyid_error` → DB read trouble; `outbox_error` / `transition_error` → DB write trouble (lock contention, schema drift); `marshal_error` → code bug. Will retry next sweep automatically."
+
+      - alert: ExpiryFindErrors
+        # D6 — DB blind. Covers BOTH the find query
+        # (FindExpiredReservations) AND the post-sweep count query
+        # (CountOverdueAfterCutoff) failure paths. When this fires,
+        # the backlog gauges (expiry_oldest_overdue_age_seconds /
+        # expiry_backlog_after_sweep) MAY be stale — round-3 F2
+        # contract holds them at last-known-good rather than zero them
+        # out. Operator: triage DB connectivity / pool / migration
+        # state; the gauge values you see may pre-date the failure.
+        expr: |
+          rate(expiry_find_expired_errors_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#expiryfinderrors"
+          summary: "Expiry sweeper find/count query failing ({{ $value | humanize }}/s over 5m)"
+          description: "Sweeper cannot scan the orders table OR cannot count post-sweep backlog. Backlog gauges are held at last-known-good (NOT zeroed) — current readings may be stale. Check Postgres health / connection pool / migration 000012 partial index existence. Mirrors `SagaWatchdogFindStuckErrors` shape."
+
+      - alert: ExpiryMaxAgeExceeded
+        # D6 — single-event paging. A reservation has been processed
+        # AFTER exceeding EXPIRY_MAX_AGE (default 24h). D6 has
+        # already expired the row + emitted order.failed by the time
+        # this fires (round-1 P1 contract: D6 always expires, MaxAge
+        # is observability only — saga compensator's idempotency
+        # guard makes the re-emit safe). Operator action: investigate
+        # WHY the row aged past MaxAge before a sweep caught it
+        # (sweeper down? deploy stuck? DB outage?). The transition
+        # itself doesn't need fixing — the sweeper has already
+        # done its job.
+        expr: |
+          increase(expiry_max_age_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#expirymaxageexceeded"
+          summary: "Expiry sweeper transitioned a reservation past MaxAge — investigate sweeper uptime"
+          description: "{{ $value }} reservation(s) aged past EXPIRY_MAX_AGE (default 24h) before being expired in the last 1h. The rows ARE now `expired` (D6 always expires; MaxAge is awareness-only) — the question is why they were stuck so long. Check sweeper uptime, deploy logs, k8s CronJob fire history."

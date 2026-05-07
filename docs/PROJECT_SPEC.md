@@ -442,6 +442,39 @@ curl -X POST 'http://localhost:8080/test/payment/confirm/<order_id>?outcome=fail
 
 The endpoint is intentionally NOT auto-fired from `/pay` — keeping mock confirmation as an explicit operator action preserves the D4 client-confirm contract (Stripe Elements would need to confirm before the webhook fires) AND lets the D6 expiry-sweeper demo work (skip the confirm step → reservation actually expires).
 
+### D6 — Reservation expiry sweeper
+
+D6 is a sweeper subcommand (`booking-cli expiry-sweeper`) — NOT an HTTP endpoint. Periodically scans `orders WHERE status='awaiting_payment' AND reserved_until <= NOW() - $1::interval` (DB-NOW source), atomically transitions each row to `expired` via `MarkExpired`, and emits `order.failed` to the outbox in the same UoW. The existing saga compensator (D2 widened `MarkCompensated` to accept `Expired → Compensated`) consumes `order.failed` and reverts the Redis-side inventory deduct via `revert.lua`.
+
+**Two run modes** (mirrors recon + saga-watchdog):
+- Default loop: ticker-driven, runs until SIGTERM. Container deployment.
+- `--once`: single sweep then exit. k8s CronJob hosting.
+
+**Tunables** (env or `expiry:` block in config.yml; full block in `internal/infrastructure/config/config.go`):
+
+| Var | Default | Notes |
+|---|---|---|
+| `EXPIRY_SWEEP_INTERVAL` | `30s` | Loop cadence. Lower than saga-watchdog's 60s — every tick of "row past `reserved_until` but unswept" is a soft-locked Redis seat. |
+| `EXPIRY_GRACE_PERIOD` | `2s` | Polite head-start for in-flight D5 webhooks. **Validation `>= 0`** (0 = legal tight mode). Doesn't change correctness — D5's `MarkPaid` predicate has its own `reserved_until > NOW()` guard — but eliminates noisy benign-race log lines. |
+| `EXPIRY_MAX_AGE` | `24h` | **Labeling/alerting only — does NOT gate the transition.** Rows past MaxAge get the `expired_overaged` outcome label + bump `expiry_max_age_total`, but they ARE still expired. Saga's "skip + alert" rationale (Redis state unknown) doesn't apply: D6 doesn't touch Redis directly, the saga compensator's `saga:reverted:order:<id>` SETNX guard makes the re-emit idempotent. |
+| `EXPIRY_BATCH_SIZE` | `100` | Orders processed per sweep. At default cadence: 12k rows/h drainage cap. |
+
+**Concurrent webhook race (3 verified-correct cases — plan v4 §E):**
+
+1. **D6 wins, then D5 `succeeded` arrives.** D5's `MarkPaid` SQL predicate fails (`reserved_until > NOW()` is false); routed to `handleLateSuccess`; MarkExpired in fallback UoW also `ErrInvalidTransition` (already expired) → terminal-already log + 200. **One** `order.failed` emit (D6 only).
+2. **D5 `payment_failed` wins, then D6 sweep.** D5 emits `order.failed` (its UoW). D6's MarkExpired returns `ErrInvalidTransition` → outcome `already_terminal`, no D6 emit. **One** `order.failed` emit (D5 only).
+3. **Future-reservation row.** D6's `FindExpiredReservations` doesn't return it.
+
+Net: at most one `order.failed` per order under any concurrent path; saga compensator's `saga:reverted:order:<id>` SETNX gives second-line idempotency.
+
+**Layering — why D6 doesn't call `revert.lua` directly:** D6 owns timing (when does the row expire); saga owns inventory revert (how does Redis become consistent). Same shape as D5's failure path. Reasons:
+- Reuses compensator's idempotent SETNX-keyed revert guard.
+- Compensator handles legacy v<3 fallback + multi-ticket-type corruption path — D6 calling Redis directly would duplicate all that.
+- Decoupling lets compensator catch up after a D6 burst without back-pressuring the sweeper.
+- Failure isolation — Redis blip during D6 doesn't fail the SQL transition.
+
+**Late-success cross-link with D5:** when a `succeeded` webhook arrives after D6 has already moved the row to `expired` (or saga to `compensated`), the D5 webhook handler routes through `handleLateSuccess` with `detected_at="post_terminal"` → `payment_webhook_late_success_total{detected_at="post_terminal"}` increments + `PaymentWebhookLateSuccessAfterExpiry` alert pages. Operators correlate "N expired in 5m + Y of them got late-success refunds" via Grafana join.
+
 ### GET /api/v1/orders/:id
 Poll the terminal status of a booking. The id is the UUID v7 returned by `POST /api/v1/book`.
 
