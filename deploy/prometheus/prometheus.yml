@@ -117,3 +117,8 @@ scrape_configs:
     metrics_path: '/metrics'
     static_configs:
       - targets: ['saga_watchdog:9091']
+
+  - job_name: 'expiry-sweeper'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['expiry_sweeper:9091']

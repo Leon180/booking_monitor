@@ -211,6 +211,25 @@ type StuckFailed struct {
 	Age time.Duration
 }
 
+// ExpiredReservation is the row shape returned by
+// `OrderRepository.FindExpiredReservations` — the D6 expiry sweeper's
+// input vocabulary. Structurally identical to StuckCharging /
+// StuckFailed but kept distinct so the sweeper and watchdog/reconciler
+// can't pass each other's results (different resolution paths: a row
+// that's overdue-awaiting_payment becomes Expired + emits order.failed
+// for saga compensation; a stuck-Failed row needs the compensator
+// re-driven).
+//
+// `Age` is `NOW() - reserved_until` (NOT `NOW() - updated_at` — for
+// awaiting_payment rows `updated_at` reflects the last status flip,
+// which is when the reservation was created, while `reserved_until`
+// is the deadline the customer was promised). The sweeper records
+// this as the per-row `expiry_sweep_age_seconds` SLO histogram.
+type ExpiredReservation struct {
+	ID  uuid.UUID
+	Age time.Duration
+}
+
 // Order is the domain aggregate. All fields are unexported; reads
 // happen through accessor methods (Wild Workouts pattern, no Get
 // prefix), writes happen through the NewOrder factory or the
@@ -614,6 +633,43 @@ type OrderRepository interface {
 	// reason — the watchdog re-drives the existing compensator,
 	// which only needs the id to fetch + idempotency-check the order.
 	FindStuckFailed(ctx context.Context, minAge time.Duration, limit int) ([]StuckFailed, error)
+
+	// FindExpiredReservations returns awaiting_payment orders whose
+	// `reserved_until` is at or past `NOW() - gracePeriod`, up to
+	// `limit` rows. Used by the D6 expiry sweeper subcommand: each
+	// returned id gets transitioned `awaiting_payment → expired` +
+	// emits `order.failed` so the existing saga compensator reverts
+	// the Redis-side inventory deduct.
+	//
+	// `gracePeriod` is a polite head-start for in-flight D5 webhooks
+	// (default 2s); 0 = tight mode. The cutoff is computed in SQL
+	// via `NOW() - $1::interval` so D5's `MarkPaid` predicate
+	// (`reserved_until > NOW()`) and D6's eligibility share the same
+	// time source. Without this, app-clock skew on the sweeper pod
+	// could pre-empt reservations that DB still considers live.
+	//
+	// Returns (id, age) pairs same as FindStuck* — sweeper resolves
+	// by id alone, doesn't need the full entity for the find step.
+	// `Age` is `NOW() - reserved_until` (the SLO signal).
+	//
+	// Backed by the partial index `idx_orders_awaiting_payment_reserved_until`
+	// from migration 000012 (added at 2026-04-29 specifically for
+	// this query — see migration header).
+	FindExpiredReservations(ctx context.Context, gracePeriod time.Duration, limit int) ([]ExpiredReservation, error)
+
+	// CountOverdueAfterCutoff returns the number of awaiting_payment
+	// rows still past `NOW() - gracePeriod` AND the age of the oldest
+	// such row. Used by the D6 sweeper at the END of each tick to
+	// populate the post-sweep observability gauges
+	// (`expiry_backlog_after_sweep`, `expiry_oldest_overdue_age_seconds`).
+	//
+	// Failure semantics: caller treats this as "we can't see the
+	// backlog", increments `expiry_find_expired_errors_total`, leaves
+	// the gauges at last-known-good, and returns the error from
+	// `Sweep` so loop mode logs+continues / `--once` mode exits 1.
+	// Already-transitioned rows in the same tick are NOT rolled back —
+	// this is post-UoW observability, not part of the work itself.
+	CountOverdueAfterCutoff(ctx context.Context, gracePeriod time.Duration) (count int, oldestAge time.Duration, err error)
 
 	// Mark* are the typed state-transition methods that replace the
 	// previous `UpdateStatus(id, status)` escape hatch. Each enforces

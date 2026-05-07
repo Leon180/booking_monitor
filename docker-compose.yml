@@ -50,6 +50,11 @@ services:
       - PAYMENT_WEBHOOK_REPLAY_TOLERANCE=${PAYMENT_WEBHOOK_REPLAY_TOLERANCE:-5m}
       - PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE=${PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE:-false}
       - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-false}
+      # D6 — forward BOOKING_RESERVATION_WINDOW so smoke / demo can
+      # override (e.g. 20s for `scripts/d6_smoke.sh`) without rebuild.
+      # Default 15m matches BookingConfig.ReservationWindow's
+      # production default (Stripe Checkout / KKTIX norm).
+      - BOOKING_RESERVATION_WINDOW=${BOOKING_RESERVATION_WINDOW:-15m}
 
   nginx:
     image: nginx:1.27-alpine
@@ -181,6 +186,52 @@ services:
       - SAGA_STUCK_THRESHOLD=${SAGA_STUCK_THRESHOLD:-60s}
       - SAGA_MAX_FAILED_AGE=${SAGA_MAX_FAILED_AGE:-24h}
       - SAGA_BATCH_SIZE=${SAGA_BATCH_SIZE:-100}
+
+  expiry_sweeper:
+    # The D6 reservation expiry sweeper — transitions overdue
+    # `awaiting_payment` reservations to `expired` and emits
+    # `order.failed` so the saga compensator reverts the Redis-side
+    # inventory deduct that's been soft-locking the ticket. See
+    # PROJECT_SPEC §6.D6 (added in PR #93). Mirrors the
+    # `saga_watchdog` shape: same default-loop vs `--once` modes,
+    # same metrics-listener-on-:9091 surface, same restart policy.
+    #
+    # Why this is a SEPARATE process (not embedded in the API server
+    # or the saga watchdog):
+    #   - Different blast radius — a bug here can't deadlock /book or
+    #     compensation.
+    #   - Different cadence — D6 runs every 30s by default vs saga
+    #     watchdog's 60s.
+    #   - k8s CronJob hosting — `--once` mode + WORKER_METRICS_ADDR=""
+    #     is the canonical CronJob shape; same as recon + watchdog.
+    #
+    # Why no `redis` in depends_on (unlike saga_watchdog): D6 doesn't
+    # touch Redis directly. The saga compensator (in saga_watchdog)
+    # owns the Redis revert; D6 only writes to Postgres (Order +
+    # Outbox). Skipping the Redis dep makes D6 useful even during a
+    # transient Redis outage.
+    build: .
+    container_name: booking_expiry_sweeper
+    command: [ "/app/booking-cli", "expiry-sweeper" ]
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--spider", "http://localhost:9091/healthz" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    environment:
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
+      - APP_NAME=booking_expiry_sweeper
+      - WORKER_METRICS_ADDR=${WORKER_METRICS_ADDR:-:9091}
+      # EXPIRY_* knobs fall back to defaults from config.go header
+      # comments; override per-deployment if production demands.
+      - EXPIRY_SWEEP_INTERVAL=${EXPIRY_SWEEP_INTERVAL:-30s}
+      - EXPIRY_GRACE_PERIOD=${EXPIRY_GRACE_PERIOD:-2s}
+      - EXPIRY_MAX_AGE=${EXPIRY_MAX_AGE:-24h}
+      - EXPIRY_BATCH_SIZE=${EXPIRY_BATCH_SIZE:-100}
 
   postgres:
     image: postgres:15-alpine

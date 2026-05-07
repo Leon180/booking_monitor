@@ -114,7 +114,7 @@ func init() {
 	// (not 0) and the alert can't evaluate. Bare WithLabelValues
 	// matches the existing pre-warm pattern in this file (line 81+):
 	// the act of looking up the labelled child registers the series.
-	for _, sweeper := range []string{"recon", "inventory_drift", "saga_watchdog", "once_recon", "once_drift", "once_saga_watchdog"} {
+	for _, sweeper := range []string{"recon", "inventory_drift", "saga_watchdog", "expiry_sweeper", "once_recon", "once_drift", "once_saga_watchdog", "once_expiry_sweeper"} {
 		sweepGoroutinePanicsTotal.WithLabelValues(sweeper)
 	}
 	// Pre-warm inventory-drift direction labels (PR-D). Same rationale
@@ -147,4 +147,20 @@ func init() {
 		PaymentWebhookLateSuccessTotal.WithLabelValues(detectedAt)
 	}
 	// IntentMismatch is unlabelled; nothing to prewarm.
+
+	// D6 expiry sweeper outcomes — alerts (`ExpiryProcessingErrors`)
+	// rate over a label slice; the slice MUST exist in /metrics
+	// before the first event so PromQL `rate(...{outcome=~"..."}[5m])`
+	// resolves to 0 not "no data". The 7 outcomes mirror
+	// `expiry.AllOutcomes` exactly.
+	for _, outcome := range []string{
+		"expired", "expired_overaged", "already_terminal",
+		"getbyid_error", "marshal_error", "outbox_error", "transition_error",
+	} {
+		ExpirySweepResolvedTotal.WithLabelValues(outcome)
+	}
+	// ExpiryMaxAgeTotal + ExpiryFindExpiredErrorsTotal are unlabelled
+	// counters; nothing to prewarm. The two gauges (oldest_overdue +
+	// backlog_after_sweep) self-initialise to 0 on first sweep, no
+	// prewarm needed.
 }

@@ -478,6 +478,102 @@ func (r *postgresOrderRepository) FindStuckFailed(
 	return out, nil
 }
 
+// FindExpiredReservations returns awaiting_payment orders whose
+// `reserved_until` is at or past `NOW() - gracePeriod`, oldest-first,
+// up to `limit` rows. The D6 expiry sweeper's per-tick input.
+//
+// Why DB-NOW (not app-clock):
+//   D5's MarkPaid SQL predicate uses `reserved_until > NOW()` against
+//   the same column. If D6 used app-clock for cutoff while D5 uses
+//   DB-NOW, app-clock skew on the sweeper pod could pre-empt
+//   reservations the DB still considers live (or vice versa). Sharing
+//   `NOW()` makes the eligibility boundary unambiguous.
+//
+// Why the partial index covers this:
+//   Migration 000012 added
+//   `idx_orders_awaiting_payment_reserved_until ON orders(status,
+//    reserved_until) WHERE status='awaiting_payment'`
+//   specifically for this query (migration header at lines 55-63
+//   names D6 as the consumer). Verify with `EXPLAIN` in the
+//   integration test under `SET enable_seqscan=off` if the planner
+//   skips it on small CI tables — that's a planner cost-estimate
+//   issue, not an index reachability issue.
+//
+// `Age` is `NOW() - reserved_until` so the sweeper can record the
+// `expiry_sweep_age_seconds` SLO histogram + log the per-row age
+// at transition time.
+func (r *postgresOrderRepository) FindExpiredReservations(
+	ctx context.Context, gracePeriod time.Duration, limit int,
+) ([]domain.ExpiredReservation, error) {
+	const sqlStmt = `
+		SELECT id, EXTRACT(EPOCH FROM (NOW() - reserved_until))
+		  FROM orders
+		 WHERE status = 'awaiting_payment'
+		   AND reserved_until <= NOW() - $1::interval
+		 ORDER BY reserved_until ASC
+		 LIMIT $2`
+
+	intervalLit := fmt.Sprintf("%f seconds", gracePeriod.Seconds())
+
+	rows, err := r.exec.QueryContext(ctx, sqlStmt, intervalLit, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orderRepository.FindExpiredReservations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.ExpiredReservation
+	for rows.Next() {
+		var id uuid.UUID
+		var ageSeconds float64
+		if err := rows.Scan(&id, &ageSeconds); err != nil {
+			return nil, fmt.Errorf("orderRepository.FindExpiredReservations scan: %w", err)
+		}
+		out = append(out, domain.ExpiredReservation{
+			ID:  id,
+			Age: time.Duration(ageSeconds * float64(time.Second)),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orderRepository.FindExpiredReservations rows: %w", err)
+	}
+	return out, nil
+}
+
+// CountOverdueAfterCutoff returns the count of awaiting_payment rows
+// still past `NOW() - gracePeriod` AND the age of the oldest such row.
+// Used by the D6 sweeper at the END of each tick (post-resolve) to
+// populate the backlog gauges.
+//
+// Single SQL round-trip via `MIN(reserved_until)` + `COUNT(*)` with
+// the same predicate as FindExpiredReservations — same partial index,
+// same plan shape. When count is 0, oldestAge is also 0 (zero
+// `time.Duration`); `MIN()` of an empty set is NULL but `COALESCE`
+// folds it into 0 so the caller doesn't have to special-case.
+//
+// Failure contract (see `internal/application/expiry/sweeper.go`):
+// caller increments `expiry_find_expired_errors_total`, leaves the
+// backlog gauges at last-known-good, and returns the error from
+// `Sweep`. Already-transitioned rows in the same tick are NOT rolled
+// back — count is post-UoW observability.
+func (r *postgresOrderRepository) CountOverdueAfterCutoff(
+	ctx context.Context, gracePeriod time.Duration,
+) (count int, oldestAge time.Duration, err error) {
+	const sqlStmt = `
+		SELECT COUNT(*),
+		       COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(reserved_until))), 0)
+		  FROM orders
+		 WHERE status = 'awaiting_payment'
+		   AND reserved_until <= NOW() - $1::interval`
+
+	intervalLit := fmt.Sprintf("%f seconds", gracePeriod.Seconds())
+
+	var oldestAgeSeconds float64
+	if err := r.exec.QueryRowContext(ctx, sqlStmt, intervalLit).Scan(&count, &oldestAgeSeconds); err != nil {
+		return 0, 0, fmt.Errorf("orderRepository.CountOverdueAfterCutoff: %w", err)
+	}
+	return count, time.Duration(oldestAgeSeconds * float64(time.Second)), nil
+}
+
 // MarkCharging atomically transitions Pending → Charging. The intent
 // log entry — written before the payment service calls the gateway
 // so a separate recon process can resolve stuck-mid-flight orders

@@ -62,6 +62,14 @@ func main() {
 	// operator mental model.
 	sagaWatchdogCmd.Flags().Bool("once", false, "Run a single sweep then exit (for k8s CronJob hosting)")
 
+	expirySweeperCmd := &cobra.Command{
+		Use:   "expiry-sweeper",
+		Short: "Run the D6 reservation expiry sweeper (transitions overdue awaiting_payment → expired, emits order.failed for saga compensation)",
+		Run:   runExpirySweeper,
+	}
+	// Same --once / loop semantics as recon + saga-watchdog.
+	expirySweeperCmd.Flags().Bool("once", false, "Run a single sweep then exit (for k8s CronJob hosting)")
+
 	stressCmd := &cobra.Command{Use: "stress", Short: "Run stress test", Run: runStress}
 	stressCmd.Flags().IntP("concurrency", "c", 1000, "Concurrency level")
 	stressCmd.Flags().IntP("requests", "n", 2000, "Total requests")
@@ -69,7 +77,7 @@ func main() {
 	stressCmd.Flags().String("ticket-type-id", "", "TicketType UUID (v7) to book against — required, obtain from `ticket_types[0].id` in the POST /api/v1/events response (D4.1+)")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd, sagaWatchdogCmd)
+	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
