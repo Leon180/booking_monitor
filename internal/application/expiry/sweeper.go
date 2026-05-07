@@ -259,10 +259,11 @@ func (s *Sweeper) resolve(parent context.Context, e domain.ExpiredReservation) {
 	}
 
 	// 3. MaxAge labeling (round-1 P1 contract: NOT skipping). Compute
-	// the outcome label ahead of the UoW so a failure inside still
-	// records the right `expired_overaged` vs `expired` dimension on
-	// the dedicated max-age counter (alert is on that counter, not
-	// on the resolved-vector outcome).
+	// `overAged` once, ahead of the UoW; the boolean drives BOTH the
+	// pre-UoW operator-awareness log AND the post-UoW outcome label
+	// (`expired_overaged` vs `expired`) on the success branch. The
+	// counter `IncMaxAgeExceeded()` only fires on commit (round-3 P2
+	// fix) — see the comment block in the if-overAged body below.
 	overAged := e.Age > s.cfg.MaxAge
 	if overAged {
 		s.log.Warn(parent, "expiry sweeper: row exceeds MaxAge but will still expire (operator awareness only)",
