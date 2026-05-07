@@ -4,16 +4,39 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
-## [Unreleased] — Phase 3 (Pattern A + 4-version comparison + portfolio narrative)
+## [Unreleased] — Phase 3 closeout (D7 saga narrow + minimal demo polish + portfolio narrative)
 
-Planned per [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md). High-level scope:
+Remaining scope per [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md):
 
-- **Pattern A core (D1-D7)**: split `POST /book` into reservation + `POST /pay` + `POST /webhook/payment`, reservation TTL expiry sweeper, saga compensator scope narrowed to `{expired, payment_failed}`. Brings the booking flow into Stripe Checkout / KKTIX shape.
+- **D7** — `payment_worker` stops being a saga consumer for the happy path; saga compensator scope narrows to `{expired, payment_failed}`. Cleans up the legacy A4 transitions.
 - **D12 4-version comparison harness**: `cmd/booking-cli-stage{1,2,3,4}` binaries against the same `internal/` packages. Markdown comparison report per benchmark run; this is the senior-interview architectural-evolution talking point.
 - **Minimal demo polish (D8-minimal, D9-minimal, D10-minimal)**: single Stripe Elements page, k6 scenario for two-step flow, asciinema terminal walkthrough. NO admin dashboard, NO React Flow animation.
-- **Portfolio narrative (D14, D15, D16)**: README mermaid architecture diagrams, multi-post `docs/blog/` series with hybrid-STAR template, this CHANGELOG + retroactive tags + GitHub Releases page.
+- **Portfolio narrative (D14, D15, D16)**: README mermaid architecture diagrams (already underway — D5 + D6 corrected the Pattern-A flow diagram), multi-post `docs/blog/` series with hybrid-STAR template, retroactive tags + GitHub Releases page.
 
-Will land as v0.5.0 when Pattern A is complete, v1.0.0 when all of Phase 3 is complete.
+Will land as v1.0.0 when all of Phase 3 is complete.
+
+## [0.5.0] — 2026-05-07 — Pattern A end-to-end (D1–D6)
+
+Closes the v0.5.0 demo arc — the customer-facing booking flow now matches Stripe Checkout / KKTIX shape. The legacy `POST /book` auto-charge path is split into three stages: reservation hold (D1–D3), Stripe-shape `PaymentIntent` creation (D4 / D4.1), and provider webhook resolution (D5). The previously-missing piece — what happens when the customer abandons checkout — closes via D6's reservation expiry sweeper.
+
+End-to-end runtime against the Docker stack: `book → /pay → confirm OR expire → paid OR compensated`.
+
+### Added
+- **D1** ([#84](https://github.com/Leon180/booking_monitor/pull/84)) — Schema migration 000012: `event_sections`, `orders.section_id`, `orders.reserved_until`, `orders.payment_intent_id`, `events.reservation_window_seconds`, partial index `idx_orders_awaiting_payment_reserved_until` (consumed by D6).
+- **D2** ([#85](https://github.com/Leon180/booking_monitor/pull/85)) — Domain state machine: additive Pattern A transitions `Pending → AwaitingPayment → Paid | Expired | PaymentFailed → Compensated`. Legacy A4 edges retained until D7.
+- **D3** ([#86](https://github.com/Leon180/booking_monitor/pull/86)) — `POST /api/v1/book` returns 202 with `status:"reserved"` + `reserved_until` + `links.pay`. Worker persists row as `awaiting_payment` (no auto-charge).
+- **D4** ([#87](https://github.com/Leon180/booking_monitor/pull/87)) — `POST /api/v1/orders/:id/pay` creates Stripe-shape `PaymentIntent`. Idempotent on `order_id` (gateway-side `Idempotency-Key` convention).
+- **D4.1** ([#89](https://github.com/Leon180/booking_monitor/pull/89)) — KKTIX 票種 model: `event_sections` → `event_ticket_types`, price snapshot frozen at book time on `orders.amount_cents` / `currency`, `BOOKING_DEFAULT_TICKET_PRICE_CENTS` global removed.
+- **PR-Cache** ([#90](https://github.com/Leon180/booking_monitor/pull/90), superseded) — Read-through cache for `TicketTypeRepository.GetByID` recovered the −40% sold-out RPS regression D4.1 introduced.
+- **PR-Lua-Meta** ([#91](https://github.com/Leon180/booking_monitor/pull/91)) — Moved ticket-type immutable metadata into Redis (`ticket_type_meta:{id}` HASH consumed directly by `deduct.lua`). Single Redis round-trip per booking; +13% RPS / -28% p95 vs the cache decorator. Cache decorator deleted.
+- **D5** ([#92](https://github.com/Leon180/booking_monitor/pull/92)) — `POST /webhook/payment`: HMAC-SHA256 signature verifier (Stripe convention), order resolution via `metadata.order_id` primary + `payment_intent_id` fallback, intent-mismatch guard, race-aware `MarkPaid` SQL (`reserved_until > NOW()` predicate), late-success refund path with `detected_at` label split (service_check / sql_predicate / post_terminal). 7 new metrics, 4 new alerts. Mock confirm test endpoint gated by `ENABLE_TEST_ENDPOINTS`. Migration 000015 partial unique index on `orders.payment_intent_id`.
+- **D6** ([#94](https://github.com/Leon180/booking_monitor/pull/94)) — `booking-cli expiry-sweeper` subcommand. DB-NOW SQL form `WHERE reserved_until <= NOW() - $1::interval` shares time source with D5's MarkPaid predicate. **MaxAge does NOT gate the transition** (saga's "Redis state unknown" rationale doesn't apply to D6, which never touches Redis directly); MaxAge is observability-only via `expired_overaged` outcome label + dedicated `expiry_max_age_total` counter (counter fires only on commit). Per-row UoW `MarkExpired + Outbox.Create` mirrors D5's `handleLateSuccess`. 7 new metrics + 4 new alerts. Round-3 F2 contract: post-sweep count failure holds gauges at last-known-good.
+
+### Demo arc
+The end-to-end flow can be exercised against the Docker stack via `scripts/d6_smoke.sh` (book → never confirm → poll until compensated → verify `event_ticket_types.available_tickets` baseline restored). Smoke uses `BOOKING_RESERVATION_WINDOW=20s` override for ~62s total cycle time.
+
+### Tagged off `main`
+Commit `a0da8a8` (D6 merge). 4 plan-rounds + 4 implementation-review-rounds of Codex feedback baked in across D5 + D6.
 
 ## [0.4.0] — 2026-05-03 — Cache-truth architecture
 

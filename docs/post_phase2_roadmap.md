@@ -6,7 +6,8 @@ Forward-looking sprint plan, written 2026-04-30 immediately after the Phase 2 ch
 
 - **Phase 2 done**: PRs #45 (charging two-phase intent log + reconciler) → #46 (streams obs + DLQ MINID) → #47 (response shape + GET /orders/:id) → #48 (N4 idempotency fingerprint) → #49 (A5 saga watchdog + checkpoint framework).
 - **First project-review checkpoint completed**: [`docs/checkpoints/20260430-phase2-review.md`](checkpoints/20260430-phase2-review.md). Grade A−. Findings split between a focused cleanup PR (Critical + cheap-Important) and 8 deferred follow-up PRs.
-- **Next user goal**: make the project **demo-able** as a real e-commerce flash-sale flow. User has chosen **Pattern A** (Stripe Checkout / KKTIX style: split `POST /book` → `POST /orders/:id/pay` with reservation TTL + webhook receiver). See backlog §13.1.
+- **`v0.5.0` shipped 2026-05-07** — Pattern A D1–D6 complete: reservation + payment intent + webhook + expiry sweeper. End-to-end flow `book → /pay → confirm OR expire → paid OR compensated` runs against the Docker stack. See [CHANGELOG.md §0.5.0](../CHANGELOG.md) for the per-PR ledger.
+- **Next user goal**: D7 (saga scope narrowing — payment_worker stops being a saga consumer for the happy path, scope narrows to `{expired, payment_failed}`) + D8-minimal (Stripe Elements demo page) + D12 4-version comparison harness. See backlog §13.1 + the sequence below.
 
 ## Sequence
 

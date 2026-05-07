@@ -152,7 +152,7 @@ sequenceDiagram
 
 D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga compensator 負責(透過 `saga:reverted:order:<id>` SETNX 保證冪等)。形狀跟 D5 失敗路徑一樣;D6 不會直接呼叫 `revert.lua`。
 
-`v0.5.0` 在這個流程完成時打 tag(D1–D6)。
+**`v0.5.0` 已於 2026-05-07 出版** — Pattern A D1–D6 完成;上述流程在 Docker stack 上端到端可跑。
 
 ## 特色
 
