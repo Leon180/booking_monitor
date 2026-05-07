@@ -59,3 +59,10 @@ docs/benchmarks/20260412_*/
 docs/benchmarks/20260413_*/
 docs/benchmarks/20261*/
 docs/benchmarks/2027*/
+
+# D8 browser demo (Vite + React + TS at demo/) — node_modules + build
+# output are derived from package.json + sources; never commit them.
+demo/node_modules/
+demo/dist/
+demo/.env
+demo/.env.local

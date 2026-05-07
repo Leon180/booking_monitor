@@ -202,6 +202,30 @@ D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga co
    make reset-db
    ```
 
+## 瀏覽器 Demo(D8-minimal)
+
+[demo/](demo/) 底下的單頁 Vite + React + TS 應用在已跑起來的 stack 上,把整套 Pattern A 流程(book → pay-or-let-expire → terminal)端到端跑一輪。**僅 mock** — confirm 那一步走 `POST /test/payment/confirm/:order_id`(伺服器端偽造一筆已簽章的 webhook),沒有真的接 Stripe gateway。真 Stripe 整合留給 D4.2。
+
+```bash
+# 1. 把 API stack 跟 CORS、test endpoints 一起開起來
+# APP_ENV=development 必設:docker-compose.yml 會把
+# APP_ENV=${APP_ENV:-production} 傳進 container,而這個 env 值會
+# 覆蓋 config/config.yml(cleanenv 優先序:env > yaml)。沒設的話
+# container 會以 production 啟動,然後拒絕 ENABLE_TEST_ENDPOINTS。
+export APP_ENV=development
+export CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+export ENABLE_TEST_ENDPOINTS=true
+export PAYMENT_WEBHOOK_SECRET=demo_secret_local_only
+docker compose up -d
+
+# 2. 啟動 demo 的 dev server
+cd demo
+npm install   # 第一次跑才需要 — Node ≥ 20.19
+npm run dev   # http://localhost:5173
+```
+
+完整流程說明、intent-aware 顯示的設計理由([demo/src/intent.ts](demo/src/intent.ts))與 `(intent, observed_status) → display` 對應表都在 [demo/README.md](demo/README.md)。
+
 ## API 端點
 
 | Method | Path | 說明 |
@@ -339,6 +363,7 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 - [Project Specification](docs/PROJECT_SPEC.zh-TW.md) — 完整系統規格(中文)
 - [Project Specification (EN)](docs/PROJECT_SPEC.md) — 完整系統規格(英文)
 - [Post-Phase-2 Roadmap](docs/post_phase2_roadmap.md) — **目前的 sprint plan + Pattern A demo 順序**(「下一步要做什麼」的權威來源)
+- [Browser Demo](demo/README.md) — **D8-minimal** Vite + React + TS 應用:book → pay → confirm/let-expire 端到端
 - [Project Review Checkpoints](docs/checkpoints/) — 各個 phase 邊界的全專案審計報告
 - [Scaling Roadmap](docs/scaling_roadmap.md) — 歷史性的 Stage 1-4 架構演進敘事
 - [Architecture (Current)](docs/architecture/current_monolith.md) — 目前架構的 Mermaid 圖

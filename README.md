@@ -202,6 +202,30 @@ D6's job is timing — when does the row expire. The saga compensator owns inven
    make reset-db
    ```
 
+## Browser Demo (D8-minimal)
+
+A single-page Vite + React + TS app at [demo/](demo/) exercises the full Pattern A flow (book → pay-or-let-expire → terminal) end-to-end against the running stack. Mock-only — confirm step goes through `POST /test/payment/confirm/:order_id` (forges a signed webhook), not a real Stripe gateway. Real-Stripe wiring is deferred to D4.2.
+
+```bash
+# 1. Start the API stack with CORS + test endpoints enabled
+# APP_ENV=development is required: docker-compose.yml passes
+# APP_ENV=${APP_ENV:-production} into the container, which wins over
+# config/config.yml (cleanenv precedence: env > yaml). Without this
+# the container starts as production and rejects ENABLE_TEST_ENDPOINTS.
+export APP_ENV=development
+export CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+export ENABLE_TEST_ENDPOINTS=true
+export PAYMENT_WEBHOOK_SECRET=demo_secret_local_only
+docker compose up -d
+
+# 2. Run the demo dev server
+cd demo
+npm install   # first time only — Node ≥ 20.19
+npm run dev   # http://localhost:5173
+```
+
+See [demo/README.md](demo/README.md) for the full flow walkthrough, intent-aware display rationale ([demo/src/intent.ts](demo/src/intent.ts)), and the `(intent, observed_status) → display` mapping.
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -339,6 +363,7 @@ Architecture-evolution snapshot (early phases — for narrative, not current num
 
 - [Project Specification](docs/PROJECT_SPEC.md) - Comprehensive system spec
 - [Post-Phase-2 Roadmap](docs/post_phase2_roadmap.md) - **Active sprint plan + Pattern A demo sequence** (canonical for "what's next")
+- [Browser Demo](demo/README.md) - **D8-minimal** Vite + React + TS app: book → pay → confirm/let-expire end-to-end
 - [Project Review Checkpoints](docs/checkpoints/) - Whole-project audit reports at phase boundaries
 - [Scaling Roadmap](docs/scaling_roadmap.md) - Historical Stage 1-4 architecture evolution narrative
 - [Architecture (Current)](docs/architecture/current_monolith.md) - Mermaid diagram
