@@ -152,7 +152,7 @@ sequenceDiagram
 
 D6's job is timing — when does the row expire. The saga compensator owns inventory revert (idempotent via `saga:reverted:order:<id>` SETNX). Same shape as D5's failure path; D6 doesn't call `revert.lua` directly.
 
-`v0.5.0` ships with this flow complete (D1–D6).
+**`v0.5.0` shipped 2026-05-07** — Pattern A D1–D6 complete; the flow above runs end-to-end against the Docker stack.
 
 ## Features
 
