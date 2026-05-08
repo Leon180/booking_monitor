@@ -12,7 +12,7 @@ Before D1 the project had the legacy A4 path: `POST /book` came in, the worker p
 
 What was wrong with this? **The flow put charge inside the saga system — treating the success path as if it were an event that needed compensation**. The mature shape used by Stripe Checkout, KKTIX, Eventbrite isn't this — they split charge into "server creates a PaymentIntent → client completes confirm with `client_secret` → server passively receives a webhook". Strong Customer Authentication (PSD2, mandatory 2019) makes charge inherently asynchronous; the server shouldn't be synchronously waiting on this flow.
 
-We added Pattern A in D1-D6 [1]: reservation TTL, payment intent, webhook signature verification, expiry sweeper. D7 deleted the legacy A4 auto-charge path entirely — 800+ LOC, the saga compensator's set of triggers shrank from three sources to two (D5 webhook, D6 sweeper).
+We added Pattern A in D1-D6 [1]: reservation TTL, payment intent, webhook signature verification, expiry sweeper. D7 deleted the legacy A4 auto-charge path entirely — 800+ LOC, the saga compensator's production triggers narrowed to D5 webhook + D6 expiry sweeper (with recon force-fail remaining as a rare fallback for stuck-charging orders that didn't resolve via gateway probe).
 
 This post's central claim: **D7 isn't engineering hygiene (deletion-as-cleanup), it's a return to the design intent of Garcia-Molina & Salem's 1987 saga paper §5 — saga shouldn't manage the happy path** [6].
 
@@ -69,12 +69,15 @@ Conclusion: pure forward recovery is feasible, eliminating the need for
             compensating transactions entirely
 ```
 
-**The happy path (book → pay → succeed) satisfies all three conditions**:
-- Each Tᵢ has retry built in (worker PEL, Stripe webhook re-delivery)
-- "Cancel the entire saga" isn't a possible event on the happy path — whether the customer continues isn't something the server can decide
-- Each Tᵢ retried enough times will succeed (this is what idempotency-key + race-aware SQL guarantee)
+**For executions classified as still-on-happy-path, the three §5 conditions hold within that subset**:
 
-**Conclusion**: the happy path doesn't need compensating transactions at all. Putting it in the saga system is an architectural mismatch.
+- **Save-points / retry**: each Tᵢ has retry built in (worker PEL, Stripe webhook re-delivery); state advances are persisted at each step
+- **No abort-saga**: server-side has no command that says "cancel this saga"; the customer's progression (or non-progression) is observed externally, not internally commanded
+- **Convergent retries**: idempotency-key + race-aware SQL ensure retries don't double-charge or split state. Provider-side eventual `succeeded` is the *precondition* for staying in the classification — not something we guarantee
+
+Executions that exit this classification — provider declines, customer abandons, TTL expires — are routed to §4 backward recovery via D5 (`payment_failed`) / D6 (`expired`). Those aren't §5 violations; they're a different recovery mode in the same paper, and we handle them with compensating transactions.
+
+**Conclusion**: for the happy-path classification, compensating transactions aren't needed at all. Putting that subset in the saga system is an architectural mismatch.
 
 D7 fixes that mismatch — the happy path moves to the forward path (webhook → MarkPaid), entirely bypassing the saga compensator. Saga scope narrows to the failure path only (D5 webhook payment_failed + D6 expiry + recon force-fail).
 
@@ -118,7 +121,7 @@ sequenceDiagram
     GW->>WH: payment_intent.succeeded (late!)
     WH->>DB: UPDATE WHERE status='awaiting_payment' AND reserved_until > NOW()
     DB-->>WH: 0 rows affected
-    Note over WH: PaymentWebhookLateSuccess path<br/>emit order.failed + manual-refund alert
+    Note over WH: handleLateSuccess: MarkExpired<br/>→ ErrInvalidTransition (D6 already did it)<br/>→ re-read terminal, idempotent return<br/>(NO duplicate order.failed — D6 already emitted)<br/>+ payment_webhook_late_success_total{detected_at="sql_predicate"}<br/>+ manual-refund alert
 
     Note over SW,GW: Scenario 2 — D5 payment_failed wins
     GW->>WH: payment_intent.payment_failed
