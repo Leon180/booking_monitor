@@ -62,7 +62,7 @@ deploy/                   # Postgres migrations (15), Redis Lua, Nginx, Promethe
 
 ### Architecture Evolution
 
-The current Stage 4 didn't appear all at once. Each layer was added in response to a benchmark-documented bottleneck — the four-stage progression below is the architecture-evolution story you can walk through commit-by-commit on the [Releases page](https://github.com/Leon180/booking_monitor/releases).
+The architecture didn't appear all at once. Each layer was added in response to a benchmark-documented bottleneck — the four-stage progression below tells the v0.1.0→v0.4.0 evolution story (Stage 4 = the v0.2.0–v0.4.0 milestone *before* v0.6.0's D7 narrowed it). Walk through it commit-by-commit on the [Releases page](https://github.com/Leon180/booking_monitor/releases); the [top-level diagram](#architecture) above shows the current post-D7 shape.
 
 **Stage 1 — synchronous baseline.** API → Postgres `SELECT FOR UPDATE`. Saturates well below 1k req/s due to row-lock contention. The C500 benchmark on [v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) documented this ceiling.
 
@@ -91,7 +91,7 @@ flowchart LR
     W3 -->|INSERT| P3[(Postgres)]
 ```
 
-**Stage 4 — full event-driven (current).** Worker writes order + outbox in one UoW; advisory-lock-leadered relay pushes to Kafka; payment service + saga compensator are independent consumers. This is the architecture released as [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) and hardened through [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0).
+**Stage 4 — full event-driven (v0.2.0–v0.4.0; pre-D7 historical).** Worker writes order + outbox in one UoW; advisory-lock-leadered relay pushes to Kafka; payment service + saga compensator are independent Kafka consumers. This is the architecture released as [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) and hardened through [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0). [v0.6.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0)'s D7 then narrowed this — worker writes only the order row (no `order.created` outbox emit), the `payment_worker` binary is gone, and the saga consumer/compensator runs in-process inside `app`. See the [top-level diagram](#architecture) for the current shape; the diagram below is preserved as the v0.2.0–v0.4.0 milestone reference (and what `cmd/booking-cli-stage4/` will benchmark in D12).
 
 ```mermaid
 flowchart LR

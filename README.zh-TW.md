@@ -62,7 +62,7 @@ deploy/                   # Postgres migrations(15 個)、Redis Lua、Nginx、Pr
 
 ### 架構演進
 
-目前的 Stage 4 不是一次到位的。每一層都是為了解決上一層 benchmark 量化出來的瓶頸 — 下面四個階段的演進就是可以照著 [Releases page](https://github.com/Leon180/booking_monitor/releases) 一個 commit 一個 commit 走過去的故事。
+這個架構不是一次到位的。每一層都是為了解決上一層 benchmark 量化出來的瓶頸 — 下面四個階段是 v0.1.0→v0.4.0 的演進故事(Stage 4 = v0.2.0–v0.4.0 的里程碑,**還沒被 v0.6.0 的 D7 收窄**前)。可以照著 [Releases page](https://github.com/Leon180/booking_monitor/releases) 一個 commit 一個 commit 走過去;當前(post-D7)的形狀則由上方 [top-level diagram](#系統架構) 呈現。
 
 **Stage 1 — 同步 baseline。** API → Postgres `SELECT FOR UPDATE`。在 1k req/s 以下就因為 row-lock 爭用飽和。[v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) 的 C500 benchmark 紀錄了這個天花板。
 
@@ -91,7 +91,7 @@ flowchart LR
     W3 -->|INSERT| P3[(Postgres)]
 ```
 
-**Stage 4 — 完整 event-driven(目前)。** Worker 在一個 UoW 裡同時寫 order 跟 outbox;advisory-lock 選出來的 leader relay 推訊息到 Kafka;payment service + saga compensator 是各自獨立的 consumer。就是 [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) 釋出、再經過 [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) 強化的這個架構。
+**Stage 4 — 完整 event-driven(v0.2.0–v0.4.0;pre-D7 歷史版本)。** Worker 在一個 UoW 裡同時寫 order 跟 outbox;advisory-lock 選出來的 leader relay 推訊息到 Kafka;payment service + saga compensator 是各自獨立的 Kafka consumer。就是 [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) 釋出、再經過 [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) 強化的架構。[v0.6.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0) 的 D7 之後把它再收窄 — worker 只寫 order 一筆(不再 emit `order.created` outbox)、`payment_worker` binary 移除、saga consumer/compensator 改在 `app` 行程內執行。當前形狀請看上面的 [top-level diagram](#系統架構);下方的圖刻意保留作為 v0.2.0–v0.4.0 的里程碑參考(也是 D12 中 `cmd/booking-cli-stage4/` 要 benchmark 的版本)。
 
 ```mermaid
 flowchart LR
