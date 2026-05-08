@@ -18,7 +18,7 @@
 
 對應的部落格文章 [`docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md`](../blog/2026-05-saga-pure-forward-recovery.zh-TW.md)([EN](../blog/2026-05-saga-pure-forward-recovery.md))解釋了這些階段背後的架構脈絡。
 
-## 播放(等 .cast 上來之後)
+## 播放
 
 ```bash
 # 安裝 asciinema(host-side,只裝一次)

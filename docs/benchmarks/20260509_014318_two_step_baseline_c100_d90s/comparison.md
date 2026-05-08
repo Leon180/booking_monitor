@@ -79,7 +79,7 @@ What this metric DID prove: **the round-2 split between `expired_seen` and `comp
 
 ### 3. business_errors threshold breach is real signal, not flake
 
-The 5% threshold was set in `scripts/k6_two_step_flow.js` based on "any single workflow stage failing should be rare." 9.72% is dominated by saga-backed-up abandons (90 of 91 errors). With ABANDON_RATIO=0.0 (pure happy path) the threshold would pass — confirms this is an abandon-load-specific limitation, not a hot-path correctness regression.
+The 5% threshold was set in `scripts/k6_two_step_flow.js` based on "any single workflow stage failing should be rare." 9.72% is dominated by abandon workflows that observed `expired` but not `compensated` within the iteration's poll window (90 of 91 errors fit this shape; see §2 for what the data does and doesn't prove about the cause). With ABANDON_RATIO=0.0 (pure happy path) the threshold would pass — confirms this is an abandon-load-specific limitation, not a hot-path correctness regression.
 
 ## Future runs
 

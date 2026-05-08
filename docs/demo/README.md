@@ -18,7 +18,7 @@ Three phases (~3 minutes total):
 
 The companion blog post [`docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md`](../blog/2026-05-saga-pure-forward-recovery.zh-TW.md) ([EN](../blog/2026-05-saga-pure-forward-recovery.md)) explains the architectural rationale these phases demonstrate.
 
-## Replay (once the .cast lands)
+## Replay
 
 ```bash
 # Install asciinema (one-time, host-side)
