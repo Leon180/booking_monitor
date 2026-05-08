@@ -4,7 +4,7 @@ A 3-minute asciinema recording of the full Pattern A flow against the running st
 
 ## What's here
 
-- [`walkthrough.cast`](walkthrough.cast) — asciinema recording of [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) running against a fresh stack. Plain JSON; commits as text. (Generated artifact — see "Re-recording" below if missing or stale.)
+- `walkthrough.cast` — **PENDING**: asciinema recording of [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) running against a fresh stack. Plain JSON; commits as text. The infrastructure (script, Makefile target, env recipe) ships in PR #102; the `.cast` itself lands in a follow-up commit because recording requires host-side `brew install asciinema` + an interactive session. See "Recording" below to capture it.
 
 ## What the recording shows
 
@@ -16,7 +16,7 @@ Three phases (~3 minutes total):
 
 The companion blog post [`docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md`](../blog/2026-05-saga-pure-forward-recovery.zh-TW.md) ([EN](../blog/2026-05-saga-pure-forward-recovery.md)) explains the architectural rationale these phases demonstrate.
 
-## Replay
+## Replay (once the .cast lands)
 
 ```bash
 # Install asciinema (one-time, host-side)
@@ -31,7 +31,7 @@ asciinema play -s 2 docs/demo/walkthrough.cast
 
 The `.cast` format is plain JSON — readable in any text editor for spot-inspection.
 
-## Re-recording
+## Recording (or re-recording)
 
 When the underlying flow changes (new states, new endpoints, new env semantics), re-record:
 

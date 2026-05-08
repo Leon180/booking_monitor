@@ -52,7 +52,27 @@ require_cmd() {
 }
 require_cmd curl
 require_cmd jq
-require_cmd psql
+# psql is OPTIONAL — only used in two informational DB-audit steps below
+# (Phase 3 status_history query + final inventory check). Both already
+# fall back to a "psql skipped" message if absent, so we don't gate the
+# whole walkthrough on having the postgres client installed.
+
+# Wait for the stack to pass /livez + /readyz before the first action.
+# Without this, `docker compose up -d` returns before the app is healthy,
+# and the first `POST /events` can hit nginx during its 502 window.
+wait_for_ready() {
+    local deadline=$(( $(date +%s) + 60 ))
+    while (( $(date +%s) < deadline )); do
+        if curl -sSf "${API_ORIGIN}/livez" >/dev/null 2>&1 \
+            && curl -sSf "${API_ORIGIN}/readyz" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "ERROR: stack at ${API_ORIGIN} didn't pass /livez + /readyz within 60s" >&2
+    echo "Hint: run 'make demo-up' first; verify nginx is up + app is healthy." >&2
+    return 1
+}
 
 # Reusable helpers
 create_event() {
@@ -110,6 +130,11 @@ cat <<'EOF'
 ║  (BOOKING_RESERVATION_WINDOW=20s, EXPIRY_SWEEP_INTERVAL=5s)  ║
 ╚══════════════════════════════════════════════════════════════╝
 EOF
+pause
+
+step "Wait for stack to be ready (livez + readyz)"
+wait_for_ready
+echo "  stack ready at ${API_ORIGIN}"
 pause
 
 step "Create an event with 3 tickets, $20 each"
@@ -190,19 +215,27 @@ echo ""
 echo "  status=$ABANDON_FINAL"
 pause
 
-note "Step 3.3 — DB audit trail confirms the saga path actually fired"
-psql "$PG_CONN" -c \
-    "SELECT from_status, to_status, transitioned_at FROM order_status_history WHERE order_id = '$ABANDON_ID' ORDER BY transitioned_at;" 2>/dev/null \
-    || echo "(psql skipped — set PG_CONN to enable audit query)"
+note "Step 3.3 — DB audit trail confirms the saga path actually fired (optional; needs psql)"
+if command -v psql >/dev/null 2>&1; then
+    psql "$PG_CONN" -c \
+        "SELECT from_status, to_status, transitioned_at FROM order_status_history WHERE order_id = '$ABANDON_ID' ORDER BY transitioned_at;" 2>/dev/null \
+        || echo "(psql query failed — verify PG_CONN points at the running db)"
+else
+    echo "(skipped — psql not installed; brew install postgresql to enable)"
+fi
 pause
 
 # ──────────────────────────────────────────────────────────────
-step "Final inventory check — all 3 tickets accounted for"
+step "Final inventory check — all 3 tickets accounted for (optional; needs psql)"
 # ──────────────────────────────────────────────────────────────
 
-psql "$PG_CONN" -c \
-    "SELECT id, available_tickets FROM event_ticket_types WHERE id = '$TT_ID';" 2>/dev/null \
-    || echo "(psql skipped)"
+if command -v psql >/dev/null 2>&1; then
+    psql "$PG_CONN" -c \
+        "SELECT id, available_tickets FROM event_ticket_types WHERE id = '$TT_ID';" 2>/dev/null \
+        || echo "(psql query failed — verify PG_CONN points at the running db)"
+else
+    echo "(skipped — psql not installed; brew install postgresql to enable)"
+fi
 
 cat <<'EOF'
 

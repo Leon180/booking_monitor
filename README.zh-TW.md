@@ -226,7 +226,7 @@ npm run dev   # http://localhost:5173
 
 ## 終端機 walkthrough(D10-minimal)
 
-3 分鐘的終端機 walkthrough,涵蓋 Pattern A 三條完整路徑 — happy path、payment-failed、abandon→expiry — 收錄在 [`docs/demo/walkthrough.cast`](docs/demo/walkthrough.cast)。用 `asciinema play docs/demo/walkthrough.cast` 播放(先 `brew install asciinema`)。`.cast` 是純 JSON,當文字 commit。
+3 分鐘的終端機 walkthrough,跑完 Pattern A 三條完整路徑 — happy path、payment-failed、abandon→expiry。基礎設施(script、Makefile target、env recipe)在這個 branch 出版;`.cast` 錄影本身會在 follow-up commit 上來(因為要先 host-side `brew install asciinema` + 一次互動式錄製)。播放跟重錄的步驟請見 [`docs/demo/README.md`](docs/demo/README.md)。
 
 從零重現:
 

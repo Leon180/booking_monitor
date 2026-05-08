@@ -87,15 +87,32 @@ bench-two-step: ## D9 — k6 two-step flow benchmark (usage: make bench-two-step
 # because docker compose reuses existing containers with the OLD env value.
 demo-up: ## D10 — bring up the demo stack (CORS + test endpoints + 20s reservation + 5s sweep)
 	@echo "Starting demo stack with: APP_ENV=development, ENABLE_TEST_ENDPOINTS, BOOKING_RESERVATION_WINDOW=20s, EXPIRY_SWEEP_INTERVAL=5s"
+	@# nginx is included so http://localhost:80 (the host-published surface
+	@# the walkthrough + scripts target by default) is actually reachable —
+	@# the `app` service publishes pprof:6060 only, NOT 8080.
 	@APP_ENV=development \
 	  CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
 	  ENABLE_TEST_ENDPOINTS=true \
 	  PAYMENT_WEBHOOK_SECRET=demo_secret_local_only \
 	  BOOKING_RESERVATION_WINDOW=20s \
 	  EXPIRY_SWEEP_INTERVAL=5s \
-	  docker compose up -d --force-recreate app expiry_sweeper
+	  docker compose up -d --force-recreate app expiry_sweeper nginx
 	@echo ""
-	@echo "Stack ready. Try:"
+	@echo "Waiting for stack to be ready (livez + readyz via nginx)..."
+	@for i in $$(seq 1 60); do \
+	  if curl -sSf http://localhost/livez >/dev/null 2>&1 \
+	      && curl -sSf http://localhost/readyz >/dev/null 2>&1; then \
+	    echo "Stack ready at http://localhost"; \
+	    break; \
+	  fi; \
+	  if [ $$i = 60 ]; then \
+	    echo "ERROR: stack didn't pass /livez + /readyz within 60s"; \
+	    exit 1; \
+	  fi; \
+	  sleep 1; \
+	done
+	@echo ""
+	@echo "Try:"
 	@echo "  scripts/d10_demo_walkthrough.sh             # terminal walkthrough"
 	@echo "  asciinema rec docs/demo/walkthrough.cast \\"
 	@echo "    --command='scripts/d10_demo_walkthrough.sh'  # record"

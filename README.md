@@ -226,7 +226,7 @@ See [demo/README.md](demo/README.md) for the full flow walkthrough, intent-aware
 
 ## Terminal walkthrough (D10-minimal)
 
-For a 3-minute terminal-only walkthrough showing the full Pattern A flow — happy path, payment-failed, and abandon→expiry — see the asciinema recording at [`docs/demo/walkthrough.cast`](docs/demo/walkthrough.cast). Plays via `asciinema play docs/demo/walkthrough.cast` (`brew install asciinema` first). The `.cast` format is plain JSON, committed as text.
+A 3-minute terminal-only walkthrough exercising the full Pattern A flow — happy path, payment-failed, and abandon→expiry. The infrastructure ships in this branch; the `.cast` recording itself lands in a follow-up commit (it needs host-side `brew install asciinema` + an interactive session). See [`docs/demo/README.md`](docs/demo/README.md) for replay + recording recipes.
 
 Reproducible from scratch:
 
