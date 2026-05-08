@@ -6,7 +6,7 @@ A 3-minute asciinema recording of the full Pattern A flow against the running st
 
 ## What's here
 
-- `walkthrough.cast` — **PENDING**: asciinema recording of [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) running against a fresh stack. Plain JSON; commits as text. The infrastructure (script, Makefile target, env recipe) ships in PR #102; the `.cast` itself lands in a follow-up commit because recording requires host-side `brew install asciinema` + an interactive session. See "Recording" below to capture it.
+- [`walkthrough.cast`](walkthrough.cast) — asciinema recording of [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) running against a fresh stack. Plain JSON; committed as text. Captured in PR #103 (against the post-D7 stack image); see "Recording (or re-recording)" below to refresh it after script changes.
 
 ## What the recording shows
 
