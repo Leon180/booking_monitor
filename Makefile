@@ -96,7 +96,7 @@ demo-up: ## D10 — bring up the demo stack (CORS + test endpoints + 20s reserva
 	  PAYMENT_WEBHOOK_SECRET=demo_secret_local_only \
 	  BOOKING_RESERVATION_WINDOW=20s \
 	  EXPIRY_SWEEP_INTERVAL=5s \
-	  docker compose up -d --force-recreate app expiry_sweeper nginx
+	  docker compose up -d --build --force-recreate app expiry_sweeper nginx
 	@echo ""
 	@echo "Waiting for stack to be ready (livez + readyz via nginx)..."
 	@for i in $$(seq 1 60); do \

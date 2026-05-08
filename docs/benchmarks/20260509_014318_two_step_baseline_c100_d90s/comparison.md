@@ -51,6 +51,8 @@ iterations completed:        936
 
 Sold-out (409) was 0 — the 50k pool wasn't depleted (936 iterations × 1 ticket = 0.5% of pool; HTTP-layer 4.4% `http_req_failed` is from polling 404s during the brief async-processing window, expected).
 
+> **Note on `accepted_bookings=1009` vs `iterations=936`**: k6 reports `accepted_bookings/s = 8.41` over its full wall-clock window (120s, including the 30s graceful-stop period after the 90s VU-active phase). The 73-iteration gap (1009 − 936) is iterations that took a `book` step but were interrupted by graceful-stop before reaching any terminal path — those bookings were `202`-accepted server-side (and the worker did persist them as `awaiting_payment`), but the k6 iteration didn't observe their terminal state. The conservation table above sums to `936` because it counts only iterations that reached terminal observation; the 73 interrupted bookings live as `awaiting_payment` rows in PG until the D6 expiry sweeper compensates them. This is consistent with Pattern A's design (server keeps state regardless of client disconnect) but worth flagging so future readers don't trip on the `1009` vs `936` discrepancy.
+
 ## Analysis
 
 ### 1. Happy path is healthy

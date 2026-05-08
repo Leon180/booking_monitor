@@ -69,8 +69,21 @@ wait_for_ready() {
         fi
         sleep 1
     done
-    echo "ERROR: stack at ${API_ORIGIN} didn't pass /livez + /readyz within 60s" >&2
-    echo "Hint: run 'make demo-up' first; verify nginx is up + app is healthy." >&2
+    # Surface the actual curl error from a final probe — `curl: (7) Failed to
+    # connect... Connection refused` and `curl: (6) Could not resolve host`
+    # and a 503 from /readyz are very different operational states; the
+    # original generic "didn't pass within 60s" message swallowed the
+    # distinction. This final attempt prints curl's diagnostic to stderr so
+    # the recording viewer can see exactly which mode the stack was in.
+    {
+        echo "ERROR: stack at ${API_ORIGIN} didn't pass /livez + /readyz within 60s"
+        echo "Final probe diagnostics (curl error / HTTP code per endpoint):"
+        curl -sS --max-time 3 "${API_ORIGIN}/livez" \
+            -o /dev/null -w '  /livez:  HTTP %{http_code}\n' 2>&1 || true
+        curl -sS --max-time 3 "${API_ORIGIN}/readyz" \
+            -o /dev/null -w '  /readyz: HTTP %{http_code}\n' 2>&1 || true
+        echo "Hint: run 'make demo-up' first; verify nginx is up + app is healthy."
+    } >&2
     return 1
 }
 
