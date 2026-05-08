@@ -109,14 +109,15 @@ poll_until_terminal() {
         local status
         status=$(get_order "$order_id" | jq -r '.status // empty')
         if [[ "$status" == "$expected" ]]; then
-            echo "$status"
+            echo "$status"   # stdout = return value (captured by callers via $())
             return 0
         fi
-        # Progress dots so the recording shows activity during polling.
-        printf '.'
+        # Progress dots → stderr so they show in the recording even when
+        # the call is wrapped in $(). stdout is reserved for the captured
+        # return value.
+        printf '.' >&2
         sleep 1
     done
-    echo ""
     return 1
 }
 
@@ -125,18 +126,27 @@ poll_until_terminal() {
 # continuing to a misleading success banner. asciinema records the
 # failure visibly so a broken stack / saga consumer / disabled test
 # endpoint is obvious to anyone playing the cast back.
+#
+# stdout is reserved for the captured return value (the terminal status
+# string). All FAIL banner + diagnostic output goes to stderr so it's
+# visible in the recording even when the caller wraps the assertion in
+# `$(...)` (which would otherwise capture-and-suppress it; combined
+# with `set -e` the outer script would exit before the captured banner
+# was ever printed).
 assert_terminal() {
     local phase="$1" order_id="$2" expected="$3" timeout_s="$4"
     local result
     if ! result=$(poll_until_terminal "$order_id" "$expected" "$timeout_s"); then
-        echo ""
-        printf '\033[1;31m❌ FAIL: %s — order %s did not reach %s within %ss\033[0m\n' \
-            "$phase" "$order_id" "$expected" "$timeout_s"
-        echo "    Likely causes:"
-        echo "      - stack unhealthy (rerun 'make demo-up' for fresh /livez+/readyz check)"
-        echo "      - ENABLE_TEST_ENDPOINTS=false / APP_ENV=production (test webhook 404)"
-        echo "      - saga compensator down or backed up"
-        echo "      - D6 expiry sweeper not running with EXPIRY_SWEEP_INTERVAL=5s"
+        {
+            echo ""
+            printf '\033[1;31m❌ FAIL: %s — order %s did not reach %s within %ss\033[0m\n' \
+                "$phase" "$order_id" "$expected" "$timeout_s"
+            echo "    Likely causes:"
+            echo "      - stack unhealthy (rerun 'make demo-up' for fresh /livez+/readyz check)"
+            echo "      - ENABLE_TEST_ENDPOINTS=false / APP_ENV=production (test webhook 404)"
+            echo "      - saga compensator down or backed up"
+            echo "      - D6 expiry sweeper not running with EXPIRY_SWEEP_INTERVAL=5s"
+        } >&2
         exit 1
     fi
     echo "$result"
@@ -146,6 +156,10 @@ assert_terminal() {
 # /test/payment/confirm is disabled (production env or
 # ENABLE_TEST_ENDPOINTS=false) BEFORE the script wastes 30s polling for
 # a paid status that will never arrive.
+#
+# Same stderr discipline as assert_terminal: success message ("HTTP
+# $code") to stdout for inline display; FAIL banner to stderr so a
+# future caller wrapping this in `$()` still gets the visible failure.
 assert_confirm() {
     local order_id="$1" outcome="$2"
     local code
@@ -155,11 +169,13 @@ assert_confirm() {
             echo "  HTTP $code"
             ;;
         *)
-            echo ""
-            printf '\033[1;31m❌ FAIL: confirm endpoint returned %s (expected 2xx)\033[0m\n' "$code"
-            echo "    Likely causes:"
-            echo "      - APP_ENV=production (test endpoints rejected at startup)"
-            echo "      - ENABLE_TEST_ENDPOINTS=false (default; demo-up should set true)"
+            {
+                echo ""
+                printf '\033[1;31m❌ FAIL: confirm endpoint returned %s (expected 2xx)\033[0m\n' "$code"
+                echo "    Likely causes:"
+                echo "      - APP_ENV=production (test endpoints rejected at startup)"
+                echo "      - ENABLE_TEST_ENDPOINTS=false (default; demo-up should set true)"
+            } >&2
             exit 1
             ;;
     esac
