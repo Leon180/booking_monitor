@@ -38,9 +38,12 @@ bin/
 # hid every file under cmd/booking-cli/ — every PR that added a
 # new file there had to use `git add -f` to override.
 /bin/booking-cli
-# Stray binary from `go build ./cmd/booking-cli` (no -o flag) at repo
-# root. Anchored so cmd/booking-cli/ stays tracked.
+# Stray binaries from `go build ./cmd/booking-cli[-stageN]` (no -o flag)
+# at repo root. Anchored so cmd/booking-cli/ stays tracked.
 /booking-cli
+/booking-cli-stage1
+/booking-cli-stage2
+/booking-cli-stage3
 
 # Claude Code runtime artifacts (scheduled-task locks, etc.) — not
 # project state; per-machine.
