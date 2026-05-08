@@ -120,6 +120,51 @@ poll_until_terminal() {
     return 1
 }
 
+# Hard assertion wrapping poll_until_terminal — fails the recording
+# loudly instead of swallowing the timeout into a "TIMEOUT" string and
+# continuing to a misleading success banner. asciinema records the
+# failure visibly so a broken stack / saga consumer / disabled test
+# endpoint is obvious to anyone playing the cast back.
+assert_terminal() {
+    local phase="$1" order_id="$2" expected="$3" timeout_s="$4"
+    local result
+    if ! result=$(poll_until_terminal "$order_id" "$expected" "$timeout_s"); then
+        echo ""
+        printf '\033[1;31m❌ FAIL: %s — order %s did not reach %s within %ss\033[0m\n' \
+            "$phase" "$order_id" "$expected" "$timeout_s"
+        echo "    Likely causes:"
+        echo "      - stack unhealthy (rerun 'make demo-up' for fresh /livez+/readyz check)"
+        echo "      - ENABLE_TEST_ENDPOINTS=false / APP_ENV=production (test webhook 404)"
+        echo "      - saga compensator down or backed up"
+        echo "      - D6 expiry sweeper not running with EXPIRY_SWEEP_INTERVAL=5s"
+        exit 1
+    fi
+    echo "$result"
+}
+
+# Hard assertion on confirm endpoint HTTP code — catches the case where
+# /test/payment/confirm is disabled (production env or
+# ENABLE_TEST_ENDPOINTS=false) BEFORE the script wastes 30s polling for
+# a paid status that will never arrive.
+assert_confirm() {
+    local order_id="$1" outcome="$2"
+    local code
+    code=$(confirm "$order_id" "$outcome")
+    case "$code" in
+        200|202|204)
+            echo "  HTTP $code"
+            ;;
+        *)
+            echo ""
+            printf '\033[1;31m❌ FAIL: confirm endpoint returned %s (expected 2xx)\033[0m\n' "$code"
+            echo "    Likely causes:"
+            echo "      - APP_ENV=production (test endpoints rejected at startup)"
+            echo "      - ENABLE_TEST_ENDPOINTS=false (default; demo-up should set true)"
+            exit 1
+            ;;
+    esac
+}
+
 clear
 cat <<'EOF'
 ╔══════════════════════════════════════════════════════════════╗
@@ -162,11 +207,11 @@ pay "$HAPPY_ID" | jq
 pause
 
 note "Step 1.4 — POST /test/payment/confirm fires a signed webhook (test endpoint)"
-confirm "$HAPPY_ID" succeeded
+assert_confirm "$HAPPY_ID" succeeded
 pause
 
 note "Step 1.5 — poll until paid"
-HAPPY_FINAL=$(poll_until_terminal "$HAPPY_ID" paid 30 || echo "TIMEOUT")
+HAPPY_FINAL=$(assert_terminal "Phase 1 (happy)" "$HAPPY_ID" paid 30)
 echo "  status=$HAPPY_FINAL"
 get_order "$HAPPY_ID" | jq '{order_id, status, amount_cents}'
 pause
@@ -188,11 +233,11 @@ echo "  PaymentIntent created"
 pause
 
 note "Step 2.3 — confirm-FAILED webhook → MarkPaymentFailed → emit order.failed"
-confirm "$FAIL_ID" failed
+assert_confirm "$FAIL_ID" failed
 pause
 
 note "Step 2.4 — poll until compensated (saga reverted Redis inventory)"
-FAIL_FINAL=$(poll_until_terminal "$FAIL_ID" compensated 30 || echo "TIMEOUT")
+FAIL_FINAL=$(assert_terminal "Phase 2 (payment-failed)" "$FAIL_ID" compensated 30)
 echo "  status=$FAIL_FINAL"
 pause
 
@@ -210,7 +255,7 @@ pause
 
 note "Step 3.2 — wait for D6 expiry sweeper (5s interval) + saga compensation"
 echo "  expecting: ~25s for window + sweep tick + saga round-trip"
-ABANDON_FINAL=$(poll_until_terminal "$ABANDON_ID" compensated 60 || echo "TIMEOUT")
+ABANDON_FINAL=$(assert_terminal "Phase 3 (abandon)" "$ABANDON_ID" compensated 60)
 echo ""
 echo "  status=$ABANDON_FINAL"
 pause

@@ -28,10 +28,18 @@
 //   accepted_bookings              counter  202 from POST /book
 //   payment_intents_created        counter  200 from POST /pay
 //   paid_orders                    counter  status=paid observed via polling
-//   compensated_abandons           counter  status ∈ {expired, compensated} observed
-//                                           (k6 polling cadence may miss the brief
-//                                           expired→compensated transition; we
-//                                           treat both as the abandon terminal)
+//   compensated_abandons           counter  status=compensated observed (saga ran;
+//                                           Redis inventory reverted). Increments
+//                                           ONLY at the true Pattern A abandon
+//                                           terminal — `expired` alone doesn't
+//                                           prove compensation, only that D6 fired.
+//   expired_seen                   counter  observability-only: `expired` was
+//                                           observed transiently during the
+//                                           expired→compensated edge. May be 0
+//                                           if k6 polling cadence missed the
+//                                           transient window — that's fine; the
+//                                           authoritative abandon outcome is
+//                                           compensated_abandons.
 //   book_to_reserved_duration      trend    p95 from 202 → first non-404 GET /orders
 //   reserved_to_paid_duration      trend    p95 from /pay 200 → first paid status
 //   end_to_end_paid_duration       trend    book → paid, full timeline
@@ -45,6 +53,7 @@ export const acceptedBookings = new Counter('accepted_bookings');
 export const paymentIntentsCreated = new Counter('payment_intents_created');
 export const paidOrders = new Counter('paid_orders');
 export const compensatedAbandons = new Counter('compensated_abandons');
+export const expiredSeen = new Counter('expired_seen');
 export const bookToReserved = new Trend('book_to_reserved_duration', true);
 export const reservedToPaid = new Trend('reserved_to_paid_duration', true);
 export const endToEndPaid = new Trend('end_to_end_paid_duration', true);
@@ -104,16 +113,24 @@ export function setup() {
     return { ticketTypeID };
 }
 
-// Poll an order's status until terminal-or-target or timeout.
+// Poll an order's status until isTerminal returns true, or timeout.
+// onObservation (optional) is called with each observed status — useful
+// for tracking transient states the caller wants to observe but not gate
+// the return on (e.g. `expired` on the way to `compensated`).
 // Returns { status, elapsedMs } or null on timeout.
-function pollOrder(orderID, isTerminal) {
+function pollOrder(orderID, isTerminal, onObservation) {
     const start = Date.now();
     while (Date.now() - start < POLL_TIMEOUT_MS) {
         const res = http.get(`${v1Base}/orders/${orderID}`);
         if (res.status === 200) {
             const body = res.json();
-            if (body && body.status && isTerminal(body.status)) {
-                return { status: body.status, elapsedMs: Date.now() - start };
+            if (body && body.status) {
+                if (onObservation) {
+                    onObservation(body.status);
+                }
+                if (isTerminal(body.status)) {
+                    return { status: body.status, elapsedMs: Date.now() - start };
+                }
             }
         }
         // 404 during the brief async-processing window is expected — keep polling.
@@ -165,13 +182,25 @@ export default function (data) {
     const abandon = Math.random() < ABANDON_RATIO;
 
     if (abandon) {
-        // Abandon path: don't pay. Wait for D6 expiry sweeper + saga compensation.
-        // Terminal observation accepts both `expired` and `compensated` because
-        // k6 polling cadence (POLL_INTERVAL_MS) may miss the brief expired→compensated
-        // edge. Both are valid end states for the abandon outcome.
-        const abandonResult = pollOrder(orderID, (s) =>
-            s === 'expired' || s === 'compensated'
+        // Abandon path: don't pay. Wait for D6 expiry sweeper → saga compensator.
+        // Authoritative terminal is `compensated` ONLY — `expired` proves only
+        // that D6 fired, not that saga compensation ran. Tracking `expired`
+        // transient observations into a separate counter so a broken/backed-up
+        // saga consumer surfaces as "expired_seen high, compensated_abandons low"
+        // instead of looking successful.
+        let sawExpired = false;
+        const abandonResult = pollOrder(
+            orderID,
+            (s) => s === 'compensated',
+            (s) => {
+                if (s === 'expired') {
+                    sawExpired = true;
+                }
+            },
         );
+        if (sawExpired) {
+            expiredSeen.add(1);
+        }
         if (abandonResult) {
             compensatedAbandons.add(1);
         } else {
