@@ -120,8 +120,15 @@ Constraint: UNIQUE(user_id, event_id) WHERE status != 'failed'
 **OutboxEvent** (`internal/domain/event.go`)
 ```
 ID, EventType, Payload (JSON), Status, ProcessedAt
-Types: order.created, order.failed
+Types: order.failed
 ```
+
+> Pre-D7 there was a second event type, `order.created`, written by
+> the booking UoW and consumed by the legacy A4 `payment_worker`.
+> D7 (2026-05-08) deleted the producer + consumer; `order.failed` is
+> now the only `EventType` shipped, with three production emitters
+> (D5 webhook on `payment_failed`, D6 expiry sweeper on `expired`,
+> recon's `failOrder` on stuck-charging force-fails — rare).
 
 ### Ports (interfaces consumed by application services)
 
@@ -1065,8 +1072,10 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | `internal/domain/inventory.go` | InventoryRepository interface |
 | `internal/domain/queue.go` | OrderQueue interface |
 | `internal/application/messaging.go` | EventPublisher interface (moved from domain in CP2.5 — pure transport port, no domain semantics) |
-| `internal/domain/payment.go` | PaymentGateway interface (true domain port — external integration boundary) |
-| `internal/application/payment_service.go` | PaymentService interface + ErrInvalidPaymentEvent (moved from domain in PR #38 — accepts `*OrderCreatedEvent`, an application-layer wire DTO) |
+| `internal/domain/payment.go` | PaymentGateway = `PaymentStatusReader` + `PaymentIntentCreator` composition (true domain port — external integration boundary). Pre-D7 also had a `PaymentCharger` half (deleted with the legacy A4 auto-charge path on 2026-05-08). |
+| `internal/application/payment/port.go` | `payment.Service` interface (`CreatePaymentIntent` only post-D7) + `ErrOrderNotAwaitingPayment` / `ErrReservationExpired` / `ErrOrderMissingPriceSnapshot` sentinels. Pre-D7 the interface also had `ProcessOrder(*OrderCreatedEvent)` and an `ErrInvalidPaymentEvent` sentinel; both deleted with the legacy A4 path. |
+| `internal/application/payment/service.go` | `payment.NewService` constructor + `CreatePaymentIntent` impl. The `gateway` parameter is the narrow `domain.PaymentIntentCreator` (not the combined `PaymentGateway`); fx provider in `cmd/booking-cli/server.go` advertises that narrow type via `fx.As`. |
+| `internal/application/payment/webhook_service.go` | D5 `WebhookService.Handle(envelope)` — verify HMAC + dispatch + race-aware MarkPaid / MarkPaymentFailed UoW. The actual money-movement surface in Pattern A. |
 | `internal/application/lock.go` | DistributedLock interface (moved from domain in CP2.5 — pure leader-election port, no domain semantics) |
 | `internal/domain/idempotency.go` | IdempotencyRepository interface |
 | `internal/domain/uow.go` | UnitOfWork interface |

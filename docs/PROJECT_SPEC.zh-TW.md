@@ -113,8 +113,14 @@ ID, EventID, UserID, Quantity, Status, CreatedAt
 **OutboxEvent**(`internal/domain/event.go`)
 ```
 ID, EventType, Payload (JSON), Status, ProcessedAt
-Types: order.created, order.failed
+Types: order.failed
 ```
+
+> D7 之前 outbox 還有第二個 event type:`order.created`,由 booking UoW
+> 寫入,給舊的 A4 `payment_worker` 消費。D7(2026-05-08)把 producer 跟
+> consumer 一起刪了,目前唯一會發出去的 `EventType` 就是 `order.failed`,
+> 共有三個 production 來源(D5 webhook 的 `payment_failed`、D6 expiry
+> sweeper 的 `expired`、recon `failOrder` 處理卡住的 charging — 罕見)。
 
 ### Ports(application service 消費的介面)
 
@@ -1048,8 +1054,10 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | `internal/domain/inventory.go` | InventoryRepository 介面 |
 | `internal/domain/queue.go` | OrderQueue 介面 |
 | `internal/application/messaging.go` | EventPublisher 介面(CP2.5 從 domain 搬過來 — 純粹的傳輸 port,沒有領域語意) |
-| `internal/domain/payment.go` | PaymentGateway 介面(真正的領域 port — 外部整合邊界) |
-| `internal/application/payment_service.go` | PaymentService 介面 + ErrInvalidPaymentEvent(PR #38 從 domain 搬過來 — 接受 `*OrderCreatedEvent`,屬於應用層的 wire DTO) |
+| `internal/domain/payment.go` | PaymentGateway = `PaymentStatusReader` + `PaymentIntentCreator` 的組合介面(真正的領域 port — 外部整合邊界)。D7 之前還有第三半 `PaymentCharger`,2026-05-08 連同舊的 A4 自動扣款路徑一起刪了。 |
+| `internal/application/payment/port.go` | `payment.Service` 介面(D7 之後只剩 `CreatePaymentIntent`)+ `ErrOrderNotAwaitingPayment` / `ErrReservationExpired` / `ErrOrderMissingPriceSnapshot` 三個 sentinel。D7 之前介面還有 `ProcessOrder(*OrderCreatedEvent)` 跟 `ErrInvalidPaymentEvent`;兩個都跟舊 A4 路徑一起被刪了。 |
+| `internal/application/payment/service.go` | `payment.NewService` 建構子 + `CreatePaymentIntent` 實作。`gateway` 參數型別是窄化過的 `domain.PaymentIntentCreator`(不是組合的 `PaymentGateway`);`cmd/booking-cli/server.go` 的 fx provider 用 `fx.As` 直接 advertise 這個窄介面。 |
+| `internal/application/payment/webhook_service.go` | D5 `WebhookService.Handle(envelope)` — HMAC 驗章 + 分派 + race-aware MarkPaid / MarkPaymentFailed UoW。Pattern A 真正搬錢的表層。 |
 | `internal/application/lock.go` | DistributedLock 介面(CP2.5 從 domain 搬過來 — 純粹的領導者選舉 port,沒有領域語意) |
 | `internal/domain/idempotency.go` | IdempotencyRepository 介面 |
 | `internal/domain/uow.go` | UnitOfWork 介面 |

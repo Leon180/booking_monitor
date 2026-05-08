@@ -343,12 +343,15 @@ docker exec booking_db psql -U booking -d booking -c \
 # Kafka 一掛,relay 的 Publish() 就會失敗,MarkProcessed 跳過,列累積起來。
 # `outbox_pending_count` 越過 100 門檻,並維持高於門檻直到 Kafka 回來為止。
 # 等 ~6m(告警 `for: 5m`)。
-# 清理:
-#   docker compose start kafka
+# 清理 — 先 DELETE 假列,再把 Kafka 開回來。如果反過來先開 Kafka,relay
+# 下一次輪詢會搶在 DELETE 之前把這些假 payload publish 出去並標記
+# processed,saga consumer 收到沒有真實 order_id 的 `order.failed` 訊息後
+# 會 retry-storm 或進 DLQ。順序:
 #   docker exec booking_db psql -U booking -d booking -c \
 #     "DELETE FROM events_outbox WHERE payload->>'probe' = 'true';"
-# (Kafka 一回來,relay 在數秒內就會追上;DELETE 只是把那些假列移掉,不然
-# 它們會以沒有真實 order_id 的形式留在 `order.failed` topic 上。)
+#   docker compose start kafka
+# (Kafka 一回來,relay 在數秒內就會把真正 pending 的列追上;假列在那之前
+# 就已經被刪掉了。)
 
 # OutboxPendingCollectorDown — 把 postgres 短暫停掉讓 COUNT 查詢失敗。
 # 等 ~2m 後 OutboxPendingCollectorDown 觸發;postgres 回來後一個 scrape 內就會解除。

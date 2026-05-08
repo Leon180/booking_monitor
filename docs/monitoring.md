@@ -345,13 +345,16 @@ docker exec booking_db psql -U booking -d booking -c \
 # skipped, and the rows accumulate. `outbox_pending_count` rises
 # above the 100 threshold and stays elevated until you bring Kafka
 # back. Wait ~6m (alert has `for: 5m`).
-# Cleanup:
-#   docker compose start kafka
+# Cleanup — DELETE the probe rows BEFORE bringing Kafka back. If you
+# start Kafka first, the relay's next poll tick publishes the bogus
+# payloads and marks them processed before the DELETE lands; the
+# saga consumer then receives invalid `order.failed` messages with
+# no real order_id and either retry-storms or DLQs them. Order:
 #   docker exec booking_db psql -U booking -d booking -c \
 #     "DELETE FROM events_outbox WHERE payload->>'probe' = 'true';"
-# (The relay catches up within seconds once Kafka returns; the
-# DELETE just removes the bogus rows that would otherwise sit on the
-# `order.failed` topic with no real order_id.)
+#   docker compose start kafka
+# (The relay catches up on real pending rows within seconds once
+# Kafka returns; the probe rows are gone before it runs.)
 
 # OutboxPendingCollectorDown — break the COUNT query by stopping postgres
 # briefly. After ~2m the OutboxPendingCollectorDown fires; postgres
