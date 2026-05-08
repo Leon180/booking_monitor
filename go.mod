@@ -4,10 +4,11 @@ go 1.25.0
 
 // Pin the toolchain to the latest 1.25 patch so CI builds (and any
 // developer using `go install` / `go run` against this module) get
-// stdlib CVE patches automatically — govulncheck flags 18+ stdlib
-// vulns fixed across 1.25.1–1.25.9 if the toolchain isn't bumped.
-// Bump in lockstep with the Dockerfile's `golang:1.25-alpine` tag.
-toolchain go1.25.9
+// stdlib CVE patches automatically — govulncheck flags 4 stdlib
+// vulns fixed in 1.25.10 (GO-2026-4918, -4971, -4977, -4986) if the
+// toolchain isn't bumped. Bump in lockstep with the Dockerfile's
+// `golang:1.25-alpine` tag.
+toolchain go1.25.10
 
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1
