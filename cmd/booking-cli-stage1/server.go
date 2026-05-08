@@ -380,9 +380,19 @@ func handlePayIntent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 		}
 
 		// Generate + persist a fresh intent. Filter on
-		// payment_intent_id IS NULL so a concurrent /pay can't
-		// double-write; if RowsAffected = 0 we lost the race —
-		// re-read and return the winner's id.
+		//   payment_intent_id IS NULL  — concurrent /pay can't double-write
+		//   status = 'awaiting_payment' — terminal states reject
+		//   reserved_until > NOW()     — atomic TTL guard (Codex slice-4 P2)
+		//
+		// The reserved_until guard MUST live in the UPDATE itself, not
+		// only in the eligibility read above. Without it, a race window
+		// exists where the read sees TTL valid but the write happens
+		// after expiry — the UPDATE's loose predicate would still match
+		// (status hasn't flipped to expired yet because nothing has run
+		// the expiry sweeper) and Stage 1 would silently persist an
+		// intent for an expired reservation. Stage 4's SetPaymentIntentID
+		// has the same predicate; matching it here keeps the comparison
+		// benchmark from measuring a looser payment contract in Stage 1.
 		intentSuffix, err := uuid.NewV7()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "mint intent id"})
@@ -394,7 +404,8 @@ func handlePayIntent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 			   SET payment_intent_id = $1
 			 WHERE id = $2
 			   AND payment_intent_id IS NULL
-			   AND status = 'awaiting_payment'`,
+			   AND status = 'awaiting_payment'
+			   AND reserved_until > NOW()`,
 			intentID, orderID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "persist intent"})
@@ -402,11 +413,50 @@ func handlePayIntent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 		}
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			// Race: another /pay won. Re-read.
-			if err = db.QueryRowContext(c.Request.Context(),
-				"SELECT payment_intent_id FROM orders WHERE id = $1",
-				orderID).Scan(&currentIntent); err == nil && currentIntent.Valid {
-				intentID = currentIntent.String
+			// RowsAffected=0 disambiguation. Three causes:
+			//   (a) concurrent /pay won — row now has an intent; return it idempotently
+			//   (b) reserved_until elapsed between read and write — return 409 expired
+			//   (c) status changed terminal (paid/compensated/expired/payment_failed)
+			//       between read and write — return 409 not eligible
+			// Re-read all three fields to figure out which case we're in.
+			var (
+				reReadStatus    string
+				reReadIntent    sql.NullString
+				reReadReservedAt time.Time
+			)
+			err = db.QueryRowContext(c.Request.Context(), `
+				SELECT status, payment_intent_id, reserved_until
+				  FROM orders
+				 WHERE id = $1`,
+				orderID).Scan(&reReadStatus, &reReadIntent, &reReadReservedAt)
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+				return
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "re-read order after race"})
+				return
+			}
+			if reReadStatus != string(domain.OrderStatusAwaitingPayment) {
+				c.JSON(http.StatusConflict, gin.H{"error": "order not in awaiting_payment state: " + reReadStatus})
+				return
+			}
+			if !time.Now().Before(reReadReservedAt) {
+				c.JSON(http.StatusConflict, gin.H{"error": "reservation expired"})
+				return
+			}
+			// Status is awaiting_payment + reserved_until still future —
+			// the only remaining cause is (a) concurrent /pay won.
+			if reReadIntent.Valid && reReadIntent.String != "" {
+				intentID = reReadIntent.String
+			} else {
+				// Defensive: shouldn't be reachable. Our UPDATE only
+				// matches payment_intent_id IS NULL, so if the row is
+				// awaiting_payment + reserved_until > NOW() and intent
+				// is still NULL, the UPDATE should have matched. Surface
+				// as 500 so a regression in this shape is not silent.
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "race fallback: unexpected null intent on eligible row"})
+				return
 			}
 		}
 
