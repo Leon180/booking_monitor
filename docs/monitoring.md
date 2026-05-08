@@ -328,18 +328,30 @@ docker stop booking_recon
 # Wait 2m+ (alert has `for: 2m`).
 # Cleanup: docker start booking_recon → up returns to 1 within one scrape (15s).
 
-# OutboxPendingBacklog — directly INSERT 200 unprocessed outbox rows.
-# Bypass the relay's normal poll cadence by pushing rows that look like
-# legitimate `order.created` events but have NO matching DB order row
-# (the rows fail to publish silently because the JSON payload isn't
-# tied to a real order; they sit pending). Faster than killing the
-# relay container, and cleanup is a single DELETE.
+# OutboxPendingBacklog — block the relay's publish path so injected
+# rows stay pending. Post-D7 (2026-05-08) the previous recipe (just
+# INSERT bogus rows + wait) no longer works: the relay doesn't
+# validate payload shape, Kafka auto-topic-creation accepts the writes,
+# and `processed_at` gets set within one tick → the gauge dips back
+# below threshold before the alert's `for: 5m` window arms.
+#
+# Block Kafka first, THEN inject:
+docker compose stop kafka
 docker exec booking_db psql -U booking -d booking -c \
   "INSERT INTO events_outbox (id, event_type, payload, status)
-   SELECT gen_random_uuid(), 'order.created', '{\"probe\":true}'::jsonb, 'PENDING'
+   SELECT gen_random_uuid(), 'order.failed', '{\"probe\":true}'::jsonb, 'PENDING'
    FROM generate_series(1, 200);"
-# Default sweep + alert `for: 5m`, so wait ~6m and check Prometheus → Alerts.
-# Cleanup: DELETE FROM events_outbox WHERE payload->>'probe' = 'true';
+# With Kafka down, the relay's Publish() fails, MarkProcessed is
+# skipped, and the rows accumulate. `outbox_pending_count` rises
+# above the 100 threshold and stays elevated until you bring Kafka
+# back. Wait ~6m (alert has `for: 5m`).
+# Cleanup:
+#   docker compose start kafka
+#   docker exec booking_db psql -U booking -d booking -c \
+#     "DELETE FROM events_outbox WHERE payload->>'probe' = 'true';"
+# (The relay catches up within seconds once Kafka returns; the
+# DELETE just removes the bogus rows that would otherwise sit on the
+# `order.failed` topic with no real order_id.)
 
 # OutboxPendingCollectorDown — break the COUNT query by stopping postgres
 # briefly. After ~2m the OutboxPendingCollectorDown fires; postgres

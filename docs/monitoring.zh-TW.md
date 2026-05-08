@@ -328,16 +328,27 @@ docker stop booking_recon
 # 等 2m+(告警 `for: 2m`)。
 # 清理:docker start booking_recon → up 在一個 scrape(15s)內就會回到 1。
 
-# OutboxPendingBacklog —直接 INSERT 200 筆未處理的 outbox 列。繞過 relay 正常的
-# poll 節奏,塞進去看起來像合法 `order.created` 事件、但沒有對應 DB orders 列的列
-# (這些列因為 JSON payload 不對應任何真實訂單而靜默 publish 不過去,留在 pending 狀態)。
-# 比殺掉 relay container 還快,清理也只要一個 DELETE。
+# OutboxPendingBacklog — 把 relay 的 publish 路徑擋住,讓塞進去的列卡在 pending。
+# D7(2026-05-08)之後,舊的食譜(直接 INSERT 假列等 alert 自己觸發)失效:
+# relay 不會驗證 payload 形狀,Kafka auto-topic-creation 接受寫入,`processed_at`
+# 在一個 tick 之內就會被設上 → gauge 在 alert 的 `for: 5m` 視窗 arm 起來之前
+# 就掉回門檻以下了。
+#
+# 先擋住 Kafka,再注入:
+docker compose stop kafka
 docker exec booking_db psql -U booking -d booking -c \
   "INSERT INTO events_outbox (id, event_type, payload, status)
-   SELECT gen_random_uuid(), 'order.created', '{\"probe\":true}'::jsonb, 'PENDING'
+   SELECT gen_random_uuid(), 'order.failed', '{\"probe\":true}'::jsonb, 'PENDING'
    FROM generate_series(1, 200);"
-# 預設 sweep + 告警 `for: 5m`,所以等 ~6m 再到 Prometheus → Alerts 看。
-# 清理:DELETE FROM events_outbox WHERE payload->>'probe' = 'true';
+# Kafka 一掛,relay 的 Publish() 就會失敗,MarkProcessed 跳過,列累積起來。
+# `outbox_pending_count` 越過 100 門檻,並維持高於門檻直到 Kafka 回來為止。
+# 等 ~6m(告警 `for: 5m`)。
+# 清理:
+#   docker compose start kafka
+#   docker exec booking_db psql -U booking -d booking -c \
+#     "DELETE FROM events_outbox WHERE payload->>'probe' = 'true';"
+# (Kafka 一回來,relay 在數秒內就會追上;DELETE 只是把那些假列移掉,不然
+# 它們會以沒有真實 order_id 的形式留在 `order.failed` topic 上。)
 
 # OutboxPendingCollectorDown — 把 postgres 短暫停掉讓 COUNT 查詢失敗。
 # 等 ~2m 後 OutboxPendingCollectorDown 觸發;postgres 回來後一個 scrape 內就會解除。

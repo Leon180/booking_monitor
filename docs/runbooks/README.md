@@ -498,17 +498,24 @@ Redis < DB by more than tolerance. Steady-state drift is positive (in-flight boo
 
 **Symptom.** `kafka_consumer_retry_total` rate > 0 for a topic over 2m. Severity `warning`. Consumer is "stuck but not dead" — leaving messages uncommitted for rebalance retry.
 
-**Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
+**Post-D7 (2026-05-08) scope.** The only Kafka consumer in the system is the in-process **saga consumer** for `order.failed` (lives inside the `app` container; see `internal/infrastructure/messaging/saga_consumer.go`). Pre-D7 the legacy `payment_worker` was a second consumer for `order.created` and shared this alert; that binary is gone. The `kafka_consumer_retry_total` metric label set narrowed to `topic=order.failed` only.
 
-**Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+**Diagnosis.** Check the downstream the saga consumer depends on:
+- **Postgres** — saga compensator's UoW (`MarkCompensated` + `IncrementTicket`) — `pg_pool_*` saturation, `pg_stat_activity` long-running tx?
+- **Redis** — `revert.lua` increments inventory + `saga:reverted:order:<id>` SETNX — Redis reachable, not OOM, not auth-rotated?
+- **Kafka** — broker reachable from `app` container? Consumer-group rebalance storms?
+
+**Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would silently mask a downstream outage and lose compensation events). Operator's job is to find and fix the downstream; once recovered, the saga consumer drains naturally. If the in-process consumer goroutine itself has died (panic), `app`'s `/livez` would still return 200 (process is up) but `/metrics` would show zero `saga_*` activity — restart `app` (`docker compose restart app`) as a last resort.
 
 ---
 
 ## OutboxPendingBacklog
 
-**Symptom.** `outbox_pending_count > 100 for 5m`. Severity `warning`. The transactional outbox is the bridge between "DB committed an `order.created` / `order.failed` event" and "Kafka downstream consumers see it" — when this fires the bridge is broken.
+**Symptom.** `outbox_pending_count > 100 for 5m`. Severity `warning`. The transactional outbox is the bridge between "DB committed an `order.failed` event" and "the saga consumer sees it" — when this fires the bridge is broken.
 
-**Why this is warning, not critical.** Customers can still book. The Redis hot path is unaffected. What's broken is the post-commit fan-out — saga compensator stops compensating, payment service stops processing, in-flight orders cannot advance from `processing` to `confirmed` / `failed`. The customer-visible damage takes minutes to surface (a 202 with no progress on `GET /orders/:id`); page-worthy via Slack/email but not phone.
+**Post-D7 scope.** Only `event_type='order.failed'` rows flow through the outbox now (D7 deleted the legacy `events_outbox(order.created)` write from the booking UoW). Three production emitters write `order.failed`: D5 webhook on `payment_failed`, D6 expiry sweeper on `expired`, recon's `failOrder` on stuck-charging force-fail (rare).
+
+**Why this is warning, not critical.** Customers can still book + pay. The Redis hot path + the `/pay` synchronous handler are unaffected. What's broken is the post-commit fan-out from D5/D6/recon to the in-process saga consumer — failed-payment compensations stall, expired-reservation compensations stall, the `failed` orders sit in `failed` status instead of advancing to `compensated`. The customer-visible damage takes minutes to surface (a declined Stripe Elements confirmation that doesn't release inventory); page-worthy via Slack/email but not phone.
 
 **Diagnosis (in order):**
 

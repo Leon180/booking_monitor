@@ -133,13 +133,16 @@ Types: order.created, order.failed
 | InventoryRepository | domain | Hot inventory deduction/reversion | Redis (Lua scripts) |
 | OrderQueue | domain | Async order stream (Enqueue/Dequeue/Ack) | Redis Streams |
 | IdempotencyRepository | domain | Request deduplication (24h TTL) | Redis |
-| PaymentGateway | domain | Charge payments | Mock (configurable success rate) |
+| PaymentGateway | domain | Compose of `PaymentStatusReader` + `PaymentIntentCreator` (kept for adapter convenience) | Mock |
+| PaymentIntentCreator | domain | Create Stripe-shape PaymentIntent (D4 `/pay` handler's port) | Mock |
+| PaymentStatusReader | domain | Read intent / charge status (recon's stuck-`charging` resolver port) | Mock |
 | EventPublisher | application | Publish to an external message bus | Kafka |
 | DistributedLock | application | Leader election | PostgreSQL advisory locks |
-| PaymentService | application | Process payment events (returns `ErrInvalidPaymentEvent` on bad input so consumers can dead-letter) | Application-layer service |
+| PaymentService (D4) | application | `CreatePaymentIntent(orderID)` — Pattern A `/pay` entry; gateway-side idempotency (no application cache); 409 on non-`awaiting_payment` | Application-layer service |
+| WebhookService (D5) | application | `Handle(envelope)` — verify HMAC, dispatch on `Envelope.Type` (`payment_intent.succeeded` / `payment_intent.payment_failed`), MarkPaid OR MarkPaymentFailed + emit `order.failed` | Application-layer service |
 | UnitOfWork | application | Transaction management | PostgreSQL |
 
-The split between `domain` and `application` packages is per-port: domain-side interfaces carry domain semantics (an `OrderRepository` knows about Orders; a `PaymentGateway` knows about charges); application-side interfaces are pure plumbing ports (`EventPublisher.Publish(topic, payload)`, `DistributedLock.TryLock(id)`) that any infrastructure adapter can satisfy. Wire-format constants like `EventTypeOrderCreated` correctly stay in domain (per coding-style rule 5) — only the *transport* port moved.
+The split between `domain` and `application` packages is per-port: domain-side interfaces carry domain semantics (an `OrderRepository` knows about Orders; `PaymentIntentCreator` knows about gateway-side intent registration); application-side interfaces are pure plumbing ports (`EventPublisher.Publish(topic, payload)`, `DistributedLock.TryLock(id)`) that any infrastructure adapter can satisfy. Wire-format constants like `EventTypeOrderFailed` correctly stay in domain (per coding-style rule 5) — only the *transport* port moved. **D7 (2026-05-08) deleted `PaymentCharger` (and `PaymentGateway.Charge`) along with the legacy A4 auto-charge path; pre-D7 `PaymentService` had a second method `ProcessOrder(*OrderCreatedEvent)` — also deleted, along with `ErrInvalidPaymentEvent` and `EventTypeOrderCreated`. Pattern A drives money movement entirely through `WebhookService` (D5) post-`/pay`-confirm.**
 
 `EventRepository.GetByID` performs a plain read; the explicit `GetByIDForUpdate` variant takes a `FOR UPDATE` row lock and MUST be called inside a UoW-managed transaction. The previously-deprecated `DeductInventory` method on `EventRepository` was removed in the remediation pass (no production callers).
 

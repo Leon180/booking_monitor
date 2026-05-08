@@ -126,13 +126,16 @@ Types: order.created, order.failed
 | InventoryRepository | domain | 熱庫存扣減/回滾 | Redis(Lua scripts) |
 | OrderQueue | domain | 非同步訂單串流(Enqueue/Dequeue/Ack) | Redis Streams |
 | IdempotencyRepository | domain | 請求去重(24 小時 TTL) | Redis |
-| PaymentGateway | domain | 扣款 | Mock(可設定成功率) |
+| PaymentGateway | domain | `PaymentStatusReader` + `PaymentIntentCreator` 的組合介面(留著給 adapter 同時實作兩半時使用) | Mock |
+| PaymentIntentCreator | domain | 建立 Stripe-shape PaymentIntent(D4 `/pay` handler 用的 port) | Mock |
+| PaymentStatusReader | domain | 讀 intent / charge 狀態(recon 處理卡住的 `charging` 訂單時用的 port) | Mock |
 | EventPublisher | application | 發布到外部訊息匯流排 | Kafka |
 | DistributedLock | application | 領導者選舉 | PostgreSQL advisory locks |
-| PaymentService | application | 處理付款事件(遇到無效輸入回傳 `ErrInvalidPaymentEvent`,讓 consumer 能 dead-letter) | 應用層服務 |
+| PaymentService(D4) | application | `CreatePaymentIntent(orderID)` — Pattern A `/pay` 進入點;gateway 端做冪等(application 層不需要 cache);訂單不在 `awaiting_payment` 狀態時回 409 | 應用層服務 |
+| WebhookService(D5) | application | `Handle(envelope)` — 驗 HMAC、依 `Envelope.Type`(`payment_intent.succeeded` / `payment_intent.payment_failed`)分派、MarkPaid 或 MarkPaymentFailed + emit `order.failed` | 應用層服務 |
 | UnitOfWork | application | 交易管理 | PostgreSQL |
 
-`domain` 與 `application` 套件的拆分是逐 port 來看的:`domain` 側的介面帶有領域語意(`OrderRepository` 認得 Order、`PaymentGateway` 認得扣款);`application` 側的介面則是純粹的 plumbing port(`EventPublisher.Publish(topic, payload)`、`DistributedLock.TryLock(id)`),任何基礎設施 adapter 都能滿足。wire-format 的常數如 `EventTypeOrderCreated` 仍然留在 `domain`(coding-style 規則 5)— 只有「傳輸」port 搬家了。
+`domain` 與 `application` 套件的拆分是逐 port 來看的:`domain` 側的介面帶有領域語意(`OrderRepository` 認得 Order;`PaymentIntentCreator` 認得 gateway 端的 intent 註冊);`application` 側的介面則是純粹的 plumbing port(`EventPublisher.Publish(topic, payload)`、`DistributedLock.TryLock(id)`),任何基礎設施 adapter 都能滿足。wire-format 的常數如 `EventTypeOrderFailed` 仍然留在 `domain`(coding-style 規則 5)— 只有「傳輸」port 搬家了。**D7(2026-05-08)把 `PaymentCharger`(以及 `PaymentGateway.Charge`)連同舊的 A4 自動扣款路徑一起刪了;D7 之前的 `PaymentService` 還有第二個方法 `ProcessOrder(*OrderCreatedEvent)` — 這個方法跟 `ErrInvalidPaymentEvent`、`EventTypeOrderCreated` 一起被刪掉了。Pattern A 的金流在 `/pay` confirm 之後完全交給 `WebhookService`(D5)接手。**
 
 `EventRepository.GetByID` 只做一般讀取;另外有一個獨立的 `GetByIDForUpdate` 會帶 `FOR UPDATE` row lock,必須在 UoW 管理的交易內呼叫。舊的 `DeductInventory` 方法在 remediation 階段已從介面移除(沒有 production 呼叫點)。
 
