@@ -14,7 +14,7 @@ A high-concurrency ticket booking system designed to simulate "flash sale" scena
 
 ## 2. System Architecture
 
-> **Visual overview**: see [README §Architecture](../README.md#architecture) for the current Stage 4 mermaid diagram, the [Stage 1→4 evolution walkthrough](../README.md#architecture-evolution), and the [Pattern A flow sequence diagram](../README.md#pattern-a-flow-shipped-in-v050--v060). Those diagrams reflect the **post-D7** architecture (saga consumer/compensator runs in-process inside `app`; `payment_worker` is gone). The ASCII flow + prose in this section is intentionally retained with **historical A4 context** so the architecture-evolution narrative is reachable from the spec — see the D7 deprecation callouts below for what's current vs historical.
+> **Visual overview**: the [README top-level Architecture diagram](../README.md#architecture) and the [Pattern A flow sequence diagram](../README.md#pattern-a-flow-shipped-in-v050--v060) reflect the **post-D7 current** architecture (saga consumer/compensator runs in-process inside `app`; `payment_worker` is gone). The [Stage 1→4 evolution walkthrough](../README.md#architecture-evolution) is intentionally **historical** — Stage 4 is the v0.2.0–v0.4.0 milestone *before* v0.6.0's D7 narrowed it, kept as the architecture-evolution narrative (and what `cmd/booking-cli-stage4/` will benchmark in D12). The ASCII flow + prose in this section is retained with **historical A4 context** so the same narrative is reachable from the spec — see the D7 deprecation callouts below for what's current vs historical.
 
 ```
 Client --> Nginx (rate limit: 100 req/s/IP, burst 200)
