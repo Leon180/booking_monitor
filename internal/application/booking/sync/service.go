@@ -34,11 +34,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
 )
+
+// pgUniqueViolation is the SQLSTATE code Postgres returns when a
+// unique constraint is violated (uq_orders_user_event for our
+// schema). The orderRepository's Create method maps this to
+// domain.ErrUserAlreadyBought; the direct INSERT path here mirrors
+// that mapping so the HTTP handler returns 409 (matching Stage 4)
+// instead of 500.
+const pgUniqueViolation = "23505"
 
 // Service implements booking.Service using a single Postgres
 // transaction with pessimistic SELECT FOR UPDATE. Bookings serialize
@@ -92,6 +101,22 @@ func NewService(db *sql.DB, orderRepo domain.OrderRepository, cfg *config.Config
 //   - domain.ErrInvalid*            — invariant violation surfaced
 //                                     via NewReservation
 func (s *Service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.UUID, quantity int) (domain.Order, error) {
+	// Pre-BEGIN input validation. Defense-in-depth — the API
+	// handler's binding tags already reject these, but failing fast
+	// here avoids wasting a SELECT FOR UPDATE on a request that will
+	// fail invariant validation in domain.NewReservation later.
+	// Sentinel choice mirrors NewReservation so the HTTP handler's
+	// existing mapError logic returns the same status codes.
+	if userID <= 0 {
+		return domain.Order{}, domain.ErrInvalidUserID
+	}
+	if ticketTypeID == uuid.Nil {
+		return domain.Order{}, domain.ErrInvalidOrderTicketTypeID
+	}
+	if quantity <= 0 {
+		return domain.Order{}, domain.ErrInvalidQuantity
+	}
+
 	orderID, err := uuid.NewV7()
 	if err != nil {
 		return domain.Order{}, fmt.Errorf("mint order id: %w", err)
@@ -144,22 +169,29 @@ func (s *Service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.
 	}
 
 	// Step 6: construct the domain.Order via the canonical factory.
-	// reservation reservedUntil is now() + window — same shape as
-	// Stage 4 so the API response is contract-identical.
-	reservedUntil := time.Now().Add(s.reservationWindow)
+	// reservedUntil = now() + window in UTC (matches Stage 4's row
+	// timezone semantics; Postgres TIMESTAMPTZ stores UTC internally
+	// regardless, but normalizing at the boundary keeps Go-side
+	// comparisons unambiguous).
+	reservedUntil := time.Now().Add(s.reservationWindow).UTC()
 	amountCents := priceCents * int64(quantity)
 	order, err := domain.NewReservation(orderID, userID, eventID, ticketTypeID, quantity, reservedUntil, amountCents, currency)
 	if err != nil {
 		return domain.Order{}, fmt.Errorf("construct reservation: %w", err)
 	}
 
-	// Step 7: persist the order row through the same OrderRepository
-	// the rest of the codebase uses, but inside our tx. The repo's
-	// Create method opens its own DB connection by default; for
-	// Stage 1 we need it to share our tx. The simplest path: insert
-	// directly here and skip the repo abstraction for the write.
-	// The schema is stable + the column list is short enough that an
-	// explicit INSERT is clearer than threading tx through the repo.
+	// Step 7: persist the order row through a direct INSERT inside
+	// our tx. The shared postgresOrderRepository.Create exists but
+	// opens its own DB connection by default; threading our tx into
+	// it would require either refactoring the repo's exec field
+	// (touches every other consumer) or building a tx-bound wrapper.
+	// For Stage 1's single-implementation context, the simplest path
+	// is the direct INSERT here. Critically, this MUST mirror the
+	// repository's 23505 → ErrUserAlreadyBought mapping (uq_orders_
+	// user_event partial unique index from migration 000011) so the
+	// HTTP handler returns the same 409 the rest of the system does
+	// — without this, Stage 1 would return 500 on duplicate-active-
+	// order, breaking Stage-4-contract parity (Codex round-2 P2).
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO orders (
 			id, user_id, event_id, ticket_type_id, quantity, status,
@@ -177,6 +209,10 @@ func (s *Service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.
 		order.ReservedUntil(),
 		order.CreatedAt(),
 	); err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return domain.Order{}, domain.ErrUserAlreadyBought
+		}
 		return domain.Order{}, fmt.Errorf("insert order: %w", err)
 	}
 
