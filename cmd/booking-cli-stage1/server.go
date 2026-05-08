@@ -75,8 +75,18 @@ func runServer(_ *cobra.Command, _ []string) {
 // inlined here rather than going through internal/infrastructure/api
 // because Stage 1 only has a subset of the endpoints + we don't want
 // to depend on payment/event subpackage initialization.
+//
+// fx.Shutdowner is injected so a ListenAndServe failure after OnStart
+// returns (port-already-in-use during a benchmark restart, EADDRINUSE,
+// etc.) escalates to fx.Shutdown(ExitCode(1)) instead of being logged
+// + swallowed. Without this, the comparison harness would see
+// connection-refused errors against a running fx app that has no
+// HTTP listener — failing late as benchmark errors instead of fast
+// at startup. Mirrors cmd/booking-cli/server.go's startHTTPServer
+// pattern.
 func registerHTTPServer(
 	lc fx.Lifecycle,
+	shutdowner fx.Shutdowner,
 	cfg *config.Config,
 	db *sql.DB,
 	bookingService booking.Service,
@@ -117,7 +127,15 @@ func registerHTTPServer(
 				logger.Info(context.Background(), "stage1 HTTP server starting",
 					mlog.String("addr", addr))
 				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					logger.Error(context.Background(), "stage1 HTTP server error", tag.Error(err))
+					logger.Error(context.Background(), "stage1 HTTP server failed — escalating fx.Shutdown",
+						tag.Error(err))
+					// Escalate to fx so the process exits non-zero
+					// instead of staying up with a dead listener.
+					// k8s / docker compose restart policy then cycles
+					// the container; benchmark orchestration sees a
+					// fast startup failure instead of late connection
+					// errors against a phantom server.
+					_ = shutdowner.Shutdown(fx.ExitCode(1))
 				}
 			}()
 			return nil
