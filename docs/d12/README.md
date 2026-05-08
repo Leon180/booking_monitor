@@ -11,7 +11,7 @@ D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadm
 | **1** | `cmd/booking-cli-stage1/` | API → Postgres `BEGIN; SELECT FOR UPDATE; UPDATE event_ticket_types; INSERT orders; COMMIT;` | (baseline) |
 | 2 | `cmd/booking-cli-stage2/` (PR-D12.2) | API → Redis Lua atomic deduct → SYNCHRONOUS PG INSERT | Redis hot-path inventory, no async buffering |
 | 3 | `cmd/booking-cli-stage3/` (PR-D12.3) | API → Redis Lua → `orders:stream` → worker → DB INSERT | async via stream + worker; no event-driven downstream |
-| 4 | `cmd/booking-cli/` (current; +observability in PR-D12.4) | full event-driven (Lua → stream → worker → outbox → Kafka → payment + saga) | Pattern A end-to-end |
+| 4 | `cmd/booking-cli/` (current; +observability in PR-D12.4) | API → Redis Lua → `orders:stream` → worker → DB INSERT; **money movement via** `/pay` + D5 webhook (not Kafka-driven post-D7); `order.failed` outbox → Kafka → in-process saga compensator (D5 webhook `payment_failed` + D6 expiry sweeper + recon force-fail as the only producers) | full Pattern A end-to-end with saga compensation only on the failure path |
 
 > **Stage 4 ≠ the README's "Architecture Evolution" Stage 4 diagram.** The README's evolution section labels its Stage 4 as the *historical* `v0.2.0–v0.4.0` pre-D7 architecture (`payment_worker` + `order.created` Kafka topic). D12 Stage 4 is the **current post-D7 binary** — `payment_worker` removed, saga consumer in-process inside `app`. `comparison.md` (lands in PR-D12.5) calls this out explicitly so readers don't conflate the two.
 
