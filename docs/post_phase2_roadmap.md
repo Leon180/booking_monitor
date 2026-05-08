@@ -140,8 +140,9 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
        - `v0.1.0` — Phase 1 baseline (synchronous Stage 1 + 2 architecture)
        - `v0.2.0` — Phase 1 complete + Redis Lua hot path + outbox + saga (Stage 4 architecture, pre-Phase-2)
        - `v0.3.0` — Phase 2 complete (CP1-CP9: reconciler + watchdog + checkpoints + alertmanager)
-       - `v0.4.0` — Cache-truth roadmap complete (PR #73-#77: Makefile reset / rehydrate / NOGROUP alert / drift detector / outbox backlog) ← we are HERE as of 2026-05-03
-       - `v0.5.0` — Pattern A complete (D1-D7: reservation + payment + webhook + expiry sweeper)
+       - `v0.4.0` — Cache-truth roadmap complete (PR #73-#77: Makefile reset / rehydrate / NOGROUP alert / drift detector / outbox backlog)
+       - `v0.5.0` — Pattern A core (D1-D6: reservation + payment + webhook + expiry sweeper)
+       - `v0.6.0` — D7 saga scope narrowed + D8-minimal browser demo ← we are HERE as of 2026-05-08
        - `v1.0.0` — Phase 3 complete (D1-D16: Pattern A + comparison harness + minimal frontend + CHANGELOG + blog)
        **GitHub Releases page** for each tag — 2-3 paragraph release notes (can paste from CHANGELOG entry), list of included PRs (`Includes: #45, #46, ...`). The Releases URL becomes the resume bullet's anchor: "https://github.com/Leon180/booking_monitor/releases" replaces "browse my PR history" as the architectural-evolution surface.
        **Order:** D16 lands EARLY in Phase 3 (week 1-2) so the existing v0.4.0 milestone is captured BEFORE Pattern A starts adding new commits — retroactive tagging is much cleaner against a static SHA range than a moving HEAD.
