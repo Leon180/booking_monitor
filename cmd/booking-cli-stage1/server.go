@@ -110,10 +110,15 @@ func registerHTTPServer(
 	v1 := router.Group(apiV1Prefix)
 	v1.POST("/book", handleBook(bookingService, logger))
 	v1.GET("/orders/:id", handleGetOrder(bookingService, logger))
+	v1.POST("/orders/:id/pay", handlePayIntent(db, logger))
 	v1.POST("/events", handleCreateEvent(db, logger))
-	// /pay + /test/payment/confirm land in slice 4.
 	// /history not registered — Stage 1 doesn't need it for the
 	// comparison harness; can add later if k6 grows a use case.
+
+	// /test routes (root-mounted, NOT under /api/v1) — matches
+	// Stage 4's mount point so the existing scripts/k6_two_step_flow.js
+	// + browser demo wire-format both work unchanged.
+	router.POST("/test/payment/confirm/:id", handleTestConfirm(db, logger))
 
 	addr := ":" + cfg.Server.Port
 	srv := &http.Server{
@@ -300,6 +305,246 @@ func handleCreateEvent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 				},
 			},
 		})
+		_ = logger
+	}
+}
+
+// handlePayIntent is the Stage 1 /api/v1/orders/:id/pay handler.
+// Generates a fake `pi_stage1_<uuid>` intent id and persists it on
+// the order row via UPDATE WHERE payment_intent_id IS NULL — atomic
+// idempotency: a repeat /pay returns the SAME intent id (matches
+// Stage 4's gateway-side idempotency behavior).
+//
+// Status guards mirror Stage 4 (per Codex round-2 P2.1, the mock-
+// payment contract must be apples-to-apples):
+//   - 404 if order doesn't exist
+//   - 409 if status != awaiting_payment (already terminal)
+//   - 409 if reserved_until elapsed (TTL ran out before /pay)
+//
+// The "client_secret" return is a stub literal — Stage 1 has no
+// real gateway, but the wire shape stays identical so the existing
+// k6 script + browser demo treat all four stages the same.
+func handlePayIntent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		orderID, err := uuid.Parse(idStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+			return
+		}
+
+		// Single-row read first: status guards + read existing
+		// intent_id (so a re-pay is idempotent without taking a
+		// row lock).
+		var (
+			status        string
+			currentIntent sql.NullString
+			amountCents   int64
+			currency      string
+			reservedUntil time.Time
+		)
+		err = db.QueryRowContext(c.Request.Context(), `
+			SELECT status, payment_intent_id, amount_cents, currency, reserved_until
+			  FROM orders
+			 WHERE id = $1`,
+			orderID).Scan(&status, &currentIntent, &amountCents, &currency, &reservedUntil)
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read order"})
+			return
+		}
+		if status != string(domain.OrderStatusAwaitingPayment) {
+			c.JSON(http.StatusConflict, gin.H{"error": "order not in awaiting_payment state: " + status})
+			return
+		}
+		if !time.Now().Before(reservedUntil) {
+			c.JSON(http.StatusConflict, gin.H{"error": "reservation expired"})
+			return
+		}
+
+		// Idempotent return: if the order already has an intent,
+		// reuse it. Stage 4's gateway is idempotent on order_id;
+		// matching that contract here.
+		if currentIntent.Valid && currentIntent.String != "" {
+			c.JSON(http.StatusOK, gin.H{
+				"order_id":          orderID,
+				"payment_intent_id": currentIntent.String,
+				"client_secret":     "stub_secret_stage1_" + currentIntent.String,
+				"amount_cents":      amountCents,
+				"currency":          currency,
+			})
+			return
+		}
+
+		// Generate + persist a fresh intent. Filter on
+		// payment_intent_id IS NULL so a concurrent /pay can't
+		// double-write; if RowsAffected = 0 we lost the race —
+		// re-read and return the winner's id.
+		intentSuffix, err := uuid.NewV7()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "mint intent id"})
+			return
+		}
+		intentID := "pi_stage1_" + intentSuffix.String()
+		res, err := db.ExecContext(c.Request.Context(), `
+			UPDATE orders
+			   SET payment_intent_id = $1
+			 WHERE id = $2
+			   AND payment_intent_id IS NULL
+			   AND status = 'awaiting_payment'`,
+			intentID, orderID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "persist intent"})
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Race: another /pay won. Re-read.
+			if err = db.QueryRowContext(c.Request.Context(),
+				"SELECT payment_intent_id FROM orders WHERE id = $1",
+				orderID).Scan(&currentIntent); err == nil && currentIntent.Valid {
+				intentID = currentIntent.String
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"order_id":          orderID,
+			"payment_intent_id": intentID,
+			"client_secret":     "stub_secret_stage1_" + intentID,
+			"amount_cents":      amountCents,
+			"currency":          currency,
+		})
+		_ = logger
+	}
+}
+
+// handleTestConfirm is the Stage 1 /test/payment/confirm/:id handler.
+// Mirrors Stage 4's mock-confirm contract:
+//
+//   - ?outcome=succeeded → race-aware UPDATE to status='paid'
+//     guarded by `status='awaiting_payment' AND payment_intent_id
+//     IS NOT NULL AND reserved_until > NOW()`. If RowsAffected=0
+//     the order isn't eligible (already terminal / no /pay /
+//     expired); returns 409 with no state change. Same predicate
+//     shape as Stage 4's MarkPaid SQL.
+//   - ?outcome=failed → in-binary compensation transaction:
+//     BEGIN; SELECT FOR UPDATE event_ticket_types; UPDATE
+//     available_tickets += quantity; UPDATE orders SET
+//     status='compensated'; COMMIT. Same shape the slice-5 expiry
+//     sweeper will use; extracting to a helper when slice 5 lands.
+//
+// Critical guard (Codex round-2 P2.1): both branches require
+// payment_intent_id IS NOT NULL — orders that skipped /pay are
+// rejected. Without this, a client could call /confirm directly
+// without first calling /pay; Stage 4 rejects that, so Stage 1 must
+// too for apples-to-apples.
+func handleTestConfirm(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		orderID, err := uuid.Parse(idStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+			return
+		}
+		outcome := c.Query("outcome")
+		if outcome != "succeeded" && outcome != "failed" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "outcome must be 'succeeded' or 'failed'"})
+			return
+		}
+
+		if outcome == "succeeded" {
+			res, err := db.ExecContext(c.Request.Context(), `
+				UPDATE orders
+				   SET status = 'paid'
+				 WHERE id = $1
+				   AND status = 'awaiting_payment'
+				   AND payment_intent_id IS NOT NULL
+				   AND reserved_until > NOW()`,
+				orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "mark paid"})
+				return
+			}
+			n, _ := res.RowsAffected()
+			if n == 0 {
+				c.JSON(http.StatusConflict, gin.H{"error": "order not eligible for paid (already terminal / no /pay / expired)"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "paid"})
+			return
+		}
+
+		// outcome == "failed" — sync compensation
+		tx, err := db.BeginTx(c.Request.Context(), nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "begin tx"})
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// Lock the order row first to read ticket_type_id + qty.
+		// FOR UPDATE on `orders` because the same compensation tx
+		// could fire from /confirm and the (slice-5) expiry sweeper
+		// concurrently if reserved_until ran out mid-confirm.
+		var (
+			ttID         uuid.UUID
+			qty          int
+			currentStat  string
+			hasIntent    sql.NullString
+		)
+		err = tx.QueryRowContext(c.Request.Context(), `
+			SELECT ticket_type_id, quantity, status, payment_intent_id
+			  FROM orders
+			 WHERE id = $1
+			   FOR UPDATE`,
+			orderID).Scan(&ttID, &qty, &currentStat, &hasIntent)
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "lock order: " + err.Error()})
+			return
+		}
+		if currentStat != string(domain.OrderStatusAwaitingPayment) {
+			c.JSON(http.StatusConflict, gin.H{"error": "order not in awaiting_payment state: " + currentStat})
+			return
+		}
+		if !hasIntent.Valid || hasIntent.String == "" {
+			c.JSON(http.StatusConflict, gin.H{"error": "order has no payment_intent — must call /pay before confirm"})
+			return
+		}
+
+		// Lock + revert inventory.
+		if _, err = tx.ExecContext(c.Request.Context(), `
+			UPDATE event_ticket_types
+			   SET available_tickets = available_tickets + $1,
+			       version = version + 1
+			 WHERE id = $2`,
+			qty, ttID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "revert inventory"})
+			return
+		}
+
+		// Mark order compensated.
+		if _, err = tx.ExecContext(c.Request.Context(), `
+			UPDATE orders
+			   SET status = 'compensated'
+			 WHERE id = $1
+			   AND status = 'awaiting_payment'`,
+			orderID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "mark compensated"})
+			return
+		}
+
+		if err = tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "commit compensation tx"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "compensated"})
 		_ = logger
 	}
 }
