@@ -584,17 +584,15 @@ func handlePayIntent(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 			}
 			// Status is awaiting_payment + reserved_until still future —
 			// the only remaining cause is (a) concurrent /pay won.
-			if reReadIntent.Valid && reReadIntent.String != "" {
-				intentID = reReadIntent.String
-			} else {
-				// Defensive: shouldn't be reachable. Our UPDATE only
-				// matches payment_intent_id IS NULL, so if the row is
-				// awaiting_payment + reserved_until > NOW() and intent
-				// is still NULL, the UPDATE should have matched. Surface
-				// as 500 so a regression in this shape is not silent.
+			// Defensive: if the row STILL has NULL intent here, our UPDATE
+			// should have matched (it only filters payment_intent_id IS
+			// NULL). Surface as 500 so a regression in this shape isn't
+			// silent.
+			if !reReadIntent.Valid || reReadIntent.String == "" {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "race fallback: unexpected null intent on eligible row"})
 				return
 			}
+			intentID = reReadIntent.String
 		}
 
 		c.JSON(http.StatusOK, gin.H{
