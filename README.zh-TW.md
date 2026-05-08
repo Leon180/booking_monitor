@@ -53,16 +53,16 @@ internal/
     persistence/postgres/ # Repositories、UoW、advisory lock、row mapper
     messaging/            # Kafka publisher + consumers
     observability/        # Prometheus metrics、OTEL tracing、DB pool collector
-    payment/              # Mock 付款閘道(成功率可設定)
+    payment/              # Mock 付款閘道(CreatePaymentIntent + GetStatus;成功/失敗由 D5 webhook 結果驅動,post-D7)
     config/               # YAML config + 環境變數 override(cleanenv)
   log/                    # 結構化日誌(Zap)— context 傳遞、typed tag、執行期 level
   bootstrap/              # logger + tracer + DI 基礎元件的 fx 綁定
-deploy/                   # Postgres migrations(11 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
+deploy/                   # Postgres migrations(15 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
 ```
 
 ### 架構演進
 
-目前的 Stage 4 不是一次到位的。每一層都是為了解決上一層 benchmark 量化出來的瓶頸 — 下面四個階段的演進就是可以照著 [Releases page](https://github.com/Leon180/booking_monitor/releases) 一個 commit 一個 commit 走過去的故事。
+這個架構不是一次到位的。每一層都是為了解決上一層 benchmark 量化出來的瓶頸 — 下面四個階段是 v0.1.0→v0.4.0 的演進故事(Stage 4 = v0.2.0–v0.4.0 的里程碑,**還沒被 v0.6.0 的 D7 收窄**前)。可以照著 [Releases page](https://github.com/Leon180/booking_monitor/releases) 一個 commit 一個 commit 走過去;當前(post-D7)的形狀則由上方 [top-level diagram](#系統架構) 呈現。
 
 **Stage 1 — 同步 baseline。** API → Postgres `SELECT FOR UPDATE`。在 1k req/s 以下就因為 row-lock 爭用飽和。[v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) 的 C500 benchmark 紀錄了這個天花板。
 
@@ -91,7 +91,7 @@ flowchart LR
     W3 -->|INSERT| P3[(Postgres)]
 ```
 
-**Stage 4 — 完整 event-driven(目前)。** Worker 在一個 UoW 裡同時寫 order 跟 outbox;advisory-lock 選出來的 leader relay 推訊息到 Kafka;payment service + saga compensator 是各自獨立的 consumer。就是 [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) 釋出、再經過 [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) 強化的這個架構。
+**Stage 4 — 完整 event-driven(v0.2.0–v0.4.0;pre-D7 歷史版本)。** Worker 在一個 UoW 裡同時寫 order 跟 outbox;advisory-lock 選出來的 leader relay 推訊息到 Kafka;payment service + saga compensator 是各自獨立的 Kafka consumer。就是 [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) 釋出、再經過 [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) 強化的架構。[v0.6.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0) 的 D7 之後把它再收窄 — worker 只寫 order 一筆(不再 emit `order.created` outbox)、`payment_worker` binary 移除、saga consumer/compensator 改在 `app` 行程內執行。當前形狀請看上面的 [top-level diagram](#系統架構);下方的圖刻意保留作為 v0.2.0–v0.4.0 的里程碑參考(也是 D12 中 `cmd/booking-cli-stage4/` 要 benchmark 的版本)。
 
 ```mermaid
 flowchart LR
@@ -106,9 +106,9 @@ flowchart LR
 
 四個 stage 的 `cmd/booking-cli-stage{1,2,3,4}/` 比較 harness([`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md) 的 D12)是 Phase 3 的計畫項目 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。
 
-### Pattern A 流程(計畫中 — Phase 3a)
+### Pattern A 流程(已隨 v0.5.0 + v0.6.0 上線)
 
-下一個里程碑會把 `POST /book` 拆成預訂 + 明確的 `POST /pay` + `POST /webhook/payment`,讓訂票流程進入 Stripe Checkout / KKTIX 的形狀。
+`POST /book` 已拆成預訂 + 顯式的 `POST /pay` + `POST /webhook/payment` — Stripe Checkout / KKTIX 形狀。下面的流程在 Docker stack 上端到端可跑。
 
 ```mermaid
 sequenceDiagram
@@ -148,22 +148,22 @@ sequenceDiagram
         SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
         P-->>SW: 過期的列
         SW->>P: UoW {MarkExpired + emit order.failed}
-        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator(獨立 process)<br/>跑 revert.lua INCRBY → MarkCompensated
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga consumer + compensator<br/>(D7 後在 app 行程內)<br/>跑 revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
 D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga compensator 負責(透過 `saga:reverted:order:<id>` SETNX 保證冪等)。形狀跟 D5 失敗路徑一樣;D6 不會直接呼叫 `revert.lua`。
 
-**`v0.5.0` 已於 2026-05-07 出版** — Pattern A D1–D6 完成;上述流程在 Docker stack 上端到端可跑。
+**已上線:** [`v0.5.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.5.0)(2026-05-07,D1–D6)讓上面的「預訂 → 付款 → 過期」迴圈完整可跑。[`v0.6.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0)(2026-05-08)把 saga compensator 的範圍收窄(D7 — 刪掉舊的 A4 自動扣款路徑;`order.failed` topic 上現在只剩 D5 webhook + D6 sweeper 兩個生產端 emitter),並出版 [瀏覽器 demo](demo/)(D8-minimal)。
 
 ## 特色
 
 - **雙層庫存**:Redis(熱路徑,次毫秒等級) + PostgreSQL(事實來源)
 - **非同步處理**:Redis Streams consumer group,含 PEL 恢復機制
 - **Transactional Outbox**:訂單與事件同一筆交易,再由 OutboxRelay 發布至 Kafka
-- **Saga 補償**:冪等地回滾付款失敗(DB + Redis)
-- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `Charge`)
+- **Saga 補償**:冪等地回滾付款失敗 + 預訂過期(DB + Redis)
+- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `CreatePaymentIntent`)
 - **限流**:Nginx(100 req/s/IP,burst 200)
 - **領導者選舉**:以 PostgreSQL advisory lock 確保只有 1 個 OutboxRelay 實例在跑
 - **完整可觀測性**:Prometheus metrics、Grafana dashboards、Jaeger tracing、Zap logging

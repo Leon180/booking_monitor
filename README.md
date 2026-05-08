@@ -53,16 +53,16 @@ internal/
     persistence/postgres/ # Repositories, UoW, advisory locks, row mappers
     messaging/            # Kafka publisher + consumers
     observability/        # Prometheus metrics, OTEL tracing, DB-pool collector
-    payment/              # Mock payment gateway with configurable success rate
+    payment/              # Mock payment gateway (CreatePaymentIntent + GetStatus; success/failure driven by D5 webhook outcomes, post-D7)
     config/               # YAML config + env overrides (cleanenv)
   log/                    # Structured logging (Zap) — context propagation, typed tags, runtime level
   bootstrap/              # fx wiring for logger + tracer + DI primitives
-deploy/                   # Postgres migrations (11), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
+deploy/                   # Postgres migrations (15), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
 ```
 
 ### Architecture Evolution
 
-The current Stage 4 didn't appear all at once. Each layer was added in response to a benchmark-documented bottleneck — the four-stage progression below is the architecture-evolution story you can walk through commit-by-commit on the [Releases page](https://github.com/Leon180/booking_monitor/releases).
+The architecture didn't appear all at once. Each layer was added in response to a benchmark-documented bottleneck — the four-stage progression below tells the v0.1.0→v0.4.0 evolution story (Stage 4 = the v0.2.0–v0.4.0 milestone *before* v0.6.0's D7 narrowed it). Walk through it commit-by-commit on the [Releases page](https://github.com/Leon180/booking_monitor/releases); the [top-level diagram](#architecture) above shows the current post-D7 shape.
 
 **Stage 1 — synchronous baseline.** API → Postgres `SELECT FOR UPDATE`. Saturates well below 1k req/s due to row-lock contention. The C500 benchmark on [v0.1.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.1.0) documented this ceiling.
 
@@ -91,7 +91,7 @@ flowchart LR
     W3 -->|INSERT| P3[(Postgres)]
 ```
 
-**Stage 4 — full event-driven (current).** Worker writes order + outbox in one UoW; advisory-lock-leadered relay pushes to Kafka; payment service + saga compensator are independent consumers. This is the architecture released as [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) and hardened through [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0).
+**Stage 4 — full event-driven (v0.2.0–v0.4.0; pre-D7 historical).** Worker writes order + outbox in one UoW; advisory-lock-leadered relay pushes to Kafka; payment service + saga compensator are independent Kafka consumers. This is the architecture released as [v0.2.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.2.0) and hardened through [v0.3.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.3.0) + [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0). [v0.6.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0)'s D7 then narrowed this — worker writes only the order row (no `order.created` outbox emit), the `payment_worker` binary is gone, and the saga consumer/compensator runs in-process inside `app`. See the [top-level diagram](#architecture) for the current shape; the diagram below is preserved as the v0.2.0–v0.4.0 milestone reference (and what `cmd/booking-cli-stage4/` will benchmark in D12).
 
 ```mermaid
 flowchart LR
@@ -106,9 +106,9 @@ flowchart LR
 
 The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12 in [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md)) is planned for Phase 3 — same `internal/` packages, different fx wirings, side-by-side benchmark runs.
 
-### Pattern A flow (planned — Phase 3a)
+### Pattern A flow (shipped in v0.5.0 + v0.6.0)
 
-The next milestone splits `POST /book` into reservation + explicit `POST /pay` + `POST /webhook/payment`. Brings the booking flow into Stripe Checkout / KKTIX shape.
+`POST /book` is split into reservation + explicit `POST /pay` + `POST /webhook/payment` — Stripe Checkout / KKTIX shape. The flow below runs end-to-end against the Docker stack.
 
 ```mermaid
 sequenceDiagram
@@ -148,22 +148,22 @@ sequenceDiagram
         SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
         P-->>SW: overdue rows
         SW->>P: UoW {MarkExpired + emit order.failed}
-        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator (separate process)<br/>runs revert.lua INCRBY → MarkCompensated
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga consumer + compensator<br/>(in-process inside app, post-D7)<br/>runs revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
 D6's job is timing — when does the row expire. The saga compensator owns inventory revert (idempotent via `saga:reverted:order:<id>` SETNX). Same shape as D5's failure path; D6 doesn't call `revert.lua` directly.
 
-**`v0.5.0` shipped 2026-05-07** — Pattern A D1–D6 complete; the flow above runs end-to-end against the Docker stack.
+**Shipped:** [`v0.5.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.5.0) (2026-05-07, D1–D6) closes the reservation→payment→expiry loop above. [`v0.6.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0) (2026-05-08) narrows the saga compensator scope (D7 — deletes the legacy A4 auto-charge path; `order.failed` topic now has only the D5 webhook + D6 sweeper as production emitters) and ships the [browser demo](demo/) (D8-minimal).
 
 ## Features
 
 - **Dual-Tier Inventory**: Redis (hot path, sub-ms) + PostgreSQL (source of truth)
 - **Async Processing**: Redis Streams with consumer groups and PEL recovery
 - **Transactional Outbox**: Atomic order + event persistence, Kafka publishing
-- **Saga Compensation**: Idempotent payment failure rollback (DB + Redis)
-- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `Charge`)
+- **Saga Compensation**: Idempotent payment-failure + reservation-expiry rollback (DB + Redis)
+- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `CreatePaymentIntent`)
 - **Rate Limiting**: Nginx (100 req/s/IP, burst 200)
 - **Leader Election**: PostgreSQL advisory locks for single OutboxRelay instance
 - **Full Observability**: Prometheus metrics, Grafana dashboards, Jaeger tracing, Zap logging
