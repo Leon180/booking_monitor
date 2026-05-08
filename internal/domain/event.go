@@ -21,12 +21,18 @@ var (
 )
 
 const (
-	// EventTypeOrderCreated / EventTypeOrderFailed are the canonical
-	// outbox event_type values. Hardcoding these strings at call sites
-	// is a typo waiting to happen — use the constants and the
-	// `New*Outbox` factories below.
-	EventTypeOrderCreated = "order.created"
-	EventTypeOrderFailed  = "order.failed"
+	// EventTypeOrderFailed is the canonical outbox event_type value
+	// for saga-compensation triggers. Hardcoding the string at call
+	// sites is a typo waiting to happen — use the constant and the
+	// `NewOrderFailedOutbox` factory below.
+	//
+	// D7 (2026-05-08) deleted the sibling `EventTypeOrderCreated` /
+	// `NewOrderCreatedOutbox` along with the legacy A4 auto-charge
+	// path. `order.failed` is the only outbox event type now;
+	// emitters are: D5 webhook (`payment_failed`), D6 expiry sweeper
+	// (`expired`), and recon's `failOrder` (rare; tagged via
+	// `Reason="recon: ..."`).
+	EventTypeOrderFailed = "order.failed"
 
 	// OutboxStatusPending is the initial status assigned by every
 	// New*Outbox factory; the OutboxRelay flips rows to PROCESSED
@@ -166,21 +172,6 @@ func (e OutboxEvent) EventType() string      { return e.eventType }
 func (e OutboxEvent) Payload() []byte        { return e.payload }
 func (e OutboxEvent) Status() string         { return e.status }
 func (e OutboxEvent) ProcessedAt() *time.Time { return e.processedAt }
-
-// NewOrderCreatedOutbox constructs a pending outbox event for an
-// `order.created` payload. UUIDv7 id assigned at construction.
-func NewOrderCreatedOutbox(payload []byte) (OutboxEvent, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return OutboxEvent{}, fmt.Errorf("generate outbox event id: %w", err)
-	}
-	return OutboxEvent{
-		id:        id,
-		eventType: EventTypeOrderCreated,
-		payload:   payload,
-		status:    OutboxStatusPending,
-	}, nil
-}
 
 // NewOrderFailedOutbox constructs a pending outbox event for an
 // `order.failed` payload (saga compensation trigger).

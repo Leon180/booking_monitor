@@ -4,16 +4,21 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
-## [Unreleased] — Phase 3 closeout (D7 saga narrow + minimal demo polish + portfolio narrative)
+## [Unreleased] — Phase 3 closeout (post-D7/D8-minimal: D12 + D14 + D16)
 
 Remaining scope per [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md):
 
-- **D7** — `payment_worker` stops being a saga consumer for the happy path; saga compensator scope narrows to `{expired, payment_failed}`. Cleans up the legacy A4 transitions.
 - **D12 4-version comparison harness**: `cmd/booking-cli-stage{1,2,3,4}` binaries against the same `internal/` packages. Markdown comparison report per benchmark run; this is the senior-interview architectural-evolution talking point.
-- **Minimal demo polish (D8-minimal, D9-minimal, D10-minimal)**: single Stripe Elements page, k6 scenario for two-step flow, asciinema terminal walkthrough. NO admin dashboard, NO React Flow animation.
-- **Portfolio narrative (D14, D15, D16)**: README mermaid architecture diagrams (already underway — D5 + D6 corrected the Pattern-A flow diagram), multi-post `docs/blog/` series with hybrid-STAR template, retroactive tags + GitHub Releases page.
+- **D9-minimal / D10-minimal**: k6 scenario for two-step flow + asciinema terminal walkthrough.
+- **Portfolio narrative (D14, D15, D16)**: README mermaid architecture diagrams, multi-post `docs/blog/` series with hybrid-STAR template, retroactive tags + GitHub Releases page.
+- **D4.2** (parallel-safe): real Stripe SDK adapter to replace MockGateway in production.
 
 Will land as v1.0.0 when all of Phase 3 is complete.
+
+### Added (post-v0.5.0)
+
+- **D7 saga scope narrowed (2026-05-08)** — Deleted the legacy A4 auto-charge path entirely: `payment.Service.ProcessOrder`, `messaging/kafka_consumer.go` (the `order.created` consumer), `cmd/booking-cli/payment.go` subcommand, `payment_worker` docker-compose service, `payment-worker` Prometheus scrape job, `domain.PaymentCharger` interface + `PaymentGateway.Charge` method + `MockGateway.Charge`, `domain.EventTypeOrderCreated` + `NewOrderCreatedOutbox`, `application.OrderCreatedEvent` + `NewOrderCreatedEvent` + `NewOrderFailedEvent(from OrderCreatedEvent)`, `KafkaConfig.PaymentGroupID` + `OrderCreatedTopic`, `MockGateway.SuccessRate` field + `results` sync.Map + `Charge` idempotency tests, `ErrInvalidPaymentEvent` sentinel. `payment.Service` interface narrowed to `CreatePaymentIntent` only; `payment.NewService` parameter narrowed from `domain.PaymentGateway` to `domain.PaymentIntentCreator` (fx provider advertises that narrow type via `fx.As`). `MockGateway.GetStatus` re-narrated to always return `ChargeStatusNotFound` post-D7 (no charge history to look up). `order.failed` saga events now have only two production emitters: D5 webhook (`payment_failed`) and D6 expiry sweeper (`expired`); `recon.failOrder` is a third (rare) emitter for stuck-charging force-fails, explicitly tagged via `Reason="recon: ..."`. Saga consumer was always in-process inside `app`. `kafka_consumer_retry_total` label set narrowed from `{topic=order.created|order.failed}` to `{topic=order.failed}` only. **Worker UoW shape change**: `[INSERT order, INSERT events_outbox(order.created)]` → `[INSERT order]`; hot-path benchmark report at [`docs/benchmarks/20260508_compare_c500_d7/`](docs/benchmarks/20260508_compare_c500_d7/) shows non-regressive (booking p95 -8.7%, http p95 -9.7%, `accepted_bookings/s` flat). Bilingual docs sweep (README, PROJECT_SPEC, AGENTS, CLAUDE, monitoring) + agent-rule docs (`patterns.md`, `coding-style.md`) + runbooks (incl. D7 cutover note for draining pending `order.created` outbox rows pre-deploy).
+- **D8-minimal browser demo (PRs [#96](https://github.com/Leon180/booking_monitor/pull/96), [#97](https://github.com/Leon180/booking_monitor/pull/97); 2026-05-07/08)** — PR-1: opt-in CORS middleware (`internal/infrastructure/api/middleware/cors.go`) with exact-match Origin allow-list + `Vary: Origin` on every response + ACRM/ACRH scoped to OPTIONS; new `AppConfig.Env` field + `normalizedAppEnv()` helper enforces "empty/whitespace → production" fail-closed, with a production-mode guard that rejects `ENABLE_TEST_ENDPOINTS=true`. PR-2: single-page Vite + React + TS demo at `demo/` exercising the full Pattern A flow (book → pay/let-expire → terminal) with intent-aware status display (`(intent, observed_status) → display`) so the saga's `payment_failed → compensated` transition between two 1 Hz polls is rendered correctly. Mock-only — confirm step uses `POST /test/payment/confirm/:order_id` (forges signed webhook). Live smoke 2026-05-08 verified CORS contract + Path A (paid) + Path B (declined → compensated) + Path C (expired) + demo bundle inlining.
 
 ## [0.5.0] — 2026-05-07 — Pattern A end-to-end (D1–D6)
 

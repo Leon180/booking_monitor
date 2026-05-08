@@ -62,7 +62,7 @@ make stress-k6      # K6 壓測 (VUS=500, DURATION=30s)
 make reset-db       # 清空訂單,庫存重設為 100
 make migrate-up     # 執行資料庫 migration
 make mocks          # 重新產生 mock 檔
-docker-compose up -d  # 啟動完整環境(app, nginx, payment_worker, postgres, redis, kafka, prometheus, grafana, jaeger)
+docker-compose up -d  # 啟動完整環境(app, nginx, postgres, redis, kafka, prometheus, grafana, jaeger)
 ```
 
 ## 關鍵 Patterns
@@ -100,12 +100,10 @@ GET  /readyz               # Readiness probe — PG + Redis + Kafka 都能在 1s
 - `deploy/postgres/migrations/` 中有 11 個 migration — 000008(PR #34)把 PK 從 SERIAL → UUIDv7;000010/000011 加上 `orders(status, updated_at) WHERE status IN ('charging','pending','failed')` 的 partial index,給 reconciler + saga-watchdog 的 sweep 用。完整 migration 歷史見 [docs/PROJECT_SPEC.md §4](docs/PROJECT_SPEC.md)。
 
 ## Kafka Topics
-- `order.created` — 由 payment service 消費(group `payment-service-group`)
-- `order.created.dlq` — 無法解析 / 無效 payment 事件的 dead letter
-- `order.failed` — 由 saga compensator 消費(group `booking-saga-group`)
+- `order.failed` — 由 saga compensator 消費(in-process 在 `app` 裡跑,group `booking-saga-group`)
 - `order.failed.dlq` — 超過 `sagaMaxRetries=3` 的 saga 事件 dead letter
 
-Group IDs 跟 topic names 可透過 `KAFKA_PAYMENT_GROUP_ID`、`KAFKA_ORDER_CREATED_TOPIC`、`KAFKA_SAGA_GROUP_ID`、`KAFKA_ORDER_FAILED_TOPIC` 設定。
+Group ID + topic name 可透過 `KAFKA_SAGA_GROUP_ID` + `KAFKA_ORDER_FAILED_TOPIC` 設定。D7(2026-05-08)把舊的 `order.created` topic、`KAFKA_PAYMENT_GROUP_ID` / `KAFKA_ORDER_CREATED_TOPIC` 兩個 env var,連同 `payment_worker` binary 一起刪掉了。
 
 ## CI
 

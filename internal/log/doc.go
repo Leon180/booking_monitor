@@ -54,7 +54,7 @@
 //
 // Pattern A — DI logger held as a struct field, used by application
 // services and long-lived components (*sagaCompensator, *workerService,
-// *paymentService, *KafkaConsumer, *SagaConsumer, *redisOrderQueue):
+// *paymentService, *SagaConsumer, *redisOrderQueue):
 //
 //	type sagaCompensator struct { log *mlog.Logger }
 //

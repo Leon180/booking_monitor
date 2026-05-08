@@ -18,44 +18,6 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
-// MockPaymentCharger is a mock of PaymentCharger interface.
-type MockPaymentCharger struct {
-	ctrl     *gomock.Controller
-	recorder *MockPaymentChargerMockRecorder
-	isgomock struct{}
-}
-
-// MockPaymentChargerMockRecorder is the mock recorder for MockPaymentCharger.
-type MockPaymentChargerMockRecorder struct {
-	mock *MockPaymentCharger
-}
-
-// NewMockPaymentCharger creates a new mock instance.
-func NewMockPaymentCharger(ctrl *gomock.Controller) *MockPaymentCharger {
-	mock := &MockPaymentCharger{ctrl: ctrl}
-	mock.recorder = &MockPaymentChargerMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockPaymentCharger) EXPECT() *MockPaymentChargerMockRecorder {
-	return m.recorder
-}
-
-// Charge mocks base method.
-func (m *MockPaymentCharger) Charge(ctx context.Context, orderID uuid.UUID, amount float64) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Charge", ctx, orderID, amount)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Charge indicates an expected call of Charge.
-func (mr *MockPaymentChargerMockRecorder) Charge(ctx, orderID, amount any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Charge", reflect.TypeOf((*MockPaymentCharger)(nil).Charge), ctx, orderID, amount)
-}
-
 // MockPaymentStatusReader is a mock of PaymentStatusReader interface.
 type MockPaymentStatusReader struct {
 	ctrl     *gomock.Controller
@@ -156,20 +118,6 @@ func NewMockPaymentGateway(ctrl *gomock.Controller) *MockPaymentGateway {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockPaymentGateway) EXPECT() *MockPaymentGatewayMockRecorder {
 	return m.recorder
-}
-
-// Charge mocks base method.
-func (m *MockPaymentGateway) Charge(ctx context.Context, orderID uuid.UUID, amount float64) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Charge", ctx, orderID, amount)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Charge indicates an expected call of Charge.
-func (mr *MockPaymentGatewayMockRecorder) Charge(ctx, orderID, amount any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Charge", reflect.TypeOf((*MockPaymentGateway)(nil).Charge), ctx, orderID, amount)
 }
 
 // CreatePaymentIntent mocks base method.

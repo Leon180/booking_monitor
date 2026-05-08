@@ -12,7 +12,7 @@ import "context"
 // it has no domain-rule semantics — it's a pure infrastructure-port
 // shape with a generic `Publish(topic, payload)` signature any
 // pub/sub broker can satisfy. The wire-contract type names (event
-// types like `EventTypeOrderCreated` + the `OrderEvent` payload
+// types like `EventTypeOrderFailed` + the `OrderEvent` payload
 // shape) correctly stay in `domain` — only the *transport* port moves.
 //
 //go:generate mockgen -source=messaging.go -destination=../mocks/messaging_mock.go -package=mocks

@@ -14,11 +14,14 @@ flowchart LR
     Nginx --> API[Gin API]
     API -->|Lua DECRBY + XADD| Redis[(Redis<br/>庫存 + stream)]
     Redis -.->|XReadGroup| Worker
-    Worker -->|UoW: INSERT order<br/>+ events_outbox| PG[(Postgres<br/>事實來源)]
+    Worker -->|UoW: INSERT order| PG[(Postgres<br/>事實來源)]
+    Client -->|POST /pay| API
+    API -->|CreatePaymentIntent| Gateway[Payment<br/>Gateway]
+    Gateway -.->|webhook<br/>signed| API
+    API -->|UoW: MarkPaid OR<br/>MarkFailed + outbox| PG
+    Sweeper[Expiry<br/>Sweeper] -->|UoW: MarkExpired<br/>+ outbox| PG
     PG -.->|advisory-lock<br/>leader relay| Kafka{{Kafka}}
-    Kafka -.->|order.created| Payment[Payment Worker]
-    Payment -.->|fail| Kafka
-    Kafka -.->|order.failed| Saga[Saga<br/>Compensator]
+    Kafka -.->|order.failed| Saga[Saga Consumer<br/>in-process]
     Saga --> Redis
     Saga --> PG
 ```
@@ -29,7 +32,7 @@ flowchart LR
 **設計風格**:Domain-Driven Design + Clean Architecture(Modular Monolith)
 
 ```
-cmd/booking-cli/          # CLI 進入點:server / stress / payment / recon / saga-watchdog 子指令
+cmd/booking-cli/          # CLI 進入點:server / stress / recon / saga-watchdog / expiry-sweeper 子指令
 internal/
   domain/                 # Entities(Event、Order、OutboxEvent)、value type(StuckCharging、StuckFailed)、repository 介面
   application/            # 跨子套件 fx module + UnitOfWork 介面 + wire-format 事件 DTO(order_events.go)
@@ -37,7 +40,7 @@ internal/
     worker/               # 訂單 stream consumer + queue 策略 + 單筆訊息 processor
     outbox/               # Outbox relay 輪詢 + Kafka 發布(transactional outbox 實作)
     event/                # 活動建立 + Redis 熱庫存初始化
-    payment/              # Kafka order.created consumer + gateway 編排 + saga 觸發
+    payment/              # /pay(D4)handler + gateway adapter + D5 webhook
     recon/                # Reconciler(A4)— 掃描卡在 `charging` 的訂單,呼叫 gateway 收尾
     saga/                 # Compensator + Watchdog(A5)— order.failed consumer + DB 端 sweep
   infrastructure/
@@ -192,12 +195,7 @@ D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga co
    ```
    Server 會監聽 8080 port,metrics 在 `/metrics`。
 
-4. **啟動 Payment Worker**(另一個 terminal)
-   ```bash
-   ./bin/booking-cli payment
-   ```
-
-5. **重置狀態**(測試用)
+4. **重置狀態**(測試用)
    ```bash
    make reset-db
    ```
@@ -321,10 +319,11 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # 查詢訂單歷史
 
 | 服務 | Port | 說明 |
 |------|------|------|
-| app | 8080 | Booking API server |
+| app | 8080 | Booking API server(同時 in-process 跑 `order.failed` 的 saga consumer) |
 | nginx | 80 | Reverse proxy + 限流 |
-| payment_worker | - | Kafka 付款 consumer(`booking-cli payment`) |
 | recon | - | 卡單收尾的 Reconciler 子指令(`booking-cli recon`) |
+| saga_watchdog | - | 卡在 `failed` 狀態的訂單 DB-side sweep(`booking-cli saga-watchdog`) |
+| expiry_sweeper | - | D6 reservation 到期 sweeper(`booking-cli expiry-sweeper`) |
 | postgres | 5433 | PostgreSQL 資料庫 |
 | redis | 6379 | 快取 + streams |
 | kafka | 9092 | 事件串流 |

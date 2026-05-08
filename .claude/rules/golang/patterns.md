@@ -90,15 +90,20 @@ type constant with a typed factory so callers don't spell the wire
 string at all:
 
 ```go
-const EventTypeOrderCreated = "order.created"
-const OutboxStatusPending   = "PENDING"
+const EventTypeOrderFailed = "order.failed"
+const OutboxStatusPending  = "PENDING"
 
-func NewOrderCreatedOutbox(payload []byte) OutboxEvent {
+func NewOrderFailedOutbox(payload []byte) (OutboxEvent, error) {
+    id, err := uuid.NewV7()
+    if err != nil {
+        return OutboxEvent{}, fmt.Errorf("generate outbox event id: %w", err)
+    }
     return OutboxEvent{
-        EventType: EventTypeOrderCreated,
+        ID:        id,
+        EventType: EventTypeOrderFailed,
         Payload:   payload,
         Status:    OutboxStatusPending,
-    }
+    }, nil
 }
 ```
 
@@ -109,11 +114,12 @@ order, err := domain.NewOrder(msg.OrderID, msg.UserID, msg.EventID, msg.Quantity
 if err != nil { return err }   // DLQ via worker classifier
 // ... persist via repo
 
-outboxEvent := domain.NewOrderCreatedOutbox(payload)
-if err := s.outboxRepo.Create(ctx, outboxEvent); err != nil { return err }
+outboxEvent, err := domain.NewOrderFailedOutbox(payload)
+if err != nil { return err }
+if _, err := s.outboxRepo.Create(ctx, outboxEvent); err != nil { return err }
 ```
 
-— no `&domain.Order{...}` literals, no inline `"order.created"`
+— no `&domain.Order{...}` literals, no inline `"order.failed"`
 string, no possibility of a typo at the call site.
 
 ## Reference

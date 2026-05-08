@@ -16,7 +16,7 @@ import (
 // CP2.6b + D4.1 note: worker / outbox / event fx wirings deliberately
 // live in `cmd/booking-cli/server.go` (not here) because their
 // subpackages import `application` (for `UnitOfWork`, `Repositories`,
-// `NewOrderCreatedEvent`, `EventPublisher`, `DistributedLock`), so an
+// `EventPublisher`, `DistributedLock`), so an
 // `application → {worker,outbox,event}` edge here would create an
 // import cycle. This matches the pattern already used by
 // payment/saga/recon: each cmd file owns its own fx.Provide for its

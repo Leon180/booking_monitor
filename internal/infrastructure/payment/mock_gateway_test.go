@@ -8,79 +8,99 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"booking_monitor/internal/domain"
 )
 
-// TestMockGateway_IsIdempotentOnOrderID directly verifies the
-// `domain.PaymentGateway` idempotency contract: repeat Charge calls
-// with the same orderID return the result of the FIRST call without
-// re-rolling against SuccessRate. This is the property that lets
-// payment.Service safely retry under Kafka redelivery.
-func TestMockGateway_IsIdempotentOnOrderID(t *testing.T) {
-	t.Run("cached failure stays a failure even when SuccessRate flips to 1.0", func(t *testing.T) {
-		gw := &MockGateway{
-			SuccessRate: 0.0, // first call MUST fail
-			MinLatency:  0,
-			MaxLatency:  time.Microsecond,
-		}
-		orderID := uuid.New()
+// D7 (2026-05-08) deleted `MockGateway.Charge` along with
+// `domain.PaymentGateway.Charge`. The pre-D7 idempotency-on-orderID
+// tests for the `Charge` path are gone with it. The remaining contract
+// surface this file pins is:
+//
+//   - `CreatePaymentIntent` is idempotent on orderID (same orderID →
+//     same PaymentIntent value);
+//   - `GetStatus` is a stub-shaped reader that always returns
+//     `ChargeStatusNotFound` post-D7 (the mock has no charge history
+//     to look up).
 
-		first := gw.Charge(context.Background(), orderID, 100)
-		require.Error(t, first, "SuccessRate=0 should fail")
+func TestMockGateway_CreatePaymentIntent_IsIdempotentOnOrderID(t *testing.T) {
+	gw := NewMockGateway()
+	gw.MinLatency = 0
+	gw.MaxLatency = time.Microsecond
+	orderID := uuid.New()
 
-		// Flip to 1.0 — without idempotency the next call would succeed.
-		// With idempotency, the cached failure persists.
-		gw.SuccessRate = 1.0
+	first, err := gw.CreatePaymentIntent(context.Background(), orderID, 2000, "usd", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, first.ID, "intent ID must be populated")
 
-		second := gw.Charge(context.Background(), orderID, 100)
-		assert.Equal(t, first.Error(), second.Error(),
-			"second call MUST return the cached failure verdict, not re-roll")
-	})
+	// Repeat call with the same orderID returns the cached intent.
+	second, err := gw.CreatePaymentIntent(context.Background(), orderID, 2000, "usd", nil)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, second.ID, "repeat CreatePaymentIntent with same orderID must return cached ID")
+	assert.Equal(t, first.ClientSecret, second.ClientSecret, "ClientSecret must also be cached")
+}
 
-	t.Run("cached success stays a success even when SuccessRate flips to 0.0", func(t *testing.T) {
-		gw := &MockGateway{
-			SuccessRate: 1.0,
-			MinLatency:  0,
-			MaxLatency:  time.Microsecond,
-		}
-		orderID := uuid.New()
+func TestMockGateway_CreatePaymentIntent_RejectsInconsistentRetry(t *testing.T) {
+	gw := NewMockGateway()
+	gw.MinLatency = 0
+	gw.MaxLatency = time.Microsecond
+	orderID := uuid.New()
 
-		require.NoError(t, gw.Charge(context.Background(), orderID, 100))
+	_, err := gw.CreatePaymentIntent(context.Background(), orderID, 2000, "usd", nil)
+	require.NoError(t, err)
 
-		gw.SuccessRate = 0.0
-		assert.NoError(t, gw.Charge(context.Background(), orderID, 100),
-			"second call MUST return the cached success verdict, not re-roll")
-	})
+	// A retry with different amount/currency should surface loudly
+	// rather than silently returning the cached intent.
+	_, err = gw.CreatePaymentIntent(context.Background(), orderID, 5000, "usd", nil)
+	assert.Error(t, err, "inconsistent amount on retry must surface as an error, not silently return cached")
+}
 
-	t.Run("different orderIDs are independent", func(t *testing.T) {
-		gw := &MockGateway{
-			SuccessRate: 1.0,
-			MinLatency:  0,
-			MaxLatency:  time.Microsecond,
-		}
-		a, b := uuid.New(), uuid.New()
-		assert.NoError(t, gw.Charge(context.Background(), a, 100))
-		assert.NoError(t, gw.Charge(context.Background(), b, 100),
-			"a fresh orderID must NOT inherit the cached verdict of a different orderID")
-	})
+func TestMockGateway_CreatePaymentIntent_DifferentOrdersAreIndependent(t *testing.T) {
+	gw := NewMockGateway()
+	gw.MinLatency = 0
+	gw.MaxLatency = time.Microsecond
 
-	t.Run("ctx cancellation does not poison the cache", func(t *testing.T) {
-		// MinLatency long enough that ctx cancellation triggers BEFORE the verdict roll.
-		gw := &MockGateway{
-			SuccessRate: 1.0,
-			MinLatency:  50 * time.Millisecond,
-			MaxLatency:  100 * time.Millisecond,
-		}
-		orderID := uuid.New()
+	a, errA := gw.CreatePaymentIntent(context.Background(), uuid.New(), 2000, "usd", nil)
+	require.NoError(t, errA)
+	b, errB := gw.CreatePaymentIntent(context.Background(), uuid.New(), 2000, "usd", nil)
+	require.NoError(t, errB)
+	assert.NotEqual(t, a.ID, b.ID, "different orderIDs must produce different intents")
+}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // cancel immediately
+func TestMockGateway_CreatePaymentIntent_CtxCancellationDoesNotPoisonCache(t *testing.T) {
+	gw := NewMockGateway()
+	gw.MinLatency = 50 * time.Millisecond
+	gw.MaxLatency = 100 * time.Millisecond
+	orderID := uuid.New()
 
-		err := gw.Charge(ctx, orderID, 100)
-		require.ErrorIs(t, err, context.Canceled, "cancelled call must surface ctx.Err")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-		// A fresh ctx should still produce a verdict — the earlier cancelled
-		// call must NOT have stored anything in the cache.
-		assert.NoError(t, gw.Charge(context.Background(), orderID, 100),
-			"cancelled-before-verdict call must leave the cache unpoisoned")
-	})
+	_, err := gw.CreatePaymentIntent(ctx, orderID, 2000, "usd", nil)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// A fresh ctx should still produce an intent — the cancelled call
+	// must not have poisoned the cache.
+	_, err = gw.CreatePaymentIntent(context.Background(), orderID, 2000, "usd", nil)
+	assert.NoError(t, err, "cancelled-before-create call must leave cache unpoisoned")
+}
+
+func TestMockGateway_GetStatus_AlwaysNotFound(t *testing.T) {
+	// Post-D7 the mock has no charge history; recon's NotFound branch
+	// handles the rare stuck-Charging order it might still encounter
+	// in transition.
+	gw := NewMockGateway()
+	got, err := gw.GetStatus(context.Background(), uuid.New())
+	require.NoError(t, err)
+	assert.Equal(t, domain.ChargeStatusNotFound, got)
+}
+
+func TestMockGateway_GetStatus_HonoursCtx(t *testing.T) {
+	gw := NewMockGateway()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := gw.GetStatus(ctx, uuid.New())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, domain.ChargeStatusUnknown, got, "cancelled ctx must surface as Unknown + ctx.Err per port contract")
 }

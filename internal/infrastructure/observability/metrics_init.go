@@ -42,19 +42,18 @@ func init() {
 	}
 	// DLQ topic labels stay inline strings — they're Kafka-side topic
 	// names (with the .dlq suffix) and have no domain-side constant.
-	// If those move to domain consts in a future PR, update here too.
-	for _, topic := range []string{"order.created.dlq", "order.failed.dlq"} {
-		for _, reason := range []string{"invalid_payload", "invalid_event", "max_retries"} {
-			DLQMessagesTotal.WithLabelValues(topic, reason)
-		}
+	// D7 (2026-05-08) dropped `order.created.dlq` from the pre-warm
+	// (the legacy A4 consumer that wrote to it was deleted; pre-warming
+	// here would produce permanently-zero labels in /metrics).
+	for _, reason := range []string{"invalid_payload", "invalid_event", "max_retries"} {
+		DLQMessagesTotal.WithLabelValues("order.failed.dlq", reason)
 	}
-	// Use the domain constants for the canonical wire event types so
-	// a typo here can't drift from the producer side. The consumer
-	// retry counter watches the same topic strings the producer
-	// publishes via the outbox.
-	for _, topic := range []string{domain.EventTypeOrderCreated, domain.EventTypeOrderFailed} {
-		KafkaConsumerRetryTotal.WithLabelValues(topic, "transient_processing_error")
-	}
+	// Use the domain constant for the canonical wire event type so a
+	// typo here can't drift from the producer side. The consumer retry
+	// counter watches the topic the producer publishes via the outbox.
+	// D7 narrowed this to `EventTypeOrderFailed` only — the legacy
+	// `EventTypeOrderCreated` was deleted with payment_worker.
+	KafkaConsumerRetryTotal.WithLabelValues(domain.EventTypeOrderFailed, "transient_processing_error")
 	// Pre-warm the DLQ stream label so it appears in /metrics at startup.
 	// Today "dlq" is the only value written; future main-stream writers
 	// will add their own label values here.

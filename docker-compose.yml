@@ -70,40 +70,15 @@ services:
     depends_on:
       - app
 
-  payment_worker:
-    build: .
-    container_name: booking_payment_worker
-    command: [ "/app/booking-cli", "payment" ]
-    # Same rationale as the `app` service: a crash or hung worker
-    # should auto-restart in pure-compose envs. The worker now exposes
-    # a metrics-only HTTP listener on :9091 (Phase 2 checkpoint O3),
-    # which doubles as a HEALTHCHECK target — `/healthz` returns 200
-    # if the process is up.
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - kafka
-      - redis
-    # Healthcheck targets the metrics listener's /healthz endpoint.
-    # Couples liveness to the listener bind, NOT to downstream deps —
-    # mirrors the app service's /livez convention. Caveat: setting
-    # WORKER_METRICS_ADDR="" (used for `--once` CronJob deployments)
-    # disables the listener and would cause this healthcheck to fail
-    # → unhealthy → restart loop. For CronJob deployments override
-    # this healthcheck (k8s livenessProbe) or remove it entirely.
-    healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--spider", "http://localhost:9091/healthz" ]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 15s
-    environment:
-      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}
-      - REDIS_ADDR=${REDIS_ADDR:?REDIS_ADDR is required}
-      - REDIS_PASSWORD=${REDIS_PASSWORD-}
-      - KAFKA_BROKERS=${KAFKA_BROKERS:?KAFKA_BROKERS is required}
-      - APP_NAME=booking_payment_worker
-      - WORKER_METRICS_ADDR=${WORKER_METRICS_ADDR:-:9091}
+  # NOTE: D7 (post-2026-05-08) deleted the `payment_worker` service.
+  # That binary was the legacy A4 auto-charge consumer of `order.created`;
+  # Pattern A drives money movement through `/api/v1/orders/:id/pay`
+  # (D4) + the provider webhook (D5). `order.failed` saga events have
+  # only D5 (`payment_failed`) and D6 (`expired`) as production
+  # emitters; the saga consumer runs in-process inside `app`. The
+  # `payment-worker` Prometheus scrape job + the `payment` subcommand
+  # were removed in the same PR.
+
 
   recon:
     # The order-status reconciler — sweeps stuck-Charging orders and
@@ -304,7 +279,7 @@ services:
     environment:
       # Auth via env so the password stays in .env, not the image.
       # Soft-optional `${REDIS_PASSWORD-}` matches the pattern the
-      # app/payment_worker/recon/saga_watchdog services use (line 36
+      # app/recon/saga_watchdog/expiry_sweeper services use (line 36
       # onwards) — a passwordless dev Redis is a legitimate config,
       # and the hard-required `${VAR:?}` form would crash compose-up
       # in that scenario. The Redis service itself (line ~200) IS

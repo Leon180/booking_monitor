@@ -551,17 +551,11 @@ type KafkaConfig struct {
 	WriteTimeout time.Duration `yaml:"write_timeout" env:"KAFKA_WRITE_TIMEOUT" env-default:"5s"`
 	// OutboxBatchSize controls how many outbox events are processed per relay tick.
 	OutboxBatchSize int `yaml:"outbox_batch_size" env:"KAFKA_OUTBOX_BATCH_SIZE" env-default:"100"`
-	// PaymentGroupID is the Kafka consumer group id for the payment
-	// service. Previously hardcoded as "payment-service-group-test"
-	// (note the `-test` suffix — a latent prod/test bleed bug).
-	PaymentGroupID string `yaml:"payment_group_id" env:"KAFKA_PAYMENT_GROUP_ID" env-default:"payment-service-group"`
-	// OrderCreatedTopic is the topic the payment consumer subscribes to.
-	// Previously hardcoded.
-	OrderCreatedTopic string `yaml:"order_created_topic" env:"KAFKA_ORDER_CREATED_TOPIC" env-default:"order.created"`
-	// SagaGroupID is the Kafka consumer group id for the saga consumer.
-	// Distinct from PaymentGroupID so the two consumers don't steal
-	// messages from each other (they live on different topics anyway
-	// but keeping group ids disjoint is defensive).
+	// SagaGroupID is the Kafka consumer group id for the saga consumer
+	// (in-process inside `app`). Pre-D7 there was a sibling
+	// `PaymentGroupID` for the legacy A4 `payment_worker` consumer of
+	// `order.created`; D7 deleted that binary along with the Kafka
+	// `KAFKA_PAYMENT_GROUP_ID` / `KAFKA_ORDER_CREATED_TOPIC` env vars.
 	SagaGroupID string `yaml:"saga_group_id" env:"KAFKA_SAGA_GROUP_ID" env-default:"booking-saga-group"`
 	// OrderFailedTopic is the topic the saga consumer subscribes to.
 	OrderFailedTopic string `yaml:"order_failed_topic" env:"KAFKA_ORDER_FAILED_TOPIC" env-default:"order.failed"`
@@ -601,6 +595,8 @@ func LoadConfig(path string) (*Config, error) {
 var deprecatedEnvVars = map[string]string{
 	"BOOKING_DEFAULT_TICKET_PRICE_CENTS": "removed in D4.1; price is now per `event_ticket_types` row (KKTIX 票種 model). Set price via POST /api/v1/events { price_cents } at event creation time.",
 	"BOOKING_DEFAULT_CURRENCY":           "removed in D4.1; currency is now per `event_ticket_types` row (KKTIX 票種 model). Set currency via POST /api/v1/events { currency } at event creation time.",
+	"KAFKA_PAYMENT_GROUP_ID":             "removed in D7 (2026-05-08); the legacy A4 `payment_worker` Kafka consumer was deleted. Pattern A drives money movement through `/api/v1/orders/:id/pay` (D4) + the provider webhook (D5); no payment-side Kafka group remains. Saga consumer's `KAFKA_SAGA_GROUP_ID` is unaffected.",
+	"KAFKA_ORDER_CREATED_TOPIC":          "removed in D7 (2026-05-08); the `order.created` Kafka topic has no producer or consumer post-D7 (the worker UoW no longer emits `events_outbox(order.created)`). Saga consumer's `KAFKA_ORDER_FAILED_TOPIC` is unaffected.",
 }
 
 // checkDeprecatedEnv writes a Stderr warning for any deprecated env

@@ -275,7 +275,7 @@ The current alert catalog:
 | `RedisRevertFailures` | warning | `redis_revert_failures_total` rate > 0 for 5m — saga compensation failing to revert Redis inventory |
 | `RedisXAddFailures` | warning | `redis_xadd_failures_total` rate > 0 for 5m — booking hot path intermittently failing to enqueue |
 | `ConsumerGroupRecreated` | critical | `increase(consumer_group_recreated_total[5m]) > 0` — worker hit NOGROUP and self-healed via `XGROUP CREATE ... $`. Recovery preserves availability but **silently drops messages** that were enqueued in the destruction→recovery window. Triggers on the FIRST occurrence (no soak); `[5m]` window gives comfortable overlap with Prometheus's default 1m eval cadence so a single spike isn't missed. Investigate: did operations FLUSHALL? did Redis crash without AOF? Cross-check `bookings_total` vs DB orders count. See `docs/architectural_backlog.md` § Cache-truth architecture. |
-| `OutboxPendingBacklog` | warning | `outbox_pending_count > 100 for 5m` — the OutboxRelay is wedged. Customers can still book (Redis hot path is fine), but the post-commit fan-out to Kafka downstream consumers is silenced — saga compensator stops compensating, payment service stops processing. In-flight orders cannot advance. Diagnose via `pg_locks` (zombie advisory lock 1001), relay container liveness, broker connectivity. |
+| `OutboxPendingBacklog` | warning | `outbox_pending_count > 100 for 5m` — the OutboxRelay is wedged. Post-D7 (2026-05-08) the outbox carries only `order.failed` rows, so customers can still book + pay (`/pay` and webhook state transitions are unaffected) — what stalls is the saga-compensation fan-out from D5 webhook (`payment_failed`) + D6 expiry sweeper (`expired`) + recon force-fail to the in-process saga consumer. Failed / expired orders sit in `failed` / `expired` instead of advancing to `compensated`; Redis inventory is left unreverted, drifting from DB. Diagnose via `pg_locks` (zombie advisory lock 1001), relay container liveness, broker connectivity. |
 | `OutboxPendingCollectorDown` | critical | `rate(outbox_pending_collector_errors_total[5m]) > 0 for 2m` — the per-scrape COUNT(events_outbox WHERE processed_at IS NULL) query is failing. While this fires, `outbox_pending_count` is silent or stale and `OutboxPendingBacklog` cannot fire. Diagnose: DB outage, missing migration 000007 partial index, query timeout. Mirrors `RedisStreamCollectorDown` discipline. |
 | `InventoryDriftDetected` | warning | `increase(inventory_drift_detected_total[5m]) > 0 for 5m` — drift detector flagged events whose Redis qty disagrees with `events.available_tickets`. Three direction labels distinguish remediation paths: `cache_missing` → rehydrate didn't run; `cache_high` → saga / manual desync; `cache_low_excess` → worker failing to commit OR recon force-fail leaks inventory. `for: 5m` discriminates "transient in-flight blip" from "sustained corruption". Final piece of the cache-truth 4-PR plan (PR-D). See `docs/architectural_backlog.md` § Cache-truth architecture. |
 | `InventoryDriftListEventsErrors` | critical | `rate(inventory_drift_list_events_errors_total[5m]) > 0 for 2m` — drift detector's per-sweep `ListAvailable` query is failing. While this fires the detector is BLIND on the DB side: every sweep aborts, gauge held at 0, `InventoryDriftDetected` cannot fire because there's nothing to detect. Diagnose: DB outage, pool exhaustion, query timeout from the recon container. Same shape as `ReconFindStuckErrors` and `SagaWatchdogFindStuckErrors`. |
@@ -292,7 +292,9 @@ The current alert catalog:
 | `ExpiryFindErrors` | critical | `rate(expiry_find_expired_errors_total[5m]) > 0 for 2m` — D6 DB blind. Covers BOTH `FindExpiredReservations` AND `CountOverdueAfterCutoff` query failures. **When this fires, `expiry_oldest_overdue_age_seconds` and `expiry_backlog_after_sweep` are HELD at last-known-good** (round-3 F2 contract) — those readings may pre-date the failure. Triage Postgres health / pool / migration 000012 partial index. |
 | `ExpiryMaxAgeExceeded` | critical | `increase(expiry_max_age_total[1h]) > 0` — D6 single-event paging, **informational**. A reservation aged past `EXPIRY_MAX_AGE` (default 24h) before a sweep caught it. The row IS now `expired` (round-1 P1 contract: D6 always expires; MaxAge is awareness-only) — the question is why it was stuck so long. Check sweeper uptime, deploy logs, k8s CronJob history. Don't intervene on the row itself; the sweeper has already done its job. |
 
-> **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `kafka_consumer_retry_total`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,payment}` worker processes' default Prometheus registries. Each of those binaries now starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`payment-worker`, `recon`, `saga-watchdog`). Verify with `up{job=~"payment-worker|recon|saga-watchdog"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port. The new `saga_watchdog` compose service runs the watchdog in default-loop mode — `--once` mode is reserved for k8s CronJob hosting where the cluster scheduler drives cadence.
+> **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `expiry_*`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,expiry-sweeper}` worker processes' default Prometheus registries. Each binary starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`recon`, `saga-watchdog`, `expiry-sweeper`). Verify with `up{job=~"recon|saga-watchdog|expiry-sweeper"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port.
+>
+> **D7 (2026-05-08) deleted the `payment-worker` scrape job** along with the legacy `payment_worker` binary itself. `kafka_consumer_retry_total` is still emitted (now only by the saga consumer for `order.failed`, running in-process inside `app`) — the metric label set narrowed from `{topic=order.created|order.failed}` to `{topic=order.failed}` only, and is scraped via the `booking-service` job (`app:8080/metrics`). Existing `KafkaConsumerStuck` alert continues to work.
 
 ### Forcing an alert to fire (testing)
 
@@ -322,22 +324,37 @@ docker exec booking_db psql -U user -d booking -c \
 # (it will move Failed → Compensated since the row has no actual reverted-Redis-key tracked).
 
 # TargetDown — stop a worker, wait 2m+, watch Prometheus → Alerts → TargetDown firing.
-docker stop booking_payment_worker
+docker stop booking_recon
 # Wait 2m+ (alert has `for: 2m`).
-# Cleanup: docker start booking_payment_worker → up returns to 1 within one scrape (15s).
+# Cleanup: docker start booking_recon → up returns to 1 within one scrape (15s).
 
-# OutboxPendingBacklog — directly INSERT 200 unprocessed outbox rows.
-# Bypass the relay's normal poll cadence by pushing rows that look like
-# legitimate `order.created` events but have NO matching DB order row
-# (the rows fail to publish silently because the JSON payload isn't
-# tied to a real order; they sit pending). Faster than killing the
-# relay container, and cleanup is a single DELETE.
+# OutboxPendingBacklog — block the relay's publish path so injected
+# rows stay pending. Post-D7 (2026-05-08) the previous recipe (just
+# INSERT bogus rows + wait) no longer works: the relay doesn't
+# validate payload shape, Kafka auto-topic-creation accepts the writes,
+# and `processed_at` gets set within one tick → the gauge dips back
+# below threshold before the alert's `for: 5m` window arms.
+#
+# Block Kafka first, THEN inject:
+docker compose stop kafka
 docker exec booking_db psql -U booking -d booking -c \
   "INSERT INTO events_outbox (id, event_type, payload, status)
-   SELECT gen_random_uuid(), 'order.created', '{\"probe\":true}'::jsonb, 'PENDING'
+   SELECT gen_random_uuid(), 'order.failed', '{\"probe\":true}'::jsonb, 'PENDING'
    FROM generate_series(1, 200);"
-# Default sweep + alert `for: 5m`, so wait ~6m and check Prometheus → Alerts.
-# Cleanup: DELETE FROM events_outbox WHERE payload->>'probe' = 'true';
+# With Kafka down, the relay's Publish() fails, MarkProcessed is
+# skipped, and the rows accumulate. `outbox_pending_count` rises
+# above the 100 threshold and stays elevated until you bring Kafka
+# back. Wait ~6m (alert has `for: 5m`).
+# Cleanup — DELETE the probe rows BEFORE bringing Kafka back. If you
+# start Kafka first, the relay's next poll tick publishes the bogus
+# payloads and marks them processed before the DELETE lands; the
+# saga consumer then receives invalid `order.failed` messages with
+# no real order_id and either retry-storms or DLQs them. Order:
+#   docker exec booking_db psql -U booking -d booking -c \
+#     "DELETE FROM events_outbox WHERE payload->>'probe' = 'true';"
+#   docker compose start kafka
+# (The relay catches up on real pending rows within seconds once
+# Kafka returns; the probe rows are gone before it runs.)
 
 # OutboxPendingCollectorDown — break the COUNT query by stopping postgres
 # briefly. After ~2m the OutboxPendingCollectorDown fires; postgres

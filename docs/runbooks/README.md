@@ -81,6 +81,9 @@ silence / inhibit / notification log.
 ### Meta (scrape health)
 - [TargetDown](#targetdown)
 
+### Deployment / cutover
+- [D7 cutover — `order.created` outbox drain](#d7-cutover-note--ordercreated-outbox-drain)
+
 ---
 
 ## HighErrorRate
@@ -150,7 +153,7 @@ silence / inhibit / notification log.
 **Symptom.** `orders:stream` length > 50K for 2m. Severity `warning`. Page on-call now.
 
 **Action.**
-- `docker compose restart app payment_worker` if a worker has hung.
+- `docker compose restart app` if the in-process worker has hung.
 - If worker logs show DB / Redis errors → fix the dependency first.
 - If steady-state load has grown → scale out worker replicas (see `WORKER_*` env config).
 
@@ -164,7 +167,7 @@ silence / inhibit / notification log.
 
 **Action.**
 1. **Drop new traffic at nginx** if user-visible 5xx is acceptable temporarily (`location /api/v1/book { return 503; }` or rate-limit zone tightening).
-2. Manually scale workers: `docker compose up -d --scale payment_worker=3`.
+2. Manually scale `app` replicas: `docker compose up -d --scale app=3` (the worker runs in-process inside `app`).
 3. If Redis is OOMing → consider `XTRIM orders:stream MAXLEN 0` (data loss; only as last resort to prevent total Redis crash).
 
 **Escalation.** Stay paged until length is back below Yellow threshold. Post-mortem required if OOM occurred.
@@ -495,17 +498,24 @@ Redis < DB by more than tolerance. Steady-state drift is positive (in-flight boo
 
 **Symptom.** `kafka_consumer_retry_total` rate > 0 for a topic over 2m. Severity `warning`. Consumer is "stuck but not dead" — leaving messages uncommitted for rebalance retry.
 
-**Diagnosis.** Check the downstream the consumer depends on: payment gateway? DB? Redis?
+**Post-D7 (2026-05-08) scope.** The only Kafka consumer in the system is the in-process **saga consumer** for `order.failed` (lives inside the `app` container; see `internal/infrastructure/messaging/saga_consumer.go`). Pre-D7 the legacy `payment_worker` was a second consumer for `order.created` and shared this alert; that binary is gone. The `kafka_consumer_retry_total` metric label set narrowed to `topic=order.failed` only.
 
-**Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would cause overselling during DB hiccups). Operator's job is to find and fix the downstream. Once recovered, the consumer drains naturally.
+**Diagnosis.** Check the downstream the saga consumer depends on:
+- **Postgres** — saga compensator's UoW (`MarkCompensated` + `IncrementTicket`) — `pg_pool_*` saturation, `pg_stat_activity` long-running tx?
+- **Redis** — `revert.lua` increments inventory + `saga:reverted:order:<id>` SETNX — Redis reachable, not OOM, not auth-rotated?
+- **Kafka** — broker reachable from `app` container? Consumer-group rebalance storms?
+
+**Action.** This alert intentionally does NOT trigger DLQ routing on transient errors (would silently mask a downstream outage and lose compensation events). Operator's job is to find and fix the downstream; once recovered, the saga consumer drains naturally. If the in-process consumer goroutine itself has died (panic), `app`'s `/livez` would still return 200 (process is up) but `/metrics` would show zero `saga_*` activity — restart `app` (`docker compose restart app`) as a last resort.
 
 ---
 
 ## OutboxPendingBacklog
 
-**Symptom.** `outbox_pending_count > 100 for 5m`. Severity `warning`. The transactional outbox is the bridge between "DB committed an `order.created` / `order.failed` event" and "Kafka downstream consumers see it" — when this fires the bridge is broken.
+**Symptom.** `outbox_pending_count > 100 for 5m`. Severity `warning`. The transactional outbox is the bridge between "DB committed an `order.failed` event" and "the saga consumer sees it" — when this fires the bridge is broken.
 
-**Why this is warning, not critical.** Customers can still book. The Redis hot path is unaffected. What's broken is the post-commit fan-out — saga compensator stops compensating, payment service stops processing, in-flight orders cannot advance from `processing` to `confirmed` / `failed`. The customer-visible damage takes minutes to surface (a 202 with no progress on `GET /orders/:id`); page-worthy via Slack/email but not phone.
+**Post-D7 scope.** Only `event_type='order.failed'` rows flow through the outbox now (D7 deleted the legacy `events_outbox(order.created)` write from the booking UoW). Three production emitters write `order.failed`: D5 webhook on `payment_failed`, D6 expiry sweeper on `expired`, recon's `failOrder` on stuck-charging force-fail (rare).
+
+**Why this is warning, not critical.** Customers can still book + pay. The Redis hot path + the `/pay` synchronous handler are unaffected. What's broken is the post-commit fan-out from D5/D6/recon to the in-process saga consumer — failed-payment compensations stall, expired-reservation compensations stall, the `failed` orders sit in `failed` status instead of advancing to `compensated`. The customer-visible damage takes minutes to surface (a declined Stripe Elements confirmation that doesn't release inventory); page-worthy via Slack/email but not phone.
 
 **Diagnosis (in order):**
 
@@ -696,10 +706,10 @@ docker exec booking_alertmanager amtool silence add \
 Stop a worker container and wait 2m+:
 
 ```bash
-docker stop booking_payment_worker
+docker stop booking_recon
 # … wait 2m+ …
-# Verify: open Prometheus UI → Alerts → TargetDown firing for job=payment-worker
-docker start booking_payment_worker  # to recover
+# Verify: open Prometheus UI → Alerts → TargetDown firing for job=recon
+docker start booking_recon  # to recover
 ```
 
 ---
@@ -870,3 +880,26 @@ docker start booking_payment_worker  # to recover
 - If a fleet-wide deploy stuck the sweeper for 24h+, verify NO other long-overdue rows are in the pipeline (`expiry_backlog_after_sweep`).
 
 **Escalation.** Critical informational — page so the operational gap gets visibility, but the row itself doesn't need direct intervention.
+
+---
+
+## D7 cutover note — `order.created` outbox drain
+
+D7 (2026-05-08) deleted the legacy `order.created` Kafka topic + `payment_worker` consumer. Before deploying the post-D7 binary in any environment with live traffic, check that the outbox relay has drained any pending `order.created` rows.
+
+**Why this matters.** If the outbox relay has accumulated `events_outbox` rows with `event_type='order.created'` (i.e. it fell behind right before the D7 deploy), the post-D7 relay will still publish those rows once each to a Kafka topic that no longer has a consumer. Not a correctness risk — the rows get marked `processed_at = NOW()` and stop firing — but it produces transient observability noise (Kafka topic gets writes, no consumer commits offsets, DLQ stays empty).
+
+**Pre-deploy check.**
+
+```bash
+docker exec booking_db psql -U booking -d booking -c \
+  "SELECT COUNT(*) FROM events_outbox
+   WHERE processed_at IS NULL AND event_type = 'order.created';"
+```
+
+If the count is 0, deploy is safe. If non-zero:
+
+1. **Drain first** (recommended for production) — wait for the relay to finish, re-check.
+2. **Mark-as-processed at deploy time** (faster, dev-only): `UPDATE events_outbox SET processed_at = NOW() WHERE processed_at IS NULL AND event_type = 'order.created'` immediately before / after the binary swap. Skips the dead-topic publishes entirely.
+
+Local-dev / smoke environments can ignore this; the topic-as-sink behavior is benign.

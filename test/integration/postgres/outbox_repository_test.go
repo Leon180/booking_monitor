@@ -50,7 +50,7 @@ func outboxRepoHarness(t *testing.T) (*pgintegration.Harness, domain.OutboxRepos
 
 func newOutboxEvent(t *testing.T, payload []byte) domain.OutboxEvent {
 	t.Helper()
-	ev, err := domain.NewOrderCreatedOutbox(payload)
+	ev, err := domain.NewOrderFailedOutbox(payload)
 	require.NoError(t, err)
 	return ev
 }
@@ -74,7 +74,7 @@ func TestOutboxRepository_CreateAndListPending(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, ev.ID(), pending[0].ID())
-	assert.Equal(t, domain.EventTypeOrderCreated, pending[0].EventType())
+	assert.Equal(t, domain.EventTypeOrderFailed, pending[0].EventType())
 	assert.JSONEq(t, `{"order_id":"abc"}`, string(pending[0].Payload()))
 }
 
@@ -133,9 +133,9 @@ func TestOutboxRepository_ListPending_OrderingIsIdAsc(t *testing.T) {
 	// fmt.Sprintf instead of string(rune('0'+n)) — the latter
 	// produces ":" for n=10 and other non-digit runes for n>9.
 	payloadFor := func(n int) []byte { return []byte(fmt.Sprintf(`{"n":%d}`, n)) }
-	ev1 := domain.ReconstructOutboxEvent(id1, domain.EventTypeOrderCreated, payloadFor(1), domain.OutboxStatusPending, nil)
-	ev2 := domain.ReconstructOutboxEvent(id2, domain.EventTypeOrderCreated, payloadFor(2), domain.OutboxStatusPending, nil)
-	ev3 := domain.ReconstructOutboxEvent(id3, domain.EventTypeOrderCreated, payloadFor(3), domain.OutboxStatusPending, nil)
+	ev1 := domain.ReconstructOutboxEvent(id1, domain.EventTypeOrderFailed, payloadFor(1), domain.OutboxStatusPending, nil)
+	ev2 := domain.ReconstructOutboxEvent(id2, domain.EventTypeOrderFailed, payloadFor(2), domain.OutboxStatusPending, nil)
+	ev3 := domain.ReconstructOutboxEvent(id3, domain.EventTypeOrderFailed, payloadFor(3), domain.OutboxStatusPending, nil)
 
 	// Insert in REVERSE order (3, 1, 2) — sort must override.
 	_, err = repo.Create(ctx, ev3)

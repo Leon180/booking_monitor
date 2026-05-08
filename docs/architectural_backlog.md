@@ -177,6 +177,24 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
 - **Why deferred.** Statistical testing catches a different class of bug (race-condition variability under realistic flake). Deterministic mode would be cleaner for unit-style assertions.
 - **Revisit when.** A specific saga-path test needs deterministic behavior to assert a single outcome.
 
+### Concurrent `CreatePaymentIntent` race-test coverage
+- **What.** `MockGateway.CreatePaymentIntent` has a `LoadOrStore` + `intentMetadataMu` mutex idempotency path (`mock_gateway.go`). The current `mock_gateway_test.go` covers single-caller idempotency but no two-goroutine concurrent test. Pre-D7 this gap was masked because the deleted `TestProcessOrder_RetryAfterChargeFailureAndSagaFailure_StableFailure` exercised concurrent retries via the gateway's `Charge` path.
+- **Why deferred.** D7 didn't add any new race; the gap is pre-existing. `go test -race ./internal/infrastructure/payment/...` passes. Adding the missing concurrent test is a 30-LOC follow-up that doesn't belong in D7's deletion-shaped diff.
+- **Revisit when.** Real Stripe adapter (D4.2) is implemented — at that point gateway-side idempotency is no longer mock-only and a concurrent-confirm race becomes a real production concern.
+
+### Legacy `MarkCharging` / `MarkConfirmed` interface methods
+- **What.** `OrderRepository.MarkCharging` + `MarkConfirmed` + `FindStuckCharging` exist on the interface, postgres impl, tracing decorator, and domain state-machine tests. Post-D7 they have ZERO application-layer callers — the legacy A4 `payment.Service.ProcessOrder` was the sole writer of `Charging` state, recon's `MarkConfirmed` only fires for migration-era pre-D7 rows.
+- **Why deferred.** Out of scope for D7 (which is shaped as "delete A4-specific code"). The methods + state-machine edges remain because:
+  1. Recon still needs to resolve any pre-D7 `Charging` rows that survive the deploy
+  2. The state machine in `domain/order.go` declares `Charging` as a legal source state — removing it requires a migration to drop any `status='charging'` rows + a domain-test rewrite
+- **Revisit when.** All deployments have been on post-D7 binary for ≥ MaxChargingAge (24h default) AND `recon_resolved_total{outcome=*}` for charging shows zero recent activity. Then the cleanup PR can: drop `MarkCharging` from the interface + impl + tracing, drop the `Charging` enum value (or keep as a tombstone), drop `FindStuckCharging` + the partial index migration 000010 (or DROP INDEX in a follow-up migration).
+
+### Saga consumer (`order.failed`) unit-test coverage
+- **What.** `internal/infrastructure/messaging/saga_consumer.go` has zero unit tests. Pre-D7 this was a known gap; post-D7 it's the only Kafka consumer left in the system (runs in-process inside `app`).
+- **Why this matters.** A panic or infinite-retry bug in this consumer would surface only as "compensations stop happening" — the symptom is invisible from the API surface (book→pay still works) and only the `KafkaConsumerStuck` alert + `SagaStuckFailedOrders` watchdog provide signal. Test coverage for: (1) happy-path consume + commit, (2) compensator-error retry budget respected, (3) DLQ-on-max-retries, (4) Redis-down retry-counter graceful degradation.
+- **Why deferred.** Net-new test infrastructure (kafka-go `kafka.Reader` mock or testcontainers Kafka) — D7 was already a sizable refactor; bundling test infrastructure work would muddle the diff.
+- **Revisit when.** Before D12 (multi-binary comparison harness) or first time the consumer has a flake in production. Plan v4 Q3 deferred this; the `SagaConsumer` shape is stable now, the test-mock seam is a one-time setup.
+
 ---
 
 ## API surface
