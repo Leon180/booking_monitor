@@ -125,13 +125,13 @@ Phase 3 (demo readiness, ~5–7 wk — TRIMMED for portfolio focus) — Pattern 
        ## Result               ← Benchmark numbers, second-order effects, industry citations.
        ## Lessons              ← Honest hindsight. Senior interviews weight this heavily.
        ```
-       **First batch (~3-5 posts, written incrementally — don't block on completing all of them):**
-       - **Cache-truth architecture: why Redis is ephemeral, not durable** (PR-A→PR-D, the FLUSHALL incident)
-       - **The Lua single-thread ceiling: 8,330 acc/s and how to think about the next 10×** (VU stress test + 1M QPS analysis)
-       - **Recon + drift detection: building the safety net after the silent-loss incident**
-       - **Why Docker Desktop on Mac caps your benchmark at ~80k req/s** (write AFTER O3.2 variant B has data — currently estimated)
-       - **Saga compensation in production-shape Go: outbox + watchdog + idempotency**
-       Target: ~1000-1500 words per post, 1-2 days each. **Pace: write 3 posts before Phase 3 finishes; the rest can land post-roadmap as portfolio additions.**
+       **First batch (~3-5 posts, written incrementally) — status as of 2026-05-09:**
+       - ✅ **Cache-truth architecture: why Redis is ephemeral, not durable** — published 2026-05-03 as [`2026-05-cache-truth-architecture.zh-TW.md`](blog/2026-05-cache-truth-architecture.zh-TW.md) (pairs with v0.4.0)
+       - ✅ **The Lua single-thread ceiling: 8,330 acc/s and how to think about the next 10×** — published 2026-05-03 as [`2026-05-lua-single-thread-ceiling.zh-TW.md`](blog/2026-05-lua-single-thread-ceiling.zh-TW.md)
+       - ✅ **Recon + drift detection: building the safety net after the silent-loss incident** — published 2026-05-03 as [`2026-05-detect-but-dont-fix.zh-TW.md`](blog/2026-05-detect-but-dont-fix.zh-TW.md) (slightly broader scope: the 4-layer detect-but-don't-fix design rule)
+       - 🕐 **Why Docker Desktop on Mac caps your benchmark at ~80k req/s** — data-gated; write AFTER O3.2 variant B benchmark has actual data. The only remaining first-batch item.
+       - ✅ **Saga compensation in production-shape Go: outbox + watchdog + idempotency** — published 2026-05-09 as [`2026-05-saga-pure-forward-recovery.zh-TW.md`](blog/2026-05-saga-pure-forward-recovery.zh-TW.md) (reframed during writing: "Saga shouldn't manage the happy path — D7 narrowing as Garcia-Molina 1987 §5's engineering implementation")
+       Target was ~1000-1500 words per post, 1-2 days each. **Pace target met 2026-05-03** (first 3 posts before Phase 3 finishes); the saga forward-recovery post (2026-05-09) is the first post-roadmap addition. Authoritative blog index: [`docs/blog/README.md`](blog/README.md).
 
   D16  Repo storytelling — `CHANGELOG.md` + retroactive git tags + GitHub Releases (~1 day, highest ROI of the portfolio-narrative tasks).
        **Why this exists:** the GitHub repo entry currently shows a flat list of 70+ PRs with no architectural-milestone visual. Recruiters / interviewers don't piece architecture evolution together from PR titles. A CHANGELOG + Releases page IS the architecture timeline, in the place GitHub surfaces it most prominently.
