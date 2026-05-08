@@ -77,15 +77,13 @@ Different from the [bilingual contract](../../.claude/CLAUDE.md) that covers AGE
 | [2026-05-cache-truth-architecture.zh-TW.md](2026-05-cache-truth-architecture.zh-TW.md) | [EN](2026-05-cache-truth-architecture.md) | published | Why Redis is ephemeral, not durable. The FLUSHALL incident, the 411/1000 silent message loss, and the 5-PR closure. | [v0.4.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) |
 | [2026-05-lua-single-thread-ceiling.zh-TW.md](2026-05-lua-single-thread-ceiling.zh-TW.md) | [EN](2026-05-lua-single-thread-ceiling.md) | published | The Lua single-thread ceiling at 8,330 acc/s. Why Redis CPU isn't the problem; why the next 10× requires two-layer sharding (section-level + hot-section quota router); why generic hash sharding is the wrong frame. | [VU stress benchmark](../benchmarks/), [saturation profile](../saturation-profile/) |
 | [2026-05-detect-but-dont-fix.zh-TW.md](2026-05-detect-but-dont-fix.zh-TW.md) | [EN](2026-05-detect-but-dont-fix.md) | published | Detect-but-don't-fix multi-layer safety. Why saga / watchdog / recon / drift detector are four non-overlapping layers; why none auto-corrects; the design rule for non-overlapping responsibility. | [PR #45](https://github.com/Leon180/booking_monitor/pull/45), [PR #49](https://github.com/Leon180/booking_monitor/pull/49), [PR #76](https://github.com/Leon180/booking_monitor/pull/76) |
+| [2026-05-saga-pure-forward-recovery.zh-TW.md](2026-05-saga-pure-forward-recovery.zh-TW.md) | [EN](2026-05-saga-pure-forward-recovery.md) | published | Saga shouldn't manage the happy path. D7 narrowing as Garcia-Molina 1987 §5 forward-recovery's engineering implementation; race semantics between D6 expiry sweeper and D5 webhook; idempotency-key vs payment-success distinction. | [PR #98](https://github.com/Leon180/booking_monitor/pull/98), [v0.6.0](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0), [foundations notes](notes/2026-05-pattern-a-foundations.zh-TW.md) |
 
 ### Planned (per [Phase 3 roadmap D15](../post_phase2_roadmap.md))
 
-- The Lua single-thread ceiling: 8,330 acc/s and how to think about the next 10× — pairs with [`docs/benchmarks/20260502_132335_compare_c500_vu_scaling/`](../benchmarks/) and the 1M QPS analysis
-- Recon + drift detection: building the safety net after the silent-loss incident — focuses on the operational shape (recovery story, runbook design)
 - Why Docker Desktop on Mac caps your benchmark at ~80k req/s — write AFTER O3.2 variant B has actual data
-- Saga compensation in production-shape Go: outbox + watchdog + idempotency
 
-Pace target: write 3 posts before Phase 3 finishes; the rest land incrementally as portfolio additions.
+Pace target: 3 posts before Phase 3 finishes (met as of `2026-05-03`); subsequent posts land as portfolio additions. The Pattern A post above is the first post-roadmap addition.
 
 ## Reading order recommendation (for someone landing fresh on the repo)
 

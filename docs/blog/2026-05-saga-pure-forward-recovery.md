@@ -1,5 +1,7 @@
 # Saga shouldn't manage the happy path — D7 narrowing as Garcia-Molina 1987 §5's 39-years-later implementation
 
+> 中文版本(主要):[2026-05-saga-pure-forward-recovery.zh-TW.md](2026-05-saga-pure-forward-recovery.zh-TW.md)
+
 > The race semantics of reservation → payment → expiry, and why removing the success path from the saga system is a return to the 1987 paper's original intent.
 
 Fourth post in the series. The first three were about infrastructure-layer decisions (cache-truth, the Lua ceiling, the three-layer detector split); this one talks about a user-facing design — splitting the booking flow from "book = charge" into reservation → payment → expiry (Pattern A), and why D7 isn't "incidental cleanup" but rather restoring the saga to where it was supposed to be.
@@ -148,13 +150,15 @@ D7's worker UoW shrinks from `[INSERT order, INSERT events_outbox(order.created)
 - Booking p95: -8.7%
 - HTTP p95: -9.7%
 
-Removing the happy-path outbox write is net positive — two SQL statements become one. This is consistent with what Mockus et al. observed at Meta in 2025 [10]: code deletion is high-ROI engineering work, with SEV-causing diffs dropping from 76% to 24% (arXiv preprint, industrial-scale data but not yet peer-reviewed; flag accordingly when citing).
+Removing the happy-path outbox write is net positive — two SQL statements become one. Mockus et al. 2025 [10]\* (Meta industrial-scale data; arXiv preprint, not peer-reviewed) report that code deletion as engineering practice correlates with substantial SEV-causing-diff reduction — directionally consistent with what we observed in D7's hot-path benchmark.
 
 ### Academic alignment
 
-- **Local compensation > global saga** — Psarakis et al. CIDR '25 [7] finding: "Local compensations reduce rollback cost; global sagas preserve consistency but delay convergence." Our saga compensator runs in-process inside `app` (post-D7), which is exactly local compensation
+> *Citations marked with \* in this section are surfaced via secondary synthesis from our [companion learning notes](notes/2026-05-pattern-a-foundations.zh-TW.md), which integrated two research-agent reports with primary-source校對 on three sources only (Stripe PaymentIntent, Stripe Idempotency, Garcia-Molina 1987). The starred citations have NOT been verified against their original venues at write time; treat them as orientation rather than verbatim authority. The notes file tracks per-source verification status and will be updated as primary reads land.*
+
+- **Local compensation > global saga** — Psarakis et al. CIDR '25 [7]\*. Per second-hand synthesis, this paper characterizes the trade-off as "local compensations reduce rollback cost; global sagas preserve consistency but delay convergence." Our saga compensator runs in-process inside `app` (post-D7), which is what the synthesis describes as local compensation
 - **Outbox is the practical solution for microservices** — Mohammad SLR 2025 [11]: "Exact-once delivery is unrealistic; transactional outbox + deduplication is the practical solution." Aligns with our outbox pattern from D1 onward
-- **Formal guarantees** — Kløvedal et al. arXiv 2026 [12] (under OOPSLA review): the Accompanist runtime provides a formal framework proving saga atomicity under three assumptions (deterministic process, idempotent action, durable queue). Our three systems (Go runtime / Kafka / PG outbox) map cleanly to those three assumptions
+- **Formal guarantees** — Kløvedal et al. arXiv 2026 [12]\* (under OOPSLA review). Per second-hand synthesis, the Accompanist runtime is described as proving saga atomicity under three assumptions (deterministic process, idempotent action, durable queue). Our three systems (Go runtime / Kafka / PG outbox) map onto those three assumptions if the synthesis is accurate
 
 ---
 
