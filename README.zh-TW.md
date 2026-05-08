@@ -53,11 +53,11 @@ internal/
     persistence/postgres/ # Repositories、UoW、advisory lock、row mapper
     messaging/            # Kafka publisher + consumers
     observability/        # Prometheus metrics、OTEL tracing、DB pool collector
-    payment/              # Mock 付款閘道(成功率可設定)
+    payment/              # Mock 付款閘道(CreatePaymentIntent + GetStatus;成功/失敗由 D5 webhook 結果驅動,post-D7)
     config/               # YAML config + 環境變數 override(cleanenv)
   log/                    # 結構化日誌(Zap)— context 傳遞、typed tag、執行期 level
   bootstrap/              # logger + tracer + DI 基礎元件的 fx 綁定
-deploy/                   # Postgres migrations(11 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
+deploy/                   # Postgres migrations(15 個)、Redis Lua、Nginx、Prometheus alert、Grafana dashboard
 ```
 
 ### 架構演進

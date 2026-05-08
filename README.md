@@ -53,11 +53,11 @@ internal/
     persistence/postgres/ # Repositories, UoW, advisory locks, row mappers
     messaging/            # Kafka publisher + consumers
     observability/        # Prometheus metrics, OTEL tracing, DB-pool collector
-    payment/              # Mock payment gateway with configurable success rate
+    payment/              # Mock payment gateway (CreatePaymentIntent + GetStatus; success/failure driven by D5 webhook outcomes, post-D7)
     config/               # YAML config + env overrides (cleanenv)
   log/                    # Structured logging (Zap) — context propagation, typed tags, runtime level
   bootstrap/              # fx wiring for logger + tracer + DI primitives
-deploy/                   # Postgres migrations (11), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
+deploy/                   # Postgres migrations (15), Redis Lua, Nginx, Prometheus alerts, Grafana dashboards
 ```
 
 ### Architecture Evolution
