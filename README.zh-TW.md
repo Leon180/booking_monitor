@@ -224,6 +224,22 @@ npm run dev   # http://localhost:5173
 
 完整流程說明、intent-aware 顯示的設計理由([demo/src/intent.ts](demo/src/intent.ts))與 `(intent, observed_status) → display` 對應表都在 [demo/README.md](demo/README.md)。
 
+## 終端機 walkthrough(D10-minimal)
+
+3 分鐘的終端機 walkthrough,跑完 Pattern A 三條完整路徑 — happy path、payment-failed、abandon→expiry。基礎設施(script、Makefile target、env recipe)在這個 branch 出版;`.cast` 錄影本身會在 follow-up commit 上來(因為要先 host-side `brew install asciinema` + 一次互動式錄製)。播放跟重錄的步驟請見 [`docs/demo/README.md`](docs/demo/README.md)。
+
+從零重現:
+
+```bash
+make demo-up                          # 啟動 stack(20s reservation + 5s sweep)
+scripts/d10_demo_walkthrough.sh        # 三階段 walkthrough
+# 或重錄:
+asciinema rec docs/demo/walkthrough.cast --overwrite \
+    --command='scripts/d10_demo_walkthrough.sh'
+```
+
+架構脈絡(§5 forward recovery / §4 backward recovery、D5 webhook vs D6 sweeper 作為取消觸發來源)請見 [`docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md`](docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md)。對應的 k6 baseline benchmark(在 load 下跑同一條 two-step flow)請見 [`make bench-two-step`](Makefile) 跟 [`docs/benchmarks/`](docs/benchmarks/)。
+
 ## API 端點
 
 | Method | Path | 說明 |
