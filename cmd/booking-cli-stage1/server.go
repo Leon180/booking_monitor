@@ -124,10 +124,28 @@ func registerExpirySweeper(
 			}()
 			return nil
 		},
-		OnStop: func(_ context.Context) error {
+		OnStop: func(stopCtx context.Context) error {
+			// Bound the shutdown by fx's stop deadline. Cancel the
+			// sweeper context first so the goroutine starts draining;
+			// then wait on a done channel with a select against the
+			// stopCtx — if a sweepOnce DB call is stuck (slow query,
+			// connection-pool stall) and outlives fx's deadline, return
+			// ctx.Err() so fx can finish the rest of its OnStop chain
+			// instead of hanging benchmark teardown forever. The
+			// goroutine keeps running until ctx.Err propagates through
+			// its DB calls; the process is exiting anyway.
 			cancel()
-			wg.Wait()
-			return nil
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+				return nil
+			case <-stopCtx.Done():
+				return stopCtx.Err()
+			}
 		},
 	})
 }
