@@ -161,7 +161,12 @@ export default function (data) {
         return;
     }
     acceptedBookings.add(1);
-    businessErrors.add(0);
+    // Don't add(0) here — `business_errors` is a Rate, and recording
+    // success at this midpoint would count multi-step failures (in
+    // /pay, confirm, paid-polling, or compensation-polling) as BOTH a
+    // success and a failure within the same iteration, halving the
+    // observed failure rate. add(0) lives at the true terminal success
+    // points only (end of happy path; end of abandon path).
     const orderID = bookRes.json().order_id;
     if (!orderID) {
         businessErrors.add(1);
@@ -203,6 +208,7 @@ export default function (data) {
         }
         if (abandonResult) {
             compensatedAbandons.add(1);
+            businessErrors.add(0);   // abandon-path terminal success
         } else {
             businessErrors.add(1);
         }
@@ -241,4 +247,5 @@ export default function (data) {
     paidOrders.add(1);
     reservedToPaid.add(Date.now() - payStart);
     endToEndPaid.add(Date.now() - bookStart);
+    businessErrors.add(0);   // happy-path terminal success
 }
