@@ -1,5 +1,7 @@
 # `docs/demo/` — Pattern A terminal walkthrough
 
+> 中文版本: [README.zh-TW.md](README.zh-TW.md)
+
 A 3-minute asciinema recording of the full Pattern A flow against the running stack — the D10-minimal portfolio piece (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) D10).
 
 ## What's here
@@ -77,7 +79,3 @@ asciinema upload docs/demo/walkthrough.cast
 ```
 
 Then add the URL to the README's terminal-walkthrough section so external readers can play in-browser without cloning the repo. The `.cast` file in this directory is the source of truth; the asciinema.org copy is a convenience.
-
-## Why no zh-TW pair for this README
-
-`docs/demo/` is not in the [bilingual contract pair list](../../.claude/CLAUDE.md). EN-only is the convention for tooling READMEs (mirrors `docs/blog/notes/` and `docs/benchmarks/` precedent). The blog post itself, which is paired EN+zh-TW, is the canonical bilingual portfolio piece for the architecture this demo demonstrates.
