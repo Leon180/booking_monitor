@@ -7,6 +7,7 @@ import (
 	"fmt"
 	stdlog "log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,13 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// ErrCompensateNotEligible is returned by compensateAwaitingOrder
+// when the order isn't in `awaiting_payment` state at lock time.
+// Callers branch on this so concurrent races (e.g., /confirm-
+// succeeded landing between sweeper-SELECT and FOR UPDATE) don't
+// log as errors.
+var ErrCompensateNotEligible = errors.New("order not awaiting_payment at lock time")
 
 // runServer is the `server` subcommand entry for Stage 1. Loads
 // config + wires fx + blocks on app.Run until SIGINT/SIGTERM.
@@ -67,8 +75,119 @@ func runServer(_ *cobra.Command, _ []string) {
 		),
 
 		fx.Invoke(registerHTTPServer),
+		fx.Invoke(registerExpirySweeper),
 	)
 	app.Run()
+}
+
+// registerExpirySweeper wires the in-binary expiry sweeper goroutine
+// for Stage 1's abandon path. Mirrors Stage 4's D6 expiry sweeper +
+// saga compensator combined into one in-process loop — Stage 1 has
+// no Kafka, so there's no out-of-process saga consumer; the sweeper
+// directly performs the compensation tx via compensateAwaitingOrder.
+//
+// Cadence + grace period reuse `cfg.Expiry.SweepInterval` and
+// `cfg.Expiry.ExpiryGracePeriod` so the existing demo-up env override
+// (`EXPIRY_SWEEP_INTERVAL=5s`) propagates without Stage 1 needing its
+// own knob.
+func registerExpirySweeper(
+	lc fx.Lifecycle,
+	db *sql.DB,
+	cfg *config.Config,
+	logger *mlog.Logger,
+) {
+	sweepInterval := cfg.Expiry.SweepInterval
+	gracePeriod := cfg.Expiry.ExpiryGracePeriod
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	lc.Append(fx.Hook{
+		OnStart: func(_ context.Context) error {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				logger.Info(ctx, "stage1 expiry sweeper starting",
+					mlog.Duration("sweep_interval", sweepInterval),
+					mlog.Duration("grace_period", gracePeriod))
+				ticker := time.NewTicker(sweepInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						logger.Info(context.Background(), "stage1 expiry sweeper stopping")
+						return
+					case <-ticker.C:
+						sweepOnce(ctx, db, gracePeriod, logger)
+					}
+				}
+			}()
+			return nil
+		},
+		OnStop: func(_ context.Context) error {
+			cancel()
+			wg.Wait()
+			return nil
+		},
+	})
+}
+
+// sweepOnce runs one tick of the Stage 1 expiry sweeper. Selects
+// candidate awaiting_payment orders past `reserved_until + grace`,
+// then calls compensateAwaitingOrder for each.
+//
+// Two-phase (SELECT candidates → loop FOR UPDATE per row) instead of
+// a single batched UPDATE because the row-lock + inventory revert
+// MUST run per-order to keep the per-row idempotency contract: a
+// concurrent /confirm-succeeded landing during the sweep races for
+// the same row's FOR UPDATE; whichever loses sees status !=
+// awaiting_payment and returns ErrCompensateNotEligible (skip, not
+// error). A single batched UPDATE would silently lose this race.
+func sweepOnce(ctx context.Context, db *sql.DB, gracePeriod time.Duration, logger *mlog.Logger) {
+	graceArg := fmt.Sprintf("%f seconds", gracePeriod.Seconds())
+	rows, err := db.QueryContext(ctx, `
+		SELECT id
+		  FROM orders
+		 WHERE status = 'awaiting_payment'
+		   AND reserved_until <= NOW() - $1::interval
+		 LIMIT 100`,
+		graceArg)
+	if err != nil {
+		logger.Error(ctx, "stage1 sweeper find candidates", tag.Error(err))
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	var orderIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			logger.Error(ctx, "stage1 sweeper scan candidate", tag.Error(err))
+			continue
+		}
+		orderIDs = append(orderIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error(ctx, "stage1 sweeper rows iter", tag.Error(err))
+	}
+	_ = rows.Close()
+
+	for _, id := range orderIDs {
+		if ctx.Err() != nil {
+			// Shutdown signaled mid-batch; abandon remaining work
+			// gracefully (next tick will pick up where we left off).
+			return
+		}
+		if err := compensateAwaitingOrder(ctx, db, id); err != nil {
+			if errors.Is(err, ErrCompensateNotEligible) {
+				// Race with /confirm-succeeded between our SELECT and
+				// FOR UPDATE — expected, debug-level rather than error.
+				continue
+			}
+			logger.Error(ctx, "stage1 sweeper compensate failed",
+				tag.OrderID(id), tag.Error(err))
+		}
+	}
 }
 
 // registerHTTPServer wires the HTTP layer for Stage 1. Routes are
@@ -527,40 +646,20 @@ func handleTestConfirm(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 			return
 		}
 
-		// outcome == "failed" — sync compensation
-		tx, err := db.BeginTx(c.Request.Context(), nil)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "begin tx"})
-			return
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		// Lock the order row first to read ticket_type_id + qty.
-		// FOR UPDATE on `orders` because the same compensation tx
-		// could fire from /confirm and the (slice-5) expiry sweeper
-		// concurrently if reserved_until ran out mid-confirm.
-		var (
-			ttID         uuid.UUID
-			qty          int
-			currentStat  string
-			hasIntent    sql.NullString
-		)
-		err = tx.QueryRowContext(c.Request.Context(), `
-			SELECT ticket_type_id, quantity, status, payment_intent_id
-			  FROM orders
-			 WHERE id = $1
-			   FOR UPDATE`,
-			orderID).Scan(&ttID, &qty, &currentStat, &hasIntent)
+		// outcome == "failed" — pre-check intent contract (Codex P2.1:
+		// /confirm requires /pay-first; sweeper has no such contract
+		// because abandoned-without-/pay is a valid abandon path),
+		// then call the shared compensation helper.
+		var hasIntent sql.NullString
+		err = db.QueryRowContext(c.Request.Context(),
+			"SELECT payment_intent_id FROM orders WHERE id = $1",
+			orderID).Scan(&hasIntent)
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 			return
 		}
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "lock order: " + err.Error()})
-			return
-		}
-		if currentStat != string(domain.OrderStatusAwaitingPayment) {
-			c.JSON(http.StatusConflict, gin.H{"error": "order not in awaiting_payment state: " + currentStat})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read order"})
 			return
 		}
 		if !hasIntent.Valid || hasIntent.String == "" {
@@ -568,35 +667,89 @@ func handleTestConfirm(db *sql.DB, logger *mlog.Logger) gin.HandlerFunc {
 			return
 		}
 
-		// Lock + revert inventory.
-		if _, err = tx.ExecContext(c.Request.Context(), `
-			UPDATE event_ticket_types
-			   SET available_tickets = available_tickets + $1,
-			       version = version + 1
-			 WHERE id = $2`,
-			qty, ttID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "revert inventory"})
-			return
+		err = compensateAwaitingOrder(c.Request.Context(), db, orderID)
+		switch {
+		case err == nil:
+			c.JSON(http.StatusOK, gin.H{"status": "compensated"})
+		case errors.Is(err, ErrCompensateNotEligible):
+			c.JSON(http.StatusConflict, gin.H{"error": "order not in awaiting_payment state"})
+		default:
+			logger.Error(c.Request.Context(), "stage1 /confirm-failed compensation",
+				tag.OrderID(orderID), tag.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "compensation tx failed"})
 		}
-
-		// Mark order compensated.
-		if _, err = tx.ExecContext(c.Request.Context(), `
-			UPDATE orders
-			   SET status = 'compensated'
-			 WHERE id = $1
-			   AND status = 'awaiting_payment'`,
-			orderID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "mark compensated"})
-			return
-		}
-
-		if err = tx.Commit(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "commit compensation tx"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "compensated"})
-		_ = logger
 	}
+}
+
+// compensateAwaitingOrder runs the Stage 1 abandon-path compensation
+// transaction:
+//
+//	BEGIN
+//	  SELECT ticket_type_id, quantity, status FROM orders WHERE id=$1 FOR UPDATE
+//	  if status != 'awaiting_payment' → ErrCompensateNotEligible (rolled back)
+//	  UPDATE event_ticket_types SET available_tickets += quantity, version += 1
+//	  UPDATE orders SET status='compensated' WHERE status='awaiting_payment'
+//	COMMIT
+//
+// Used by both call sites that abandon a Pattern A reservation in
+// Stage 1:
+//
+//   - /test/payment/confirm/:id?outcome=failed (handler-side; the
+//     handler does the additional payment_intent_id IS NOT NULL
+//     check before calling here, since /confirm has the
+//     "must-call-/pay-first" contract)
+//   - the in-binary expiry sweeper goroutine (calls this directly;
+//     no /pay-first requirement — abandon-without-/pay is a valid
+//     TTL-expired path)
+//
+// The SELECT FOR UPDATE on `orders` serializes concurrent attempts
+// to compensate the same order (e.g., /confirm-failed AND the
+// sweeper firing in the same window). The second to acquire the
+// lock will see status='compensated' and return ErrCompensateNotEligible.
+func compensateAwaitingOrder(ctx context.Context, db *sql.DB, orderID uuid.UUID) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		ttID   uuid.UUID
+		qty    int
+		status string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT ticket_type_id, quantity, status
+		  FROM orders
+		 WHERE id = $1
+		   FOR UPDATE`,
+		orderID).Scan(&ttID, &qty, &status)
+	if err != nil {
+		return fmt.Errorf("lock order: %w", err)
+	}
+	if status != string(domain.OrderStatusAwaitingPayment) {
+		return ErrCompensateNotEligible
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE event_ticket_types
+		   SET available_tickets = available_tickets + $1,
+		       version = version + 1
+		 WHERE id = $2`,
+		qty, ttID); err != nil {
+		return fmt.Errorf("revert inventory: %w", err)
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE orders
+		   SET status = 'compensated'
+		 WHERE id = $1
+		   AND status = 'awaiting_payment'`,
+		orderID); err != nil {
+		return fmt.Errorf("mark compensated: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // mapBookingError translates Stage 1 service errors into HTTP
