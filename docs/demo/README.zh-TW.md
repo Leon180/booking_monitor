@@ -6,7 +6,7 @@
 
 ## 資料夾內容
 
-- `walkthrough.cast` — **PENDING**:把 [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) 對著新 stack 跑出來的 asciinema 錄影。純 JSON;當文字 commit。基礎建設(script、Makefile target、env 配方)在 PR #102 出版;`.cast` 本身會在 follow-up commit 才上來,因為錄影需要 host-side `brew install asciinema` + 一次互動式 session。下方「錄製」段有完整步驟。
+- [`walkthrough.cast`](walkthrough.cast) — 把 [`scripts/d10_demo_walkthrough.sh`](../../scripts/d10_demo_walkthrough.sh) 對著新 stack 跑出來的 asciinema 錄影。純 JSON;當文字 commit。在 PR #103 中錄製(對應 post-D7 stack image);script 改了之後要重錄請看下方「錄製(或重錄)」段。
 
 ## 錄影內容
 
@@ -18,7 +18,7 @@
 
 對應的部落格文章 [`docs/blog/2026-05-saga-pure-forward-recovery.zh-TW.md`](../blog/2026-05-saga-pure-forward-recovery.zh-TW.md)([EN](../blog/2026-05-saga-pure-forward-recovery.md))解釋了這些階段背後的架構脈絡。
 
-## 播放(等 .cast 上來之後)
+## 播放
 
 ```bash
 # 安裝 asciinema(host-side,只裝一次)
