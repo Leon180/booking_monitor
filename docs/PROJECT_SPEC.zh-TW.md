@@ -14,6 +14,8 @@
 
 ## 2. 系統架構
 
+> **視覺概觀**:請看 [README §系統架構](../README.zh-TW.md#系統架構) 的 Stage 4 mermaid 圖、[Stage 1→4 演進說明](../README.zh-TW.md#架構演進),以及 [Pattern A 流程 sequence diagram](../README.zh-TW.md#pattern-a-流程已隨-v050--v060-上線)。這些圖是**post-D7** 後的架構(saga consumer/compensator 在 `app` 行程內執行;`payment_worker` 已經移除)。本節保留 ASCII 流程跟散文是**刻意保留 A4 歷史脈絡**,讓架構演進的敘事在 spec 內可達 — 哪裡是現況、哪裡是歷史,請看下方 D7 汰除標註。
+
 ```
 Client --> Nginx (限流: 100 req/s/IP, burst 200)
   --> Gin API (冪等性檢查, Correlation ID, metrics, mapError)

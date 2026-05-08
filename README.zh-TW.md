@@ -106,9 +106,9 @@ flowchart LR
 
 四個 stage 的 `cmd/booking-cli-stage{1,2,3,4}/` 比較 harness([`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md) 的 D12)是 Phase 3 的計畫項目 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。
 
-### Pattern A 流程(計畫中 — Phase 3a)
+### Pattern A 流程(已隨 v0.5.0 + v0.6.0 上線)
 
-下一個里程碑會把 `POST /book` 拆成預訂 + 明確的 `POST /pay` + `POST /webhook/payment`,讓訂票流程進入 Stripe Checkout / KKTIX 的形狀。
+`POST /book` 已拆成預訂 + 顯式的 `POST /pay` + `POST /webhook/payment` — Stripe Checkout / KKTIX 形狀。下面的流程在 Docker stack 上端到端可跑。
 
 ```mermaid
 sequenceDiagram
@@ -148,22 +148,22 @@ sequenceDiagram
         SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
         P-->>SW: 過期的列
         SW->>P: UoW {MarkExpired + emit order.failed}
-        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator(獨立 process)<br/>跑 revert.lua INCRBY → MarkCompensated
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga consumer + compensator<br/>(D7 後在 app 行程內)<br/>跑 revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
 D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga compensator 負責(透過 `saga:reverted:order:<id>` SETNX 保證冪等)。形狀跟 D5 失敗路徑一樣;D6 不會直接呼叫 `revert.lua`。
 
-**`v0.5.0` 已於 2026-05-07 出版** — Pattern A D1–D6 完成;上述流程在 Docker stack 上端到端可跑。
+**已上線:** [`v0.5.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.5.0)(2026-05-07,D1–D6)讓上面的「預訂 → 付款 → 過期」迴圈完整可跑。[`v0.6.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0)(2026-05-08)把 saga compensator 的範圍收窄(D7 — 刪掉舊的 A4 自動扣款路徑;`order.failed` topic 上現在只剩 D5 webhook + D6 sweeper 兩個生產端 emitter),並出版 [瀏覽器 demo](demo/)(D8-minimal)。
 
 ## 特色
 
 - **雙層庫存**:Redis(熱路徑,次毫秒等級) + PostgreSQL(事實來源)
 - **非同步處理**:Redis Streams consumer group,含 PEL 恢復機制
 - **Transactional Outbox**:訂單與事件同一筆交易,再由 OutboxRelay 發布至 Kafka
-- **Saga 補償**:冪等地回滾付款失敗(DB + Redis)
-- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `Charge`)
+- **Saga 補償**:冪等地回滾付款失敗 + 預訂過期(DB + Redis)
+- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `CreatePaymentIntent`)
 - **限流**:Nginx(100 req/s/IP,burst 200)
 - **領導者選舉**:以 PostgreSQL advisory lock 確保只有 1 個 OutboxRelay 實例在跑
 - **完整可觀測性**:Prometheus metrics、Grafana dashboards、Jaeger tracing、Zap logging

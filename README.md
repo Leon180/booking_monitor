@@ -106,9 +106,9 @@ flowchart LR
 
 The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12 in [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md)) is planned for Phase 3 — same `internal/` packages, different fx wirings, side-by-side benchmark runs.
 
-### Pattern A flow (planned — Phase 3a)
+### Pattern A flow (shipped in v0.5.0 + v0.6.0)
 
-The next milestone splits `POST /book` into reservation + explicit `POST /pay` + `POST /webhook/payment`. Brings the booking flow into Stripe Checkout / KKTIX shape.
+`POST /book` is split into reservation + explicit `POST /pay` + `POST /webhook/payment` — Stripe Checkout / KKTIX shape. The flow below runs end-to-end against the Docker stack.
 
 ```mermaid
 sequenceDiagram
@@ -148,22 +148,22 @@ sequenceDiagram
         SW->>P: SELECT awaiting_payment<br/>WHERE reserved_until <= NOW() - grace
         P-->>SW: overdue rows
         SW->>P: UoW {MarkExpired + emit order.failed}
-        Note over P,R: outbox relay → Kafka order.failed →<br/>saga compensator (separate process)<br/>runs revert.lua INCRBY → MarkCompensated
+        Note over P,R: outbox relay → Kafka order.failed →<br/>saga consumer + compensator<br/>(in-process inside app, post-D7)<br/>runs revert.lua INCRBY → MarkCompensated
         end
     end
 ```
 
 D6's job is timing — when does the row expire. The saga compensator owns inventory revert (idempotent via `saga:reverted:order:<id>` SETNX). Same shape as D5's failure path; D6 doesn't call `revert.lua` directly.
 
-**`v0.5.0` shipped 2026-05-07** — Pattern A D1–D6 complete; the flow above runs end-to-end against the Docker stack.
+**Shipped:** [`v0.5.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.5.0) (2026-05-07, D1–D6) closes the reservation→payment→expiry loop above. [`v0.6.0`](https://github.com/Leon180/booking_monitor/releases/tag/v0.6.0) (2026-05-08) narrows the saga compensator scope (D7 — deletes the legacy A4 auto-charge path; `order.failed` topic now has only the D5 webhook + D6 sweeper as production emitters) and ships the [browser demo](demo/) (D8-minimal).
 
 ## Features
 
 - **Dual-Tier Inventory**: Redis (hot path, sub-ms) + PostgreSQL (source of truth)
 - **Async Processing**: Redis Streams with consumer groups and PEL recovery
 - **Transactional Outbox**: Atomic order + event persistence, Kafka publishing
-- **Saga Compensation**: Idempotent payment failure rollback (DB + Redis)
-- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `Charge`)
+- **Saga Compensation**: Idempotent payment-failure + reservation-expiry rollback (DB + Redis)
+- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `CreatePaymentIntent`)
 - **Rate Limiting**: Nginx (100 req/s/IP, burst 200)
 - **Leader Election**: PostgreSQL advisory locks for single OutboxRelay instance
 - **Full Observability**: Prometheus metrics, Grafana dashboards, Jaeger tracing, Zap logging
