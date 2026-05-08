@@ -224,6 +224,22 @@ npm run dev   # http://localhost:5173
 
 See [demo/README.md](demo/README.md) for the full flow walkthrough, intent-aware display rationale ([demo/src/intent.ts](demo/src/intent.ts)), and the `(intent, observed_status) → display` mapping.
 
+## Terminal walkthrough (D10-minimal)
+
+For a 3-minute terminal-only walkthrough showing the full Pattern A flow — happy path, payment-failed, and abandon→expiry — see the asciinema recording at [`docs/demo/walkthrough.cast`](docs/demo/walkthrough.cast). Plays via `asciinema play docs/demo/walkthrough.cast` (`brew install asciinema` first). The `.cast` format is plain JSON, committed as text.
+
+Reproducible from scratch:
+
+```bash
+make demo-up                          # stack with 20s reservation + 5s sweep
+scripts/d10_demo_walkthrough.sh        # the 3-phase walkthrough
+# or to re-record:
+asciinema rec docs/demo/walkthrough.cast --overwrite \
+    --command='scripts/d10_demo_walkthrough.sh'
+```
+
+For the architectural rationale (§5 forward recovery / §4 backward recovery; D5 webhook vs D6 sweeper as cancellation triggers), see [`docs/blog/2026-05-saga-pure-forward-recovery.md`](docs/blog/2026-05-saga-pure-forward-recovery.md). For the k6 baseline benchmark exercising the same two-step flow under load, see [`make bench-two-step`](Makefile) and [`docs/benchmarks/`](docs/benchmarks/).
+
 ## API Endpoints
 
 | Method | Path | Description |

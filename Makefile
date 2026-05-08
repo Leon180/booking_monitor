@@ -64,6 +64,43 @@ DURATION ?= 30s
 stress-k6: ## Run K6 load test via Docker (usage: make stress-k6 VUS=1000 DURATION=60s)
 	docker run --rm -i --network=booking_monitor_default -e VUS=$(VUS) -e DURATION=$(DURATION) -v $(PWD)/scripts/k6_load.js:/script.js grafana/k6 run /script.js
 
+# D9-minimal — k6 two-step (book → /pay → confirm → poll-paid OR abandon → expire → compensated)
+TWO_STEP_VUS ?= 100
+TWO_STEP_DURATION ?= 90s
+TWO_STEP_ABANDON_RATIO ?= 0.2
+TWO_STEP_TICKET_POOL ?= 50000
+bench-two-step: ## D9 — k6 two-step flow benchmark (usage: make bench-two-step TWO_STEP_VUS=100 TWO_STEP_DURATION=90s)
+	@echo "Pre-flight: stack must be up via 'make demo-up' (BOOKING_RESERVATION_WINDOW=20s + EXPIRY_SWEEP_INTERVAL=5s)"
+	@docker run --rm -i --network=booking_monitor_default \
+	  -e API_ORIGIN=http://app:8080 \
+	  -e VUS=$(TWO_STEP_VUS) \
+	  -e DURATION=$(TWO_STEP_DURATION) \
+	  -e ABANDON_RATIO=$(TWO_STEP_ABANDON_RATIO) \
+	  -e TICKET_POOL=$(TWO_STEP_TICKET_POOL) \
+	  -v $(PWD)/scripts/k6_two_step_flow.js:/script.js \
+	  grafana/k6 run /script.js
+
+# D10-minimal — bring up stack with demo-friendly env (CORS + test endpoints +
+# 20s reservation + 5s sweep). Recipe lines don't share shell state, so env
+# is set inline on the docker compose command (NOT via separate `export`).
+# `--force-recreate` is mandatory when changing BOOKING_RESERVATION_WINDOW
+# because docker compose reuses existing containers with the OLD env value.
+demo-up: ## D10 — bring up the demo stack (CORS + test endpoints + 20s reservation + 5s sweep)
+	@echo "Starting demo stack with: APP_ENV=development, ENABLE_TEST_ENDPOINTS, BOOKING_RESERVATION_WINDOW=20s, EXPIRY_SWEEP_INTERVAL=5s"
+	@APP_ENV=development \
+	  CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173 \
+	  ENABLE_TEST_ENDPOINTS=true \
+	  PAYMENT_WEBHOOK_SECRET=demo_secret_local_only \
+	  BOOKING_RESERVATION_WINDOW=20s \
+	  EXPIRY_SWEEP_INTERVAL=5s \
+	  docker compose up -d --force-recreate app expiry_sweeper
+	@echo ""
+	@echo "Stack ready. Try:"
+	@echo "  scripts/d10_demo_walkthrough.sh             # terminal walkthrough"
+	@echo "  asciinema rec docs/demo/walkthrough.cast \\"
+	@echo "    --command='scripts/d10_demo_walkthrough.sh'  # record"
+	@echo "  make bench-two-step                          # k6 D9 baseline"
+
 benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 DURATION=60s)
 	@chmod +x scripts/benchmark_k6.sh
 	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)
