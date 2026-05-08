@@ -118,8 +118,10 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator saga.Compensator) 
 			}
 
 			// Budget exhausted — dead-letter first, bump metric ONLY on
-			// successful write (see KafkaConsumer.deadLetter for the same
-			// invariant). If the DLQ write fails, we don't commit the
+			// successful write (the SagaConsumer.writeDLQ helper below
+			// enforces this invariant; pre-D7 the legacy KafkaConsumer
+			// for `order.created` shared the same shape).
+			// If the DLQ write fails, we don't commit the
 			// offset either — Kafka rebalance will redeliver and we'll
 			// try again next time. This means poison messages may cause
 			// a short hot-loop under DLQ failure, but at least the

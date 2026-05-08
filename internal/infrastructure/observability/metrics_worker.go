@@ -56,7 +56,7 @@ var InventoryRehydrateDriftTotal = promauto.NewCounter(
 
 // DLQMessagesTotal counts messages routed to a dead-letter queue by
 // topic and reason. Labels:
-//   topic  = "order.created.dlq" | "order.failed.dlq"
+//   topic  = "order.failed.dlq"  // post-D7 the only Kafka DLQ topic; pre-D7 also "order.created.dlq"
 //   reason = "invalid_payload" | "invalid_event" | "max_retries"
 var DLQMessagesTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{

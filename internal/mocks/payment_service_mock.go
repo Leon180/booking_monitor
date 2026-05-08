@@ -10,7 +10,6 @@
 package mocks
 
 import (
-	application "booking_monitor/internal/application"
 	domain "booking_monitor/internal/domain"
 	context "context"
 	reflect "reflect"
@@ -56,18 +55,4 @@ func (m *MockService) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID
 func (mr *MockServiceMockRecorder) CreatePaymentIntent(ctx, orderID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreatePaymentIntent", reflect.TypeOf((*MockService)(nil).CreatePaymentIntent), ctx, orderID)
-}
-
-// ProcessOrder mocks base method.
-func (m *MockService) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ProcessOrder", ctx, event)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ProcessOrder indicates an expected call of ProcessOrder.
-func (mr *MockServiceMockRecorder) ProcessOrder(ctx, event any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessOrder", reflect.TypeOf((*MockService)(nil).ProcessOrder), ctx, event)
 }

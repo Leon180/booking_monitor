@@ -24,16 +24,23 @@ const (
 	defaultConfigPath = "config/config.yml"
 )
 
-// Subcommand entrypoints (runServer / runPaymentWorker / runStress) and
-// helpers (initTracer, resolveSampler, build*/start*/shutdown*) live in
+// Subcommand entrypoints (runServer / runStress / etc.) and helpers
+// (initTracer, resolveSampler, build*/start*/shutdown*) live in
 // sibling files. main.go is intentionally thin: cobra registration only.
 //
-//	main.go     — root command + subcommand registration + resolveConfigPath
-//	server.go   — `server` subcommand: HTTP + workers + saga consumer
-//	payment.go  — `payment` subcommand: Kafka order.created consumer
-//	recon.go    — `recon` subcommand: stuck-Charging reconciler (loop or --once)
-//	stress.go   — `stress` subcommand: one-shot load generator
-//	tracer.go   — OTel tracer init shared by server + payment + recon
+//	main.go            — root command + subcommand registration + resolveConfigPath
+//	server.go          — `server` subcommand: HTTP + workers + saga consumer (in-process)
+//	recon.go           — `recon` subcommand: stuck-Charging reconciler (loop or --once)
+//	saga_watchdog.go   — `saga-watchdog` subcommand: stuck-Failed sweeper (loop or --once)
+//	expiry_sweeper.go  — `expiry-sweeper` subcommand: D6 reservation-expiry sweeper (loop or --once)
+//	stress.go          — `stress` subcommand: one-shot load generator
+//	tracer.go          — OTel tracer init shared by every subcommand
+//
+// D7 (2026-05-08) deleted the legacy `payment` subcommand (the A4 auto-charge
+// path that consumed `order.created` and called gateway.Charge). Pattern A
+// drives money movement through `/api/v1/orders/:id/pay` (D4) + the
+// provider webhook (D5); `order.failed` saga events have only D5
+// (`payment_failed`) and D6 (`expired`) as production emitters.
 //
 // DB pool + log + base observability wiring lives in internal/bootstrap
 // (CommonModule) so it can be re-used by any new subcommand without
@@ -42,7 +49,6 @@ func main() {
 	rootCmd := &cobra.Command{Use: "booking-cli"}
 
 	serverCmd := &cobra.Command{Use: "server", Short: "Run the API server", Run: runServer}
-	paymentCmd := &cobra.Command{Use: "payment", Short: "Run the Payment Service worker", Run: runPaymentWorker}
 
 	reconCmd := &cobra.Command{
 		Use:   "recon",
@@ -77,7 +83,7 @@ func main() {
 	stressCmd.Flags().String("ticket-type-id", "", "TicketType UUID (v7) to book against — required, obtain from `ticket_types[0].id` in the POST /api/v1/events response (D4.1+)")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, paymentCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd)
+	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

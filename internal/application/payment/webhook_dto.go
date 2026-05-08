@@ -1,8 +1,8 @@
 // Inbound webhook DTO for the D5 payment-provider surface.
 //
 // Lives in the application layer alongside the WebhookService that
-// consumes it (mirrors how OrderCreatedEvent / OrderFailedEvent — the
-// outbound-async DTOs — also live in `application`). The HTTP edge
+// consumes it (mirrors how `OrderFailedEvent` — the outbound-async
+// saga-compensation DTO — also lives in `application`). The HTTP edge
 // in `infrastructure/api/webhook/` parses raw bytes into one of these
 // and hands it to the service.
 //

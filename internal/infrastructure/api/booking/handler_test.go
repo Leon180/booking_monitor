@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"booking_monitor/internal/application"
 	bookingapp "booking_monitor/internal/application/booking"
 	appevent "booking_monitor/internal/application/event"
 	paymentapp "booking_monitor/internal/application/payment"
@@ -100,21 +99,13 @@ func (s *stubEventService) CreateEvent(ctx context.Context, name string, totalTi
 }
 
 // stubPaymentService is the D4 counterpart to stubBookingService /
-// stubEventService — controllable via per-test fn fields. Implements
-// the full payment.Service interface (ProcessOrder + CreatePaymentIntent)
-// even though only handler_test.go's /pay tests exercise the latter.
-// Unset fn fields fall back to "this method wasn't expected for this
-// test" sentinel errors so missing setup surfaces loudly.
+// stubEventService — controllable via per-test fn fields. After D7
+// the payment.Service interface narrowed to a single method
+// (CreatePaymentIntent); this stub implements that method only.
+// Unset fn falls back to a "this method wasn't expected for this
+// test" sentinel error so missing setup surfaces loudly.
 type stubPaymentService struct {
-	processFn       func(ctx context.Context, event *application.OrderCreatedEvent) error
-	createIntentFn  func(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error)
-}
-
-func (s *stubPaymentService) ProcessOrder(ctx context.Context, event *application.OrderCreatedEvent) error {
-	if s.processFn == nil {
-		return errors.New("ProcessOrder called without processFn")
-	}
-	return s.processFn(ctx, event)
+	createIntentFn func(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error)
 }
 
 func (s *stubPaymentService) CreatePaymentIntent(ctx context.Context, orderID uuid.UUID) (domain.PaymentIntent, error) {

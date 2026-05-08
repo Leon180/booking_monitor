@@ -43,13 +43,20 @@ require_cmd docker
 # 1. Override + restart relevant services so the new reservation
 #    window propagates. `--force-recreate` is the explicit knob (a
 #    plain `up -d` reuses the existing container with the OLD env).
-log "exporting BOOKING_RESERVATION_WINDOW=${RESERVATION_WINDOW} and recreating app + payment_worker + expiry_sweeper"
+#
+# D7 (2026-05-08): the legacy `payment_worker` service is gone — the
+# A4 auto-charge path was deleted along with the binary's `payment`
+# subcommand. The smoke now restarts only `app` + `expiry_sweeper`.
+# Do NOT add `saga_watchdog` here — its DB-side fallback would
+# compensate stuck-failed orders even when the in-process Kafka saga
+# consumer is broken, masking real failures and making the smoke pass
+# dishonestly. The natural Pattern A path the smoke verifies is:
+# `expiry_sweeper` → emit `order.failed` → in-process saga consumer
+# inside `app` → revert.lua + MarkCompensated. saga_watchdog is for
+# operator-driven recovery, not happy-path verification.
+log "exporting BOOKING_RESERVATION_WINDOW=${RESERVATION_WINDOW} and recreating app + expiry_sweeper"
 export BOOKING_RESERVATION_WINDOW="${RESERVATION_WINDOW}"
-# Service names match docker-compose.yml: `app`, `payment_worker`,
-# `expiry_sweeper`. Round-3 PR-review fix: this used to say `worker`
-# (no such service), which would fail with "no such service" before
-# the smoke ever reached `/book`.
-docker compose up -d --force-recreate app payment_worker expiry_sweeper >/dev/null
+docker compose up -d --force-recreate app expiry_sweeper >/dev/null
 
 # Wait for app /livez before issuing API calls.
 log "waiting for app /livez (30s budget)"

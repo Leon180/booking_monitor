@@ -53,49 +53,6 @@ const (
 	ChargeStatusNotFound ChargeStatus = "not_found"
 )
 
-// PaymentCharger is the write side of payment processing. The
-// payment-worker service (KafkaConsumer for order.created) is the
-// sole consumer; the reconciler does NOT receive this port to
-// eliminate "accidental Charge call from recon code" as a class of
-// bug. Mirrors the io.Reader / io.Writer separation in stdlib.
-//
-// IDEMPOTENCY CONTRACT — load-bearing, the payment service relies on
-// it:
-//
-// Implementations MUST treat orderID as an idempotency key. Repeat
-// Charge calls with the same orderID MUST return the result of the
-// FIRST call — they MUST NOT initiate a second charge against the
-// payment provider. Real adapters pass orderID as the provider's
-// `Idempotency-Key` header (Stripe), `idempotency_key` field
-// (Square), or equivalent.
-//
-// Why this contract is required even after A4's intent log:
-//
-//	A4 records intent (status=Charging) BEFORE calling Charge, so
-//	a crash between MarkCharging and Charge can be recovered via
-//	gateway query. But two race windows still produce duplicate
-//	Charge calls under at-least-once Kafka delivery:
-//	  a) Charge succeeds, MarkConfirmed fails (DB blip), Kafka
-//	     redelivers, the new worker sees status=Charging, calls
-//	     reconciler? No — the worker SKIPS because the order isn't
-//	     Pending. Recon would then call gateway.GetStatus, NOT
-//	     Charge. So this race is closed by A4.
-//	  b) MarkCharging succeeds, Charge call hangs past Kafka
-//	     session timeout, partition rebalances, new worker sees
-//	     Charging and skips. Recon resolves via GetStatus.
-//	     Original Charge call eventually returns (success or
-//	     failure), but the worker doing it has been killed by
-//	     Kafka — its result is lost. Recon's result wins.
-//	     Charge is never called twice in this race.
-//
-// So A4 narrows the duplicate-Charge windows but doesn't eliminate
-// the requirement. A buggy adapter that doesn't send an idempotency
-// key still wreaks havoc the moment a Kafka redelivery fires before
-// MarkCharging commits.
-type PaymentCharger interface {
-	Charge(ctx context.Context, orderID uuid.UUID, amount float64) error
-}
-
 // PaymentStatusReader is the read side. The reconciler subcommand is
 // the sole consumer; the payment-worker does NOT have this port in
 // scope (it doesn't need to query — it owns the Charge call).
@@ -180,14 +137,15 @@ type PaymentIntent struct {
 
 // PaymentIntentCreator is the Pattern A write port — creates a
 // PaymentIntent at the gateway. The application service for /pay (D4)
-// is the sole consumer; the reconciler / saga / payment-worker do NOT
-// receive this port.
+// is the sole consumer; the reconciler and saga do NOT receive this
+// port.
 //
-// IDEMPOTENCY CONTRACT — same shape as PaymentCharger's:
-// implementations MUST treat orderID as the gateway-side idempotency
-// key. Repeat CreatePaymentIntent calls with the same orderID MUST
-// return the SAME `PaymentIntent` value (same ID, same ClientSecret,
-// same AmountCents, same Currency) — they MUST NOT register a second
+// IDEMPOTENCY CONTRACT — same rule real Stripe / Adyen adapters
+// enforce via their `Idempotency-Key` header: implementations MUST
+// treat orderID as the gateway-side idempotency key. Repeat
+// CreatePaymentIntent calls with the same orderID MUST return the
+// SAME `PaymentIntent` value (same ID, same ClientSecret, same
+// AmountCents, same Currency) — they MUST NOT register a second
 // intent with the gateway. Real Stripe adapters pass orderID as the
 // `Idempotency-Key` header on `POST /v1/payment_intents`.
 //
@@ -200,24 +158,25 @@ type PaymentIntentCreator interface {
 }
 
 // PaymentGateway is the combined port retained for adapters that
-// implement all three sides (Charge / GetStatus / CreatePaymentIntent).
-// New consumers should depend on the narrowest port that fits their
-// needs (PaymentCharger / PaymentStatusReader / PaymentIntentCreator).
-// Kept here (not deleted) because MockGateway in the test infrastructure
-// is the single adapter today and naturally implements all three —
-// splitting the adapter into separate types just to satisfy a "narrow
-// port at the adapter" rule would add ceremony without payoff.
+// implement both halves (status read + intent creation). New consumers
+// should depend on the narrowest port that fits their needs
+// (`PaymentStatusReader` for recon's gateway probe, `PaymentIntentCreator`
+// for D4's /pay handler) and the fx providers in `cmd/booking-cli/server.go`
+// advertise the narrow halves directly. Kept here (not deleted) because
+// MockGateway in the test infrastructure is the single adapter today
+// and naturally implements both — splitting the adapter into separate
+// types just to satisfy a "narrow port at the adapter" rule would add
+// ceremony without payoff.
 //
 // Real Stripe / Adyen / Braintree adapters in production would
 // likewise implement multiple sides on a single struct.
 //
-// D7 cleanup: once the legacy A4 flow is decommissioned, PaymentCharger
-// + PaymentStatusReader can be removed from the gateway entirely,
-// leaving only PaymentIntentCreator (+ a future PaymentIntentReader
-// for D5 webhook verification). The aggregated interface here makes
-// that future shrink visible — D7 just removes embeds.
+// D7 (2026-05-08) deleted `PaymentCharger` (and its `Charge` method) —
+// the legacy A4 auto-charge path is gone, so no consumer requests
+// `Charge` anymore. Pattern A drives money movement through
+// `PaymentIntentCreator.CreatePaymentIntent` (D4) + the provider
+// webhook (D5), neither of which calls `Charge`.
 type PaymentGateway interface {
-	PaymentCharger
 	PaymentStatusReader
 	PaymentIntentCreator
 }

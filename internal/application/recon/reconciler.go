@@ -256,9 +256,13 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 			tag.OrderID(s.ID), mlog.Duration("age", s.Age))
 
 	case domain.ChargeStatusNotFound:
-		// Gateway has no record = the worker crashed AFTER MarkCharging
-		// committed but BEFORE Charge was called. Safe to fail the
-		// order (the customer was never charged).
+		// Gateway has no record. Pre-D7 this surfaced when the legacy
+		// payment_worker crashed AFTER MarkCharging committed but
+		// BEFORE `gateway.Charge` returned. Post-D7 (2026-05-08) the
+		// `Charge` path is gone — any `Charging` row reaching recon
+		// now is a migration-era artifact from a pre-D7 binary, not
+		// a new production code path. Safe to fail in either case
+		// (no charge was registered at the gateway).
 		if err := r.failOrder(parent, s.ID, "recon: gateway has no charge record"); err != nil {
 			r.handleMarkErr(parent, s.ID, "not_found", err)
 			return
@@ -288,11 +292,13 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 // inventory deduct from booking time is leaked permanently. This
 // closes DEF-CRIT from the Phase 2 checkpoint.
 //
-// Mirrors PaymentService.ProcessOrder's failure path
-// (internal/application/payment/service.go) — same UoW shape, same
-// event factory, same saga downstream. Recon-side reasons are
-// recorded in the OrderFailedEvent.Reason so a saga consumer can
-// distinguish a worker-side decline from a recon-driven force-fail.
+// Same UoW shape as the D5 webhook's payment_failed path and the D6
+// expiry sweeper's expired path — atomic MarkFailed +
+// `events_outbox(order.failed)` so the saga compensator picks it up.
+// (Pre-D7 the legacy A4 `PaymentService.ProcessOrder` was a fourth
+// emitter on this saga path; D7 deleted it.) Recon-side reasons are
+// recorded in the OrderFailedEvent.Reason so the saga consumer can
+// distinguish a recon-driven force-fail from the other emitters.
 //
 // Returns the wrapped error from either GetByID (rare; the row was
 // just observed in FindStuckCharging) or the UoW closure. Caller

@@ -41,6 +41,24 @@ Happy path 與 failure path 都從同一個 `POST /api/v1/book` 呼叫開始,在
 
 #### Happy path
 
+> **D7(2026-05-08)汰除說明**:下表第 4、5 列描述的是舊版 A4
+> 自動扣款路徑(Pending → Charging → Confirmed)— `OutboxRelay`
+> 把 `order.created` 發出去後,由 `payment_worker` 這個 Kafka
+> consumer 去呼叫 `gateway.Charge`。**D7 把這條路徑刪了。**
+> Pattern A(D3–D6)金流改走 in-process 在 `app` 裡的同步 handler
+> `POST /api/v1/orders/:id/pay`(D4),然後等 provider 的 webhook
+> `POST /webhook/payment`(D5)。`order.failed` 只剩兩個 production
+> 來源 — D5 webhook(`payment_failed`)與 D6 expiry sweeper
+> (`expired`),saga compensator 也跑在 `app` in-process(沒有獨立的
+> `payment_worker` binary 了)。下面這幾列保留是為了架構演進的
+> 脈絡;`cmd/booking-cli/payment.go` +
+> `internal/infrastructure/messaging/kafka_consumer.go` +
+> `payment.Service.ProcessOrder` + `application.OrderCreatedEvent`
+> + `domain.EventTypeOrderCreated` 在 D7 之後都已經不存在於 codebase。
+> Worker 的 UoW 現在只剩 `[INSERT order]`;第 3 列「三步在同一個交易裡」
+> 講的 `events_outbox(order.created)` 寫入也在 D7 移除了。熱路徑
+> 比對報告見 `docs/benchmarks/20260508_compare_c500_d7/`。
+
 | # | 元件 | 輸入 | 動到的儲存層 | 效果 | 失敗行為 |
 |---|------|------|-------------|------|---------|
 | 1 | Gin API handler(`/api/v1/book`) | 使用者請求 | Redis(idempotency key,24 小時 TTL) | 先查 `Idempotency-Key` header,命中時把 request fingerprint(body 的 SHA-256)拿去跟快取的 entry 比對:相符 → 原封不動回傳;不符 → 409 Conflict;沒有 fingerprint(legacy entry)→ 回傳 + 懶式寫回 fingerprint。寫入快取時**只有 2xx 會被快取** — 4xx 與 5xx 都不快取(4xx 沿用 Stripe 慣例;5xx 是刻意偏離 Stripe 的決定,理由見 §5)。 | Body 缺漏/格式錯 → 400 `"invalid request body"`;`mapError` 會把任何下游錯誤 sanitize |
@@ -274,12 +292,12 @@ CREATE INDEX idx_order_status_history_occurred
 
 | Topic | Producer | Consumer Group | Consumer | Payload |
 |-------|----------|----------------|----------|---------|
-| `order.created` | OutboxRelay | `payment-service-group`(可由 `KAFKA_PAYMENT_GROUP_ID` 覆蓋) | PaymentWorker(KafkaConsumer) | OrderCreatedEvent (id, user_id, event_id, **ticket_type_id(D4.1 follow-up)**, quantity, amount, version) |
-| `order.created.dlq` | KafkaConsumer 在遇到無法解析 / `ErrInvalidPaymentEvent` 時寫入 | — | —(未來的 DLQ worker) | 原始 payload + `x-original-{topic,partition,offset}` / `x-dlq-{reason,error}` headers |
-| `order.failed` | PaymentService(透過 outbox) | `booking-saga-group`(可由 `KAFKA_SAGA_GROUP_ID` 覆蓋) | SagaCompensator(透過 SagaConsumer) | OrderFailedEvent (order_id, event_id, user_id, quantity, reason) |
+| `order.failed` | D5 webhook(`payment_failed`)+ D6 expiry sweeper(`expired`)+ recon force-fail(罕見) | `booking-saga-group`(可由 `KAFKA_SAGA_GROUP_ID` 覆蓋) | SagaCompensator(透過 SagaConsumer,in-process 跑在 `app` 裡) | OrderFailedEvent (order_id, event_id, user_id, ticket_type_id, quantity, reason, version) |
 | `order.failed.dlq` | SagaConsumer 在超過 `sagaMaxRetries` 之後 | — | —(未來的 DLQ worker) | 同樣的 provenance headers + reason=`max_retries` |
 
-Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`)。舊版的 `payment-service-group-test` 字面常數是 prod/test 命名混淆的潛在 bug,已在 remediation 中移除。
+Group ID + topic 名稱來自 `KafkaConfig`(`KAFKA_SAGA_GROUP_ID`、`KAFKA_ORDER_FAILED_TOPIC`)。
+
+**D7(2026-05-08)的刪除**:D7 之前還有兩列(`order.created` 由 `PaymentWorker` 消費的舊 A4 自動扣款路徑 + 它的 DLQ)。D7 把 `payment_worker` binary、`order.created` Kafka topic emit、`OrderCreatedEvent` wire-format 型別,以及 `KAFKA_PAYMENT_GROUP_ID` / `KAFKA_ORDER_CREATED_TOPIC` 兩個 env var 都刪了。saga consumer(本來就 in-process 在 `app` 裡跑)是現在唯一的 Kafka consumer。
 
 ---
 
@@ -318,7 +336,7 @@ Consumer group 跟 topic 名稱都來自 `KafkaConfig`(`KAFKA_PAYMENT_GROUP_ID`,
 
 成功時回的是 `202 Accepted` — 對非同步管線是誠實的。Pattern A 語意:Redis 端的庫存「被預訂」(不再自動扣款),worker 非同步把訂單寫入 DB,狀態 `awaiting_payment` + `reserved_until = NOW() + BOOKING_RESERVATION_WINDOW`(預設 15m)。Client 必須在 `reserved_until` 之前 POST 到 `links.pay`(D4 端點,目前回 404 — D4 才實作)才會真的扣款;否則 D6 的過期 sweeper 會把訂單轉為 `expired` 並透過 saga compensator 回補庫存。Client 用 `order_id` 對 `GET /api/v1/orders/:id` 輪詢即時狀態。`order_id` 是 UUIDv7,在 API 邊界由 `BookingService.BookTicket` 鑄造,然後沿 Lua deduct → Redis stream(包含 `reserved_until` 的 unix 秒)→ worker `domain.NewReservation(id, ...)` → DB orders.id + orders.reserved_until → 輪詢一路串到底。PEL 重送會復用同一個 id;PR-47 之前 worker 在每次重送都鑄一個新 uuid,client 拿到的 id 會跟 DB 的 id 對不起來。
 
-**D3 wire-format 說明。** 舊版的 `status: "processing"` 值仍以 export 常數的形式留在 codebase,給仍綁定 D3 之前語意的 in-flight client 做向後相容,但新部署的 server 一律回 `status: "reserved"`。Pattern A 跳過了舊的自動扣款路徑(Pending → Charging → Confirmed);payment_worker 仍會消費 `order.created`,但因為它在 `status != Pending` 時提前 return,在 Pattern A 的場景下會優雅地不做事(沒有重複扣款風險)。D7 會清掉這條死路徑(payment_worker 訂閱 + Pattern A 的 outbox emit)。
+**D3 wire-format 說明。** 舊版的 `status: "processing"` 值仍以 export 常數的形式留在 codebase,給仍綁定 D3 之前語意的 in-flight client 做向後相容,但新部署的 server 一律回 `status: "reserved"`。Pattern A 之前繞過舊的自動扣款路徑(Pending → Charging → Confirmed);D7(2026-05-08)把它完全刪了 — `payment_worker` binary、`order.created` outbox emit 與 `OrderCreatedEvent` wire-format 型別通通沒了。
 
 **Idempotency-Key 契約(N4)** — Stripe 風格的 fingerprint 驗證:
 
@@ -1008,10 +1026,12 @@ Go runtime + OTel + pprof 開關。透過 `.env` 提供本機開發預設值,`do
 | 檔案 | 用途 |
 |------|------|
 | `cmd/booking-cli/main.go` | Cobra root + 子指令註冊 + `resolveConfigPath` |
-| `cmd/booking-cli/server.go` | `server` 子指令:HTTP + pprof + worker + saga consumer 生命週期 |
-| `cmd/booking-cli/payment.go` | `payment` 子指令:Kafka `order.created` consumer 生命週期 |
+| `cmd/booking-cli/server.go` | `server` 子指令:HTTP + pprof + worker + in-process saga consumer 生命週期 |
+| `cmd/booking-cli/recon.go` | `recon` 子指令:卡住的 `charging` 對帳器(loop 或 `--once`) |
+| `cmd/booking-cli/saga_watchdog.go` | `saga-watchdog` 子指令:卡住的 `failed` 訂單 DB-side sweep(loop 或 `--once`) |
+| `cmd/booking-cli/expiry_sweeper.go` | `expiry-sweeper` 子指令:D6 reservation 到期 sweeper(loop 或 `--once`) |
 | `cmd/booking-cli/stress.go` | `stress` 子指令:一次性壓測產生器 |
-| `cmd/booking-cli/tracer.go` | OTel tracer 初始化 + `OTEL_TRACES_SAMPLER_RATIO` 解析(`server` + `payment` 共用) |
+| `cmd/booking-cli/tracer.go` | OTel tracer 初始化 + `OTEL_TRACES_SAMPLER_RATIO` 解析(每個子指令共用) |
 | `internal/bootstrap/module.go` | `CommonModule(cfg)` — 每個子指令都需要的 log + config + DB + 基礎 observability wiring |
 | `internal/bootstrap/db.go` | `provideDB`(retry-until-reachable Postgres pool)+ `registerDBPoolCollector` |
 | `internal/bootstrap/logmodule.go` | `LogModule` — ctx-aware `*log.Logger` 的 fx provider |

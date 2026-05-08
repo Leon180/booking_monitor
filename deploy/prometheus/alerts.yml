@@ -464,12 +464,14 @@ groups:
         # zombie tx, broker unreachable, or relay's poll loop hung.
         #
         # Why this matters: the outbox is the bridge between
-        # "DB committed an order.created / order.failed event" and
-        # "Kafka downstream consumers see it". A stuck relay silences
-        # the saga compensator (no order.failed delivery → Redis
-        # inventory leaked) and the payment service (no order.created
-        # delivery → bookings stuck in async-processing forever).
-        # Customer 202s never advance to confirmed/failed.
+        # "DB committed an order.failed event" and "the saga compensator
+        # sees it" (post-D7 only `order.failed` flows through the
+        # outbox; pre-D7 `order.created` was the second event type
+        # consumed by the legacy A4 payment_worker). A stuck relay
+        # silences the saga compensator (no order.failed delivery →
+        # Redis inventory leaked) — customer 202s reach `paid`/`expired`
+        # via D5/D6 directly but the failed-payment compensation path
+        # stalls until the relay recovers.
         #
         # Threshold rationale (100): well above realistic in-flight
         # peak (typical hot path produces single-digit pending at
@@ -728,12 +730,16 @@ groups:
       - alert: KafkaConsumerStuck
         # Fires when a Kafka consumer is persistently leaving messages
         # uncommitted for rebalance retry — the "stuck but not dead"
-        # state that happens during extended Postgres/Redis/payment-
-        # gateway outages. This is the observability half of the
-        # order.created.dlq infinite-loop gap: we intentionally do NOT
-        # dead-letter on transient errors (that would cause overselling
-        # during DB hiccups), so the contract is "if this alert fires,
-        # humans investigate the downstream dependency, not the consumer".
+        # state that happens during extended Postgres/Redis outages.
+        # Post-D7 the only Kafka consumer in the system is the saga
+        # consumer for `order.failed` (running in-process inside `app`).
+        # Pre-D7 the legacy `payment_worker` was a second consumer for
+        # `order.created` and shared this alert; the metric is still
+        # emitted with `topic=order.failed` only after D7. We
+        # intentionally do NOT dead-letter on transient errors (that
+        # would mask a downstream DB/Redis outage), so the contract is
+        # "if this alert fires, humans investigate the downstream
+        # dependency, not the consumer".
         #
         # Threshold is > 0 retries/sec sustained for 2 minutes. The
         # `for: 2m` guard absorbs transient blips (e.g. a single Kafka

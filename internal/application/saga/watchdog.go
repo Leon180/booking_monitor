@@ -232,12 +232,14 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 	// `saga:reverted:<order_id>`; the DB MarkCompensated is idempotent
 	// via the OrderStatusCompensated check inside its UoW closure.
 	//
-	// Uses NewOrderFailedEventFromOrder (the order-aware factory)
-	// rather than NewOrderFailedEvent + a partial throwaway
-	// OrderCreatedEvent. The previous shape zero-initialised the
-	// Version field (and Amount/Status/CreatedAt), producing a
-	// wire-format schema violation: consumers branching on Version
-	// would see v0 instead of OrderEventVersion.
+	// NewOrderFailedEventFromOrder is the order-aware factory — it maps
+	// directly off the loaded domain.Order so wire fields like Version
+	// are filled correctly. Pre-D7 there was a sibling
+	// `NewOrderFailedEvent(from OrderCreatedEvent, reason)` factory
+	// used by the legacy A4 path; D7 deleted both that factory and
+	// `OrderCreatedEvent`. All saga-trigger callers (D5 webhook, D6
+	// expiry sweeper, recon, this watchdog) now use the order-aware
+	// factory exclusively.
 	event := application.NewOrderFailedEventFromOrder(order, "saga_watchdog: re-driven from stuck Failed state")
 
 	payload, err := json.Marshal(event)

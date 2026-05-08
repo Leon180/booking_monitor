@@ -292,7 +292,9 @@ The current alert catalog:
 | `ExpiryFindErrors` | critical | `rate(expiry_find_expired_errors_total[5m]) > 0 for 2m` — D6 DB blind. Covers BOTH `FindExpiredReservations` AND `CountOverdueAfterCutoff` query failures. **When this fires, `expiry_oldest_overdue_age_seconds` and `expiry_backlog_after_sweep` are HELD at last-known-good** (round-3 F2 contract) — those readings may pre-date the failure. Triage Postgres health / pool / migration 000012 partial index. |
 | `ExpiryMaxAgeExceeded` | critical | `increase(expiry_max_age_total[1h]) > 0` — D6 single-event paging, **informational**. A reservation aged past `EXPIRY_MAX_AGE` (default 24h) before a sweep caught it. The row IS now `expired` (round-1 P1 contract: D6 always expires; MaxAge is awareness-only) — the question is why it was stuck so long. Check sweeper uptime, deploy logs, k8s CronJob history. Don't intervene on the row itself; the sweeper has already done its job. |
 
-> **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `kafka_consumer_retry_total`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,payment}` worker processes' default Prometheus registries. Each of those binaries now starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`payment-worker`, `recon`, `saga-watchdog`). Verify with `up{job=~"payment-worker|recon|saga-watchdog"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port. The new `saga_watchdog` compose service runs the watchdog in default-loop mode — `--once` mode is reserved for k8s CronJob hosting where the cluster scheduler drives cadence.
+> **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `expiry_*`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,expiry-sweeper}` worker processes' default Prometheus registries. Each binary starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`recon`, `saga-watchdog`, `expiry-sweeper`). Verify with `up{job=~"recon|saga-watchdog|expiry-sweeper"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port.
+>
+> **D7 (2026-05-08) deleted the `payment-worker` scrape job** along with the legacy `payment_worker` binary itself. `kafka_consumer_retry_total` is still emitted (now only by the saga consumer for `order.failed`, running in-process inside `app`) — the metric label set narrowed from `{topic=order.created|order.failed}` to `{topic=order.failed}` only, and is scraped via the `booking-service` job (`app:8080/metrics`). Existing `KafkaConsumerStuck` alert continues to work.
 
 ### Forcing an alert to fire (testing)
 
@@ -322,9 +324,9 @@ docker exec booking_db psql -U user -d booking -c \
 # (it will move Failed → Compensated since the row has no actual reverted-Redis-key tracked).
 
 # TargetDown — stop a worker, wait 2m+, watch Prometheus → Alerts → TargetDown firing.
-docker stop booking_payment_worker
+docker stop booking_recon
 # Wait 2m+ (alert has `for: 2m`).
-# Cleanup: docker start booking_payment_worker → up returns to 1 within one scrape (15s).
+# Cleanup: docker start booking_recon → up returns to 1 within one scrape (15s).
 
 # OutboxPendingBacklog — directly INSERT 200 unprocessed outbox rows.
 # Bypass the relay's normal poll cadence by pushing rows that look like

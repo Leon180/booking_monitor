@@ -99,11 +99,12 @@ func runRecon(cmd *cobra.Command, _ []string) {
 	app := fx.New(
 		bootstrap.CommonModule(cfg),
 		fx.Provide(
-			// MockGateway implements both PaymentCharger and
-			// PaymentStatusReader. The reconciler only needs the
-			// reader half (defense against accidental Charge calls
-			// from recon code) — fx.As scopes the injection to
-			// just the read-side port.
+			// MockGateway implements both PaymentStatusReader and
+			// PaymentIntentCreator. The reconciler only needs the
+			// reader half — fx.As scopes the injection to just the
+			// read-side port. (Pre-D7 there was a third interface
+			// `PaymentCharger`; D7 deleted it along with the legacy
+			// A4 auto-charge path.)
 			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentStatusReader))),
 			// Translate the wire-format infrastructure config into the
 			// application-layer recon.Config + provide the Prometheus-

@@ -61,11 +61,11 @@ rule (every layer, but most strictly here), the conventions are:
    ```
 
 5. **Wire-contract strings live as typed constants in domain.** Event
-   type names (`EventTypeOrderCreated`, `EventTypeOrderFailed`),
-   statuses (`OutboxStatusPending`), and other cross-process strings
-   never appear as inline literals at call sites. Each named
-   string should also have a paired `New*Outbox` / similar factory
-   so callers don't even need to spell the constant.
+   type names (e.g. `EventTypeOrderFailed`), statuses
+   (`OutboxStatusPending`), and other cross-process strings never
+   appear as inline literals at call sites. Each named string should
+   also have a paired `New*Outbox` / similar factory so callers don't
+   even need to spell the constant.
 
 6. **Tests for new entity factories are mandatory** — at minimum,
    one positive case + one case per invariant violation + one

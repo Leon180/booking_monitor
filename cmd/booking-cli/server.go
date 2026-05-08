@@ -70,16 +70,23 @@ func runServer(_ *cobra.Command, _ []string) {
 
 		// Payment service wiring for the HTTP server. D4 added the
 		// /api/v1/orders/:id/pay endpoint, which depends on
-		// payment.Service. The legacy payment_worker subcommand
-		// (cmd/booking-cli/payment.go) provides the same Service in
-		// its own fx graph; here we duplicate the wiring because the
-		// server process needs an in-process Service (no Kafka
-		// consumer, just the synchronous CreatePaymentIntent path).
-		// Both wirings share the same MockGateway adapter — D4-D7
-		// don't promote the gateway to a singleton service yet, that
-		// happens with real Stripe integration in a later PR.
+		// payment.Service. After D7 the legacy payment_worker
+		// subcommand (which had its own fx graph providing the same
+		// Service for the A4 auto-charge path) is gone; the server
+		// process is the only host of payment.Service now. The
+		// MockGateway is wired here as the gateway adapter; real
+		// Stripe integration lands in a later PR (D4.2).
+		//
+		// fx wiring note (D7): payment.NewService takes
+		// `domain.PaymentIntentCreator` (the narrow CreatePaymentIntent
+		// half of the gateway), NOT the combined `PaymentGateway`.
+		// fx/dig matches by exact type key — the provider must
+		// advertise PaymentIntentCreator explicitly via fx.As.
+		// recon runs as a separate subcommand with its own fx graph
+		// and provides its own PaymentStatusReader; there's no
+		// cross-graph wiring here.
 		fx.Provide(
-			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentGateway))),
+			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentIntentCreator))),
 			payment.NewService,
 		),
 		// D5 webhook service + metrics adapters. The handler itself
@@ -103,9 +110,9 @@ func runServer(_ *cobra.Command, _ []string) {
 		),
 		// Worker fx wiring lives here (not in application/module.go)
 		// because the worker subpackage imports `application` for shared
-		// types (UnitOfWork, Repositories, NewOrderCreatedEvent), so an
-		// `application → worker` edge there would create an import
-		// cycle. Same convention used by payment/saga/recon: each cmd
+		// types (UnitOfWork, Repositories), so an `application → worker`
+		// edge there would create an import cycle. Same convention used
+		// by payment/saga/recon: each cmd
 		// owns its subpackage's fx.Provide. CP2.6b moved this here.
 		//
 		// worker.Service is provided as a decorated chain:

@@ -14,11 +14,14 @@ flowchart LR
     Nginx --> API[Gin API]
     API -->|Lua DECRBY + XADD| Redis[(Redis<br/>inventory + stream)]
     Redis -.->|XReadGroup| Worker
-    Worker -->|UoW: INSERT order<br/>+ events_outbox| PG[(Postgres<br/>source of truth)]
+    Worker -->|UoW: INSERT order| PG[(Postgres<br/>source of truth)]
+    Client -->|POST /pay| API
+    API -->|CreatePaymentIntent| Gateway[Payment<br/>Gateway]
+    Gateway -.->|webhook<br/>signed| API
+    API -->|UoW: MarkPaid OR<br/>MarkFailed + outbox| PG
+    Sweeper[Expiry<br/>Sweeper] -->|UoW: MarkExpired<br/>+ outbox| PG
     PG -.->|advisory-lock<br/>leadered relay| Kafka{{Kafka}}
-    Kafka -.->|order.created| Payment[Payment Worker]
-    Payment -.->|fail| Kafka
-    Kafka -.->|order.failed| Saga[Saga<br/>Compensator]
+    Kafka -.->|order.failed| Saga[Saga Consumer<br/>in-process]
     Saga --> Redis
     Saga --> PG
 ```
@@ -29,7 +32,7 @@ flowchart LR
 **Design**: Domain-Driven Design + Clean Architecture (Modular Monolith)
 
 ```
-cmd/booking-cli/          # CLI entry: server, stress, payment, recon, saga-watchdog subcommands
+cmd/booking-cli/          # CLI entry: server, stress, recon, saga-watchdog, expiry-sweeper subcommands
 internal/
   domain/                 # Entities (Event, Order, OutboxEvent), value types (StuckCharging, StuckFailed), repository interfaces
   application/            # Cross-package fx module + UnitOfWork interface + wire-format event DTOs (order_events.go)
@@ -37,7 +40,7 @@ internal/
     worker/               # Order-stream consumer + queue policy + per-message processor
     outbox/               # Outbox relay polling + Kafka publish (transactional outbox impl)
     event/                # Event creation + Redis hot inventory provisioning
-    payment/              # Kafka order.created consumer + gateway orchestration + saga trigger
+    payment/              # /pay (D4) handler + gateway adapter + D5 webhook
     recon/                # Reconciler (A4) — sweeps stuck `charging` orders, queries gateway, resolves
     saga/                 # Compensator + Watchdog (A5) — order.failed consumer + DB-side sweep
   infrastructure/
@@ -192,12 +195,7 @@ D6's job is timing — when does the row expire. The saga compensator owns inven
    ```
    Server listens on port 8080. Metrics at `/metrics`.
 
-4. **Run Payment Worker** (separate terminal):
-   ```bash
-   ./bin/booking-cli payment
-   ```
-
-5. **Reset State** (for testing):
+4. **Reset State** (for testing):
    ```bash
    make reset-db
    ```
@@ -322,10 +320,11 @@ make curl-history PAGE=1 SIZE=5 STATUS=confirmed  # Query order history
 
 | Service | Port | Description |
 |---------|------|-------------|
-| app | 8080 | Booking API server |
+| app | 8080 | Booking API server (also hosts the in-process saga consumer for `order.failed`) |
 | nginx | 80 | Reverse proxy + rate limiter |
-| payment_worker | - | Kafka consumer for payments (`booking-cli payment`) |
 | recon | - | Reconciler subcommand for stuck `charging` orders (`booking-cli recon`) |
+| saga_watchdog | - | DB-side sweep for stuck `failed` orders (`booking-cli saga-watchdog`) |
+| expiry_sweeper | - | D6 reservation-expiry sweeper (`booking-cli expiry-sweeper`) |
 | postgres | 5433 | PostgreSQL database |
 | redis | 6379 | Cache + streams |
 | kafka | 9092 | Event streaming |

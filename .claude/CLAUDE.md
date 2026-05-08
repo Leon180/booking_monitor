@@ -60,7 +60,7 @@ make stress-k6      # K6 load test (VUS=500, DURATION=30s)
 make reset-db       # Clear orders, reset inventory to 100
 make migrate-up     # Run database migrations
 make mocks          # Generate mock files
-docker-compose up -d  # Full stack (app, nginx, payment_worker, postgres, redis, kafka, prometheus, grafana, jaeger)
+docker-compose up -d  # Full stack (app, nginx, postgres, redis, kafka, prometheus, grafana, jaeger)
 ```
 
 ## Key Patterns
@@ -100,12 +100,10 @@ Legacy `POST /book` was removed in Phase 13 remediation (PR #9 H9) — it bypass
 - 7 migrations in `deploy/postgres/migrations/` (000007 added in PR #12: partial index on `events_outbox(id) WHERE processed_at IS NULL`)
 
 ## Kafka Topics
-- `order.created` — consumed by payment service (group `payment-service-group`)
-- `order.created.dlq` — dead letter for unparseable / invalid payment events
-- `order.failed` — consumed by saga compensator (group `booking-saga-group`)
+- `order.failed` — consumed by saga compensator (in-process inside `app`, group `booking-saga-group`)
 - `order.failed.dlq` — dead letter for saga events that exceed `sagaMaxRetries=3`
 
-Group IDs and topic names are configurable via `KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`.
+Group ID + topic name are configurable via `KAFKA_SAGA_GROUP_ID` + `KAFKA_ORDER_FAILED_TOPIC`. D7 (2026-05-08) deleted the legacy `order.created` topic + `KAFKA_PAYMENT_GROUP_ID` / `KAFKA_ORDER_CREATED_TOPIC` env vars along with the `payment_worker` binary.
 
 ## CI
 

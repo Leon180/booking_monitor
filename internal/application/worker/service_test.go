@@ -2,7 +2,6 @@ package worker_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -93,27 +91,17 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 					// pass the test (any non-zero UUID would).
 					assert.Equal(t, msg.OrderID, o.ID(),
 						"worker must propagate msg.OrderID end-to-end (not re-mint)")
+					assert.Equal(t, validEventID, o.EventID(), "domain.NewOrder must receive eventID from msg")
+					assert.Equal(t, validTicketTypeID, o.TicketTypeID(), "domain.NewOrder must receive ticketTypeID from msg")
 					return o, nil
 				})
-				m.outbox.EXPECT().Create(gomock.Any(), gomock.AssignableToTypeOf(domain.OutboxEvent{})).DoAndReturn(func(_ context.Context, e domain.OutboxEvent) (domain.OutboxEvent, error) {
-					assert.Equal(t, domain.EventTypeOrderCreated, e.EventType())
-					assert.Equal(t, domain.OutboxStatusPending, e.Status())
-					// Verify the order's UUID id + the schema version
-					// propagate into the wire payload via the explicit
-					// OrderCreatedEvent type — that's the contract the
-					// payment consumer expects.
-					var eventPayload application.OrderCreatedEvent
-					require.NoError(t, json.Unmarshal(e.Payload(), &eventPayload))
-					assert.NotEqual(t, uuid.Nil, eventPayload.OrderID, "outbox payload must include the order's UUID")
-					assert.Equal(t, validEventID, eventPayload.EventID, "outbox payload event_id must match input")
-					// D4.1 follow-up: ticket_type_id MUST propagate
-					// into the wire payload so the saga compensator can
-					// route IncrementTicket to the right ticket_type
-					// (Codex P1).
-					assert.Equal(t, validTicketTypeID, eventPayload.TicketTypeID, "outbox payload ticket_type_id must match input (D4.1 wire format v3)")
-					assert.Equal(t, application.OrderEventVersion, eventPayload.Version, "outbox payload must carry the schema version")
-					return e, nil
-				})
+				// D7 (2026-05-08): the booking UoW no longer writes an
+				// `events_outbox(event_type=order.created)` row — the
+				// legacy A4 consumer that read it was deleted. The
+				// pre-D7 expectation `m.outbox.EXPECT().Create(...)`
+				// asserting `EventTypeOrderCreated` + `OrderCreatedEvent`
+				// payload was dropped. UoW shape is now
+				// `[INSERT order]` only.
 			},
 			expectedError: nil,
 		},

@@ -45,6 +45,27 @@ or Postgres writes.
 
 #### Happy path
 
+> **D7 (2026-05-08) deprecation note**: rows 4 and 5 below describe
+> the legacy A4 auto-charge path (Pending → Charging → Confirmed)
+> where the `OutboxRelay` published `order.created` for the
+> `payment_worker` Kafka consumer to call `gateway.Charge`.
+> **D7 deleted that path.** Pattern A (D3–D6) drives money movement
+> through the synchronous `POST /api/v1/orders/:id/pay` (D4) handler
+> in-process inside `app`, followed by the provider webhook
+> `POST /webhook/payment` (D5). `order.failed` events now have only
+> two production emitters — D5's webhook (`payment_failed`) and D6's
+> expiry sweeper (`expired`) — and the saga compensator runs
+> in-process inside `app` (no separate `payment_worker` binary).
+> The legacy rows are retained verbatim below as architectural-
+> evolution context; `cmd/booking-cli/payment.go` +
+> `internal/infrastructure/messaging/kafka_consumer.go` +
+> `payment.Service.ProcessOrder` + `application.OrderCreatedEvent`
+> + `domain.EventTypeOrderCreated` no longer exist in the tree.
+> Worker UoW is now `[INSERT order]` only; the
+> `events_outbox(order.created)` write in row 3's "all three in one
+> tx" was removed in D7. See `docs/benchmarks/20260508_compare_c500_d7/`
+> for the hot-path comparison report.
+
 | # | Component | Input | Storage touched | Effect | Failure behaviour |
 |---|-----------|-------|-----------------|--------|-------------------|
 | 1 | Gin API handler (`/api/v1/book`) | User request | Redis (idempotency key, 24h TTL) | `Idempotency-Key` header, if present, is looked up first — a hit checks the request fingerprint (SHA-256 of body) against the cached entry: match → replay verbatim, mismatch → 409 Conflict, absent fingerprint → replay + lazy write-back (legacy entry). Only 2xx responses are cached on the way out — 4xx and 5xx are both NOT cached (4xx is a Stripe convention; 5xx is a deliberate deviation from Stripe — see §5 for the rationale). | Missing/duplicate body → 400 `"invalid request body"`; `mapError` sanitizes any downstream leak |
@@ -283,12 +304,12 @@ CREATE INDEX idx_order_status_history_occurred
 
 | Topic | Producer | Consumer Group | Consumer | Payload |
 |-------|----------|----------------|----------|---------|
-| `order.created` | OutboxRelay | `payment-service-group` (configurable via `KAFKA_PAYMENT_GROUP_ID`) | PaymentWorker (KafkaConsumer) | OrderCreatedEvent (id, user_id, event_id, **ticket_type_id (D4.1 follow-up)**, quantity, amount, version) |
-| `order.created.dlq` | KafkaConsumer on unparseable / `ErrInvalidPaymentEvent` | — | — (future DLQ worker) | Original payload + `x-original-{topic,partition,offset}` / `x-dlq-{reason,error}` headers |
-| `order.failed` | PaymentService (via outbox) | `booking-saga-group` (configurable via `KAFKA_SAGA_GROUP_ID`) | SagaCompensator (via SagaConsumer) | OrderFailedEvent (order_id, event_id, user_id, quantity, reason) |
+| `order.failed` | D5 webhook (`payment_failed`) + D6 expiry sweeper (`expired`) + recon force-fail (rare) | `booking-saga-group` (configurable via `KAFKA_SAGA_GROUP_ID`) | SagaCompensator (via SagaConsumer, in-process inside `app`) | OrderFailedEvent (order_id, event_id, user_id, ticket_type_id, quantity, reason, version) |
 | `order.failed.dlq` | SagaConsumer after `sagaMaxRetries` | — | — (future DLQ worker) | Same provenance headers + reason=`max_retries` |
 
-Group IDs and topic names are all sourced from `KafkaConfig` (`KAFKA_PAYMENT_GROUP_ID`, `KAFKA_ORDER_CREATED_TOPIC`, `KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`). The previous hardcoded `payment-service-group-test` literal was a latent prod/test bleed bug.
+Group ID + topic name are sourced from `KafkaConfig` (`KAFKA_SAGA_GROUP_ID`, `KAFKA_ORDER_FAILED_TOPIC`).
+
+**D7 (2026-05-08) deletion**: pre-D7 there were two more topic rows (`order.created` consumed by `PaymentWorker` for the legacy A4 auto-charge path + its DLQ). D7 deleted the `payment_worker` binary, the `order.created` Kafka topic emit, the `OrderCreatedEvent` wire-format type, and the `KAFKA_PAYMENT_GROUP_ID` / `KAFKA_ORDER_CREATED_TOPIC` env vars. The saga consumer (always in-process inside `app`) is the only Kafka consumer in the system now.
 
 ---
 
@@ -327,7 +348,7 @@ Reserve tickets for an event (D3 — Pattern A reservation flow). The customer-f
 
 Status is `202 Accepted` — the success path is honest about the async pipeline. Pattern A semantics: Redis-side inventory has been **reserved** (not auto-charged), and the worker is in flight to persist the row as `awaiting_payment` with `reserved_until = NOW() + BOOKING_RESERVATION_WINDOW` (default 15m). The client must POST to `links.pay` (D4 endpoint, currently 404 — wires up in D4) before `reserved_until` to actually charge; otherwise the D6 expiry sweeper flips the order to `expired` and reverts inventory via the saga compensator. Clients use `order_id` against `GET /api/v1/orders/:id` for the live status. The `order_id` is a UUIDv7 minted at the API boundary in `BookingService.BookTicket` and threaded through Lua deduct → Redis stream (incl. `reserved_until` as unix-seconds) → worker `domain.NewReservation(id, ...)` → DB orders.id + orders.reserved_until → response polling. PEL retries reuse the same id; pre-PR-47 the worker minted its own uuid per redelivery and the client's id diverged from the DB's.
 
-**D3 wire-format note.** The legacy `status: "processing"` value is kept as an exported constant for backwards compatibility with mid-flight clients pinned to the pre-D3 vocabulary, but every newly-deployed server returns `status: "reserved"`. The legacy auto-charge path (Pending → Charging → Confirmed) is bypassed for Pattern A; payment_worker still consumes `order.created` but its early-return on `status != Pending` makes it a graceful no-op (no double-charge risk). D7 cleans up the now-dead payment_worker subscription + outbox emit on the Pattern A path.
+**D3 wire-format note.** The legacy `status: "processing"` value is kept as an exported constant for backwards compatibility with mid-flight clients pinned to the pre-D3 vocabulary, but every newly-deployed server returns `status: "reserved"`. The legacy auto-charge path (Pending → Charging → Confirmed) was bypassed by Pattern A; D7 (2026-05-08) deleted it entirely — `payment_worker` binary, `order.created` outbox emit, and `OrderCreatedEvent` wire-format type all gone.
 
 **Idempotency-Key contract (N4)** — Stripe-style fingerprint validation:
 
@@ -1022,10 +1043,12 @@ Benchmark reports in `docs/benchmarks/` — see the `*_compare_c500` clean runs 
 | File | Purpose |
 |------|---------|
 | `cmd/booking-cli/main.go` | Cobra root + subcommand registration + `resolveConfigPath` |
-| `cmd/booking-cli/server.go` | `server` subcommand: HTTP + pprof + workers + saga consumer lifecycle |
-| `cmd/booking-cli/payment.go` | `payment` subcommand: Kafka `order.created` consumer lifecycle |
+| `cmd/booking-cli/server.go` | `server` subcommand: HTTP + pprof + workers + in-process saga consumer lifecycle |
+| `cmd/booking-cli/recon.go` | `recon` subcommand: stuck-`charging` reconciler (loop or `--once`) |
+| `cmd/booking-cli/saga_watchdog.go` | `saga-watchdog` subcommand: stuck-`failed` DB sweep (loop or `--once`) |
+| `cmd/booking-cli/expiry_sweeper.go` | `expiry-sweeper` subcommand: D6 reservation expiry sweeper (loop or `--once`) |
 | `cmd/booking-cli/stress.go` | `stress` subcommand: one-shot load generator |
-| `cmd/booking-cli/tracer.go` | OTel tracer init + `OTEL_TRACES_SAMPLER_RATIO` resolver (shared by `server` + `payment`) |
+| `cmd/booking-cli/tracer.go` | OTel tracer init + `OTEL_TRACES_SAMPLER_RATIO` resolver (shared by every subcommand) |
 | `internal/bootstrap/module.go` | `CommonModule(cfg)` — log + config + DB + base observability wiring shared by every subcommand |
 | `internal/bootstrap/db.go` | `provideDB` (retry-until-reachable Postgres pool) + `registerDBPoolCollector` |
 | `internal/bootstrap/logmodule.go` | `LogModule` — ctx-aware `*log.Logger` fx provider |

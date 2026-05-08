@@ -81,6 +81,9 @@ silence / inhibit / notification log.
 ### Meta (scrape health)
 - [TargetDown](#targetdown)
 
+### Deployment / cutover
+- [D7 cutover — `order.created` outbox drain](#d7-cutover-note--ordercreated-outbox-drain)
+
 ---
 
 ## HighErrorRate
@@ -150,7 +153,7 @@ silence / inhibit / notification log.
 **Symptom.** `orders:stream` length > 50K for 2m. Severity `warning`. Page on-call now.
 
 **Action.**
-- `docker compose restart app payment_worker` if a worker has hung.
+- `docker compose restart app` if the in-process worker has hung.
 - If worker logs show DB / Redis errors → fix the dependency first.
 - If steady-state load has grown → scale out worker replicas (see `WORKER_*` env config).
 
@@ -164,7 +167,7 @@ silence / inhibit / notification log.
 
 **Action.**
 1. **Drop new traffic at nginx** if user-visible 5xx is acceptable temporarily (`location /api/v1/book { return 503; }` or rate-limit zone tightening).
-2. Manually scale workers: `docker compose up -d --scale payment_worker=3`.
+2. Manually scale `app` replicas: `docker compose up -d --scale app=3` (the worker runs in-process inside `app`).
 3. If Redis is OOMing → consider `XTRIM orders:stream MAXLEN 0` (data loss; only as last resort to prevent total Redis crash).
 
 **Escalation.** Stay paged until length is back below Yellow threshold. Post-mortem required if OOM occurred.
@@ -696,10 +699,10 @@ docker exec booking_alertmanager amtool silence add \
 Stop a worker container and wait 2m+:
 
 ```bash
-docker stop booking_payment_worker
+docker stop booking_recon
 # … wait 2m+ …
-# Verify: open Prometheus UI → Alerts → TargetDown firing for job=payment-worker
-docker start booking_payment_worker  # to recover
+# Verify: open Prometheus UI → Alerts → TargetDown firing for job=recon
+docker start booking_recon  # to recover
 ```
 
 ---
@@ -870,3 +873,26 @@ docker start booking_payment_worker  # to recover
 - If a fleet-wide deploy stuck the sweeper for 24h+, verify NO other long-overdue rows are in the pipeline (`expiry_backlog_after_sweep`).
 
 **Escalation.** Critical informational — page so the operational gap gets visibility, but the row itself doesn't need direct intervention.
+
+---
+
+## D7 cutover note — `order.created` outbox drain
+
+D7 (2026-05-08) deleted the legacy `order.created` Kafka topic + `payment_worker` consumer. Before deploying the post-D7 binary in any environment with live traffic, check that the outbox relay has drained any pending `order.created` rows.
+
+**Why this matters.** If the outbox relay has accumulated `events_outbox` rows with `event_type='order.created'` (i.e. it fell behind right before the D7 deploy), the post-D7 relay will still publish those rows once each to a Kafka topic that no longer has a consumer. Not a correctness risk — the rows get marked `processed_at = NOW()` and stop firing — but it produces transient observability noise (Kafka topic gets writes, no consumer commits offsets, DLQ stays empty).
+
+**Pre-deploy check.**
+
+```bash
+docker exec booking_db psql -U booking -d booking -c \
+  "SELECT COUNT(*) FROM events_outbox
+   WHERE processed_at IS NULL AND event_type = 'order.created';"
+```
+
+If the count is 0, deploy is safe. If non-zero:
+
+1. **Drain first** (recommended for production) — wait for the relay to finish, re-check.
+2. **Mark-as-processed at deploy time** (faster, dev-only): `UPDATE events_outbox SET processed_at = NOW() WHERE processed_at IS NULL AND event_type = 'order.created'` immediately before / after the binary swap. Skips the dead-topic publishes entirely.
+
+Local-dev / smoke environments can ignore this; the topic-as-sink behavior is benign.

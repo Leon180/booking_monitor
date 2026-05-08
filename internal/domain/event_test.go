@@ -10,20 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNewOrderCreatedOutbox(t *testing.T) {
-	t.Parallel()
-	payload, _ := json.Marshal(map[string]int{"order_id": 1})
-
-	got, err := domain.NewOrderCreatedOutbox(payload)
-
-	assert.NoError(t, err)
-	assert.Equal(t, domain.EventTypeOrderCreated, got.EventType())
-	assert.Equal(t, domain.OutboxStatusPending, got.Status())
-	assert.Equal(t, payload, got.Payload())
-	assert.NotEqual(t, uuid.Nil, got.ID(), "ID is factory-generated, must not be zero UUID")
-	assert.Nil(t, got.ProcessedAt())
-}
-
 func TestNewOrderFailedOutbox(t *testing.T) {
 	t.Parallel()
 	payload, _ := json.Marshal(map[string]int{"order_id": 1})
@@ -39,13 +25,12 @@ func TestNewOrderFailedOutbox(t *testing.T) {
 }
 
 // TestEventTypeConstantsAreStable pins the wire format of the outbox
-// event-type constants. The factories above use these constants, so
+// event-type constants. The factory above uses these constants, so
 // renaming the const to a different string would silently break every
-// downstream consumer (Kafka subscribers / saga compensator). Keep
-// this test passing or coordinate the rename across all consumers.
+// downstream consumer (saga compensator). Keep this test passing or
+// coordinate the rename across all consumers.
 func TestEventTypeConstantsAreStable(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "order.created", domain.EventTypeOrderCreated)
 	assert.Equal(t, "order.failed", domain.EventTypeOrderFailed)
 	assert.Equal(t, "PENDING", domain.OutboxStatusPending)
 }

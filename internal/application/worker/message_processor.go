@@ -2,9 +2,7 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 
 	"booking_monitor/internal/application"
 	"booking_monitor/internal/domain"
@@ -112,33 +110,15 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 			return err
 		}
 
-		// Outbox pattern. Marshal an explicit OrderCreatedEvent
-		// payload — the wire contract with the payment consumer —
-		// rather than json.Marshal(created) which would tie the
-		// Kafka shape to the domain.Order struct. Marshal errors
-		// are theoretical for the current event shape but we
-		// surface them so a future field addition can't ship a
-		// silent nil-payload outbox row.
-		payload, err := json.Marshal(application.NewOrderCreatedEvent(created))
-		if err != nil {
-			p.logger.Error(ctx, "Failed to marshal order_created event for outbox",
-				tag.MsgID(msg.MessageID), tag.Error(err))
-			return fmt.Errorf("marshal outbox payload: %w", err)
-		}
-
-		outboxEvent, err := domain.NewOrderCreatedOutbox(payload)
-		if err != nil {
-			p.logger.Error(ctx, "Failed to construct outbox event",
-				tag.MsgID(msg.MessageID), tag.Error(err))
-			return fmt.Errorf("construct outbox event: %w", err)
-		}
-		if _, err := repos.Outbox.Create(ctx, outboxEvent); err != nil {
-			p.logger.Error(ctx, "Failed to create outbox event",
-				tag.MsgID(msg.MessageID), tag.Error(err))
-			return err
-		}
-
-		p.logger.Info(ctx, "Order processed successfully with Outbox",
+		// D7 (2026-05-08): the legacy `events_outbox(event_type=
+		// order.created)` write was removed here. Pre-D7 the
+		// payment_worker consumed `order.created` to drive
+		// gateway.Charge; D7 deleted that path entirely. Pattern A
+		// drives money movement through `/api/v1/orders/:id/pay` (D4)
+		// + the provider webhook (D5), neither of which depends on
+		// `order.created`. The booking UoW is now `[INSERT order]`
+		// only — single SQL statement, no fanout.
+		p.logger.Info(ctx, "Order processed successfully",
 			tag.MsgID(msg.MessageID), tag.OrderID(created.ID()))
 		return nil
 	})

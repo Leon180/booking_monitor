@@ -14,15 +14,16 @@ import (
 // timer) — fresher data, no goroutine, no race against fx lifecycle.
 //
 // Why this exists. The transactional outbox is the bridge between
-// "DB committed an order.created / order.failed event" and "Kafka
-// downstream consumers see it". If the OutboxRelay is healthy, this
-// gauge sits at ~ in-flight events (small, drains within seconds).
-// If the relay breaks (crashed leader, advisory lock contention,
-// poll loop hung, broker unreachable), pending grows unbounded and
-// the saga compensator / payment service / any downstream consumer
-// goes silent. Without this gauge, the only signal is downstream
-// effects (saga not compensating, customer 202s never advancing),
-// which arrive minutes-to-hours late.
+// "DB committed an order.failed event" and "Kafka downstream consumers
+// see it" (post-D7 only `order.failed` flows through the outbox; pre-D7
+// `order.created` was the second event type). If the OutboxRelay is
+// healthy, this gauge sits at ~ in-flight events (small, drains within
+// seconds). If the relay breaks (crashed leader, advisory lock
+// contention, poll loop hung, broker unreachable), pending grows
+// unbounded and the saga compensator goes silent. Without this gauge,
+// the only signal is downstream effects (saga not compensating;
+// failed orders sitting in `failed` instead of `compensated`), which
+// arrive minutes-to-hours late.
 //
 // The companion alert `OutboxPendingBacklog` fires when the gauge
 // stays elevated, distinguishing "relay is keeping up but slow" from

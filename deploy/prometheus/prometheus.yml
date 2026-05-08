@@ -91,22 +91,27 @@ scrape_configs:
     static_configs:
       - targets: ['redis_exporter:9121']
 
-  # The three worker subcommands run as separate compose services
-  # (`payment_worker`, `recon`, `saga_watchdog`) — each binary has its
+  # The worker subcommands run as separate compose services
+  # (`recon`, `saga_watchdog`, `expiry_sweeper`) — each binary has its
   # own Prometheus default registry, so their metrics MUST be scraped
   # at the per-process listener (port 9091, configured by
   # WORKER_METRICS_ADDR). Without these jobs:
   #   - recon_*           (recon process)
   #   - saga_watchdog_*   (saga_watchdog process)
-  #   - kafka_consumer_retry_total / saga_poison_messages_total
-  #     (payment_worker process — payment-side consumer)
+  #   - expiry_*          (expiry_sweeper process)
   # are registered but never scraped, so the corresponding alerts
-  # (ReconStuckCharging, SagaStuckFailedOrders, KafkaConsumerStuck,
+  # (ReconStuckCharging, SagaStuckFailedOrders, ExpiryProcessingErrors,
   # ReconMarkErrors, etc.) cannot fire. Phase 2 checkpoint O3.
-  - job_name: 'payment-worker'
-    metrics_path: '/metrics'
-    static_configs:
-      - targets: ['payment_worker:9091']
+  #
+  # D7 (2026-05-08) deleted the `payment-worker` scrape job + the
+  # `payment_worker` binary itself. The saga consumer now runs
+  # in-process inside `app` (it always did, actually — pre-D7 it lived
+  # alongside the legacy A4 `order.created` consumer in
+  # `payment_worker`; D7 just removes the latter). `kafka_consumer_retry_total`
+  # is still emitted, scraped via the `booking-service` job above
+  # (`app:8080/metrics`); the metric label set narrowed from
+  # `{topic=order.created|order.failed}` to `{topic=order.failed}` only.
+  # `KafkaConsumerStuck` alert continues to work.
 
   - job_name: 'recon'
     metrics_path: '/metrics'
