@@ -65,12 +65,27 @@ func stage1Harness(t *testing.T) (*pgintegration.Harness, *bookingsync.Service) 
 
 // seedTicketType inserts an event + a ticket_type row directly via
 // SQL, bypassing both the event repo and ticket_type repo. Returns
-// (eventID, ticketTypeID). Inventory is set to availableTickets;
-// price_cents = 2000 ($20), currency = "usd".
+// (eventID, ticketTypeID). The ticket_type is seeded with the
+// caller's `availableTickets`; price_cents = 2000 ($20),
+// currency = "usd".
+//
+// SoT divergence (per Codex slice-2 review): the parent event row
+// is seeded with `events.available_tickets = availableTickets * 2`
+// — a deliberately DIFFERENT value from the ticket_type's stock.
+// `event_ticket_types.available_tickets` is the inventory SoT
+// post-D4.1; `events.available_tickets` is frozen (initialized at
+// create, never written thereafter). If the service ever
+// regressed to read from `events.available_tickets`, every test
+// would suddenly see DOUBLE the actual ticket_type capacity and
+// either over-sell or fail conservation checks. By seeding them
+// divergently, the test suite turns the design rule into a
+// regression tripwire — the service code is correct today, this
+// pins it.
 func seedTicketType(t *testing.T, h *pgintegration.Harness, availableTickets int) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	eventID := uuid.New()
-	h.SeedEvent(t, eventID.String(), "Stage1 Test Event", availableTickets)
+	// Divergent seed: events.available_tickets = ticket_type stock × 2.
+	h.SeedEvent(t, eventID.String(), "Stage1 Test Event", availableTickets*2)
 
 	ttID, err := uuid.NewV7()
 	require.NoError(t, err)
@@ -253,10 +268,10 @@ func TestSyncBooking_ConcurrentContention(t *testing.T) {
 
 // TestSyncBooking_DuplicateActiveOrder — the same user + same event
 // with an active (non-failed/non-compensated) order trips the
-// uq_orders_user_event partial unique index (migration 000011).
-// The Stage 4 contract maps this to domain.ErrUserAlreadyBought →
-// HTTP 409. Stage 1's direct INSERT path mirrors that mapping
-// (Codex round-1 P2 fix).
+// uq_orders_user_event partial unique index (added in migration
+// 000006, refined in 000008). The Stage 4 contract maps this to
+// domain.ErrUserAlreadyBought → HTTP 409. Stage 1's direct INSERT
+// path mirrors that mapping (Codex round-1 P2 fix).
 //
 // CRITICAL: the rejected second booking MUST NOT consume inventory.
 // The first booking decremented from 5 → 4; the second booking
