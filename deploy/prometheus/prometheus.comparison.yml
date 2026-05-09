@@ -1,0 +1,95 @@
+# D12.5 — Bench-only Prometheus scrape config for the 4-stage harness.
+#
+# Mounted at /etc/prometheus/prometheus.yml inside `prometheus-bench`
+# (see docker-compose.comparison.yml).
+#
+# This config is intentionally minimal compared to the production
+# `deploy/prometheus/prometheus.yml`:
+#   - No alerting rules (the harness measures throughput; alerts are
+#     a separate concern handled by the production stack)
+#   - No external_labels (single-instance bench Prometheus; not
+#     federated)
+#   - No remote_write (no long-term storage for bench data)
+#
+# The load-bearing piece is the per-stage `stage=stageN` label on each
+# scrape target. PromQL queries from the orchestration script (Slice
+# 3) and the comparison.md (Slice 4) filter by `stage` label:
+#   rate(http_requests_total{stage="stage4"}[1m])
+#   sum by (stage) (rate(saga_compensator_events_processed_total[5m]))
+#
+# Inline `labels:` on `static_configs` is the simplest mechanism;
+# `relabel_configs` with `target_label: stage` would also work but
+# is more YAML for the same outcome.
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+
+# ⚠️ Future-maintainer notes (Slice 2 review):
+#
+# 1. Scrape-time labels (`stage`, `architecture`) win over metric-defined
+#    labels of the same name. No metric in the codebase currently
+#    declares a `stage` or `architecture` label, but if you add one
+#    later, Prometheus will silently prefer the scrape-time value.
+#    Pick a different label name on the metric side OR rename here.
+#
+# 2. The `stage` label values are the literal strings `stage1`,
+#    `stage2`, `stage3`, `stage4` — NOT `1`, `2`, `3`, `4` and NOT
+#    `s1`, `s2`, etc. PromQL filters typo-fail silently (return 0
+#    results, not an error). The orchestration script (Slice 3)
+#    asserts `up{stage="stageN"} == 1` × 4 to catch this.
+#
+# 3. PromQL aggregations on the booking-stages job should use
+#    `sum by (stage)` — but be aware the `architecture` label is
+#    additive, so `sum by (stage)` silently also groups by
+#    `architecture`. Use `sum by (stage) (... without (architecture))`
+#    when a query MUST aggregate strictly by stage.
+
+scrape_configs:
+  # Self-scrape so the bench Prometheus shows up in `up{}` queries
+  # and a sanity check (`up{job="prometheus-bench"} == 1`) is the
+  # first thing the orchestration script verifies post-bring-up.
+  # Default 5s interval + 4s timeout from `global` is fine — the
+  # bench Prometheus's own metrics endpoint isn't under load.
+  - job_name: prometheus-bench
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The 4 stage binaries. Container-internal port is 8080 (uniform
+  # across stages — set via PORT env var in compose). Host-mapped
+  # ports 8091-8094 are NOT used here; intra-compose scraping uses
+  # the service hostname + container-internal port. The discrepancy
+  # between Section 1's host port table (8091-8094) and this
+  # scrape config (8080) trips up readers who diff them — hence
+  # this comment.
+  #
+  # Per-job scrape override: 10s interval + 8s timeout (2s buffer)
+  # instead of the global 5s/4s. Under k6 saturation (500 VUs against
+  # Stage 4) the binary's `/metrics` response can stall multiple
+  # seconds — a tight 5s/4s window silently drops samples (Prometheus
+  # logs a warning per-scrape but does NOT increment `up`; you lose
+  # data without any visible signal). 10s/8s gives recovery headroom
+  # without sacrificing material time-resolution for a 60s benchmark.
+  # (Closes Slice 2 review MED-#2.)
+  - job_name: booking-stages
+    metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 8s
+    static_configs:
+      - targets: ["booking-cli-stage1:8080"]
+        labels:
+          stage: stage1
+          architecture: sync-select-for-update
+      - targets: ["booking-cli-stage2:8080"]
+        labels:
+          stage: stage2
+          architecture: redis-lua-sync-pg
+      - targets: ["booking-cli-stage3:8080"]
+        labels:
+          stage: stage3
+          architecture: redis-lua-stream-async
+      - targets: ["booking-cli-stage4:8080"]
+        labels:
+          stage: stage4
+          architecture: pattern-a-with-saga
