@@ -181,7 +181,14 @@ func (s *Service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.
 	order, err := domain.NewReservation(orderID, userID, result.EventID, ticketTypeID, quantity, reservedUntil, result.AmountCents, result.Currency)
 	if err != nil {
 		if revertErr := s.revertAfterFailure(ctx, ticketTypeID, quantity, orderID); revertErr != nil {
-			return domain.Order{}, fmt.Errorf("construct reservation: %w; redis revert also failed: %v", err, revertErr)
+			// Revert failed: Redis qty is leaked. Wrap revertErr
+			// (NOT the primary domain.ErrInvalid* sentinel) so the
+			// error chain falls through to MapBookingError's 500
+			// default — clients see "internal error", not the 400
+			// the primary sentinel would map to. The original
+			// invariant cause is in the message text for log
+			// triage. (Codex round-3 P2.)
+			return domain.Order{}, fmt.Errorf("redis revert failed after construct reservation (invariant: %v): %w", err, revertErr)
 		}
 		return domain.Order{}, fmt.Errorf("construct reservation: %w", err)
 	}
@@ -191,7 +198,14 @@ func (s *Service) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.
 	// duplicate active orders; mirror Stage 1's mapping.
 	if err := s.insertOrder(ctx, order); err != nil {
 		if revertErr := s.revertAfterFailure(ctx, ticketTypeID, quantity, orderID); revertErr != nil {
-			return domain.Order{}, fmt.Errorf("%w; redis revert also failed: %v", err, revertErr)
+			// Same logic as Step 5: when revert fails, the Redis
+			// leak is the operationally-important error. Wrap
+			// revertErr (NOT the primary err — domain.ErrUserAlreadyBought
+			// for the 23505 case) so MapBookingError doesn't return
+			// 409 on a leaked-inventory state. The 500 default leak-
+			// guards against the client incorrectly believing a
+			// duplicate-detection happened cleanly. (Codex round-3 P2.)
+			return domain.Order{}, fmt.Errorf("redis revert failed after insert order (insert: %v): %w", err, revertErr)
 		}
 		return domain.Order{}, err
 	}

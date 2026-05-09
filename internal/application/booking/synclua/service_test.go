@@ -235,6 +235,66 @@ func TestService_BookTicket_RepairFails_SetMetadataError(t *testing.T) {
 	assert.Equal(t, 1, deducter.calls)
 }
 
+// TestService_BookTicket_RevertFailureMasksInvariantSentinel — when
+// NewReservation rejects a Lua-supplied price snapshot AND the
+// follow-up RevertInventory fails, the returned error must NOT
+// match the domain.ErrInvalid* sentinel that would map to 400.
+// Otherwise stagehttp.MapBookingError would surface 400 with a
+// leaked-Redis-inventory state — a worse outcome than 500. (Codex
+// round-3 P2: wraps revertErr, not the primary sentinel.)
+//
+// The 23505-equivalent case (insertOrder failure) lives in the
+// integration suite at synclua_booking_test.go because it requires
+// real PG to trigger uq_orders_user_event; the wrapping logic is
+// shared, so testing one branch here + the other there is enough.
+func TestService_BookTicket_RevertFailureMasksInvariantSentinel(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+
+	ticketTypeID := uuid.New()
+	eventID := uuid.New()
+	// fakeDeducter returns Accepted=true with AmountCents=0 — the
+	// only Lua-reachable shape that trips a NewReservation
+	// invariant (price snapshot must be > 0). Real Lua would reject
+	// price_cents=0 in `metadata_missing`, but we're testing the
+	// Go-side defense-in-depth here.
+	deducter := &fakeDeducter{
+		responses: []deductResponse{{
+			result: domain.DeductInventoryResult{
+				Accepted:    true,
+				EventID:     eventID,
+				AmountCents: 0,
+				Currency:    "usd",
+			},
+		}},
+	}
+	svc, _, _, invRepo := newServiceForTest(t, ctrl, deducter)
+
+	redisDown := errors.New("redis: connection refused")
+	invRepo.EXPECT().
+		RevertInventory(gomock.Any(), ticketTypeID, 1, gomock.Any()).
+		Return(redisDown)
+
+	_, err := svc.BookTicket(context.Background(), 1, ticketTypeID, 1)
+	require.Error(t, err)
+
+	// Critical: the error chain must NOT match the invariant
+	// sentinel. If it did, MapBookingError would route to 400
+	// while Redis is leaked — surfacing the wrong outcome class.
+	assert.False(t, errors.Is(err, domain.ErrInvalidAmountCents),
+		"revert-failure error must NOT chain to the primary invariant sentinel; got %v", err)
+
+	// And the chain MUST match the revert error so an operator
+	// grepping for the redis cause finds it.
+	assert.ErrorIs(t, err, redisDown,
+		"revert-failure error must chain to the underlying redis error")
+
+	// The original cause is still surfaced via the message for
+	// log triage even though it's not in the error chain.
+	assert.Contains(t, err.Error(), "redis revert failed",
+		"error message must explicitly call out the revert failure")
+}
+
 func TestService_GetOrder_DelegatesToOrderRepo(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)

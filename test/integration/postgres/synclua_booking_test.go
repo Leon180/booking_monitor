@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/booking/synclua"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/api/stagehttp"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/persistence/postgres"
@@ -42,9 +44,11 @@ import (
 //   - Concurrent contention through Lua's single-thread serialization
 //     point — the architectural baseline Stage 2 brings vs Stage 1's
 //     row-lock serialization.
-//   - Compensator path: revert.lua + SQL UPDATEs landing the order
-//     in 'compensated' status with both Redis AND PG inventory
-//     reflecting the revert.
+//   - Compensator path: revert.lua + UPDATE orders status landing
+//     the order in 'compensated' state with Redis qty restored.
+//     The PG `event_ticket_types.available_tickets` column is
+//     unchanged on the compensation path (symmetric with the
+//     forward path which doesn't decrement it).
 //
 // All tests boot their own Postgres + Redis pair (no shared harness
 // across tests) — same pattern as sync_booking_test.go. Container
@@ -133,10 +137,11 @@ func redisQtyNow(t *testing.T, redisH *pgintegration.RedisHarness, ttID uuid.UUI
 	return n
 }
 
-// pgAvailableTicketsNow returns the current available_tickets count
-// for a ticket_type. Stage 2 leaves this column UNCHANGED on the
-// booking hot path; the compensator updates it via the SQL revert
-// step.
+// pgAvailableTicketsNow returns the current available_tickets
+// count for a ticket_type. Stage 2 leaves this column UNCHANGED on
+// BOTH the booking hot path AND on compensation — symmetric. The
+// seeded `total_tickets` value is the long-term snapshot for PG
+// admin / drift-detector readers; Redis qty is the live count.
 func pgAvailableTicketsNow(t *testing.T, pgH *pgintegration.Harness, ttID uuid.UUID) int {
 	t.Helper()
 	var n int
@@ -301,6 +306,115 @@ func TestSyncLuaBooking_DuplicateActiveOrderRevertsRedis(t *testing.T) {
 
 	// PG order count stays at 1.
 	assert.Equal(t, 1, stage2OrderCount(t, pgH, ttID))
+}
+
+// TestSyncLuaBooking_DuplicateActiveOrder_RevertFailureMaps500 —
+// the load-bearing case from Codex round-3 P2. When PG INSERT
+// trips 23505 AND the follow-up Redis revert ALSO fails, the
+// returned error MUST NOT match domain.ErrUserAlreadyBought —
+// otherwise stagehttp.MapBookingError surfaces 409 to the client
+// while Redis qty is silently leaked. The fix flips the wrapping
+// so the chain matches the revert error (a generic redis error
+// that falls through to 500), demoting the primary sentinel to a
+// message string for log triage.
+//
+// Setup: real PG + real Redis testcontainers, but the Service is
+// wired with `failingRevertRepo` — a wrapping fake that delegates
+// every method to the real InventoryRepository EXCEPT
+// `RevertInventory`, which returns a controlled error. The first
+// booking exercises the real DeductInventory + Lua path; the
+// second booking trips 23505 and the wrapper's failing
+// RevertInventory exercises the new error-mapping path.
+func TestSyncLuaBooking_DuplicateActiveOrder_RevertFailureMaps500(t *testing.T) {
+	pgH, redisH, _, realInvRepo := stage2Harness(t)
+	ctx := context.Background()
+
+	_, ttID := seedTicketTypeForStage2(t, pgH, redisH, 5)
+
+	// Build a Service that uses the real InventoryRepository for
+	// deduct + metadata helpers but a controlled-fail wrapper for
+	// RevertInventory. Mirrors stage2Harness internals verbatim
+	// EXCEPT for the wrapping. Replicating the wiring inline keeps
+	// the helper layer narrow.
+	cfg := &config.Config{
+		Booking: config.BookingConfig{ReservationWindow: 15 * time.Minute},
+		Redis:   config.RedisConfig{InventoryTTL: 24 * time.Hour},
+	}
+	orderRepo := postgres.NewPostgresOrderRepository(pgH.DB)
+	ttRepo := postgres.NewPostgresTicketTypeRepository(pgH.DB)
+	deducter := cache.NewRedisSyncDeducter(redisH.Client)
+	wrappedInvRepo := &failingRevertRepo{
+		real:      realInvRepo,
+		revertErr: errors.New("redis: simulated revert failure for test"),
+	}
+	svc := synclua.NewService(pgH.DB, deducter, orderRepo, ttRepo, wrappedInvRepo, cfg)
+
+	// First booking: succeeds. The wrapped RevertInventory is NOT
+	// reached on the success path so the controlled error doesn't
+	// fire here.
+	_, err := svc.BookTicket(ctx, 99, ttID, 1)
+	require.NoError(t, err)
+	require.Equal(t, 4, redisQtyNow(t, redisH, ttID))
+
+	// Second booking: PG INSERT trips uq_orders_user_event.
+	// Service runs revertAfterFailure → wrapped RevertInventory
+	// returns the controlled error.
+	_, err = svc.BookTicket(ctx, 99, ttID, 1)
+	require.Error(t, err)
+
+	// Critical: error chain must NOT match ErrUserAlreadyBought.
+	// Pre-fix this assertion would fail (the chain WOULD match
+	// because we wrapped the primary err with %w), and a request
+	// would surface 409 to the client while Redis was leaked.
+	assert.False(t, errors.Is(err, domain.ErrUserAlreadyBought),
+		"revert-failure error must NOT chain to ErrUserAlreadyBought — would route to 409 while Redis is leaked. Got: %v", err)
+
+	// Chain must match the revert error so an operator can grep
+	// for the redis cause.
+	assert.Contains(t, err.Error(), "simulated revert failure",
+		"revert-failure error must surface the underlying redis cause")
+
+	// MapBookingError integration check — the error must route to 500.
+	status, _ := stagehttp.MapBookingError(err)
+	assert.Equal(t, http.StatusInternalServerError, status,
+		"revert-failure error must map to 500 (NOT 409); the 500 default is the leak-guard")
+
+	// Redis qty leaked: original deduct went 5→4 (success), second
+	// deduct went 4→3 then INSERT-failed-and-revert-failed leaving
+	// it at 3. PG order count stays at 1 (the original successful
+	// booking) since the second INSERT rolled back.
+	assert.Equal(t, 3, redisQtyNow(t, redisH, ttID),
+		"second deduct decremented but revert was forced to fail — Redis qty stays at 3 (the documented leak case the 500 surfaces)")
+	assert.Equal(t, 1, stage2OrderCount(t, pgH, ttID))
+}
+
+// failingRevertRepo wraps a real InventoryRepository, delegating
+// every method to the real impl except `RevertInventory`, which
+// returns a controlled error. Used by the
+// DuplicateActiveOrder_RevertFailureMaps500 test to inject revert
+// failures without breaking the rest of the Redis path.
+type failingRevertRepo struct {
+	real      domain.InventoryRepository
+	revertErr error
+}
+
+func (f *failingRevertRepo) SetTicketTypeRuntime(ctx context.Context, tt domain.TicketType) error {
+	return f.real.SetTicketTypeRuntime(ctx, tt)
+}
+func (f *failingRevertRepo) SetTicketTypeMetadata(ctx context.Context, tt domain.TicketType) error {
+	return f.real.SetTicketTypeMetadata(ctx, tt)
+}
+func (f *failingRevertRepo) DeleteTicketTypeRuntime(ctx context.Context, id uuid.UUID) error {
+	return f.real.DeleteTicketTypeRuntime(ctx, id)
+}
+func (f *failingRevertRepo) DeductInventory(ctx context.Context, orderID, ttID uuid.UUID, userID, count int, reservedUntil time.Time) (domain.DeductInventoryResult, error) {
+	return f.real.DeductInventory(ctx, orderID, ttID, userID, count, reservedUntil)
+}
+func (f *failingRevertRepo) RevertInventory(_ context.Context, _ uuid.UUID, _ int, _ string) error {
+	return f.revertErr
+}
+func (f *failingRevertRepo) GetInventory(ctx context.Context, ttID uuid.UUID) (int, bool, error) {
+	return f.real.GetInventory(ctx, ttID)
 }
 
 // TestSyncLuaBooking_ConcurrentContention — N goroutines book the
