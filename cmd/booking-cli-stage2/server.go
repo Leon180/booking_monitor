@@ -357,8 +357,15 @@ func (s *stage2Compensator) Compensate(ctx context.Context, orderID uuid.UUID) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// `ticket_type_id` is `UUID NULL` per the schema (migration 000012
+	// added it nullable). Scanning into a bare `uuid.UUID` would fail
+	// hard on a legacy NULL row with "converting NULL to uuid.UUID is
+	// unsupported" — that error does NOT match sql.ErrNoRows, so the
+	// sweeper would log spurious hard errors. Use uuid.NullUUID to
+	// handle legacy rows cleanly. Round-3 agent review found this in
+	// Stage 3; Stage 2 inherited the same pattern and is fixed here.
 	var (
-		ttID   uuid.UUID
+		ttID   uuid.NullUUID
 		qty    int
 		status string
 	)
@@ -368,17 +375,29 @@ func (s *stage2Compensator) Compensate(ctx context.Context, orderID uuid.UUID) e
 		 WHERE id = $1
 		   FOR UPDATE`,
 		orderID).Scan(&ttID, &qty, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Sweeper-vs-confirm race: the row may be deleted between
+		// the sweeper's SELECT and this FOR UPDATE. Treat as not-
+		// eligible so the sweeper continues silently.
+		return stagehttp.ErrCompensateNotEligible
+	}
 	if err != nil {
 		return fmt.Errorf("lock order: %w", err)
 	}
 	if status != string(domain.OrderStatusAwaitingPayment) {
 		return stagehttp.ErrCompensateNotEligible
 	}
+	if !ttID.Valid {
+		// Legacy pre-D4.1 row with NULL ticket_type_id — Redis SoT
+		// is keyed by ticket_type_id, can't reverse-route. Skip
+		// silently (operator-review territory, not sweeper-eligible).
+		return stagehttp.ErrCompensateNotEligible
+	}
 
 	// revert.lua FIRST (within the tx scope so a Redis failure
 	// rolls back the orders UPDATE and the next sweep retries the
 	// whole compensation). The SETNX guard makes the retry idempotent.
-	if err = s.inventoryRepo.RevertInventory(ctx, ttID, qty, "order:"+orderID.String()); err != nil {
+	if err = s.inventoryRepo.RevertInventory(ctx, ttID.UUID, qty, "order:"+orderID.String()); err != nil {
 		return fmt.Errorf("redis revert: %w", err)
 	}
 
