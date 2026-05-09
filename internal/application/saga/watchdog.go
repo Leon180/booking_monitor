@@ -255,7 +255,14 @@ func (w *Watchdog) resolve(parent context.Context, s domain.StuckFailed) {
 		return
 	}
 
-	if err := w.compensator.HandleOrderFailed(parent, payload); err != nil {
+	// Watchdog re-drives the compensator out of the Kafka path —
+	// there's no original `events_outbox.created_at` to thread through
+	// (the sweep is DB-side, not message-driven). Pass `time.Now()`
+	// so the histogram measures compensator-only latency for these
+	// resolves; this won't conflate with the Kafka-path histogram
+	// because the watchdog has its own `SagaWatchdogResolveDuration`
+	// metric for that purpose.
+	if err := w.compensator.HandleOrderFailed(parent, payload, time.Now()); err != nil {
 		// Compensator failed (Redis blip, DB lock, etc). Will retry
 		// next sweep — the underlying revert + MarkCompensated are
 		// idempotent so a partially-completed earlier attempt is

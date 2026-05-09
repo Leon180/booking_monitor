@@ -289,6 +289,146 @@ groups:
           summary: "Saga watchdog sweep query is failing"
           description: "FindStuckFailed has been failing for 2m+ at {{ $value }} errors/sec. Watchdog cannot detect stuck failure-terminal orders (failed | expired | payment_failed post-D2). Check DB connectivity, migration status (000011 + 000013 must both be applied — 000011 created the partial index, 000013 widens its predicate to cover Pattern A's `expired` / `payment_failed` states), and query timeouts."
 
+      # ─────────────────────────────────────────────────────────
+      # Saga COMPENSATOR (Kafka-driven hot path) alerts — PR-D12.4
+      #
+      # Distinct from the saga-WATCHDOG alerts above. The watchdog
+      # is a DB-side sweeper that re-drives stuck-Failed orders;
+      # the COMPENSATOR is the Kafka consumer reading order.failed
+      # events. Both end up calling the same compensator code, but
+      # they get distinct metric series + alerts because the trigger
+      # paths (and therefore the operational signals) differ.
+      # ─────────────────────────────────────────────────────────
+      - alert: SagaCompensatorErrorRate
+        # Fires when > 5% of compensator outcomes are non-success
+        # for sustained 5m. Buckets `compensated`,
+        # `already_compensated`, AND `already_compensated_redis_error`
+        # as "success-equivalent for ratio-alert purposes":
+        #   - `compensated` = full success
+        #   - `already_compensated` = Kafka redelivery hitting an
+        #     already-final order (benign by design)
+        #   - `already_compensated_redis_error` = SETNX-guarded
+        #     idempotent re-drive blip; Redis state was already
+        #     correct from a previous delivery, so the failure is
+        #     functionally a no-op. Including it in the error ratio
+        #     produces false positives during Kafka recovery bursts.
+        #     The dedicated `SagaCompensatorRedisInventoryLeak`
+        #     (critical) covers the FRESH-compensation Redis failure
+        #     case where inventory is actually leaked.
+        # Everything else is a real error class:
+        # `path_c_skipped` (inventory NOT reverted), all *_error
+        # labels (DB / Redis / unmarshal failures), `context_error`,
+        # `uow_infra_error`, `unknown` (classifier drift — has its
+        # own dedicated alert + runbook).
+        expr: |
+          (
+            sum(rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated|already_compensated_redis_error"}[5m]))
+            /
+            sum(rate(saga_compensator_events_processed_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorerrorrate"
+          summary: "Saga compensator error rate above 5% — {{ $value | humanizePercentage }}"
+          description: "saga_compensator_events_processed_total non-success ratio averaging {{ $value | humanizePercentage }} over 5m. Run `topk(5, sum by (outcome) (rate(...{outcome!~\"compensated|already_compensated|already_compensated_redis_error\"}[5m])))` for the dominant label, then map via the runbook's per-outcome triage table. **False-positive note**: if `path_c_skipped` is dominant within ~1h of a rolling upgrade, that's expected (pre-v3 multi-ticket-type events flushing); should taper to 0 once deploy is done. **Dual-page note**: when `redis_revert_error` is dominant the critical `SagaCompensatorRedisInventoryLeak` will also fire — same root cause, different urgency."
+
+      - alert: SagaConsumerLagHigh
+        # Fires when consumer lag (seconds since
+        # events_outbox.created_at on the most-recently-processed
+        # message) exceeds 30s for 2m. CRITICAL: gated on
+        # `up{job="booking-service"} == 1` because the lag gauge
+        # is a PERFORMANCE metric — a crashed consumer leaves the
+        # gauge stale at the last-known value until Prometheus
+        # marks the target down (~scrape_interval × 3). Without
+        # the up-gate, a dead consumer would false-fire this alert
+        # for minutes (gauge stuck at, say, 60s) before the actual
+        # liveness signal kicked in. Liveness is a separate concern
+        # — Prometheus's default `up == 0` alerting (or a custom
+        # SagaConsumerDown rule) handles it.
+        #
+        # The compensator + consumer Slice 2 also includes a 30s
+        # idle-reset goroutine that zeros the gauge on quiet
+        # systems, so a healthy consumer with no traffic doesn't
+        # false-fire either.
+        #
+        # NOTE — `and on(instance)` join: in single-instance Docker
+        # Compose deployment (today) both metrics carry
+        # `instance="app:8080"` so the join works. In future k8s
+        # multi-pod deployment, verify `saga_compensation_consumer_lag_seconds`
+        # and `up{job="booking-service"}` share identical `instance`
+        # label values; if a service mesh rewrites `instance` on
+        # one side but not the other, the join silently produces
+        # an empty result set and the alert can never fire.
+        # Mitigation: replace `on(instance)` with `on(job)` if all
+        # instances of the service scrape under one job.
+        #
+        # NOTE — D12.5 forward-compat: PR-D12.5 will add per-stage
+        # scrape jobs (`d12-stage1` ... `d12-stage4`). When that
+        # lands and may rename the Stage 4 binary's job from
+        # `booking-service` to `d12-stage4`, this gate expression
+        # MUST be updated. Otherwise the gate checks the wrong
+        # job and silently misses crashed-consumer false-positives
+        # again.
+        expr: |
+          (saga_compensation_consumer_lag_seconds > 30)
+            and on(instance) (up{job="booking-service"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagaconsumerlaghigh"
+          summary: "Saga consumer lag {{ $value | humanizeDuration }} (> 30s for 2m)"
+          description: "Saga consumer is processing order.failed events {{ $value | humanizeDuration }} after they were emitted to the outbox (events_outbox.created_at). Includes outbox poll delay (default 500ms), Kafka round-trip, and processing time. Sustained > 30s typically means: (a) Kafka topic is backlogged, (b) compensator is slow due to Redis/DB contention, or (c) consumer is single-instance and saturated. Check saga_compensation_loop_duration_seconds_bucket for compensator latency distribution."
+
+      - alert: SagaCompensatorClassifierDrift
+        # Fires the moment the `unknown` outcome label increments.
+        # `unknown` is the deferred-sentinel value emitted ONLY when
+        # a return path in HandleOrderFailed fails to call
+        # RecordEventProcessed explicitly — i.e. a code regression
+        # (refactor added a new return without updating the
+        # classifier). Distinct from `uow_infra_error` and
+        # `context_error` which ARE recorded explicitly by their
+        # respective branches. Should be 0 in production forever;
+        # any non-zero value is a deploy-regression signal.
+        #
+        # Threshold is `> 0` not `> N` because a single occurrence
+        # is significant — once a code path fires "unknown" it will
+        # keep firing for every event hitting that path until the
+        # next deploy.
+        expr: increase(saga_compensator_events_processed_total{outcome="unknown"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorclassifierdrift"
+          summary: "Saga compensator emitted 'unknown' outcome label — code-path missing record() call"
+          description: "saga_compensator_events_processed_total{outcome=\"unknown\"} incremented {{ $value }} time(s) in the last 5m. This means a return path in compensator.HandleOrderFailed reached the deferred sentinel without explicitly calling record(<outcome>). Cause is always a regression: a refactor added a new return statement and forgot to update the classifier. Fix: identify the new return site (recent deploy diff), add the appropriate record() call, ship a new build. Until then the metric loses granularity for whatever traffic hits that path."
+
+      - alert: SagaCompensatorRedisInventoryLeak
+        # Fires the moment redis_revert_error increments. This is
+        # the FRESH-compensation path (NOT the idempotent re-drive)
+        # — a non-zero rate means: PG MarkCompensated committed,
+        # but RevertInventory failed to put inventory back into
+        # Redis. The order is `compensated` in PG, but the Redis
+        # qty key is permanently short by the order's quantity.
+        # Real inventory loss until manual operator intervention.
+        #
+        # Distinct from `already_compensated_redis_error` (idempotent
+        # re-drive failure on a previously-fully-compensated order;
+        # SETNX guard makes most of those benign — Redis state is
+        # already correct from the first delivery's revert; the
+        # error just means the SETNX TTL expired between deliveries).
+        expr: increase(saga_compensator_events_processed_total{outcome="redis_revert_error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorredisinventoryleak"
+          summary: "Saga compensator failed Redis revert on FRESH compensation — inventory leaked"
+          description: "saga_compensator_events_processed_total{outcome=\"redis_revert_error\"} incremented {{ $value }} time(s). PG was marked compensated but Redis qty was NOT restored — inventory is permanently leaked until manual revert. Operator: `XADD ticket_type_qty:<id> +<qty>` (carefully) OR run rehydrate via `booking-cli rehydrate`. Investigate Redis health (saga:reverted:order:* keys, MEMORY USAGE), DB lock contention. Distinct from `already_compensated_redis_error` (idempotent re-drive blip — usually benign, alerted separately if sustained)."
+
       - alert: SagaMaxFailedAgeExceeded
         # Fires when the watchdog flags an order older than
         # SAGA_MAX_FAILED_AGE (default 24h). Unlike recon's max-age

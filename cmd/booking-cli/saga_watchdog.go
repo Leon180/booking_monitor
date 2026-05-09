@@ -59,6 +59,17 @@ func runSagaWatchdog(cmd *cobra.Command, _ []string) {
 			// infrastructure/{config,observability}.
 			bootstrap.NewSagaConfig,
 			bootstrap.NewPrometheusSagaMetrics,
+			// PR-D12.4: saga.NewCompensator now also requires
+			// CompensatorMetrics (4th parameter). The watchdog
+			// binary independently constructs a Compensator to
+			// re-drive stuck-Failed orders; without this provider
+			// fx fails to resolve at startup with "missing type:
+			// saga.CompensatorMetrics". Mirrors `server.go`'s
+			// provider — both binaries register the same
+			// `saga_compensator_events_processed_total` metric
+			// name (promauto uses the default registry); Prometheus
+			// distinguishes them by `instance` label at scrape time.
+			bootstrap.NewPrometheusCompensatorMetrics,
 			saga.NewWatchdog,
 		),
 		// App-startup inventory rehydrate. Same wire as server.go —

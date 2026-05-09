@@ -34,19 +34,26 @@ func TestRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
-					domain.ReconstructOutboxEvent(id2, "test.event", []byte("payload2"), domain.OutboxStatusPending, nil),
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, time.Now().UTC(), nil),
+					domain.ReconstructOutboxEvent(id2, "test.event", []byte("payload2"), domain.OutboxStatusPending, time.Now().UTC(), nil),
 				}
 
 				// 1. ListPending
 				repo.EXPECT().ListPending(ctx, 10).Return(events, nil)
 
-				// 2. Publish & Mark Processed (Event 1)
-				pub.EXPECT().Publish(ctx, "test.event", []byte("payload1")).Return(nil)
+				// 2. Publish & Mark Processed (Event 1).
+				//    gomock.Eq pins the exact event published — without
+				//    it a regression that published the WRONG entity
+				//    would still pass the test (per slice-0 go-reviewer
+				//    M2). domain.OutboxEvent is a value type with all
+				//    unexported fields; reflect.DeepEqual via gomock.Eq
+				//    works because both events were constructed by the
+				//    same path.
+				pub.EXPECT().PublishOutboxEvent(ctx, gomock.Eq(events[0])).Return(nil)
 				repo.EXPECT().MarkProcessed(ctx, id1).Return(nil)
 
 				// 3. Publish & Mark Processed (Event 2)
-				pub.EXPECT().Publish(ctx, "test.event", []byte("payload2")).Return(nil)
+				pub.EXPECT().PublishOutboxEvent(ctx, gomock.Eq(events[1])).Return(nil)
 				repo.EXPECT().MarkProcessed(ctx, id2).Return(nil)
 			},
 		},
@@ -62,13 +69,13 @@ func TestRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, time.Now().UTC(), nil),
 				}
 
 				repo.EXPECT().ListPending(ctx, 10).Return(events, nil)
 
 				// Publish Fails
-				pub.EXPECT().Publish(ctx, "test.event", []byte("payload1")).Return(errors.New("kafka error"))
+				pub.EXPECT().PublishOutboxEvent(ctx, gomock.Any()).Return(errors.New("kafka error"))
 
 				// MarkProcessed Should NOT be called
 			},
@@ -78,13 +85,13 @@ func TestRelay_ProcessBatch(t *testing.T) {
 			batchSize: 10,
 			setupMocks: func(repo *mocks.MockOutboxRepository, pub *mocks.MockEventPublisher) {
 				events := []domain.OutboxEvent{
-					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, nil),
+					domain.ReconstructOutboxEvent(id1, "test.event", []byte("payload1"), domain.OutboxStatusPending, time.Now().UTC(), nil),
 				}
 
 				repo.EXPECT().ListPending(ctx, 10).Return(events, nil)
 
 				// Publish Success
-				pub.EXPECT().Publish(ctx, "test.event", []byte("payload1")).Return(nil)
+				pub.EXPECT().PublishOutboxEvent(ctx, gomock.Any()).Return(nil)
 
 				// MarkProcessed Fails (Log and Continue)
 				repo.EXPECT().MarkProcessed(ctx, id1).Return(errors.New("db update error"))

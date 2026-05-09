@@ -870,9 +870,18 @@ func (r *postgresOutboxRepository) WithTx(tx *sql.Tx) *postgresOutboxRepository 
 
 func (r *postgresOutboxRepository) Create(ctx context.Context, event domain.OutboxEvent) (domain.OutboxEvent, error) {
 	row := outboxRowFromDomain(event)
+	// PR-D12.4: explicitly write `created_at` from the factory-
+	// assigned timestamp so the in-memory `OutboxEvent.CreatedAt()`
+	// and the persisted column agree bit-exact. The schema's
+	// `DEFAULT NOW()` remains as a defensive fallback for direct-
+	// SQL inserts that bypass the factory. Without this explicit
+	// write, ListPending reads DB-NOW (microseconds-to-ms after
+	// factory NOW), which drifts the saga-compensation latency
+	// histogram's start time by sub-millisecond — small but
+	// measurable in apples-to-apples comparison runs.
 	if _, err := r.exec.ExecContext(ctx,
-		"INSERT INTO events_outbox (id, event_type, payload, status) VALUES ($1, $2, $3, $4)",
-		row.ID, row.EventType, row.Payload, row.Status); err != nil {
+		"INSERT INTO events_outbox (id, event_type, payload, status, created_at) VALUES ($1, $2, $3, $4, $5)",
+		row.ID, row.EventType, row.Payload, row.Status, row.CreatedAt); err != nil {
 		return domain.OutboxEvent{}, fmt.Errorf("outboxRepository.Create type=%s: %w", row.EventType, err)
 	}
 	return row.toDomain(), nil

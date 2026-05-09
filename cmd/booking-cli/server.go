@@ -68,6 +68,14 @@ func runServer(_ *cobra.Command, _ []string) {
 		fx.Provide(observability.NewWorkerMetrics),
 		fx.Provide(observability.NewBookingMetrics),
 
+		// Saga compensator metrics (PR-D12.4). Sibling to the
+		// existing watchdog metrics adapter; required by
+		// `saga.NewCompensator`'s new constructor parameter.
+		// Slice 2 will add the actual instrumentation; this PR
+		// just provides the metrics surface so /metrics exposes
+		// the pre-warmed counters from the moment Stage 4 boots.
+		fx.Provide(bootstrap.NewPrometheusCompensatorMetrics),
+
 		// Payment service wiring for the HTTP server. D4 added the
 		// /api/v1/orders/:id/pay endpoint, which depends on
 		// payment.Service. After D7 the legacy payment_worker
@@ -169,8 +177,8 @@ func runServer(_ *cobra.Command, _ []string) {
 				},
 			})
 		}),
-		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger) *messaging.SagaConsumer {
-			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger)
+		fx.Provide(func(cfg *config.Config, rdb *redis.Client, logger *mlog.Logger, metrics saga.CompensatorMetrics) *messaging.SagaConsumer {
+			return messaging.NewSagaConsumer(&cfg.Kafka, rdb, logger, metrics)
 		}),
 
 		// App-startup inventory rehydrate from DB → Redis. Runs as an

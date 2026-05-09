@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/persistence/postgres"
@@ -57,18 +58,27 @@ func newOutboxEvent(t *testing.T, payload []byte) domain.OutboxEvent {
 
 // TestOutboxRepository_CreateAndListPending: round-trip an outbox
 // event via Create + ListPending. Pins that fresh events appear in
-// ListPending with their original payload + event_type.
+// ListPending with their original payload + event_type + CreatedAt.
+//
+// PR-D12.4 added the CreatedAt round-trip assertion. Without it,
+// ListPending could regress to reading a zero-value CreatedAt and
+// the saga-compensation latency histogram would silently break
+// (msg.Time would be the Go zero value, time.Since() would return
+// ~63 BILLION seconds, all observations land in +Inf bucket).
 func TestOutboxRepository_CreateAndListPending(t *testing.T) {
 	h, repo := outboxRepoHarness(t)
 	h.Reset(t)
 
 	ctx := context.Background()
 	ev := newOutboxEvent(t, []byte(`{"order_id":"abc"}`))
+	originalCreatedAt := ev.CreatedAt()
 
 	created, err := repo.Create(ctx, ev)
 	require.NoError(t, err)
 	assert.Equal(t, ev.ID(), created.ID(),
 		"Create must return the same id passed in (caller-generated)")
+	assert.Equal(t, originalCreatedAt, created.CreatedAt(),
+		"Create must preserve the factory-assigned CreatedAt — load-bearing for the saga-compensation latency histogram (PR-D12.4)")
 
 	pending, err := repo.ListPending(ctx, 100)
 	require.NoError(t, err)
@@ -76,6 +86,25 @@ func TestOutboxRepository_CreateAndListPending(t *testing.T) {
 	assert.Equal(t, ev.ID(), pending[0].ID())
 	assert.Equal(t, domain.EventTypeOrderFailed, pending[0].EventType())
 	assert.JSONEq(t, `{"order_id":"abc"}`, string(pending[0].Payload()))
+
+	// CreatedAt round-trip via PG: factory assigned NOW(), Create
+	// wrote it, ListPending reads it back. The PG-side stored value
+	// must match in-memory within microsecond precision.
+	//
+	// Tolerance rationale (1µs not 1ms): Postgres TIMESTAMP has
+	// microsecond resolution; Go time.Time has nanosecond resolution.
+	// The PG read truncates the sub-µs fraction, so maximum drift
+	// is <1µs by definition. Cross-process clock skew is NOT a
+	// factor because testcontainers-go shares the Docker daemon's
+	// clock between both the Go test process and the PG container
+	// — same wall clock, no host skew. CI runs on linux/Docker;
+	// developer-local Mac runs use Docker Desktop's daemon (same
+	// invariant). 1µs is the correct tight bound; loosening to 1ms
+	// would let a future tz-handling regression slip past the test.
+	require.False(t, pending[0].CreatedAt().IsZero(),
+		"ListPending must NOT return a zero-value CreatedAt — would silently break the saga compensation histogram")
+	assert.WithinDuration(t, originalCreatedAt, pending[0].CreatedAt(), 1*time.Microsecond,
+		"PG-side CreatedAt must round-trip from factory time within microsecond precision (PG TIMESTAMP truncates Go nanoseconds; tolerance tightened from 1ms to 1µs per silent-failure-hunter Slice 0 H2)")
 }
 
 // TestOutboxRepository_ListPending_FiltersProcessed: events with
@@ -133,9 +162,9 @@ func TestOutboxRepository_ListPending_OrderingIsIdAsc(t *testing.T) {
 	// fmt.Sprintf instead of string(rune('0'+n)) — the latter
 	// produces ":" for n=10 and other non-digit runes for n>9.
 	payloadFor := func(n int) []byte { return []byte(fmt.Sprintf(`{"n":%d}`, n)) }
-	ev1 := domain.ReconstructOutboxEvent(id1, domain.EventTypeOrderFailed, payloadFor(1), domain.OutboxStatusPending, nil)
-	ev2 := domain.ReconstructOutboxEvent(id2, domain.EventTypeOrderFailed, payloadFor(2), domain.OutboxStatusPending, nil)
-	ev3 := domain.ReconstructOutboxEvent(id3, domain.EventTypeOrderFailed, payloadFor(3), domain.OutboxStatusPending, nil)
+	ev1 := domain.ReconstructOutboxEvent(id1, domain.EventTypeOrderFailed, payloadFor(1), domain.OutboxStatusPending, time.Now(), nil)
+	ev2 := domain.ReconstructOutboxEvent(id2, domain.EventTypeOrderFailed, payloadFor(2), domain.OutboxStatusPending, time.Now(), nil)
+	ev3 := domain.ReconstructOutboxEvent(id3, domain.EventTypeOrderFailed, payloadFor(3), domain.OutboxStatusPending, time.Now(), nil)
 
 	// Insert in REVERSE order (3, 1, 2) — sort must override.
 	_, err = repo.Create(ctx, ev3)
