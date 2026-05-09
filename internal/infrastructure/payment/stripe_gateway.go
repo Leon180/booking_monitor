@@ -116,6 +116,15 @@ type StripeConfig struct {
 	// idempotency-key on POST makes retries safe. Default 2 (matches
 	// stripe-go's `DefaultMaxNetworkRetries`).
 	MaxNetworkRetries int64
+
+	// BaseURL overrides the Stripe API endpoint. Production wiring
+	// leaves this empty — stripe-go uses its built-in api.stripe.com
+	// default. Test-only knob: `stripe_gateway_test.go` spins up an
+	// `httptest.Server` impersonating Stripe and constructs the
+	// adapter with `BaseURL = ts.URL` so the SDK's HTTP requests
+	// land on the test server. Plumbed into `BackendConfig.URL`
+	// only when non-empty.
+	BaseURL string
 }
 
 // StripeGateway is the production-grade Stripe adapter.
@@ -184,6 +193,11 @@ func NewStripeGateway(cfg StripeConfig, logger *mlog.Logger, metrics StripeMetri
 		HTTPClient:        httpClient,
 		LeveledLogger:     redacting,
 		MaxNetworkRetries: stripe.Int64(cfg.MaxNetworkRetries),
+	}
+	// Test-only URL override (see StripeConfig.BaseURL doc). Empty
+	// in production → stripe-go's default api.stripe.com applies.
+	if cfg.BaseURL != "" {
+		backendCfg.URL = stripe.String(cfg.BaseURL)
 	}
 	apiBackend := stripe.GetBackendWithConfig(stripe.APIBackend, backendCfg)
 	uploadsBackend := stripe.GetBackendWithConfig(stripe.UploadsBackend, backendCfg)
@@ -562,11 +576,17 @@ var sensitiveFields = []string{
 // format params as `key1=value1&key2=value2`.
 func redactKeyValue(s, key string) string {
 	prefix := key + "="
+	const replacement = "<redacted>"
+	// Advance scan position by the replacement length each iteration
+	// so we don't match the same `key=` again inside the just-written
+	// `key=<redacted>` substring (would be an infinite loop).
+	scanFrom := 0
 	for {
-		idx := strings.Index(s, prefix)
+		idx := strings.Index(s[scanFrom:], prefix)
 		if idx < 0 {
 			return s
 		}
+		idx += scanFrom // shift back to absolute index
 		valueStart := idx + len(prefix)
 		valueEnd := valueStart
 		for valueEnd < len(s) {
@@ -576,7 +596,8 @@ func redactKeyValue(s, key string) string {
 			}
 			valueEnd++
 		}
-		s = s[:valueStart] + "<redacted>" + s[valueEnd:]
+		s = s[:valueStart] + replacement + s[valueEnd:]
+		scanFrom = valueStart + len(replacement)
 	}
 }
 
@@ -591,12 +612,18 @@ func redactKeyValue(s, key string) string {
 // sufficient. Future structured redactor (stripe-go's request_log
 // field, for instance) is deferred until needed.
 func redactJSONField(s, key string) string {
+	const replacement = "<redacted>"
 	for _, prefix := range []string{`"` + key + `":"`, `"` + key + `": "`} {
+		// Same scan-forward pattern as redactKeyValue — avoid matching
+		// the just-written `"key":"<redacted>"` again on the next
+		// iteration (infinite loop).
+		scanFrom := 0
 		for {
-			idx := strings.Index(s, prefix)
+			idx := strings.Index(s[scanFrom:], prefix)
 			if idx < 0 {
 				break
 			}
+			idx += scanFrom
 			valueStart := idx + len(prefix)
 			valueEnd := valueStart
 			for valueEnd < len(s) && s[valueEnd] != '"' {
@@ -606,7 +633,8 @@ func redactJSONField(s, key string) string {
 				}
 				valueEnd++
 			}
-			s = s[:valueStart] + "<redacted>" + s[valueEnd:]
+			s = s[:valueStart] + replacement + s[valueEnd:]
+			scanFrom = valueStart + len(replacement)
 		}
 	}
 	return s
