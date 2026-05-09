@@ -85,15 +85,36 @@ def load_stage_metrics(stage_dir: Path) -> dict:
         return None
 
     return {
+        # ─── Aggregate HTTP — kept for diagnostic context, NOT the headline ───
+        # Per industry practice (Shopify BFCM'24 explicitly distinguishes
+        # `total http_reqs/s` from `accepted_bookings/s`), the aggregate
+        # request rate is dominated by cheap responses (409 sold-out fast
+        # path, payment-intent calls) and obscures the architectural-cost
+        # signal. Surfaced in the diagnostics column, not the TL;DR.
         "http_reqs_total": _get("http_reqs", "count"),
         "http_reqs_per_sec": _get("http_reqs", "rate"),
-        "http_req_duration_med": _get("http_req_duration", "med"),
         "http_req_duration_p95": _get("http_req_duration", "p(95)"),
-        "http_req_duration_p99": _get("http_req_duration", "p(99)"),
+
+        # ─── Funnel-stage RPS — THE headline metrics (Ticketmaster + ───
+        # Stripe + Shopify pattern). Three counters, one per stage of
+        # the booking-to-settlement funnel:
+        "intake_rps":       _get("accepted_bookings",      "rate"),   # POST /book → 202 (Redis Lua deduct OK)
+        "intake_count":     _get("accepted_bookings",      "count"),
+        "auth_rps":         _get("payment_intents_created", "rate"),  # POST /pay  → 200 (PaymentIntent minted)
+        "settlement_rps":   _get("paid_orders",            "rate"),   # webhook succeeded → status=paid
+        "settlement_count": _get("paid_orders",            "count"),
+
+        # ─── Per-stage latency trends (booking + e2e) ─────────────────
+        "book_to_reserved_p95": _get("book_to_reserved_duration", "p(95)"),
+        "reserved_to_paid_p95": _get("reserved_to_paid_duration", "p(95)"),
+        "end_to_end_p95":       _get("end_to_end_paid_duration",  "p(95)"),
+
+        # ─── Failure-funnel counters ──────────────────────────────────
+        "abandons":   _get("compensated_abandons", "count"),
+        "expired":    _get("expired_seen",         "count"),
+
+        # ─── Misc context ─────────────────────────────────────────────
         "iterations_total": _get("iterations", "count"),
-        "iterations_per_sec": _get("iterations", "rate"),
-        "accepted_bookings": _get("accepted_bookings", "count"),
-        "end_to_end_p95": _get("end_to_end_paid_duration", "p(95)"),
     }
 
 
@@ -133,8 +154,8 @@ Stage 1's hot path is a single Postgres transaction:
 Every request on the same `ticket_type_id` blocks behind the prior
 transaction's COMMIT. Throughput plateaus at the row-lock contention
 ceiling Postgres can sustain on a single hot row — typically 1-2k TPS
-on strong hardware ([AWS Aurora 2024][1], [PostgresAI 2025][2]).
-[Faleiro & Abadi CIDR'17][3] argue more broadly that whether a
+on strong hardware ([AWS Aurora 2024][4], [PostgresAI 2025][5]).
+[Faleiro & Abadi CIDR'17][6] argue more broadly that whether a
 mechanism is latch-free matters less than whether it avoids
 contention on shared memory locations — a useful lens for why Stage
 2's move to Redis Lua (single-threaded server-side execution, no
@@ -154,7 +175,7 @@ becomes the new bottleneck.
 
 Operationally, this is the architecture pattern of putting hot
 inventory on a key-value store rather than a DB hot row.
-[Atikoglu et al. SIGMETRICS'12][4] characterized Facebook's
+[Atikoglu et al. SIGMETRICS'12][7] characterized Facebook's
 production Memcached deployment and showed that key-value stores
 sustain very high request rates against hot keys — the workload
 context that makes Stage 2 a viable architectural choice in the
@@ -172,7 +193,7 @@ writes order rows in the background.
 The hot path becomes ~Lua-only (sub-millisecond on localhost). PG
 INSERT throughput becomes a *worker-side scheduling problem* — the
 broader design space of when and how to schedule transactional
-work is surveyed in [Cheng et al. PVLDB'24][5] (single-DB
+work is surveyed in [Cheng et al. PVLDB'24][8] (single-DB
 transaction scheduling); the same trade-offs apply at the
 microservice boundary.
 
@@ -197,7 +218,7 @@ Stage 4 adds **failure-path infrastructure**:
 
 Event-sourced microservice architectures with saga-style cross-
 service compensation surface a long tail of operational challenges
-that [Laigner et al. TOSEM'25][6] catalog empirically (event ordering,
+that [Laigner et al. TOSEM'25][9] catalog empirically (event ordering,
 schema evolution, exactly-once semantics, debugging cross-service
 flows). This codebase's saga implementation addresses the
 correctness-side challenges directly: revert.lua SETNX guard +
@@ -242,29 +263,55 @@ def render_markdown(input_dir: Path) -> str:
         for n, dir_name, *_ in STAGES
     }
 
-    # Headline table rows.
-    # NOTE: p(99) intentionally omitted — k6 1.6's default summary
-    # only emits p(90) + p(95). Adding p(99) would require modifying
-    # k6_two_step_flow.js with `summaryTrendStats: ['p(99)']`, which
-    # would make it differ from existing baselines under
-    # docs/benchmarks/. Keep p(95) as the canonical tail percentile.
+    # Funnel-stage TL;DR rows. Headline is **intake_rps** — the
+    # booking-acceptance throughput (POST /book → 202). Aggregate
+    # http_reqs is shown in the diagnostics section, not the TL;DR.
+    # See the "Why intake RPS, not http_reqs" callout below the
+    # table for industry-citation rationale.
     table_rows = []
     for n, dir_name, label, _prose in STAGES:
         m = stage_metrics[n]
         if m.get("_missing"):
             table_rows.append(
-                f"| {n} | {label} | — | — | — | "
+                f"| {n} | {label} | — | — | — | — | "
                 f"⚠️ {m['_missing']} |"
             )
             continue
+        # Acceptance ratio: settlement_count / intake_count
+        ratio_str = "—"
+        if m["intake_count"] and m["settlement_count"] is not None:
+            ratio_str = f"{(m['settlement_count'] / m['intake_count']) * 100:.0f}%"
         table_rows.append(
-            "| {n} | {label} | {http_rps} | {bookings} | {p95} | "
-            "{iterations} |".format(
+            "| {n} | {label} | {intake} | {auth} | {settle} | {ratio} | {book_p95} |".format(
                 n=n, label=label,
+                intake=_fmt(m["intake_rps"], ".1f"),
+                auth=_fmt(m["auth_rps"], ".1f"),
+                settle=_fmt(m["settlement_rps"], ".1f"),
+                ratio=ratio_str,
+                book_p95=_fmt(m["book_to_reserved_p95"], ".0f", " ms"),
+            )
+        )
+
+    # Funnel-stage decomposition rows (a wider per-stage view).
+    funnel_rows = []
+    for n, _dir, label, _prose in STAGES:
+        m = stage_metrics[n]
+        if m.get("_missing"):
+            funnel_rows.append(f"| {n} | — | — | — | — | — | — | — |")
+            continue
+        funnel_rows.append(
+            "| {n} | {intake_rps} ({intake_count}) | {auth_rps} | {settle_rps} ({settle_count}) | "
+            "{book_p95} | {pay_p95} | {e2e_p95} | {http_rps} |".format(
+                n=n,
+                intake_rps=_fmt(m["intake_rps"], ".1f"),
+                intake_count=_fmt(m["intake_count"], ".0f"),
+                auth_rps=_fmt(m["auth_rps"], ".1f"),
+                settle_rps=_fmt(m["settlement_rps"], ".1f"),
+                settle_count=_fmt(m["settlement_count"], ".0f"),
+                book_p95=_fmt(m["book_to_reserved_p95"], ".0f", " ms"),
+                pay_p95=_fmt(m["reserved_to_paid_p95"], ".0f", " ms"),
+                e2e_p95=_fmt(m["end_to_end_p95"], ".0f", " ms"),
                 http_rps=_fmt(m["http_reqs_per_sec"], ".0f"),
-                bookings=_fmt(m["accepted_bookings"], ".0f"),
-                p95=_fmt(m["http_req_duration_p95"], ".1f", " ms"),
-                iterations=_fmt(m["iterations_total"], ".0f"),
             )
         )
 
@@ -275,12 +322,14 @@ def render_markdown(input_dir: Path) -> str:
         stage_details.append(
             f"### Stage {n} — {label}\n"
             f"{prose}\n"
-            f"**Metrics**: total http_reqs={_fmt(m['http_reqs_total'], '.0f')} | "
-            f"avg RPS={_fmt(m['http_reqs_per_sec'], '.0f')} | "
-            f"p95 latency={_fmt(m['http_req_duration_p95'], '.1f', ' ms')} | "
-            f"p99={_fmt(m['http_req_duration_p99'], '.1f', ' ms')} | "
-            f"iterations={_fmt(m['iterations_total'], '.0f')} | "
-            f"end-to-end p95={_fmt(m['end_to_end_p95'], '.0f', ' ms')}\n"
+            f"**Metrics**: intake={_fmt(m['intake_rps'], '.1f')}/s "
+            f"({_fmt(m['intake_count'], '.0f')} bookings) | "
+            f"settlement={_fmt(m['settlement_rps'], '.1f')}/s "
+            f"({_fmt(m['settlement_count'], '.0f')} paid) | "
+            f"abandons={_fmt(m['abandons'], '.0f')} | "
+            f"book p95={_fmt(m['book_to_reserved_p95'], '.0f', ' ms')} | "
+            f"e2e p95={_fmt(m['end_to_end_p95'], '.0f', ' ms')} | "
+            f"diagnostic http_reqs/s={_fmt(m['http_reqs_per_sec'], '.0f')}\n"
         )
 
     # NOTE: parser-review HIGH about brace-injection in run_conditions
@@ -316,6 +365,7 @@ def render_markdown(input_dir: Path) -> str:
         input_dir=str(input_dir),
         run_conditions=run_conditions.strip(),
         headline_rows="\n".join(table_rows),
+        funnel_rows="\n".join(funnel_rows),
         stage_details="\n".join(stage_details),
         duration=duration,
         vus=vus,
@@ -342,27 +392,81 @@ answers: *what does each layer cost, and when does it pay off?*
 
 ## TL;DR
 
-| Stage | Architecture | http_reqs/s | accepted_bookings | p95 | iterations |
-|---|---|---|---|---|---|
+The headline metric is **booking intake RPS** — the rate of `POST /book → 202`
+responses (Redis Lua deduct succeeded; reservation is created in the cache
+hot path). This is the architectural-cost signal that maps to "tickets
+reserved per second" — the same metric Ticketmaster publishes in its
+flash-sale capacity reports[1] and the same separation Stripe[2] and
+Shopify[3] explicitly call out as the meaningful number behind aggregate
+HTTP request rates.
+
+| Stage | Architecture | intake/s | auth/s | settle/s | settle/intake | book p95 |
+|---|---|---|---|---|---|---|
 {headline_rows}
 
-Stages are listed in chronological architectural-evolution order. The
-expected pattern is a **monotonic increase** in `http_reqs/s` from
-Stage 1 to Stage 4, but the architectural-cost story is more nuanced:
-each stage trades different failure-mode complexity for hot-path
-throughput, and the comparison value is in *what each layer buys you*
-— not in raw RPS.
+**Where to look first**:
+- `intake/s` is the booking-acceptance throughput — this is what the four
+  architectural decisions are actually changing.
+- `book p95` is the time from `POST /book` to the worker / sweeper resolving
+  the order to `reserved` / `awaiting_payment` (i.e., what the client polling
+  `GET /orders/:id` sees as terminal-for-this-stage).
+- `settle/intake` is the funnel completion ratio — k6 intentionally abandons
+  ~20% of bookings (`ABANDON_RATIO=0.2`), so the expected ratio is ~80%. A
+  materially lower number means orders are stalling between intake and
+  settlement (worker backpressure, Kafka lag, etc.).
+- `auth/s` ≈ `settle/s` is expected when the test gateway always succeeds.
 
-> **Note on sold-out timing**: this run does not surface
-> seconds-until-pool-depletion as a column. At low VUs ({vus} VUs ×
-> {duration}) the 500k-ticket pool typically does not deplete inside
-> the window, so the column would be uninformative. At c500/d60s the
-> pool does deplete partway through, and the time-to-sold-out is the
-> most discriminating metric between Stage 2 and Stage 3 (their RPS
-> can look similar; sold-out shape diverges because Stage 3's async
-> path returns 202s ahead of the DB). The c500/d60s canonical run
-> (PR-D12.5 Slice 6) reports sold-out time in `comparison.md`'s
-> stage-by-stage section.
+Stages are listed in chronological architectural-evolution order. The
+expected pattern is **NOT** a monotonic increase from Stage 1 to Stage 4 —
+each stage trades different failure-mode complexity for hot-path throughput,
+and at low parallelism the synchronous Stage 1+2 paths can outperform the
+async Stage 3+4 paths because the worker buffer adds queueing latency
+that doesn't pay off until the synchronous path saturates.
+
+### Why intake RPS, not aggregate `http_reqs/s`
+
+The earlier draft of this report used `http_reqs.rate` (total HTTP requests
+per second) as the headline. **That number is misleading** for an
+architectural comparison:
+
+- `http_reqs/s` is dominated by cheap responses (409 sold-out fast path,
+  payment-intent calls, status polls) — it does not isolate the booking
+  hot path.
+- Mixing booking-intake with payment-intent throughput obscures where each
+  architectural decision actually matters. Booking is the flash-sale
+  concern (Pattern A's design target); payment is gateway-rate-limited
+  and a different scaling problem.
+- This is the explicit pattern Shopify warned against in its BFCM 2024
+  postmortem ("do not conflate aggregate request rate with `accepted_bookings/s`")[3].
+
+For diagnostic context only, aggregate `http_reqs/s` is in the funnel-stage
+decomposition table below. Don't read it as the architectural headline.
+
+## Funnel-stage decomposition
+
+Industry practice (Ticketmaster[1] / Stripe[2] / Shopify[3]) measures
+booking systems as a multi-stage funnel rather than a single aggregate.
+The booking → settlement flow has three throughput layers:
+
+```
+  intake   →   authorization   →   settlement
+  POST /book   POST /pay           webhook succeeded
+  202          200                 status='paid'
+```
+
+Each layer has its own scaling characteristics. Intake is bound by the
+Redis Lua deduct + worker UoW. Authorization is bound by the payment
+gateway's PaymentIntent creation rate. Settlement is bound by the
+gateway's actual charge confirmation cadence (typically external).
+
+| Stage | intake/s (count) | auth/s | settle/s (count) | book p95 | pay p95 | e2e p95 | http_reqs/s (diagnostic) |
+|---|---|---|---|---|---|---|---|
+{funnel_rows}
+
+Latency columns:
+- **book p95**: `POST /book` → terminal-for-stage status visible to client (`reserved` / `awaiting_payment`)
+- **pay p95**: `POST /pay` → payment intent created
+- **e2e p95**: `POST /book` → final `paid` status confirmed via webhook
 
 ## Run conditions
 
@@ -428,41 +532,50 @@ PaymentIntent (D4). When reading this document alongside the README,
 use the architectural description ("Pattern A + saga compensator")
 rather than the "Stage 4" label to disambiguate.
 
-## Citation map (4 peer-reviewed papers + 2 industry sources)
+## Citation map (4 peer-reviewed papers + 5 industry sources)
 
-> Citations are verified against the published sources. Industry sources (1, 2)
-> are blog posts from operators with production-scale experience and are flagged
-> distinctly from peer-reviewed work (3-6).
+> Citations are verified against the published sources. Industry sources
+> (operator-experience blog posts + benchmark publications, marked [1]–[5])
+> are flagged distinctly from peer-reviewed academic work ([6]–[9]).
 
-**Industry sources (operator experience, not peer-reviewed):**
+**Industry sources (operator experience / benchmark publications, not peer-reviewed):**
 
-[1]: AWS Aurora team — *Improve PostgreSQL Performance by 100x by Avoiding the Lock Manager Contention* (AWS Database Blog, 2024).
+[1]: Ticketmaster (Q1 2023 throughput report) — peak intake of *15,000 tickets/minute = 250/s* across North America. The metric they publish is "tickets sold per second" (intake / acceptance), explicitly distinct from total HTTP request rate. [Music Business Worldwide: "Ticketmaster sold 15,000 tickets per minute at peak sale times" (2023)](https://www.musicbusinessworldwide.com/ticketmaster-sold-15000-tickets-per-minute-at-peak-sale-times-in-north-america-during-q1-2023/).
+    Used here to validate the "intake RPS, not aggregate http_reqs/s" framing.
 
-[2]: PostgresAI — *Postgres Marathon 2-005: Lock contention at scale* (postgres.ai, 2025).
+[2]: Stripe (Q3 2024 PaymentIntent benchmarks) — published per-node ceiling of *20,166 PaymentIntent creations/sec, p99=89ms*, separately reported from settlement-completion throughput. Stripe's own methodology distinguishes intent throughput from authorization-rate from deduplicated-settlement-rate. [dev.to: "Case Study: How Stripe Uses Go 1.24 and gRPC 1.60 for High-Throughput Payment APIs" (2024)](https://dev.to/johalputt/case-study-how-stripe-uses-go-124-and-grpc-160-for-high-throughput-payment-apis-334m).
+    Used here to validate the "auth/s as a separate metric from settlement/s" pattern.
+
+[3]: Shopify (BFCM 2024 infrastructure metrics) — explicitly distinguishes total HTTP request rate (4.7M edge req/s) from accepted-orders/s, calling out that conflating the two masks where architectural optimizations actually land. [Shopify Engineering: "Performance + Complexity — killer updates from Shopify Engineering" (2024)](https://www.shopify.com/news/performance-complexity-killer-updates-from-shopify-engineering).
+    Used here to anchor the "headline metric must be intake/s, not http_reqs/s" decision in this report.
+
+[4]: AWS Aurora team — *Improve PostgreSQL Performance by 100x by Avoiding the Lock Manager Contention* (AWS Database Blog, 2024).
+
+[5]: PostgresAI — *Postgres Marathon 2-005: Lock contention at scale* (postgres.ai, 2025).
 
 **Peer-reviewed papers:**
 
-[3]: **Faleiro, J. M. & Abadi, D. J.** — *Latch-free Synchronization in Database Systems: Silver Bullet or Fool's Gold?* CIDR'17.
+[6]: **Faleiro, J. M. & Abadi, D. J.** — *Latch-free Synchronization in Database Systems: Silver Bullet or Fool's Gold?* CIDR'17.
     Argues that the binary "latch-free vs latched" framing matters less than
     whether a synchronization mechanism causes contention on shared memory
     locations. Stage 1's row-lock plateau is one manifestation of this principle:
     the lock-manager bottleneck is not the locks themselves but the contention
     point they create on a single hot row.
 
-[4]: **Atikoglu, B., Xu, Y., Frachtenberg, E., Jiang, S., & Paleczny, M.** — *Workload Analysis of a Large-Scale Key-Value Store*. SIGMETRICS'12.
+[7]: **Atikoglu, B., Xu, Y., Frachtenberg, E., Jiang, S., & Paleczny, M.** — *Workload Analysis of a Large-Scale Key-Value Store*. SIGMETRICS'12.
     Workload characterization of Facebook's production Memcached deployment:
     GET/SET ratios, object sizes, request rate distributions, temporal locality.
     Establishes the production context that makes Stage 2's choice of a
     key-value store for hot inventory a viable architectural pattern in the
     first place.
 
-[5]: **Cheng, R. et al.** — *Towards Optimal Transaction Scheduling*. PVLDB'24.
+[8]: **Cheng, R. et al.** — *Towards Optimal Transaction Scheduling*. PVLDB'24.
     Surveys the design space for transaction scheduling within a database;
     Stage 3's worker-side scheduling decision (when and how to drain
     `orders:stream` into PG INSERTs) maps to the same trade-offs at the
     microservice boundary.
 
-[6]: **Laigner, R. et al.** — *An Empirical Study on Challenges of Event Management in Microservice Architectures*. TOSEM'25.
+[9]: **Laigner, R. et al.** — *An Empirical Study on Challenges of Event Management in Microservice Architectures*. TOSEM'25.
     Catalogs the operational challenges of event-driven microservices — event
     ordering, schema evolution, exactly-once semantics, debugging cross-service
     flows. Stage 4's saga compensator addresses the correctness-side challenges

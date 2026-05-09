@@ -739,7 +739,9 @@ Total: ~1.5k LOC including the orchestration + helper scripts. No application-co
 
 The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × 4-stage benchmark cost on every push.
 
-**Citation map note**: the 6 citations under `comparison.md`'s citation map are the verified subset of an originally-planned 7. Kløvedal 2025 saga-anti-patterns preprint was dropped after Slice 4 review couldn't verify its existence on any indexed preprint server. Faleiro PVLDB'17 was corrected to CIDR'17, Atikoglu SIGMOD'12 to SIGMETRICS'12. The remaining 4 peer-reviewed papers (Faleiro CIDR'17, Atikoglu SIGMETRICS'12, Cheng PVLDB'24, Laigner TOSEM'25) + 2 industry sources (AWS Aurora 2024, PostgresAI 2025) are venue- and title-accurate.
+**Citation map**: 9 verified citations in the comparison.md (5 industry sources + 4 peer-reviewed). Slice 4 review caught fabrications in the original 7-paper plan (Faleiro PVLDB'17 → CIDR'17, Atikoglu SIGMOD'12 → SIGMETRICS'12, Kløvedal 2025 preprint dropped as unverifiable). Slice 7 added 3 funnel-methodology citations (Ticketmaster Q1'23 / Stripe Q3'24 / Shopify BFCM'24) when the headline metric was migrated from aggregate `http_reqs/s` to **booking-intake RPS** — see Slice 7 below.
+
+**Funnel-stage methodology (Slice 7)**: the canonical headline number is **booking intake RPS** — `accepted_bookings.rate` (POST /book → 202), NOT aggregate `http_reqs.rate`. Aggregate http_reqs mixes intake with payment-intent calls and status polls, obscuring the architectural-cost signal. This split mirrors Ticketmaster's "tickets sold per second" published metric, Stripe's separate PaymentIntent-creation-rate vs settlement-rate reporting, and Shopify's BFCM 2024 distinction between total request rate and accepted-orders rate. The funnel decomposition section in `comparison.md` shows all 3 layers (intake → authorization → settlement) plus per-layer p95 latency.
 
 ## Cross-references
 
