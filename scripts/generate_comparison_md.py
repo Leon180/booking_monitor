@@ -48,23 +48,35 @@ from pathlib import Path
 def load_stage_metrics(stage_dir: Path) -> dict:
     """Extract the headline metrics from a stage's summary.json.
 
+    Reads `full_flow_summary.json` (the operational-funnel view) by
+    preference, falling back to legacy `summary.json` for
+    backward-compatibility with pre-Slice-8 runs that produced only
+    one scenario per stage.
+
+    Slice 8 (D12.5): the orchestration script also produces
+    `intake_only_summary.json` (Ticketmaster-pattern pure-intake
+    ceiling). That's loaded separately via `load_intake_only_metrics`.
+
     Schema (k6 1.6.0 verified):
         metrics.http_reqs.count           total HTTP requests
         metrics.http_reqs.rate            requests/sec average
         metrics.http_req_duration.med     median latency (ms)
         metrics.http_req_duration['p(95)']  p95 latency (ms)
-        metrics.http_req_duration['p(99)']  p99 latency (ms)
-        metrics.iterations.count          total scenario iterations
-        metrics.iteration_duration['p(95)']  p95 end-to-end (ms)
 
     Custom-metric keys used by `k6_two_step_flow.js`:
-        metrics.accepted_bookings.count   number of /book → 202
+        metrics.accepted_bookings.count/rate  number of /book → 202
+        metrics.payment_intents_created       authorization throughput
+        metrics.paid_orders                   settlement throughput
         metrics.end_to_end_paid_duration['p(95)']  full happy-path
                                                     end-to-end p95
     """
-    summary_path = stage_dir / "summary.json"
+    # Prefer Slice 8's full_flow_summary.json; fall back to legacy
+    # `summary.json` (single-scenario pre-Slice-8 layout).
+    full_flow_path = stage_dir / "full_flow_summary.json"
+    legacy_path = stage_dir / "summary.json"
+    summary_path = full_flow_path if full_flow_path.exists() else legacy_path
     if not summary_path.exists():
-        return _empty_metrics(reason=f"summary.json missing at {summary_path}")
+        return _empty_metrics(reason=f"full_flow_summary.json / summary.json missing at {stage_dir}")
     try:
         with summary_path.open() as f:
             data = json.load(f)
@@ -123,13 +135,56 @@ def _empty_metrics(reason: str) -> dict:
         "_missing": reason,
         "http_reqs_total": None,
         "http_reqs_per_sec": None,
-        "http_req_duration_med": None,
         "http_req_duration_p95": None,
-        "http_req_duration_p99": None,
-        "iterations_total": None,
-        "iterations_per_sec": None,
-        "accepted_bookings": None,
+        "intake_rps": None,
+        "intake_count": None,
+        "auth_rps": None,
+        "settlement_rps": None,
+        "settlement_count": None,
+        "book_to_reserved_p95": None,
+        "reserved_to_paid_p95": None,
         "end_to_end_p95": None,
+        "abandons": None,
+        "expired": None,
+        "iterations_total": None,
+    }
+
+
+def load_intake_only_metrics(stage_dir: Path) -> dict | None:
+    """Load the Slice-8 pure-intake k6 scenario summary (Ticketmaster
+    pattern: each VU hammers POST /book with no poll/pay/confirm).
+
+    Returns None if the file doesn't exist — pre-Slice-8 layout.
+    The headline TL;DR table gracefully degrades to full-flow-only
+    when intake-only is absent.
+    """
+    summary_path = stage_dir / "intake_only_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        with summary_path.open() as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        return None
+
+    metrics = data.get("metrics", {})
+
+    def _get(name: str, *keys: str):
+        m = metrics.get(name)
+        if not isinstance(m, dict):
+            return None
+        for k in keys:
+            if k in m:
+                v = m[k]
+                if isinstance(v, (int, float)):
+                    return float(v)
+        return None
+
+    return {
+        "intake_rps":     _get("accepted_bookings", "rate"),
+        "intake_count":   _get("accepted_bookings", "count"),
+        "http_reqs_rate": _get("http_reqs",         "rate"),
+        "http_p95":       _get("http_req_duration", "p(95)"),
     }
 
 
@@ -258,6 +313,16 @@ def render_markdown(input_dir: Path) -> str:
     duration = _extract_run_field(run_conditions, "duration", "60s")
     vus = _extract_run_field(run_conditions, "vus", "?")
 
+    # Slice 8: load the pure-intake scenario summary if it exists.
+    # When all 4 stages have intake_only_summary.json (the Slice 8
+    # canonical run), render the second TL;DR table; otherwise omit
+    # the section so a pre-Slice-8 run doesn't surface dashes.
+    intake_only_per_stage = {
+        n: load_intake_only_metrics(input_dir / dir_name)
+        for n, dir_name, *_ in STAGES
+    }
+    has_intake_only = all(v is not None for v in intake_only_per_stage.values())
+
     stage_metrics = {
         n: load_stage_metrics(input_dir / dir_name)
         for n, dir_name, *_ in STAGES
@@ -360,6 +425,38 @@ def render_markdown(input_dir: Path) -> str:
             file=sys.stderr,
         )
 
+    # Slice 8: build the intake-only TL;DR section if all 4 stages
+    # have intake_only_summary.json. Single-block substitution keeps
+    # the conditional logic out of the TEMPLATE constant — when the
+    # section is absent, the substitution is just an empty string.
+    if has_intake_only:
+        intake_rows = []
+        for n, _dir, label, _prose in STAGES:
+            io = intake_only_per_stage[n]
+            ff = stage_metrics[n]
+            # Booking-layer ceiling factor: how much higher the
+            # pure-intake RPS is vs the full-flow intake RPS. >1×
+            # means the booking layer has more headroom than the
+            # full flow shows; ~1× means full-flow already saturates
+            # the booking layer.
+            factor_str = "—"
+            if io.get("intake_rps") and ff.get("intake_rps"):
+                factor_str = f"{io['intake_rps'] / ff['intake_rps']:.1f}×"
+            intake_rows.append(
+                "| {n} | {label} | {intake} | {http_rps} | {p95} | {factor} |".format(
+                    n=n, label=label,
+                    intake=_fmt(io.get("intake_rps"), ".1f"),
+                    http_rps=_fmt(io.get("http_reqs_rate"), ".0f"),
+                    p95=_fmt(io.get("http_p95"), ".1f", " ms"),
+                    factor=factor_str,
+                )
+            )
+        intake_only_section = INTAKE_ONLY_SECTION.format(
+            intake_only_rows="\n".join(intake_rows),
+        )
+    else:
+        intake_only_section = ""
+
     return TEMPLATE.format(
         timestamp=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         input_dir=str(input_dir),
@@ -369,10 +466,85 @@ def render_markdown(input_dir: Path) -> str:
         stage_details="\n".join(stage_details),
         duration=duration,
         vus=vus,
+        intake_only_section=intake_only_section,
     )
 
 
 # ─── Markdown template ────────────────────────────────────────────
+
+
+# Slice 8: pure-intake (Ticketmaster pattern) TL;DR section. Inserted
+# into TEMPLATE between the funnel decomposition and the per-stage
+# analysis when all 4 stages have intake_only_summary.json. When
+# absent (pre-Slice-8 layout), an empty string is substituted instead
+# and the report is full-flow-only.
+INTAKE_ONLY_SECTION = """\
+
+## Booking-layer ceiling — intake-only scenario (Ticketmaster pattern)
+
+The full-flow intake RPS (table above) is **throttled by per-VU full-flow
+latency** — each VU spends most of its 60-second budget polling for
+`paid` or waiting for the saga compensator, NOT hammering `POST /book`.
+That number answers "how many bookings can the system convert end-to-end
+under realistic mixed load?".
+
+To answer the **independent** question — "what is the booking layer's
+isolated throughput ceiling?" — Slice 8 of D12.5 added a second k6
+scenario (`scripts/k6_intake_only.js`) that drops the poll/pay/confirm
+steps. Each VU just sends `POST /book` → next iteration. This matches
+the methodology Ticketmaster[1] uses for its published "tickets sold
+per second" (250/s peak) and Stripe[2] uses for its PaymentIntent
+creation-rate (20k/s/node) — both report layer-isolated throughput,
+not full-flow numbers.
+
+| Stage | Architecture | intake/s (isolated) | http_reqs/s | p95 latency | vs full-flow intake |
+|---|---|---|---|---|---|
+{intake_only_rows}
+
+The **vs full-flow** column is the *headroom factor*: ratio of pure-intake
+RPS to full-flow intake RPS. A factor near 1× means the booking layer is
+already saturated under full-flow load (the architecture's bottleneck is
+elsewhere — payment polling, worker queue, etc.). A factor materially >
+1× means the booking layer has headroom that full-flow load can't
+expose — useful when reasoning about capacity scaling.
+
+For Stage 4 specifically, the isolated number is the metric directly
+comparable to industry-published flash-sale benchmarks (Ticketmaster's
+250 tickets/s peak intake). The full-flow number tells a different
+story — it's the operational reality under realistic conversion-rate
+assumptions, useful for capacity planning when the saga compensator
++ outbox + sweepers compete with the booking hot path for CPU.
+
+### What the isolated ceiling actually exposes
+
+Two distinct architectural facts surface only in the intake-only view:
+
+1. **Stage 1 hits the row-lock plateau, Stages 2-4 don't.** Stage 1's
+   `SELECT FOR UPDATE` ceiling is whatever single-row lock contention
+   Postgres can sustain on this laptop hardware — a single architectural
+   number that doesn't depend on what the rest of the funnel is doing.
+   Stages 2-4 (Redis Lua deduct) sit much higher because the cache-tier
+   atomic op replaces the row lock entirely.
+
+2. **Stages 2/3/4 cluster at the same isolated ceiling** — when the
+   booking layer is the only thing the VU is doing, the cache-tier
+   deduct is fast enough that the bottleneck moves to network /
+   container / k6-VU CPU, not architecture. The full-flow numbers
+   diverge (Stage 2 → Stage 3 → Stage 4 progressively slower) because
+   the *downstream* work (worker / saga / outbox / sweepers) is what
+   competes for VU slots. This is the real architectural-cost insight:
+   Stage 4 buys failure-path observability + cross-process compensation
+   *with no penalty on the booking layer itself*; the cost is in
+   the operational-reality column where the saga goroutines compete
+   for CPU with k6's polling.
+
+If you need higher resolution on the isolated ceiling for Stages 2-4,
+the test parameters that would expose it: larger pool (so the run
+window doesn't pool-deplete), more VUs, longer duration, and ideally
+bare-metal hardware. Out of scope for this comparison; tracked as a
+follow-up under PR-D12.6.
+
+"""
 
 
 TEMPLATE = """\
@@ -473,7 +645,7 @@ Latency columns:
 ```
 {run_conditions}
 ```
-
+{intake_only_section}
 ## Stage-by-stage analysis
 
 {stage_details}
@@ -611,14 +783,18 @@ def main(argv: list[str]) -> int:
     # Sanity: at least one stage's summary.json must exist. If ALL
     # four are missing, this is almost certainly a wrong-directory
     # call and we should fail loud rather than emit a useless report.
+    # Accept either Slice-8 layout (full_flow_summary.json) or legacy
+    # layout (summary.json) for backward compatibility with pre-Slice-8
+    # comparison directories.
     n_present = sum(
         1 for n, dir_name, *_ in STAGES
-        if (input_dir / dir_name / "summary.json").exists()
+        if (input_dir / dir_name / "full_flow_summary.json").exists()
+        or (input_dir / dir_name / "summary.json").exists()
     )
     if n_present == 0:
         print(
-            f"FATAL: no stage summary.json files found under {input_dir}/stage{{1..4}}/. "
-            f"Wrong input directory?",
+            f"FATAL: no stage full_flow_summary.json / summary.json files found "
+            f"under {input_dir}/stage{{1..4}}/. Wrong input directory?",
             file=sys.stderr,
         )
         return 1

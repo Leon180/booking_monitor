@@ -161,9 +161,82 @@ except Exception as e:
     echo "  ✓ stage $stage smoke OK (ticket_type_id $tt_id)"
 done
 
-# ─── Step 6-7: run k6 sequentially per stage ────────────────────
+# ─── k6 invocation helper ───────────────────────────────────────
+# Used twice per stage (Slice 8): once with the full 2-step flow
+# scenario (k6_two_step_flow.js) and once with the pure-intake
+# scenario (k6_intake_only.js). The pure-intake run aligns with
+# Ticketmaster / Stripe / Shopify operator-experience methodology
+# (each layer measured separately rather than as a full-flow
+# atomic unit) — see comparison.md "Why two scenarios" callout.
+#
+# Args: stage_num port stage_dir script_path label
+#   - label is the basename for output files: <label>_summary.json,
+#     <label>_run_raw.txt
+#   - "full_flow" + "intake_only" are the two canonical labels.
+run_k6_scenario() {
+    local stage=$1 port=$2 stage_dir=$3 script=$4 label=$5
+    local summary="$stage_dir/${label}_summary.json"
+    local raw="$stage_dir/${label}_run_raw.txt"
+
+    echo "  → $label (k6 $script)..."
+
+    # Threshold breaches → exit 99 (or 1 in newer k6); other non-zero
+    # codes are real failures. Tolerate non-zero here and let the
+    # http_reqs > 0 assertion downstream decide if the run was usable.
+    set +e
+    k6 run \
+        --summary-export "$summary" \
+        -e API_ORIGIN="http://localhost:$port" \
+        -e VUS="$VUS" \
+        -e DURATION="$DURATION" \
+        -e TICKET_POOL=500000 \
+        "$script" \
+        > "$raw" 2>&1
+    local k6_exit=$?
+    set -e
+
+    if [ "$k6_exit" -ne 0 ]; then
+        if grep -qE "thresholds on metrics .* have been crossed" "$raw"; then
+            echo "    ⚠️  $label k6 exit=$k6_exit (threshold breach — informational, not fatal)"
+        else
+            echo "    ✗ $label k6 exit=$k6_exit (real failure)"
+            echo "    last 20 lines of $raw:"
+            tail -20 "$raw" | sed 's/^/      /'
+            exit 5
+        fi
+    fi
+
+    if [ ! -f "$summary" ]; then
+        echo "    ✗ $label summary.json missing at $summary — k6 didn't write it"
+        exit 5
+    fi
+
+    local http_reqs
+    http_reqs=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$summary'))
+    print(int(d['metrics']['http_reqs']['count']))
+except Exception as e:
+    sys.exit(f'parse failed: {e}')
+" 2>&1) || {
+        echo "    ✗ $label summary.json parse failed at $summary"
+        cat "$summary" | head -40
+        exit 5
+    }
+    if [ "$http_reqs" -lt 1 ]; then
+        echo "    ✗ $label k6 produced 0 http_reqs — silent failure"
+        echo "    (likely BASE_URL wrong, container DNS, or stage crashed mid-run)"
+        echo "    last 30 lines of $raw:"
+        tail -30 "$raw" | sed 's/^/      /'
+        exit 5
+    fi
+    echo "    ✓ $label: $http_reqs http_reqs"
+}
+
+# ─── Step 6-7: run k6 sequentially per stage (BOTH scenarios) ───
 echo ""
-echo "[4/8] Running k6 sequentially per stage..."
+echo "[4/8] Running k6 sequentially per stage (full_flow + intake_only)..."
 for stage in 1 2 3 4; do
     port=$((8090 + stage))
     stage_dir="$OUTDIR/stage$stage"
@@ -171,72 +244,19 @@ for stage in 1 2 3 4; do
     echo ""
     echo "── stage $stage (port $port) ──"
 
-    # k6's setup() creates its own 500k-ticket event; we only need
-    # to point it at the right host port. --summary-export gives
-    # us structured JSON to parse in Step 8 (closes plan-review
-    # HIGH #4: avoid k6 text-output regex fragility).
-    #
-    # Note on k6 exit codes:
-    #   - 0 = clean
-    #   - 99 (or 1 in newer k6) = threshold(s) crossed
-    #   - other non-zero = real failure (DNS, parse, panic)
-    # A threshold breach (e.g., business_errors > 5% under load) is
-    # INFORMATIONAL, not a runner failure — k6 still wrote summary.json.
-    # We tolerate non-zero exit and let the post-k6 assertion (Step 8)
-    # decide whether the run was usable.
-    set +e
-    k6 run \
-        --summary-export "$stage_dir/summary.json" \
-        -e API_ORIGIN="http://localhost:$port" \
-        -e VUS="$VUS" \
-        -e DURATION="$DURATION" \
-        -e TICKET_POOL=500000 \
-        scripts/k6_two_step_flow.js \
-        > "$stage_dir/run_raw.txt" 2>&1
-    k6_exit=$?
-    set -e
+    # Full-flow scenario: book → poll → pay → confirm → poll paid
+    # OR abandon → poll compensated. Records the operational
+    # funnel-completion view (acceptance ratio, e2e latency).
+    run_k6_scenario "$stage" "$port" "$stage_dir" "scripts/k6_two_step_flow.js" "full_flow"
 
-    if [ "$k6_exit" -ne 0 ]; then
-        if grep -qE "thresholds on metrics .* have been crossed" "$stage_dir/run_raw.txt"; then
-            echo "  ⚠️  stage $stage k6 exit=$k6_exit (threshold breach — informational, not fatal)"
-        else
-            echo "  ✗ stage $stage k6 exit=$k6_exit (real failure)"
-            echo "  last 20 lines of run_raw.txt:"
-            tail -20 "$stage_dir/run_raw.txt" | sed 's/^/    /'
-            exit 5
-        fi
-    fi
+    # Brief drain between scenarios so intake-only's k6 doesn't
+    # contend with full-flow's residual goroutines / PG connections.
+    sleep 3
 
-    if [ ! -f "$stage_dir/summary.json" ]; then
-        echo "  ✗ stage $stage summary.json missing — k6 didn't write it"
-        exit 5
-    fi
-
-    # ─── Step 8: post-k6 assertion ──────────────────────────────
-    # closes plan-review CRITICAL #2: k6 exits 0 even if 100% of
-    # requests were 4xx or http_reqs is 0 (DNS, BASE_URL wrong,
-    # wrong host port). Parse summary.json and assert the
-    # benchmark actually drove load.
-    http_reqs=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('$stage_dir/summary.json'))
-    print(int(d['metrics']['http_reqs']['count']))
-except Exception as e:
-    sys.exit(f'parse failed: {e}')
-" 2>&1) || {
-        echo "  ✗ stage $stage summary.json parse failed"
-        cat "$stage_dir/summary.json" | head -40
-        exit 5
-    }
-    if [ "$http_reqs" -lt 1 ]; then
-        echo "  ✗ stage $stage k6 produced 0 http_reqs — silent failure"
-        echo "  (likely BASE_URL wrong, container DNS, or stage crashed mid-run)"
-        echo "  last 30 lines of run_raw.txt:"
-        tail -30 "$stage_dir/run_raw.txt" | sed 's/^/    /'
-        exit 5
-    fi
-    echo "  ✓ stage $stage: $http_reqs http_reqs"
+    # Intake-only scenario: each VU just hammers POST /book → next
+    # iteration. Records the booking-layer ceiling — comparable to
+    # Ticketmaster's "tickets sold per second" published metric.
+    run_k6_scenario "$stage" "$port" "$stage_dir" "scripts/k6_intake_only.js" "intake_only"
 
     # ─── Step 9: inter-stage drain ──────────────────────────────
     # closes plan-review MED #1: replace 10s magic constant with
