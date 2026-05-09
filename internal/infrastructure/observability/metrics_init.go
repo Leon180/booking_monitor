@@ -134,6 +134,23 @@ func init() {
 	} {
 		SagaCompensatorEventsTotal.WithLabelValues(outcome)
 	}
+	// Pre-warm Stripe adapter outcomes (D4.2). 5 outcomes × 2 ops = 10
+	// label combinations; pre-warmed so PromQL alerts can evaluate
+	// `rate(stripe_api_calls_total{outcome="misconfigured"}[5m]) > 0`
+	// (page-worthy auth-failure detection) from second 0 — without
+	// pre-warm, the alert can't fire until the first 401/403 actually
+	// happens, defeating the early-warning purpose.
+	//
+	// The metric is registered regardless of `PAYMENT_PROVIDER` value
+	// (mock or stripe) — pre-warm runs at boot before fx wires the
+	// gateway. MockGateway never increments the metric so the series
+	// remains zero in mock-only deploys; Stripe adapter increments
+	// per real API call.
+	for _, op := range []string{"create_payment_intent", "get_status"} {
+		for _, outcome := range []string{"success", "declined", "transient", "misconfigured", "invalid"} {
+			StripeAPICallsTotal.WithLabelValues(op, outcome)
+		}
+	}
 	// Pre-warm sweeper-panic labels (PR-D fixup). The SweepGoroutinePanic
 	// alert fires immediately on any non-zero increase, so the series
 	// MUST exist in /metrics before the first panic — otherwise

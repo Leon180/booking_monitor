@@ -35,7 +35,6 @@ import (
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
-	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
@@ -82,8 +81,13 @@ func runServer(_ *cobra.Command, _ []string) {
 		// subcommand (which had its own fx graph providing the same
 		// Service for the A4 auto-charge path) is gone; the server
 		// process is the only host of payment.Service now. The
-		// MockGateway is wired here as the gateway adapter; real
-		// Stripe integration lands in a later PR (D4.2).
+		// D4.2: gateway adapter selected by `PAYMENT_PROVIDER` config:
+		//   "mock"    → in-process MockGateway (default; dev/CI)
+		//   "stripe"  → real Stripe SDK adapter via stripe-go v82
+		// `bootstrap.NewPaymentGateway` reads cfg.Payment.Provider and
+		// returns the appropriate `domain.PaymentGateway`; fx.As
+		// projects to the narrow `PaymentIntentCreator` port that
+		// `payment.NewService` actually consumes.
 		//
 		// fx wiring note (D7): payment.NewService takes
 		// `domain.PaymentIntentCreator` (the narrow CreatePaymentIntent
@@ -91,10 +95,15 @@ func runServer(_ *cobra.Command, _ []string) {
 		// fx/dig matches by exact type key — the provider must
 		// advertise PaymentIntentCreator explicitly via fx.As.
 		// recon runs as a separate subcommand with its own fx graph
-		// and provides its own PaymentStatusReader; there's no
-		// cross-graph wiring here.
+		// and provides its own PaymentStatusReader (using the same
+		// bootstrap.NewPaymentGateway helper); there's no cross-graph
+		// wiring here.
 		fx.Provide(
-			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentIntentCreator))),
+			// D4.2 Slice 2b: per-call Stripe observability (counter +
+			// histogram). MockGateway never emits to these metrics;
+			// production Stripe adapter records (op, outcome) per call.
+			bootstrap.NewPrometheusStripeMetrics,
+			fx.Annotate(bootstrap.NewPaymentGateway, fx.As(new(domain.PaymentIntentCreator))),
 			payment.NewService,
 		),
 		// D5 webhook service + metrics adapters. The handler itself

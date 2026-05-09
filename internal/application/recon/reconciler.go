@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -206,7 +207,40 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 		return
 	}
 
-	// 2. Per-order gateway timeout. Without this, a hung gateway pins
+	// 2. Null-intent-id guard (D4.2). The Stripe API has no
+	// "get intent by metadata.order_id" call — only "get intent by
+	// ID" — so the reconciler needs an intent ID to query the gateway.
+	// The intent ID lives on `orders.payment_intent_id`, but the
+	// documented `SetPaymentIntentID` race in
+	// `internal/application/payment/service.go:166` can leave the
+	// column NULL when the gateway-side intent-create succeeded but
+	// the follow-on UPDATE failed. Calling GetStatus with an empty
+	// intent ID would issue `GET /v1/payment_intents/` (a malformed
+	// URL) — Stripe returns 404, the adapter maps to ChargeStatusNotFound,
+	// and the reconciler then calls `failOrder` for an order that
+	// was actually charged successfully. SILENT WRONG VERDICT.
+	//
+	// Resolution: skip the row, leave it in `charging`, and emit a
+	// dedicated metric so ops can find the orphan via Stripe dashboard
+	// search by `metadata.order_id` and reconcile manually.
+	// TrimSpace fail-safe: a botched migration / pre-D4.2 binary could
+	// have written a whitespace-only `payment_intent_id` ("" + a stray
+	// space). Without trimming, that value bypasses the empty-string
+	// guard and we end up calling `GetStatus(ctx, " ")` — Stripe returns
+	// 404, mapStripeError surfaces as ErrPaymentTransient, ops sees a
+	// fake gateway error rather than the dedicated null-intent-id metric
+	// for an orphan row that needs manual triage. Final-pre-merge
+	// multi-agent review fix.
+	if strings.TrimSpace(s.PaymentIntentID) == "" {
+		r.log.Warn(parent, "recon: stuck-charging row has empty payment_intent_id; skipping (cannot call gateway without intent ID — ops triage required)",
+			tag.OrderID(s.ID),
+			mlog.Duration("age", s.Age),
+		)
+		r.metrics.IncNullIntentIDSkipped()
+		return
+	}
+
+	// 3. Per-order gateway timeout. Without this, a hung gateway pins
 	// the whole sweep loop — and SIGTERM can't preempt a blocked
 	// HTTP read.
 	//
@@ -219,8 +253,10 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 	gwCtx, cancel := context.WithTimeout(parent, r.cfg.GatewayTimeout)
 	defer cancel()
 
+	// D4.2: pass the intent ID (Stripe wire shape) NOT the orderID.
+	// Mock gateway also uses intentID lookup post-D4.2.
 	gwStart := time.Now()
-	status, err := r.gateway.GetStatus(gwCtx, s.ID)
+	status, err := r.gateway.GetStatus(gwCtx, s.PaymentIntentID)
 	r.metrics.ObserveGatewayDuration(time.Since(gwStart).Seconds())
 
 	if err != nil {

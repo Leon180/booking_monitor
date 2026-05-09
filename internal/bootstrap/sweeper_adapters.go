@@ -78,6 +78,9 @@ func (prometheusReconMetrics) IncResolved(outcome string) {
 func (prometheusReconMetrics) IncMarkErrors() {
 	observability.ReconMarkErrorsTotal.Inc()
 }
+func (prometheusReconMetrics) IncNullIntentIDSkipped() {
+	observability.ReconNullIntentIDSkippedTotal.Inc()
+}
 func (prometheusReconMetrics) ObserveResolveDuration(seconds float64) {
 	observability.ReconResolveDurationSeconds.Observe(seconds)
 }

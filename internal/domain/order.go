@@ -181,16 +181,30 @@ func (s OrderStatus) IsValid() bool {
 // `OrderRepository.FindStuckCharging` — the reconciler's input
 // vocabulary. Lives in domain because the reconciler is an
 // application-layer service that depends on this domain port and the
-// type is a pure value (no JSON / DB tags). Carrying just (id, age)
-// avoids the cost of materializing full Orders that the reconciler
-// won't read most fields of.
+// type is a pure value (no JSON / DB tags). Carrying just (id, age,
+// payment_intent_id) avoids the cost of materializing full Orders
+// that the reconciler won't read most fields of.
 //
 // `Age` is the duration the row has been in Charging at query time,
 // derived from `NOW() - updated_at` in SQL. Used by the reconciler
 // to apply the max-age give-up policy.
+//
+// `PaymentIntentID` is the gateway-assigned intent ID (Stripe shape:
+// `pi_3xxx...`). Empty string if the row was committed but the
+// follow-on `SetPaymentIntentID` UPDATE failed before persisting —
+// see the documented race in
+// `internal/application/payment/service.go:166`. The reconciler's
+// `resolve` skips rows with empty PaymentIntentID and emits a
+// dedicated metric (Section 2.1 of D4.2 plan).
+//
+// D4.2 added `PaymentIntentID` so `domain.PaymentStatusReader.GetStatus`
+// can be invoked with the real intent ID — the Stripe API has no
+// "get intent by metadata.order_id" cheap call, only "get intent by
+// ID".
 type StuckCharging struct {
-	ID  uuid.UUID
-	Age time.Duration
+	ID              uuid.UUID
+	Age             time.Duration
+	PaymentIntentID string // empty if the SetPaymentIntentID race produced NULL — see resolve() null-guard
 }
 
 // StuckFailed is the row shape returned by

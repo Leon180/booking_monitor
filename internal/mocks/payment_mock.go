@@ -43,18 +43,18 @@ func (m *MockPaymentStatusReader) EXPECT() *MockPaymentStatusReaderMockRecorder 
 }
 
 // GetStatus mocks base method.
-func (m *MockPaymentStatusReader) GetStatus(ctx context.Context, orderID uuid.UUID) (domain.ChargeStatus, error) {
+func (m *MockPaymentStatusReader) GetStatus(ctx context.Context, paymentIntentID string) (domain.ChargeStatus, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetStatus", ctx, orderID)
+	ret := m.ctrl.Call(m, "GetStatus", ctx, paymentIntentID)
 	ret0, _ := ret[0].(domain.ChargeStatus)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetStatus indicates an expected call of GetStatus.
-func (mr *MockPaymentStatusReaderMockRecorder) GetStatus(ctx, orderID any) *gomock.Call {
+func (mr *MockPaymentStatusReaderMockRecorder) GetStatus(ctx, paymentIntentID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStatus", reflect.TypeOf((*MockPaymentStatusReader)(nil).GetStatus), ctx, orderID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStatus", reflect.TypeOf((*MockPaymentStatusReader)(nil).GetStatus), ctx, paymentIntentID)
 }
 
 // MockPaymentIntentCreator is a mock of PaymentIntentCreator interface.
@@ -136,16 +136,16 @@ func (mr *MockPaymentGatewayMockRecorder) CreatePaymentIntent(ctx, orderID, amou
 }
 
 // GetStatus mocks base method.
-func (m *MockPaymentGateway) GetStatus(ctx context.Context, orderID uuid.UUID) (domain.ChargeStatus, error) {
+func (m *MockPaymentGateway) GetStatus(ctx context.Context, paymentIntentID string) (domain.ChargeStatus, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetStatus", ctx, orderID)
+	ret := m.ctrl.Call(m, "GetStatus", ctx, paymentIntentID)
 	ret0, _ := ret[0].(domain.ChargeStatus)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetStatus indicates an expected call of GetStatus.
-func (mr *MockPaymentGatewayMockRecorder) GetStatus(ctx, orderID any) *gomock.Call {
+func (mr *MockPaymentGatewayMockRecorder) GetStatus(ctx, paymentIntentID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStatus", reflect.TypeOf((*MockPaymentGateway)(nil).GetStatus), ctx, orderID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetStatus", reflect.TypeOf((*MockPaymentGateway)(nil).GetStatus), ctx, paymentIntentID)
 }

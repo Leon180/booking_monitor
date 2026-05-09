@@ -89,6 +89,7 @@ silence / inhibit / notification log.
 
 ### Deployment / cutover
 - [D7 cutover — `order.created` outbox drain](#d7-cutover-note--ordercreated-outbox-drain)
+- [D4.2 — Stripe SDK adapter production cutover (PCI scope, key rotation, sandbox→live)](#d42-cutover-note--stripe-sdk-adapter-production)
 
 ---
 
@@ -1003,3 +1004,87 @@ If the count is 0, deploy is safe. If non-zero:
 2. **Mark-as-processed at deploy time** (faster, dev-only): `UPDATE events_outbox SET processed_at = NOW() WHERE processed_at IS NULL AND event_type = 'order.created'` immediately before / after the binary swap. Skips the dead-topic publishes entirely.
 
 Local-dev / smoke environments can ignore this; the topic-as-sink behavior is benign.
+
+---
+
+## D4.2 cutover note — Stripe SDK adapter (production)
+
+D4.2 (PR-D4.2) replaced the in-process mock payment gateway with a real `stripe-go v82` SDK adapter ([internal/infrastructure/payment/stripe_gateway.go](../internal/infrastructure/payment/stripe_gateway.go)). This section covers operational concerns specific to running against real Stripe: the PCI scope statement, the sandbox→live cutover checklist, webhook-secret rotation, and the leaked-key incident response.
+
+### PCI scope statement
+
+The application **NEVER receives raw card data**. Stripe Elements (the JavaScript widget our D8 demo page uses) collects card details client-side and submits them directly to Stripe's API; our backend only ever sees:
+
+- `PaymentIntent.ID` (e.g., `pi_3xxx...`)
+- `PaymentIntent.client_secret` (an opaque token used by Stripe Elements client-side)
+- Webhook events about the payment lifecycle (`payment_intent.succeeded` / `payment_intent.payment_failed`)
+
+This puts the integration **out of PCI DSS SAQ A scope** for card data handling — we are not a "merchant who handles card data" under PCI's classification. Documented explicitly here so any future security reviewer doesn't have to derive it from the architecture.
+
+### Sandbox → live cutover checklist
+
+Production deploys against Stripe's live mode require switching three pieces of config in lockstep. The validation in [`config.LoadConfig`](../../internal/infrastructure/config/config.go) refuses startup if `APP_ENV=production` is paired with a `sk_test_*` / `rk_test_*` / `pk_test_*` API key — that's the last-line guard, not the first.
+
+**Pre-flight (do first, in this order):**
+
+1. **Stripe dashboard → Developers → API keys.** Confirm a Restricted Key (`rk_live_*`) exists with the minimum scope: `payment_intents:write` + `payment_intents:read`. Avoid the Secret Key (`sk_live_*`) — full-account scope means a leak compromises everything.
+2. **Stripe dashboard → Developers → Webhooks.** Add the production webhook endpoint pointing at `https://<your-domain>/webhook/payment`. Subscribe to `payment_intent.succeeded` + `payment_intent.payment_failed` only. Copy the signing secret (`whsec_*`) — this is the LIVE-mode webhook secret, distinct from the test-mode one.
+
+**Cutover (production environment):**
+
+3. Update the deployment env (k8s Secret / SSM Parameter Store / equivalent) — set in lockstep:
+   - `APP_ENV=production`
+   - `PAYMENT_PROVIDER=stripe`
+   - `STRIPE_API_KEY=rk_live_xxx`
+   - `STRIPE_WEBHOOK_SECRET=whsec_xxx` (the live-mode one from step 2)
+4. Roll the deployment. Watch the boot log for the `LoadConfig` validation lines: any `sk_test_*` / missing webhook secret / `pk_live_*` aborts startup with a non-zero exit code, so a misconfigured rollout fails fast at pod restart instead of running silently against test mode.
+5. **Verify the webhook endpoint is reachable from Stripe.** Now that the live secret is deployed, Stripe dashboard → Webhooks → "Send test webhook" should respond 200. A 401 here means signature mismatch — the deployed secret doesn't match the one Stripe is signing with (re-copy from dashboard step 2). A 5xx / connection refused means Stripe can't reach the URL at all (firewall / DNS / load balancer config).
+6. **First-charge sanity check.** Within 5 minutes of step 5 passing, walk one real booking end-to-end (book → pay → webhook arrival). Verify in Stripe dashboard:
+   - PaymentIntent shows `livemode: true`
+   - Webhook delivery shows 200 response
+   - Our DB `orders` row reaches `paid` status
+
+**Rollback** (if step 5 or 6 fails). Revert the env to test-mode keys (`sk_test_*` / test-mode `whsec_*`) and roll back the deployment. The booking flow continues against test mode while you investigate.
+
+**Note on step ordering** (post-open multi-agent review fix). Earlier draft of this runbook tried to verify webhook reachability BEFORE the live secret was deployed; that gave operators a 401 they were told to ignore, hiding any real connectivity problem. The reordered sequence above puts reachability AFTER the secret is deployed so the response code carries unambiguous signal: 200 = healthy, 401 = wrong secret, 5xx/refused = network problem.
+
+### Webhook secret rotation playbook
+
+The webhook secret signs the `Stripe-Signature` header on every inbound webhook. Rotating it requires careful sequencing because there's a brief window where in-flight webhooks signed by the old secret get rejected with `ErrSignatureMismatch` (HTTP 401, classified as `mismatch` in `payment_webhook_signature_invalid_total`).
+
+**Rotation steps:**
+
+1. **Stripe dashboard → Developers → Webhooks → your endpoint → "Roll secret".** Stripe surfaces the new signing secret. Note: Stripe DOES NOT support two simultaneous secrets on a single endpoint — once you roll, the old secret stops signing new deliveries.
+2. **Update env IMMEDIATELY** with the new secret (`STRIPE_WEBHOOK_SECRET=whsec_new`).
+3. **Roll the deployment.** Stripe's webhook delivery uses at-least-once with retries up to 30 days, so any in-flight webhooks signed by the old secret get rejected once, but Stripe's retry will re-deliver them with the new secret on the next attempt. The `mismatch` rate spikes briefly during this window.
+4. **Confirm clean state** (5 min after roll): `rate(payment_webhook_signature_invalid_total{reason="mismatch"}[5m])` should be back to 0. The `PaymentWebhookSignatureFailing` alert may fire transiently during the window — silence it via Alertmanager for the rotation duration if you want a clean dashboard.
+
+**Future**: dual-secret support (`STRIPE_WEBHOOK_SECRET` + `STRIPE_WEBHOOK_SECRET_NEXT`) is deferred to a follow-up PR; tracked in the plan's R9.
+
+### Leaked-key incident response
+
+If `STRIPE_API_KEY` is exposed (committed to a repo, posted to a Slack channel, leaked in a stack trace, etc.):
+
+1. **Immediately revoke the leaked key in Stripe dashboard → Developers → API keys.** This stops the leaked key from being used by an attacker. Do this BEFORE rolling a new key — a 30-second exposure window with the key still active is worse than a 5-minute outage.
+2. **Generate a replacement key with the same scope.** Restricted Key (`rk_live_*`) preferred — minimum-privilege.
+3. **Update env + roll deployment** with the new key. The adapter's first request after rollout uses the new key; in-flight requests with the old key get `401 Unauthorized` from Stripe, classified by `mapStripeError` as `ErrPaymentMisconfigured` (outcome label `misconfigured`, page-worthy via `stripe_api_calls_total{outcome="misconfigured"}` — see [monitoring.md §5](../monitoring.md)).
+4. **Audit recent activity.** Stripe dashboard → Logs filter by the leaked key for any unfamiliar requests. If you see PaymentIntent creates you didn't initiate, escalate to Stripe support and start a transaction-by-transaction review.
+5. **Post-incident.** Add a redaction test for the specific leak shape (e.g., if it leaked in a log line, extend [`internal/infrastructure/payment/stripe_gateway.go`](../../internal/infrastructure/payment/stripe_gateway.go)'s `redactKeyValue` / `redactJSONField` test cases). The adapter's redacting `LeveledLogger` already strips bearer tokens from log output, but a leak via a different path (config-dump, panic stack, etc.) needs its own coverage.
+
+### Test-mode dashboard cleanup (developer convenience)
+
+Running `make test-stripe-live` against your Stripe test account creates a PaymentIntent per test run; over time the test dashboard accumulates orphans. Stripe-side TTL is 90 days; if you want to clean up sooner, the official Stripe CLI does it:
+
+```bash
+# List the most recent 100 test-mode intents
+stripe payment_intents list --limit 100
+
+# Cancel all of them (only works for status=requires_payment_method intents
+# — fully-confirmed/charged ones can't be cancelled, only refunded if you want
+# to nuke them, which doesn't apply in test mode anyway)
+stripe payment_intents list --limit 100 \
+  | jq -r '.data[] | select(.status == "requires_payment_method") | .id' \
+  | xargs -I {} stripe payment_intents cancel {}
+```
+
+This is dashboard-cosmetics only; orphan test intents incur no charges and don't count against any rate limit.

@@ -163,7 +163,8 @@ D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga co
 - **非同步處理**:Redis Streams consumer group,含 PEL 恢復機制
 - **Transactional Outbox**:訂單與事件同一筆交易,再由 OutboxRelay 發布至 Kafka
 - **Saga 補償**:冪等地回滾付款失敗 + 預訂過期(DB + Redis)
-- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(DB UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(mock gateway 實作 idempotent `CreatePaymentIntent`)
+- **四層冪等性**:API(`Idempotency-Key` header + N4 fingerprint 驗證)、Worker(資料庫 UNIQUE 索引)、Saga(Redis SETNX)、付款閘道(以 `order_id` 當 key 的 Stripe 端 `Idempotency-Key` header,Stripe 慣用做法)
+- **可切換 Payment Provider(D4.2)**:`PAYMENT_PROVIDER ∈ {mock, stripe}` 切換 in-process mock(`make stress-k6` 在用)與真實的 `stripe-go v82` SDK 介面卡。Production 啟動會直接拒絕 `mock` 與 `*_test_*` 金鑰(最後一道防線)。Production cutover checklist + 金鑰輪替 playbook 見 [`docs/runbooks/README.md` § D4.2 cutover note](docs/runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production)。
 - **限流**:Nginx(100 req/s/IP,burst 200)
 - **領導者選舉**:以 PostgreSQL advisory lock 確保只有 1 個 OutboxRelay 實例在跑
 - **完整可觀測性**:Prometheus metrics、Grafana dashboards、Jaeger tracing、Zap logging

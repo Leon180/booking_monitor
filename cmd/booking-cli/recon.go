@@ -16,7 +16,6 @@ import (
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
 	"booking_monitor/internal/infrastructure/observability"
-	paymentInfra "booking_monitor/internal/infrastructure/payment"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 )
@@ -99,13 +98,22 @@ func runRecon(cmd *cobra.Command, _ []string) {
 	app := fx.New(
 		bootstrap.CommonModule(cfg),
 		fx.Provide(
-			// MockGateway implements both PaymentStatusReader and
-			// PaymentIntentCreator. The reconciler only needs the
-			// reader half — fx.As scopes the injection to just the
-			// read-side port. (Pre-D7 there was a third interface
-			// `PaymentCharger`; D7 deleted it along with the legacy
-			// A4 auto-charge path.)
-			fx.Annotate(paymentInfra.NewMockGateway, fx.As(new(domain.PaymentStatusReader))),
+			// D4.2: gateway adapter selected by `PAYMENT_PROVIDER` config
+			// via shared `bootstrap.NewPaymentGateway` helper. Both
+			// MockGateway and StripeGateway implement
+			// `domain.PaymentGateway` (combined port);
+			// fx.As scopes the injection to just the reader-half port
+			// the reconciler consumes. (Pre-D7 there was a third
+			// interface `PaymentCharger`; D7 deleted it along with the
+			// legacy A4 auto-charge path.)
+			//
+			// Slice 2b: same `prometheusStripeMetrics` adapter the
+			// server fx graph uses — recon's GetStatus calls also
+			// emit per-(op, outcome) metrics so dashboards see both
+			// hot-path (server CreatePaymentIntent) and recon-path
+			// (GetStatus) Stripe latency / failure-class.
+			bootstrap.NewPrometheusStripeMetrics,
+			fx.Annotate(bootstrap.NewPaymentGateway, fx.As(new(domain.PaymentStatusReader))),
 			// Translate the wire-format infrastructure config into the
 			// application-layer recon.Config + provide the Prometheus-
 			// backed Metrics adapter. Closes the layer-violation

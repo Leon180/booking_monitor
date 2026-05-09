@@ -56,6 +56,24 @@ type Metrics interface {
 	// signal counted under outcome="transition_lost").
 	IncMarkErrors()
 
+	// IncNullIntentIDSkipped bumps the dedicated counter for stuck-
+	// charging rows where the gateway-side payment intent ID is empty
+	// — caused by the documented `SetPaymentIntentID` race in
+	// `internal/application/payment/service.go:166` (the
+	// `CreatePaymentIntent` call to the gateway succeeded but the
+	// follow-on UPDATE that persisted the intent ID failed). The
+	// reconciler can't call Stripe's GetStatus without an intent ID,
+	// so it skips the row, leaves it in `charging`, and increments
+	// this counter so ops can find the orphan via Stripe dashboard
+	// (search by metadata.order_id) and reconcile manually.
+	//
+	// Distinct counter (not folded into IncResolved) because the
+	// alert criterion is "rate > 0 for 5m → page" — any non-zero
+	// rate is operationally interesting; the "transition_lost"
+	// outcome under IncResolved is benign and shouldn't share an
+	// alert with this one.
+	IncNullIntentIDSkipped()
+
 	// ObserveResolveDuration records the wall-clock cost of one
 	// per-order resolve call.
 	ObserveResolveDuration(seconds float64)
@@ -77,11 +95,12 @@ type Metrics interface {
 // codebase.
 type NopMetrics struct{}
 
-func (NopMetrics) SetStuckChargingOrders(int)      {}
-func (NopMetrics) IncFindStuckErrors()             {}
-func (NopMetrics) IncGatewayErrors()               {}
-func (NopMetrics) IncResolved(string)              {}
-func (NopMetrics) IncMarkErrors()                  {}
-func (NopMetrics) ObserveResolveDuration(float64)  {}
-func (NopMetrics) ObserveResolveAge(float64)       {}
-func (NopMetrics) ObserveGatewayDuration(float64)  {}
+func (NopMetrics) SetStuckChargingOrders(int)     {}
+func (NopMetrics) IncFindStuckErrors()            {}
+func (NopMetrics) IncGatewayErrors()              {}
+func (NopMetrics) IncResolved(string)             {}
+func (NopMetrics) IncMarkErrors()                 {}
+func (NopMetrics) IncNullIntentIDSkipped()        {}
+func (NopMetrics) ObserveResolveDuration(float64) {}
+func (NopMetrics) ObserveResolveAge(float64)      {}
+func (NopMetrics) ObserveGatewayDuration(float64) {}

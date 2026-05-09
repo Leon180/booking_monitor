@@ -51,14 +51,21 @@ type HandlerMetrics interface {
 
 // Handler is the gin-side webhook entry point. Constructed via
 // NewHandler in package wiring. Stateless aside from the secret +
-// tolerance + clock — safe to share across goroutines.
+// tolerance — safe to share across goroutines.
+//
+// Note (D4.2 Slice 3b): the previous `now func() time.Time` test
+// seam was removed when VerifySignature was delegated to stripe-go's
+// webhook package. stripe-go uses `time.Now()` internally and
+// doesn't expose a clock injection point. Tests that need
+// deterministic skew assertions sign payloads with `time.Now()` (or
+// `time.Now().Add(-X)`) and rely on real wall clock — see
+// verifier_test.go.
 type Handler struct {
 	svc       PaymentService
 	secret    []byte
 	tolerance time.Duration
 	metrics   HandlerMetrics
 	log       *mlog.Logger
-	now       func() time.Time
 }
 
 // NewHandler wires the dependencies. `secret` MUST be non-empty;
@@ -66,7 +73,8 @@ type Handler struct {
 // startup rather than running with a no-op verifier.
 //
 // `tolerance` is typically 5 minutes — Stripe's documented default
-// — and configurable so tests can dial it down.
+// (`stripewebhook.DefaultTolerance`) — and configurable so tests can
+// dial it down.
 func NewHandler(svc PaymentService, secret []byte, tolerance time.Duration, metrics HandlerMetrics, logger *mlog.Logger) *Handler {
 	return &Handler{
 		svc:       svc,
@@ -74,7 +82,6 @@ func NewHandler(svc PaymentService, secret []byte, tolerance time.Duration, metr
 		tolerance: tolerance,
 		metrics:   metrics,
 		log:       logger.With(mlog.String("component", "payment_webhook_handler")),
-		now:       time.Now,
 	}
 }
 
@@ -117,7 +124,7 @@ func (h *Handler) HandlePayment(c *gin.Context) {
 	}
 
 	header := c.GetHeader(SignatureHeader)
-	if err := VerifySignature(h.secret, raw, header, h.now(), h.tolerance); err != nil {
+	if err := VerifySignature(h.secret, raw, header, h.tolerance); err != nil {
 		reason := ClassifySignatureError(err)
 		h.log.Warn(ctx, "webhook: signature invalid",
 			mlog.String("reason", reason),

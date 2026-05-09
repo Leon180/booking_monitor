@@ -49,6 +49,22 @@ services:
       - PAYMENT_WEBHOOK_SECRET=${PAYMENT_WEBHOOK_SECRET:?PAYMENT_WEBHOOK_SECRET is required (see .env.example for a dev value)}
       - PAYMENT_WEBHOOK_REPLAY_TOLERANCE=${PAYMENT_WEBHOOK_REPLAY_TOLERANCE:-5m}
       - PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE=${PAYMENT_WEBHOOK_EXPECTED_LIVE_MODE:-false}
+      # D4.2 — payment provider switch. `mock` (default) uses the
+      # in-process mock; `stripe` uses the real stripe-go v82 SDK
+      # adapter. Production validation rejects mock; see config.go
+      # Validate(). Both Stripe vars are optional with empty defaults
+      # so dev-mode mock deploys don't need them set; the validator
+      # asserts presence when PAYMENT_PROVIDER=stripe is selected.
+      # STRIPE_WEBHOOK_SECRET when set takes precedence over the
+      # legacy PAYMENT_WEBHOOK_SECRET; LoadConfig falls back to
+      # PAYMENT_WEBHOOK_SECRET if the new one is empty (D5 → D4.2
+      # transition shim documented in runbook).
+      - PAYMENT_PROVIDER=${PAYMENT_PROVIDER:-mock}
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - STRIPE_API_TIMEOUT=${STRIPE_API_TIMEOUT:-30s}
+      - STRIPE_MAX_NETWORK_RETRIES=${STRIPE_MAX_NETWORK_RETRIES:-2}
+      - STRIPE_ALLOW_TEST_KEY=${STRIPE_ALLOW_TEST_KEY:-false}
       - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-false}
       # D8 — CORS allow-list for the browser demo (Vite dev server on
       # localhost:5173). Empty default disables the middleware so
