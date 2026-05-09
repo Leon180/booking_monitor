@@ -104,7 +104,7 @@ flowchart LR
     K4 -.-> S4[Saga]
 ```
 
-四個 stage 的 `cmd/booking-cli-stage{1,2,3,4}/` 比較 harness([`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md) 的 D12)是 Phase 3 的計畫項目 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。
+四個 stage 的 `cmd/booking-cli-stage{1,2,3,4}/` 比較 harness(D12;細節見 [`docs/d12/README.md`](docs/d12/README.md))已上線 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。每次 apples-to-apples 比較報告都放在 [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/),透過 `make bench-up` + `scripts/run_4stage_comparison.sh` + `scripts/generate_comparison_md.py` 產生。
 
 ### Pattern A 流程(已隨 v0.5.0 + v0.6.0 上線)
 

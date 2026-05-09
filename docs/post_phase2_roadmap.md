@@ -8,7 +8,7 @@ Forward-looking sprint plan, written 2026-04-30 immediately after the Phase 2 ch
 - **First project-review checkpoint completed**: [`docs/checkpoints/20260430-phase2-review.md`](checkpoints/20260430-phase2-review.md). Grade A−. Findings split between a focused cleanup PR (Critical + cheap-Important) and 8 deferred follow-up PRs.
 - **`v0.5.0` shipped 2026-05-07** — Pattern A D1–D6 complete: reservation + payment intent + webhook + expiry sweeper. End-to-end flow `book → /pay → confirm OR expire → paid OR compensated` runs against the Docker stack. See [CHANGELOG.md §0.5.0](../CHANGELOG.md) for the per-PR ledger.
 - **D7 + D8-minimal both shipped 2026-05-08** — D7 deleted the legacy A4 auto-charge path (payment_worker binary + `order.created` consumer + `ProcessOrder`); saga scope narrowed to `{expired, payment_failed}`. D8-minimal browser demo (Vite + React + TS in `demo/`) ships against the CORS allow-list from PR #96.
-- **Next user goal**: D12 4-version multi-cmd comparison harness (~4 wk; the senior-interview centerpiece) and/or D14+D16 portfolio narrative quick-wins (~1-2 days each). D4.2 (real Stripe SDK adapter) is parallel-safe with any of the above.
+- **D12 CLOSED** (PR-D12.5 merged) — 4-version multi-cmd comparison harness shipped. The senior-interview talking point (`comparison.md` per-run report at `docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/comparison.md`) is in repo. D14 + D16 portfolio-narrative quick-wins are also done. **Next user goal**: D4.2 (real Stripe SDK adapter, ~3-5 days) is the natural follow-on; alternatives include D8 multi-ticket-type-per-event (front-end demo expansion) or the parked TT-Cache-6 singleflight cleanup (load-bearing now that D12's multi-binary harness exists).
 
 ## Sequence
 

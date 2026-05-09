@@ -1,6 +1,6 @@
 # D12 — 4-stage architecture comparison harness
 
-> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) shipped.** The multi-target harness lands in PR-D12.5.
+> Status: **D12 closed — PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) + PR-D12.5 (multi-target harness + comparison.md) all shipped.** See [docs/benchmarks/comparisons/](../benchmarks/comparisons/) for the apples-to-apples comparison reports.
 
 D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Four separate Go binaries share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all four under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
 
@@ -715,11 +715,31 @@ docs/d12/README.md                                            (Stage 4 section �
 
 Total: ~2.1k LOC including tests. Tests outnumber production saga code by ~2× (12 outcome subtests + spy infrastructure + 8 saga consumer tests + boundary guard tests). Multi-agent review pre-PR (no Codex due to limit): 8 plan-stage findings + 4 Slice 1 + 7 Slice 2 + 7 Slice 3 + 4 Slice 4 = 30 findings actioned across 5 review rounds.
 
-## Future PRs (D12.5)
+## What's in PR-D12.5
 
-| PR | Scope | Effort |
-|---|---|---|
-| **PR-D12.5** | Harness + `comparison.md`: per-stage Postgres DB + per-stage Redis DB index; docker-compose comparison profile; orchestration script; per-stage Prometheus scrape-config `stage` target labels for all 4 binaries; first comparison.md with the full 6-paper citation map (Psarakis CIDR'25 / SIGMOD'25 tutorial / Faleiro PVLDB'17 / Cheng PVLDB'24 / Laigner TOSEM'25 / Kløvedal preprint) | ~5-7 days |
+```
+ADDED:
+deploy/postgres/init/02_create_stage_dbs.sql          (per-stage DB provisioning, idempotent \gexec)
+docker-compose.comparison.yml                          (9 services on non-conflicting ports)
+deploy/prometheus/prometheus.comparison.yml            (per-stage scrape labels: stage + architecture)
+scripts/run_4stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × 4 → snapshot → tear-down)
+scripts/generate_comparison_md.py                      (k6 summary.json → comparison.md emitter; 6-citation map)
+docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/     (the canonical run output)
+
+MODIFIED:
+Dockerfile                                             (BUILD_TARGET arg; backward-compatible default ./cmd/booking-cli)
+Makefile                                               (bench-up / bench-down / bench-down-clean / bench-smoke targets)
+docs/d12/README.md                                     (this file: status closure + What's in section)
+docs/post_phase2_roadmap.md                            (D12 marked closed)
+README.md + README.zh-TW.md                            (D12 cross-link to comparison.md; bilingual)
+docs/PROJECT_SPEC.md + docs/PROJECT_SPEC.zh-TW.md      (Stage 4 evolution note: now-past-tense for D12 benchmarking; bilingual)
+```
+
+Total: ~1.5k LOC including the orchestration + helper scripts. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors). All actioned before PR-open.
+
+The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × 4-stage benchmark cost on every push.
+
+**Citation map note**: the 6 citations under `comparison.md`'s citation map are the verified subset of an originally-planned 7. Kløvedal 2025 saga-anti-patterns preprint was dropped after Slice 4 review couldn't verify its existence on any indexed preprint server. Faleiro PVLDB'17 was corrected to CIDR'17, Atikoglu SIGMOD'12 to SIGMETRICS'12. The remaining 4 peer-reviewed papers (Faleiro CIDR'17, Atikoglu SIGMETRICS'12, Cheng PVLDB'24, Laigner TOSEM'25) + 2 industry sources (AWS Aurora 2024, PostgresAI 2025) are venue- and title-accurate.
 
 ## Cross-references
 
