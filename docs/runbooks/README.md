@@ -47,6 +47,12 @@ silence / inhibit / notification log.
 - [SagaWatchdogFindStuckErrors](#sagawatchdogfindstuckerrors)
 - [SagaMaxFailedAgeExceeded](#sagamaxfailedageexceeded)
 
+### Saga compensator (D12.4 — Kafka-driven hot path)
+- [SagaCompensatorErrorRate](#sagacompensatorerrorrate)
+- [SagaConsumerLagHigh](#sagaconsumerlaghigh)
+- [SagaCompensatorClassifierDrift](#sagacompensatorclassifierdrift)
+- [SagaCompensatorRedisInventoryLeak](#sagacompensatorredisinventoryleak)
+
 ### Correctness controls
 - [IdempotencyCacheGetErrors](#idempotencycachegeterrors)
 - [DBRollbackFailures](#dbrollbackfailures)
@@ -330,6 +336,100 @@ silence / inhibit / notification log.
   Query the `orders` table directly, NOT `order_status_history` — the alert intent is "currently stuck in a failure-terminal status", and the history table records every transition including ones that have since been Compensated. Querying history would give false positives for orders the saga consumer eventually compensated.
 
 - For each order returned: verify Redis inventory state matches DB, then either manually `MarkCompensated` + revert inventory or escalate to engineering. The remediation step is the same regardless of which failure-terminal status the order is stuck in (the compensator widens accordingly in D2).
+
+---
+
+## SagaCompensatorErrorRate
+
+**Symptom.** `saga_compensator_events_processed_total` non-success ratio > 5% for 5m. Severity `warning`. Distinct from `SagaCompensatorErrors` above (that watches the watchdog re-drive path; this watches the Kafka consumer hot path).
+
+**Triage by dominant outcome label.** Run:
+
+```promql
+topk(5, sum by (outcome) (rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated"}[5m])))
+```
+
+Then map the dominant label to its handler:
+
+| Outcome | What broke | Action |
+|---|---|---|
+| `redis_revert_error` | Redis revert failed on FRESH compensation | This SHOULD have already paged via `SagaCompensatorRedisInventoryLeak` (critical). Inventory is leaked — see that runbook. |
+| `already_compensated_redis_error` | Idempotent re-drive Redis blip | Usually benign (SETNX guard means Redis was already correct from first delivery). Sustained > 0 means Redis is unhealthy. Check Redis MEMORY USAGE + slowlog. |
+| `unmarshal_error` | Poison `order.failed` payload | Check producer-side schema regression. `kafka-console-consumer --topic order.failed --offset latest --max-messages 5` to inspect payload. DLQ is at `order.failed.dlq`. |
+| `getbyid_error` / `markcompensated_error` | DB outage upstream of Redis | Check `up{job="postgres-exporter"}`, pg_stat_activity for lock contention. |
+| `incrementticket_error` | DB constraint violation OR contention | Check `event_ticket_types.available_tickets` for any rows where `available_tickets > total_tickets` (over-increment regression). |
+| `list_ticket_type_error` | DB outage during legacy-event Path B fallback | Same DB-outage class as above; isolated label so triage scopes to the rolling-upgrade fallback path. |
+| `path_c_skipped` | Rolling-upgrade artifact | Pre-v3 multi-ticket-type events. Inventory was NOT reverted but this is structurally impossible during the upgrade window. Check deploy timing — should taper to 0 within 1h after rolling upgrade completes. **If sustained > 1h after deploy is done, escalate.** |
+| `context_error` | Saga consumer context cancellation | Usually shutdown noise during deploys. If sustained outside deploy windows, check for upstream timeout configs. |
+| `uow_infra_error` | DB connection pool / tx-begin failure | Check pg pool stats, `db_pool_*` metrics, connection limits. |
+| `unknown` | Code-path missing `record()` call | This SHOULD have already paged via `SagaCompensatorClassifierDrift`. See that runbook. |
+
+**False-positive note.** If `path_c_skipped` is dominant during the first hour after a rolling upgrade, that's expected — pre-v3 messages flushing through. If `already_compensated_redis_error` is dominant during a Kafka redelivery burst (consumer recovering from lag), that's also expected — SETNX means Redis state is correct.
+
+---
+
+## SagaConsumerLagHigh
+
+**Symptom.** `saga_compensation_consumer_lag_seconds > 30 for 2m` AND `up{job="booking-service"} == 1` (gated to avoid stuck-gauge false-positives during consumer crash). Severity `warning`.
+
+**What this measures.** The lag-since-write of the most-recently-processed `order.failed` Kafka message. `msg.Time` was set by the outbox relay to `events_outbox.created_at` (PR-D12.4 Slice 0 data path), so the lag includes:
+1. Outbox relay polling delay (default 500ms tick)
+2. Kafka write + broker round-trip
+3. Consumer FetchMessage queue wait
+4. Compensator processing time (UoW + Redis revert)
+
+**Why up==1 gating matters.** This metric is a PERFORMANCE indicator, not a LIVENESS indicator. A crashed consumer leaves the gauge stale at the last value until Prometheus marks the target down (`scrape_interval × 3`). Without the gate, a dead consumer would false-fire this alert for minutes before the actual liveness signal kicks in. Liveness is a separate concern handled by Prometheus's default `up == 0` paging.
+
+**Action.**
+1. **Check Kafka backlog**: `kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group saga-consumer`. If `LAG` is high and growing, Kafka producers (webhook handler, expiry sweeper, recon force-fail) are outpacing the consumer.
+2. **Check compensator latency**: `histogram_quantile(0.99, sum by (le)(rate(saga_compensation_loop_duration_seconds_bucket[5m])))`. p99 above 5s with sustained lag means compensator is the bottleneck — check Redis revert latency + DB lock contention on `orders` and `event_ticket_types`.
+3. **Check consumer thread count**: single-instance saga consumer today. If sustained lag with a backlog, consider scaling. **NOTE for k8s**: in multi-pod deployments verify `saga_compensation_consumer_lag_seconds` and `up{job='booking-service'}` share identical `instance` label values, or replace `on(instance)` in the alert with `on(job)` if all instances scrape under one job.
+
+**Forward-compat NOTE for D12.5**: when PR-D12.5 lands per-stage scrape jobs and may rename `job="booking-service"` → `job="d12-stage4"`, this alert's gate expression must be updated.
+
+---
+
+## SagaCompensatorClassifierDrift
+
+**Symptom.** `increase(saga_compensator_events_processed_total{outcome="unknown"}[5m]) > 0`. Severity `warning` (single-occurrence alert; `for: 0m`).
+
+**This is a code regression alert, not an infra alert.** The `unknown` outcome label is the deferred-sentinel value — emitted ONLY when a return path in `compensator.HandleOrderFailed` fails to call `RecordEventProcessed(...)` explicitly. Distinct from `uow_infra_error` and `context_error` which ARE recorded explicitly by their respective branches. Should be 0 in production forever.
+
+**Action.**
+1. **Identify the offending code path.** Diff the latest deploy's compensator.go changes against the previous version: `git log -p --since="$(date -v-7d -u +%Y-%m-%dT%H:%M:%SZ)" -- internal/application/saga/compensator.go`. Look for new `return` statements without a preceding `record(<outcome>)` call.
+2. **Add the missing `record()` call.** Pick the appropriate outcome label or add a new one (and pre-warm in `metrics_init.go`'s SagaCompensatorEventsTotal block + document in monitoring.md §2).
+3. **Ship a build.** Until then, the metric loses granularity for whatever traffic hits that path — but the system is functionally correct (the order is still compensated; only the metric label is wrong).
+
+**Re-notification cadence.** Alertmanager will re-page every `repeat_interval` (default 4h for warning) until the regression is deployed away.
+
+---
+
+## SagaCompensatorRedisInventoryLeak
+
+**Symptom.** `increase(saga_compensator_events_processed_total{outcome="redis_revert_error"}[5m]) > 0`. Severity `critical` (single-occurrence alert; `for: 0m`).
+
+**This is a real inventory leak.** Unlike `already_compensated_redis_error` (idempotent re-drive blip — usually benign because SETNX guard means Redis state was already correct from a previous delivery), `redis_revert_error` fires on the FRESH compensation path: PG `MarkCompensated` committed, but the subsequent `RevertInventory` call failed. The order is `compensated` in PG, but the Redis qty key is permanently short by the order's quantity until manual intervention.
+
+**Action.**
+1. **Identify the affected order(s).** Check the saga compensator logs around the alert timestamp:
+   ```bash
+   docker logs booking_app 2>&1 | grep "failed to rollback Redis inventory" | tail -20
+   ```
+   Each log line carries `order_id` + `error` for triage.
+2. **Verify Redis health.** `redis-cli INFO replication` + `redis-cli MEMORY USAGE saga:reverted:order:<id>` for the affected orders. If Redis is down → restore Redis first, then proceed.
+3. **Manually revert the inventory.** For each affected order:
+   ```bash
+   # Get the ticket_type_id and quantity from the order
+   psql ... -c "SELECT ticket_type_id, quantity FROM orders WHERE id = '<order_id>'"
+   # INCRBY the Redis qty key (CAREFULLY — verify the SETNX guard isn't already set,
+   # otherwise you'd double-count if a future re-drive succeeds)
+   redis-cli EXISTS "saga:reverted:order:<order_id>"  # should be 0; if 1, skip — already reverted
+   redis-cli INCRBY "ticket_type_qty:<ticket_type_id>" <quantity>
+   redis-cli SET "saga:reverted:order:<order_id>" "1" EX 604800  # arm SETNX guard
+   ```
+4. **Alternative — full rehydrate.** `booking-cli rehydrate` walks PG and rewrites Redis qty keys via SETNX. This is safe but slower and recovers inventory for ALL ticket types, not just the affected one.
+
+**Why no automatic retry.** The compensator already retried via the saga consumer's retry budget. The persistent failure means Redis was unavailable for the full retry window. By the time this alert fires, the message has been DLQ'd (`order.failed.dlq`). The DLQ is the operator-review path; auto-retry would re-attempt against the same broken Redis and fail again.
 
 ---
 
