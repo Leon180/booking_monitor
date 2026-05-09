@@ -1,6 +1,6 @@
 # D12 — 4-stage architecture comparison harness
 
-> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) shipped.** Stage 4 observability + the multi-target harness land in PR-D12.4 + PR-D12.5.
+> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) shipped.** The multi-target harness lands in PR-D12.5.
 
 D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Four separate Go binaries share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all four under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
 
@@ -11,7 +11,7 @@ D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadm
 | **1** | `cmd/booking-cli-stage1/` | API → Postgres `BEGIN; SELECT FOR UPDATE; UPDATE event_ticket_types; INSERT orders; COMMIT;` | (baseline) |
 | **2** | `cmd/booking-cli-stage2/` | API → Redis Lua atomic deduct → SYNCHRONOUS PG INSERT; revert.lua on INSERT failure | Redis hot-path inventory (SoT migrates to `ticket_type_qty:{id}`); no async buffering — saturation IS the sync PG INSERT |
 | **3** | `cmd/booking-cli-stage3/` | API → Redis Lua → `orders:stream` → async worker → DB INSERT (worker UoW: `DecrementTicket` + `Order.Create`); revert.lua + UPDATE on compensator path | async via stream + worker buffers the PG INSERT off the request hot path; no Kafka outbox / saga consumer (in-binary expiry sweeper handles abandon) |
-| 4 | `cmd/booking-cli/` (current; +observability in PR-D12.4) | API → Redis Lua → `orders:stream` → worker → DB INSERT; **money movement via** `/pay` + D5 webhook (not Kafka-driven post-D7); `order.failed` outbox → Kafka → in-process saga compensator (D5 webhook `payment_failed` + D6 expiry sweeper + recon force-fail as the only producers) | full Pattern A end-to-end with saga compensation only on the failure path |
+| **4** | `cmd/booking-cli/` (current) | API → Redis Lua → `orders:stream` → worker → DB INSERT; **money movement via** `/pay` + D5 webhook (not Kafka-driven post-D7); `order.failed` outbox → Kafka → in-process saga compensator (D5 webhook `payment_failed` + D6 expiry sweeper + recon force-fail as the only producers) | full Pattern A end-to-end with saga compensation only on the failure path; PR-D12.4 adds throughput observability (3 metrics + 4 alerts + outcome-label exhaustiveness) |
 
 > **Stage 4 ≠ the README's "Architecture Evolution" Stage 4 diagram.** The README's evolution section labels its Stage 4 as the *historical* `v0.2.0–v0.4.0` pre-D7 architecture (`payment_worker` + `order.created` Kafka topic). D12 Stage 4 is the **current post-D7 binary** — `payment_worker` removed, saga consumer in-process inside `app`. `comparison.md` (lands in PR-D12.5) calls this out explicitly so readers don't conflate the two.
 
@@ -466,6 +466,174 @@ PR-D12.5's `comparison.md` will frame Stage 4 (with Kafka + saga) as the next la
 
 ---
 
+## Stage 4 — Pattern A end-to-end + saga compensator observability (PR-D12.4)
+
+### Architecture
+
+Stage 4 is the **current production binary** (`cmd/booking-cli`). The architecture itself was settled by D5–D7 + D4.1 follow-up; PR-D12.4's contribution is **making the failure-path saga compensator observable** so the comparison harness can frame Stage 4's incremental cost vs Stage 3 quantitatively.
+
+```
+POST /book   ─── inherited from Stage 3 verbatim ───
+  EVAL deduct.lua → XADD orders:stream → 202 Accepted
+  worker → uow.Do { TicketType.DecrementTicket + Order.Create }
+
+POST /pay   ── D4 PaymentIntent (Stripe-shape; gateway-idempotent on order_id) ──
+POST /webhook/payment   ── D5 inbound provider webhook (HMAC-verified) ──
+  succeeded → MarkPaid
+  payment_failed → MarkPaymentFailed + outbox INSERT (events_outbox)
+                                              ↓
+                                              ↓  ─── async ───
+                                              ↓
+                                  OutboxRelay (poll every 1s,
+                                  pg_try_advisory_lock leader)
+                                              ↓
+                                  events_outbox.created_at  ─→  kafka.Message.Time
+                                              ↓
+                                  Kafka order.failed topic
+                                              ↓
+                                  SagaConsumer (in-process,
+                                  group=booking-saga-group)
+                                              ↓
+                                  HandleOrderFailed(ctx, payload, originatedAt)
+                                              ↓
+                                  uow.Do { resolveTicketTypeID (Path A/B/C)
+                                            → IncrementTicket
+                                            → MarkCompensated }
+                                              ↓
+                                  RevertInventory (revert.lua, idempotent)
+                                              ↓
+                                  metrics.RecordEventProcessed(outcome)
+                                  metrics.ObserveLoopDuration(time.Since(originatedAt))   ← only on `compensated`
+                                  metrics.SetConsumerLag(time.Since(msg.Time))            ← every loop, every outcome
+
+D6 expiry sweeper + recon force-fail emit the SAME `order.failed` outbox
+shape — the saga compensator is path-agnostic to the producer.
+```
+
+### What Stage 4 adds vs Stage 3
+
+| Layer | Stage 3 | Stage 4 |
+|---|---|---|
+| Failure-path compensation | In-binary `stage3Compensator` called by sweeper + `/test/payment/confirm/:id?outcome=failed` directly | Outbox event → Kafka `order.failed` → in-process saga consumer → `HandleOrderFailed` |
+| Cross-process compensation guarantee | Same-binary mutex (sweeper goroutine vs HTTP handler — runtime contention) | At-least-once Kafka delivery + idempotent DB MarkCompensated + idempotent revert.lua (SETNX guard on compensation key) |
+| Failure-path observability | Sweeper-level logs only (no histograms / counters / lag) | 3 throughput metrics + 13 exhaustive outcome labels + 4 alerts + 4 runbook sections |
+| Money-movement architecture | `/test/payment/confirm/:id` direct compensator call (no real webhook) | D5 inbound provider webhook (HMAC-verified) + D4 PaymentIntent gateway adapter (gateway-idempotent on `order_id`) |
+| Recovery surface | Sweeper-only (PG `WHERE reserved_until <= NOW()`) | Sweeper + recon + saga watchdog + saga consumer PEL recovery (Kafka group offset commit) |
+
+### Saga compensator throughput observability (the PR-D12.4 contribution)
+
+Three new Prometheus metrics plus 13 outcome-label exhaustiveness:
+
+| Metric | Type | Labels | What it measures |
+|---|---|---|---|
+| `saga_compensator_events_processed_total` | Counter | `outcome` | One increment per `order.failed` event consumed; the `outcome` label classifies WHY the compensator returned (success, idempotent re-drive, classified error, or `unknown` sentinel) |
+| `saga_compensation_loop_duration_seconds` | Histogram | (none) | E2E latency from `events_outbox.created_at` to `MarkCompensated` commit. **Observed ONLY on the `compensated` success path** — `already_compensated` is sub-millisecond no-op work and would skew p50/p99 to the floor. Buckets `0.05s … 300s` (failure-path latency can be minutes due to retries) |
+| `saga_compensation_consumer_lag_seconds` | Gauge | (none) | `time.Since(kafka.Message.Time)` per loop iteration; companion goroutine zeroes the gauge after 30s of no messages so a quiet system reads 0 instead of stuck-at-last-known |
+
+The 13 outcome labels are **pre-warmed at boot** (`metrics_init.go`) so PromQL alerts evaluate `rate(...{outcome="X"}[5m])` from second 0, not from "first time we observed X". The full label set:
+
+| Label | Path | Histogram observed? |
+|---|---|---|
+| `compensated` | Full happy path: GetByID → IncrementTicket → MarkCompensated → RevertInventory all OK | ✓ |
+| `already_compensated` | Kafka at-least-once redelivery; order already in `compensated` state; Redis revert.lua succeeds (idempotent) | ✗ |
+| `already_compensated_redis_error` | Same as above but RevertInventory failed — distinguishes benign idempotent re-drive blip from FRESH compensation Redis failure (real inventory leak signal) | ✗ |
+| `path_c_skipped` | Legacy `uuid.Nil` payload + 0 or > 1 ticket_types per event (D4.1 rolling-upgrade tail or D8 multi-ticket future). Inside the UoW: `IncrementTicket` skipped, `MarkCompensated` still applied (the order is no longer recoverable to a charging path either way). After UoW: Redis revert skipped (no resolved ticket_type to scope the runtime key) | ✗ |
+| `unmarshal_error` | `OrderFailedEvent` JSON parse failed; payload routed to be re-delivered (consumer-side dead-letter is a future PR) | ✗ |
+| `getbyid_error` / `list_ticket_type_error` / `incrementticket_error` / `markcompensated_error` | Per-step `*stepError` wrapper from inside the UoW closure; classified by `outcomeForStepError` via `errors.As`, NOT string matching | ✗ |
+| `redis_revert_error` | FRESH (not idempotent re-drive) Redis revert failure — paired alert `SagaCompensatorRedisInventoryLeak` fires on `rate > 0.1/s for 2m` | ✗ |
+| `context_error` | UoW returned `context.Canceled` / `context.DeadlineExceeded` — separates shutdown noise from real failures so ops can filter | ✗ |
+| `uow_infra_error` | UoW returned a non-stepError, non-context error (tx-begin failure, connection-pool exhaustion) | ✗ |
+| `unknown` | **Deferred sentinel** — fired only by the `did_record` closing-defer if a future contributor adds a return path that forgets to call `record(outcome)`. Paired alert `SagaCompensatorClassifierDrift` fires on `rate > 0` | ✗ |
+
+The classifier is in `internal/application/saga/compensator.go:36-50` (`outcomeForStepError`) and uses `errors.As` against the typed `*stepError` wrapper — string matching the error message would be brittle to error-message-prose tweaks.
+
+### E2E latency data path (Slice 0 substrate)
+
+The histogram measures **end-to-end** latency, not just compensator-internal work. Threading the timestamp through the pipeline is what makes that possible:
+
+```
+events_outbox.created_at   ← factory-assigned at outbox INSERT time
+        ↓                    (NOT DB-assigned; preserves timestamp through relay restart)
+OutboxEvent.CreatedAt()    ← rehydration via ReconstructOutboxEvent in postgres scan
+        ↓
+kafka.Message.Time         ← OutboxRelay sets this on publish via messageForOutboxEvent
+        ↓                    (defense-in-depth zero-time guard rejects publish at boundary)
+HandleOrderFailed(ctx, payload, originatedAt time.Time)
+        ↓
+metrics.ObserveLoopDuration(time.Since(originatedAt))   ← only on compensated path
+```
+
+`originatedAt` is wired through to `HandleOrderFailed` as an explicit argument (NOT pulled from a goroutine-local) so the saga watchdog (which re-drives stuck `failed` orders without a fresh Kafka message) can pass `time.Now()` without conflating watchdog-driven latency with consumer-driven latency.
+
+### 4 new alerts
+
+| Alert | Condition | Severity | Rationale |
+|---|---|---|---|
+| `SagaCompensatorErrorRate` | `(sum(rate(...{outcome!~"compensated\|already_compensated\|already_compensated_redis_error"}[5m])) / sum(rate(...[5m]))) > 0.05` for `5m` | warning | **Ratio**, not absolute rate — non-success outcomes / total outcomes. Threshold `0.05` (5%). `already_compensated_redis_error` is excluded because Kafka at-least-once redelivery bursts are benign idempotent re-drives — the `SagaCompensatorRedisInventoryLeak` alert below covers the FRESH-compensation Redis failure separately |
+| `SagaConsumerLagHigh` | `saga_compensation_consumer_lag_seconds > 30` for `2m` | warning | Either Kafka group offset is stuck (consumer wedged) or outbox-relay-to-Kafka path is backed up. 30s aligns with `idleResetThreshold` so quiet-system false positives can't sustain — the companion goroutine zeroes the gauge after 30s of no messages |
+| `SagaCompensatorClassifierDrift` | `increase(saga_compensator_events_processed_total{outcome="unknown"}[5m]) > 0` for `0m` | warning | Fires immediately on any single `unknown` increment — `unknown` is the deferred-sentinel, fired ONLY if a future PR adds a return path that forgot `record(outcome)`. Pre-warmed at boot so the alert evaluates the time series from second 0 |
+| `SagaCompensatorRedisInventoryLeak` | `increase(saga_compensator_events_processed_total{outcome="redis_revert_error"}[5m]) > 0` for `0m` | critical | Fires immediately on any single `redis_revert_error` increment. FRESH compensation Redis failure means `MarkCompensated` committed but `revert.lua` did NOT — permanent inventory leak. Paired runbook covers `revert.lua` rollback playbook |
+
+All four alerts have runbook sections under `docs/runbooks/README.md` (silent-failure-hunter Slice 3 CRITICAL — alert anchors must resolve, not 404).
+
+### Deployment expectation: +Inf histogram spike on first PR-D12.4 deploy
+
+The `+Inf` spike risk is narrow and time-bounded — it concerns **pre-PR Kafka messages in flight**, NOT pre-PR DB rows.
+
+- **Pre-PR DB rows are fine.** `events_outbox.created_at` is schema-defaulted to `NOW()` at INSERT time, so any pre-PR row still in `pending` state when the new relay code runs gets read with a real timestamp and threaded into `kafka.Message.Time` correctly.
+- **Pre-PR Kafka messages already published are the problem.** Pre-PR-D12.4, the publisher did NOT set `kafka.Message.Time` (it took raw `(topic, payload)` only, not the OutboxEvent — see the `EventPublisher.Publish` → `EventPublisher.PublishOutboxEvent` API change). Any message published BEFORE the deploy and consumed AFTER the deploy arrives at the new consumer with `kafka.Message.Time = zero` → `time.Since(zero)` ≈ 56 years → lands in the `+Inf` histogram bucket.
+
+Operational impact:
+- p99 of `saga_compensation_loop_duration_seconds` will spike to **absurd values** for the duration of pre-PR Kafka backlog drain.
+- `SagaCompensatorErrorRate` does NOT fire (the `compensated` outcome label is excluded; backlog drain still produces success outcomes).
+- `SagaConsumerLagHigh` MAY fire transiently if backlog is large — that's the actual signal worth investigating; the histogram spike is noise.
+
+Mitigation:
+- Defense-in-depth zero-CreatedAt guard at the **publish** boundary (`kafka_publisher.go`) rejects any new publish with zero CreatedAt → forward path is clean post-deploy.
+- Pre-deploy runbook (TODO post-D12.4): drain `order.failed` topic backlog before deploying or accept the histogram spike as expected one-off noise.
+
+### How to run Stage 4
+
+```bash
+# Build
+go build -o bin/booking-cli ./cmd/booking-cli
+
+# Run (requires Postgres + Redis + Kafka)
+DATABASE_URL='postgres://booking:smoketest_pg_local@localhost:5433/booking?sslmode=disable' \
+  REDIS_PASSWORD=smoketest_redis_local REDIS_ADDR=localhost:6379 \
+  KAFKA_BROKERS=localhost:9092 \
+  PORT=8094 \
+  BOOKING_RESERVATION_WINDOW=20s \
+  EXPIRY_SWEEP_INTERVAL=5s \
+  EXPIRY_GRACE_PERIOD=1s \
+  bin/booking-cli server
+```
+
+Same `make demo-up`-style env-var compatibility as Stages 1–3. Per-stage Postgres DB isolation is still PR-D12.5; until then run only ONE stage binary at a time against the shared backing services.
+
+### How Stage 4 (PR-D12.4) was verified
+
+| Verification | What it pins |
+|---|---|
+| **Compensator outcome-label exhaustive tests** ([`internal/application/saga/compensator_test.go`](../../internal/application/saga/compensator_test.go)) — `TestHandleOrderFailed_OutcomeLabel_Exhaustive` 12 subtests + `TestHandleOrderFailed_UnmarshalError_RecordsOutcome` standalone | Every outcome label has at least one direct test. Each subtest asserts (1) exactly-one outcome recorded, (2) the outcome matches the expected branch, (3) `unknown` sentinel NOT tripped, (4) histogram observed iff `compensated` (no skew from `already_compensated` no-ops). Path-C × already-compensated cross-product covered (Slice 4 review M2) |
+| **shouldResetLag boundary tests** ([`internal/infrastructure/messaging/saga_consumer_test.go`](../../internal/infrastructure/messaging/saga_consumer_test.go)) — `TestShouldResetLag_TableDriven` 7 subtests | Pure-function decision pinned across the matrix: `lastUnixNano==0` sentinel returns true; `<30s ago` doesn't reset; `==30s ago` (boundary equality) doesn't reset (`>` not `>=`); `>30s ago` resets; `1h ago` resets. References production `idleResetThreshold` constant directly so a future tweak fails the test (M1 review fix) |
+| **runIdleReset goroutine lifecycle** — `TestRunIdleReset_ExitsOnCtxDone` (200ms timeout) | Companion goroutine returns within 200ms of ctx cancel → no goroutine leak per Start invocation. The 5s ticker × 30s threshold real-time integration test is deferred (`TODO(d12-test-debt)`) — promoting `idleResetThreshold` to `var` is the documented path forward |
+| **Kafka publisher zero-CreatedAt guard** ([`internal/infrastructure/messaging/kafka_publisher_test.go`](../../internal/infrastructure/messaging/kafka_publisher_test.go)) | Publisher rejects publish at the boundary if `OutboxEvent.CreatedAt()` is zero — defense-in-depth against +Inf histogram spike from pre-PR rows. Ensures the relay errors loudly rather than silently corrupting the histogram |
+| **Outbox row created_at scan + roundtrip** ([`internal/infrastructure/persistence/postgres/outbox_row_test.go`](../../internal/infrastructure/persistence/postgres/outbox_row_test.go) + [`test/integration/postgres/outbox_repository_test.go`](../../test/integration/postgres/outbox_repository_test.go)) | The `created_at` column survives INSERT → SELECT → rehydrate via `ReconstructOutboxEvent`; relay sees the original timestamp not `NOW()` |
+| **Multi-agent review pre-PR (no Codex due to limit)** | Per-slice reviews by silent-failure-hunter + go-reviewer + code-reviewer (no Codex due to rate limit). Slice 1: 4 findings (HIGH watchdog binary missing fx provider — would crash at startup; typo `listticketttype_error` × 2 files; pre-warm scope). Slice 2: 7 findings (UoW classifier `unknown` overload; `already_compensated_redis_error` distinguisher; `originatedAt` arg threading; atomic.Int64 over atomic.Pointer; +3). Slice 3: 7 findings (CRITICAL 4 runbook anchors 404; HIGH `already_compensated_redis_error` excluded from error-rate ratio; +5). Slice 4: 4 findings (M1 const reference; M2 path-C × already-compensated subtest; 2× P2 doc gaps). All actioned before push |
+
+### Architectural cost Stage 4 surfaces vs Stage 3
+
+The saga path adds **cross-process latency** (outbox poll + Kafka round-trip) on the failure path AND adds **operational complexity** (Kafka broker + topic provisioning + group offset management + classifier outcome label maintenance). Every new return path the compensator adds in the future MUST classify or trip the `unknown` sentinel — drift is expensive but visible, not silent.
+
+What the comparison harness will quantify in PR-D12.5:
+- Stage 3 abandon-compensation latency: sweeper tick interval (configurable, ~5s typical) + in-binary compensator (~10ms).
+- Stage 4 abandon-compensation latency: outbox poll interval (1s) + Kafka publish + consumer group fetch + in-process compensator (~10ms) + ObserveLoopDuration histogram captures the actual distribution.
+
+The expected verdict (NOT measured against this PR's binary; PR-D12.5 does the actual benchmarking): Stage 3 has lower median compensation latency; Stage 4 has higher complexity ceiling but observable failure modes with paired alerts. The framing PR-D12.5's `comparison.md` will use: Stage 4 buys cross-process compensation guarantees + multi-binary scaling headroom (the saga consumer is independently scalable from the booking API) at the cost of one Kafka round-trip per compensation event.
+
+---
+
 ## What's in PR-D12.1
 
 ```
@@ -512,12 +680,46 @@ docs/d12/README.md                                      (new Stage 3 section —
 
 Total: ~1.4k LOC. Smaller than PR-D12.2 because Stage 3 reuses Stage 4's `booking.Service` + `worker` package + `deduct.lua` verbatim — only the cmd binary + compensator + integration tests are new. Multi-agent review pre-PR (no Codex due to limit) caught 8 plan-stage findings + 2 Slice 1 HIGH findings (NullUUID, RowsAffected — applied to Stage 2 too) + 5 Slice 2 findings; all actioned before push.
 
-## Future PRs (D12.4 + D12.5)
+## What's in PR-D12.4
+
+```
+ADDED:
+internal/application/saga/metrics.go                          (CompensatorMetrics interface + NopCompensatorMetrics)
+internal/infrastructure/observability/metrics_saga.go         (3 prom vars: counter + histogram + gauge)
+internal/infrastructure/messaging/saga_consumer_test.go       (~150 LOC, 7 shouldResetLag subtests + 1 runIdleReset lifecycle test)
+internal/infrastructure/messaging/kafka_publisher_test.go     (zero-CreatedAt boundary guard tests)
+
+MODIFIED:
+internal/domain/event.go                                      (OutboxEvent.CreatedAt() accessor + factory-assigned)
+internal/infrastructure/persistence/postgres/outbox_row.go    (created_at column scan)
+internal/infrastructure/persistence/postgres/repositories.go  (outbox INSERT explicit created_at = $5)
+internal/infrastructure/persistence/postgres/outbox_row_test.go    (created_at coverage)
+test/integration/postgres/outbox_repository_test.go           (created_at SQL roundtrip)
+internal/application/messaging.go                             (EventPublisher.PublishOutboxEvent replaces Publish)
+internal/application/outbox/relay.go + relay_test.go          (call new PublishOutboxEvent)
+internal/infrastructure/messaging/kafka_publisher.go          (messageForOutboxEvent helper + zero-CreatedAt guard)
+internal/mocks/messaging_mock.go                              (regen)
+internal/application/saga/compensator.go                      (typed *stepError + outcomeForStepError + originatedAt arg + did_record sentinel + 13 record() callsites)
+internal/application/saga/compensator_test.go                 (recordingCompensatorMetrics spy + 12 outcome subtests + 1 unmarshal_error standalone)
+internal/application/saga/watchdog.go + watchdog_test.go      (passes time.Now() as originatedAt)
+internal/infrastructure/messaging/saga_consumer.go            (lastMessageAt atomic.Int64 + lag emit + runIdleReset companion + shouldResetLag pure helper)
+internal/infrastructure/observability/metrics_init.go         (13 outcome labels pre-warmed)
+internal/bootstrap/sweeper_adapters.go                        (prometheusCompensatorMetrics adapter + NewPrometheusCompensatorMetrics)
+cmd/booking-cli/server.go                                     (fx.Provide NewPrometheusCompensatorMetrics)
+cmd/booking-cli/saga_watchdog.go                              (same fx provider; would crash at startup without it — Slice 1 HIGH fix)
+deploy/prometheus/alerts.yml                                  (4 new alerts)
+docs/monitoring.md + docs/monitoring.zh-TW.md                 (§2 metric inventory + §5 alert catalog; bilingual structural parity)
+docs/runbooks/README.md                                       (4 new runbook sections; closes Slice 3 CRITICAL anchor 404)
+docs/d12/README.md                                            (Stage 4 section — this file)
+```
+
+Total: ~2.1k LOC including tests. Tests outnumber production saga code by ~2× (12 outcome subtests + spy infrastructure + 8 saga consumer tests + boundary guard tests). Multi-agent review pre-PR (no Codex due to limit): 8 plan-stage findings + 4 Slice 1 + 7 Slice 2 + 7 Slice 3 + 4 Slice 4 = 30 findings actioned across 5 review rounds.
+
+## Future PRs (D12.5)
 
 | PR | Scope | Effort |
 |---|---|---|
-| **PR-D12.4** | Stage 4 (current cmd/booking-cli) + observability changes: Prometheus scrape-config `stage` target labels for ALL 4 binaries; new saga-throughput metrics (`saga_compensator_events_processed_total{outcome}`, `saga_compensation_loop_duration_seconds` histogram with `events_outbox.created_at → MarkCompensated commit` data path via `kafka.Message.Time`, `saga_compensation_consumer_lag` gauge) | ~3 days |
-| **PR-D12.5** | Harness + `comparison.md`: per-stage Postgres DB + per-stage Redis DB index; docker-compose comparison profile; orchestration script; first comparison.md with the full 6-paper citation map (Psarakis CIDR'25 / SIGMOD'25 tutorial / Faleiro PVLDB'17 / Cheng PVLDB'24 / Laigner TOSEM'25 / Kløvedal preprint) | ~5-7 days |
+| **PR-D12.5** | Harness + `comparison.md`: per-stage Postgres DB + per-stage Redis DB index; docker-compose comparison profile; orchestration script; per-stage Prometheus scrape-config `stage` target labels for all 4 binaries; first comparison.md with the full 6-paper citation map (Psarakis CIDR'25 / SIGMOD'25 tutorial / Faleiro PVLDB'17 / Cheng PVLDB'24 / Laigner TOSEM'25 / Kløvedal preprint) | ~5-7 days |
 
 ## Cross-references
 
