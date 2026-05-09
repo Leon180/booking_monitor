@@ -213,7 +213,12 @@ bench-down-clean: ## D12.5 — stop AND remove volumes (resets all state)
 
 bench-smoke: ## D12.5 — minimal smoke (VUS=1 DURATION=10s) to detect harness rot in CI
 	@$(MAKE) bench-up
-	@echo "Running 10s smoke against each stage..."
+	@echo "Running 10s smoke against each stage (event create + k6 sanity for both scenarios)..."
+	@# Closes Slice 9 review SFH M4: bench-smoke originally did just
+	@# event-create curl (no k6 at all), so a broken k6 script (wrong
+	@# threshold name, wrong metric ref, JS syntax error) wouldn't
+	@# surface in CI. Now invokes k6 at VUS=1 / DURATION=5s against
+	@# both scenarios per stage to actually exercise the script paths.
 	@for stage in 1 2 3 4; do \
 	  port=$$((8090 + $$stage)); \
 	  echo "stage $$stage smoke (port $${port})..."; \
@@ -221,7 +226,14 @@ bench-smoke: ## D12.5 — minimal smoke (VUS=1 DURATION=10s) to detect harness r
 	    -H 'Content-Type: application/json' \
 	    -d '{"name":"smoke","total_tickets":10,"price_cents":1000,"currency":"usd"}' \
 	    >/dev/null || { echo "  ✗ stage $$stage event create failed"; exit 1; }; \
-	  echo "  ✓ stage $$stage accepted 1 event"; \
+	  echo "  ✓ stage $$stage event create OK"; \
+	  echo "  → stage $$stage k6 intake-only smoke (VUS=1 DURATION=5s)..."; \
+	  k6 run -q --vus 1 --duration 5s \
+	    -e API_ORIGIN="http://localhost:$${port}" \
+	    -e VUS=1 -e DURATION=5s -e TICKET_POOL=10000 \
+	    scripts/k6_intake_only.js >/dev/null \
+	    || { echo "  ✗ stage $$stage k6 intake-only smoke FAILED"; exit 1; }; \
+	  echo "  ✓ stage $$stage k6 intake-only smoke OK"; \
 	done
 	@$(MAKE) bench-down-clean
 	@echo "bench-smoke OK"

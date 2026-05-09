@@ -722,9 +722,10 @@ ADDED:
 deploy/postgres/init/02_create_stage_dbs.sql          (per-stage DB provisioning, idempotent \gexec)
 docker-compose.comparison.yml                          (9 services on non-conflicting ports)
 deploy/prometheus/prometheus.comparison.yml            (per-stage scrape labels: stage + architecture)
-scripts/run_4stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × 4 → snapshot → tear-down)
-scripts/generate_comparison_md.py                      (k6 summary.json → comparison.md emitter; 6-citation map)
-docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/     (the canonical run output)
+scripts/run_4stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × 4 (both scenarios) → snapshot → tear-down)
+scripts/k6_intake_only.js                              (Slice 8 — pure-intake k6 scenario, Ticketmaster-pattern booking-layer ceiling)
+scripts/generate_comparison_md.py                      (k6 summary.json → comparison.md emitter; 9-citation map; dual-scenario rendering)
+docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/     (the canonical run output, both scenarios)
 
 MODIFIED:
 Dockerfile                                             (BUILD_TARGET arg; backward-compatible default ./cmd/booking-cli)
@@ -735,13 +736,18 @@ README.md + README.zh-TW.md                            (D12 cross-link to compar
 docs/PROJECT_SPEC.md + docs/PROJECT_SPEC.zh-TW.md      (Stage 4 evolution note: now-past-tense for D12 benchmarking; bilingual)
 ```
 
-Total: ~1.5k LOC including the orchestration + helper scripts. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors). All actioned before PR-open.
+Total: ~1.9k LOC including the orchestration + helper scripts + 2 k6 scenarios. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors; Slice 8: final 2-CRIT + 6-HIGH gate review). All actioned before PR-open.
 
 The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × 4-stage benchmark cost on every push.
 
-**Citation map**: 9 verified citations in the comparison.md (5 industry sources + 4 peer-reviewed). Slice 4 review caught fabrications in the original 7-paper plan (Faleiro PVLDB'17 → CIDR'17, Atikoglu SIGMOD'12 → SIGMETRICS'12, Kløvedal 2025 preprint dropped as unverifiable). Slice 7 added 3 funnel-methodology citations (Ticketmaster Q1'23 / Stripe Q3'24 / Shopify BFCM'24) when the headline metric was migrated from aggregate `http_reqs/s` to **booking-intake RPS** — see Slice 7 below.
+**Citation map**: 9 verified citations in the comparison.md (5 industry sources + 4 peer-reviewed). Slice 4 review caught fabrications in the original 7-paper plan (Faleiro PVLDB'17 → CIDR'17, Atikoglu SIGMOD'12 → SIGMETRICS'12, Kløvedal 2025 preprint dropped as unverifiable). Slice 7 added 3 funnel-methodology citations (Ticketmaster Q1'23 / Stripe PaymentIntent docs / Shopify BFCM'24 engineering announcement) when the headline metric was migrated from aggregate `http_reqs/s` to **booking-intake RPS**.
 
-**Funnel-stage methodology (Slice 7)**: the canonical headline number is **booking intake RPS** — `accepted_bookings.rate` (POST /book → 202), NOT aggregate `http_reqs.rate`. Aggregate http_reqs mixes intake with payment-intent calls and status polls, obscuring the architectural-cost signal. This split mirrors Ticketmaster's "tickets sold per second" published metric, Stripe's separate PaymentIntent-creation-rate vs settlement-rate reporting, and Shopify's BFCM 2024 distinction between total request rate and accepted-orders rate. The funnel decomposition section in `comparison.md` shows all 3 layers (intake → authorization → settlement) plus per-layer p95 latency.
+**Dual-scenario methodology (Slices 7 + 8)**: the comparison.md reports TWO complementary headline numbers — Slice 7 made aggregate `http_reqs/s` no longer the headline; Slice 8 then split intake measurement into two scenarios:
+
+1. **Full-flow intake/s** (`accepted_bookings.rate` from `k6_two_step_flow.js`) — operational reality under realistic conversion-rate-aware mixed workload. Each VU goes through the full book → poll → pay → confirm → poll-paid funnel; intake/s is therefore THROTTLED by per-VU full-flow latency. Useful for capacity planning under realistic conditions.
+2. **Intake-only ceiling/s** (`accepted_bookings.rate` from `k6_intake_only.js`) — booking-layer ISOLATED throughput. Each VU just hammers `POST /book` → next iteration with no poll/pay/confirm. Directly comparable to Ticketmaster's published "tickets sold per second" (250/s peak) and Stripe's documented PaymentIntent-lifecycle layer separation (intent / authorization / settlement as distinct phases). Reveals the booking-layer architectural ceiling that full-flow load can't expose.
+
+The funnel decomposition section in `comparison.md` shows all 3 funnel layers (intake → authorization → settlement) plus per-layer p95 latency for the full-flow scenario, AND a separate "Booking-layer ceiling" section for the intake-only scenario.
 
 ## Cross-references
 
