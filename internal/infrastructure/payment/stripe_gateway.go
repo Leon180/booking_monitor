@@ -653,15 +653,21 @@ func redactJSONField(s, key string) string {
 			}
 			// Unterminated string handling: if the inner loop scanned to
 			// end-of-input without finding a closing `"` (truncated /
-			// partially-buffered log line), fail SAFE — redact to end of
-			// string rather than silently dropping the unterminated tail.
-			// We accept that any non-sensitive bytes after the unterminated
-			// string also get redacted; that's fine for log output where
-			// the malformed JSON is itself unusable. Prevents the silent
-			// data-loss case flagged by final-pre-merge multi-agent review.
+			// partially-buffered log line), fail SAFE — redact to end
+			// of string. `break` (NOT `return`): the OUTER prefix loop
+			// must still run the second prefix variant (`"key": "`),
+			// because the redacted suffix could legitimately contain
+			// it from an earlier truncation. The redaction itself is
+			// guaranteed harmless on the second pass — `s[valueStart:]`
+			// is now the literal `<redacted>` marker, which contains
+			// no `"`, so the prefix scan finds nothing. (Post-open
+			// multi-agent review fix — `return s` here was accidentally
+			// correct but logically misleading; future contributors
+			// adding a third prefix variant would silently drop the
+			// new variant on the unterminated path.)
 			if valueEnd >= len(s) {
 				s = s[:valueStart] + replacement
-				return s
+				break
 			}
 			s = s[:valueStart] + replacement + s[valueEnd:]
 			scanFrom = valueStart + len(replacement)

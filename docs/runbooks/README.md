@@ -1029,22 +1029,24 @@ Production deploys against Stripe's live mode require switching three pieces of 
 
 1. **Stripe dashboard → Developers → API keys.** Confirm a Restricted Key (`rk_live_*`) exists with the minimum scope: `payment_intents:write` + `payment_intents:read`. Avoid the Secret Key (`sk_live_*`) — full-account scope means a leak compromises everything.
 2. **Stripe dashboard → Developers → Webhooks.** Add the production webhook endpoint pointing at `https://<your-domain>/webhook/payment`. Subscribe to `payment_intent.succeeded` + `payment_intent.payment_failed` only. Copy the signing secret (`whsec_*`) — this is the LIVE-mode webhook secret, distinct from the test-mode one.
-3. **Verify the webhook endpoint is reachable from Stripe.** Stripe's "Send test webhook" button posts a synthetic `payment_intent.succeeded` to your endpoint and shows the response code in the dashboard. Expect 200 (or 401 if you haven't deployed the LIVE secret yet — that's the next step).
 
 **Cutover (production environment):**
 
-4. Update the deployment env (k8s Secret / SSM Parameter Store / equivalent) — set in lockstep:
+3. Update the deployment env (k8s Secret / SSM Parameter Store / equivalent) — set in lockstep:
    - `APP_ENV=production`
    - `PAYMENT_PROVIDER=stripe`
    - `STRIPE_API_KEY=rk_live_xxx`
    - `STRIPE_WEBHOOK_SECRET=whsec_xxx` (the live-mode one from step 2)
-5. Roll the deployment. Watch the boot log for the `LoadConfig` validation lines: any `sk_test_*` / missing webhook secret aborts startup with a non-zero exit code, so a misconfigured rollout fails fast at pod restart instead of running silently against test mode.
-6. **First-charge sanity check.** Within 5 minutes of cutover, walk one real booking end-to-end (book → pay → webhook arrival). Verify in Stripe dashboard:
+4. Roll the deployment. Watch the boot log for the `LoadConfig` validation lines: any `sk_test_*` / missing webhook secret / `pk_live_*` aborts startup with a non-zero exit code, so a misconfigured rollout fails fast at pod restart instead of running silently against test mode.
+5. **Verify the webhook endpoint is reachable from Stripe.** Now that the live secret is deployed, Stripe dashboard → Webhooks → "Send test webhook" should respond 200. A 401 here means signature mismatch — the deployed secret doesn't match the one Stripe is signing with (re-copy from dashboard step 2). A 5xx / connection refused means Stripe can't reach the URL at all (firewall / DNS / load balancer config).
+6. **First-charge sanity check.** Within 5 minutes of step 5 passing, walk one real booking end-to-end (book → pay → webhook arrival). Verify in Stripe dashboard:
    - PaymentIntent shows `livemode: true`
    - Webhook delivery shows 200 response
    - Our DB `orders` row reaches `paid` status
 
-**Rollback** (if step 6 fails). Revert the env to test-mode keys (`sk_test_*` / test-mode `whsec_*`) and roll back the deployment. The booking flow continues against test mode while you investigate.
+**Rollback** (if step 5 or 6 fails). Revert the env to test-mode keys (`sk_test_*` / test-mode `whsec_*`) and roll back the deployment. The booking flow continues against test mode while you investigate.
+
+**Note on step ordering** (post-open multi-agent review fix). Earlier draft of this runbook tried to verify webhook reachability BEFORE the live secret was deployed; that gave operators a 401 they were told to ignore, hiding any real connectivity problem. The reordered sequence above puts reachability AFTER the secret is deployed so the response code carries unambiguous signal: 200 = healthy, 401 = wrong secret, 5xx/refused = network problem.
 
 ### Webhook secret rotation playbook
 

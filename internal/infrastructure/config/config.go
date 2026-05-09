@@ -847,7 +847,7 @@ func (c *Config) Validate() error {
 			// at startup.
 			if normalizedAppEnv(c.App.Env) == "production" &&
 				strings.HasPrefix(c.Payment.Stripe.APIKey, "pk_live_") {
-				missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY is a publishable key (pk_live_*) — Stripe rejects publishable keys on server-side API calls with 401; use a Restricted Key (rk_live_*) instead")
+				missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY is a publishable key (pk_live_*) — Stripe rejects publishable keys on server-side API calls with 401; use a Secret Key (sk_live_*) or Restricted Key (rk_live_*; preferred — minimum-privilege scope)")
 			}
 		}
 		if c.Payment.Stripe.WebhookSecret == "" && c.Payment.WebhookSecret == "" {
