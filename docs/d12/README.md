@@ -1,6 +1,6 @@
 # D12 — 4-stage architecture comparison harness
 
-> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) shipped.** The multi-target harness lands in PR-D12.5.
+> Status: **D12 closed — PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) + PR-D12.5 (multi-target harness + comparison.md) all shipped.** See [docs/benchmarks/comparisons/](../benchmarks/comparisons/) for the apples-to-apples comparison reports.
 
 D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Four separate Go binaries share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all four under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
 
@@ -715,11 +715,39 @@ docs/d12/README.md                                            (Stage 4 section �
 
 Total: ~2.1k LOC including tests. Tests outnumber production saga code by ~2× (12 outcome subtests + spy infrastructure + 8 saga consumer tests + boundary guard tests). Multi-agent review pre-PR (no Codex due to limit): 8 plan-stage findings + 4 Slice 1 + 7 Slice 2 + 7 Slice 3 + 4 Slice 4 = 30 findings actioned across 5 review rounds.
 
-## Future PRs (D12.5)
+## What's in PR-D12.5
 
-| PR | Scope | Effort |
-|---|---|---|
-| **PR-D12.5** | Harness + `comparison.md`: per-stage Postgres DB + per-stage Redis DB index; docker-compose comparison profile; orchestration script; per-stage Prometheus scrape-config `stage` target labels for all 4 binaries; first comparison.md with the full 6-paper citation map (Psarakis CIDR'25 / SIGMOD'25 tutorial / Faleiro PVLDB'17 / Cheng PVLDB'24 / Laigner TOSEM'25 / Kløvedal preprint) | ~5-7 days |
+```
+ADDED:
+deploy/postgres/init/02_create_stage_dbs.sql          (per-stage DB provisioning, idempotent \gexec)
+docker-compose.comparison.yml                          (9 services on non-conflicting ports)
+deploy/prometheus/prometheus.comparison.yml            (per-stage scrape labels: stage + architecture)
+scripts/run_4stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × 4 (both scenarios) → snapshot → tear-down)
+scripts/k6_intake_only.js                              (Slice 8 — pure-intake k6 scenario, Ticketmaster-pattern booking-layer ceiling)
+scripts/generate_comparison_md.py                      (k6 summary.json → comparison.md emitter; 9-citation map; dual-scenario rendering)
+docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/     (the canonical run output, both scenarios)
+
+MODIFIED:
+Dockerfile                                             (BUILD_TARGET arg; backward-compatible default ./cmd/booking-cli)
+Makefile                                               (bench-up / bench-down / bench-down-clean / bench-smoke targets)
+docs/d12/README.md                                     (this file: status closure + What's in section)
+docs/post_phase2_roadmap.md                            (D12 marked closed)
+README.md + README.zh-TW.md                            (D12 cross-link to comparison.md; bilingual)
+docs/PROJECT_SPEC.md + docs/PROJECT_SPEC.zh-TW.md      (Stage 4 evolution note: now-past-tense for D12 benchmarking; bilingual)
+```
+
+Total: ~1.9k LOC including the orchestration + helper scripts + 2 k6 scenarios. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors; Slice 8: final 2-CRIT + 6-HIGH gate review). All actioned before PR-open.
+
+The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × 4-stage benchmark cost on every push.
+
+**Citation map**: 9 verified citations in the comparison.md (5 industry sources + 4 peer-reviewed). Slice 4 review caught fabrications in the original 7-paper plan (Faleiro PVLDB'17 → CIDR'17, Atikoglu SIGMOD'12 → SIGMETRICS'12, Kløvedal 2025 preprint dropped as unverifiable). Slice 7 added 3 funnel-methodology citations (Ticketmaster Q1'23 / Stripe PaymentIntent docs / Shopify BFCM'24 engineering announcement) when the headline metric was migrated from aggregate `http_reqs/s` to **booking-intake RPS**.
+
+**Dual-scenario methodology (Slices 7 + 8)**: the comparison.md reports TWO complementary headline numbers — Slice 7 made aggregate `http_reqs/s` no longer the headline; Slice 8 then split intake measurement into two scenarios:
+
+1. **Full-flow intake/s** (`accepted_bookings.rate` from `k6_two_step_flow.js`) — operational reality under realistic conversion-rate-aware mixed workload. Each VU goes through the full book → poll → pay → confirm → poll-paid funnel; intake/s is therefore THROTTLED by per-VU full-flow latency. Useful for capacity planning under realistic conditions.
+2. **Intake-only ceiling/s** (`accepted_bookings.rate` from `k6_intake_only.js`) — booking-layer ISOLATED throughput. Each VU just hammers `POST /book` → next iteration with no poll/pay/confirm. Directly comparable to Ticketmaster's published "tickets sold per second" (250/s peak) and Stripe's documented PaymentIntent-lifecycle layer separation (intent / authorization / settlement as distinct phases). Reveals the booking-layer architectural ceiling that full-flow load can't expose.
+
+The funnel decomposition section in `comparison.md` shows all 3 funnel layers (intake → authorization → settlement) plus per-layer p95 latency for the full-flow scenario, AND a separate "Booking-layer ceiling" section for the intake-only scenario.
 
 ## Cross-references
 

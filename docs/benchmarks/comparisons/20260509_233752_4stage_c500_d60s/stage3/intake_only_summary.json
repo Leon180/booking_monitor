@@ -1,0 +1,150 @@
+{
+    "root_group": {
+        "groups": {
+            "setup": {
+                "checks": {
+                    "event created": {
+                        "name": "event created",
+                        "path": "::setup::event created",
+                        "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                        "passes": 1,
+                        "fails": 0
+                    }
+                },
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {}
+            }
+        },
+        "checks": {},
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "metrics": {
+        "http_req_sending": {
+            "avg": 0.004143160031101651,
+            "min": 0,
+            "med": 0.002,
+            "max": 20.576,
+            "p(90)": 0.003,
+            "p(95)": 0.005
+        },
+        "data_sent": {
+            "count": 503304402,
+            "rate": 8386049.241790646
+        },
+        "iteration_duration": {
+            "med": 12.44825,
+            "max": 107.090208,
+            "p(90)": 18.394625,
+            "p(95)": 20.959002099999996,
+            "avg": 13.16011975252091,
+            "min": 0.370917
+        },
+        "data_received": {
+            "count": 515914092,
+            "rate": 8596151.67849398
+        },
+        "business_errors": {
+            "passes": 0,
+            "fails": 508551,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_req_duration": {
+            "p(95)": 20.915,
+            "avg": 13.126216973054126,
+            "min": 0.329,
+            "med": 12.42,
+            "max": 107.073,
+            "p(90)": 18.357
+        },
+        "http_req_waiting": {
+            "med": 12.408,
+            "max": 107.067,
+            "p(90)": 18.288,
+            "p(95)": 20.805,
+            "avg": 13.098180926303124,
+            "min": 0.318
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "http_reqs": {
+            "count": 2278541,
+            "rate": 37965.01073606525
+        },
+        "http_req_connecting": {
+            "avg": 0.0017330985047010357,
+            "min": 0,
+            "med": 0,
+            "max": 43.491,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "iterations": {
+            "count": 2278540,
+            "rate": 37964.99407408254
+        },
+        "http_req_duration{expected_response:true}": {
+            "p(95)": 21.903,
+            "avg": 13.856959166417772,
+            "min": 0.329,
+            "med": 13.419,
+            "max": 56.773,
+            "p(90)": 19.45590000000001
+        },
+        "http_req_blocked": {
+            "avg": 0.0024181517910904517,
+            "min": 0,
+            "med": 0,
+            "max": 43.502,
+            "p(90)": 0.001,
+            "p(95)": 0.001
+        },
+        "accepted_bookings": {
+            "count": 508551,
+            "rate": 8473.46796693003
+        },
+        "http_req_failed": {
+            "passes": 1769989,
+            "fails": 508552,
+            "value": 0.7768080539257358
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_receiving": {
+            "avg": 0.02389288671990631,
+            "min": 0.002,
+            "med": 0.004,
+            "max": 23.319,
+            "p(90)": 0.011,
+            "p(95)": 0.017
+        },
+        "vus": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e0d6a-4d7d-7ea4-b1fa-0b6b67830e4b"
+    }
+}

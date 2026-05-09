@@ -13,6 +13,18 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache make git
 
+# BUILD_TARGET selects which `cmd/<binary>/` to compile. Default
+# `./cmd/booking-cli` preserves backward compatibility for the main
+# `docker-compose.yml` `build: .` shorthand. The D12 comparison
+# harness (`docker-compose.comparison.yml`) overrides this per stage:
+#   stage1 → ./cmd/booking-cli-stage1
+#   stage2 → ./cmd/booking-cli-stage2
+#   stage3 → ./cmd/booking-cli-stage3
+#   stage4 → ./cmd/booking-cli           (the current production binary IS Stage 4)
+# Binary name remains `booking-cli` regardless so the runner stage
+# stays uniform — only the source `cmd/` differs.
+ARG BUILD_TARGET=./cmd/booking-cli
+
 # Copy go mod and sum files
 COPY go.mod go.sum ./
 RUN go mod download
@@ -24,7 +36,7 @@ COPY . .
 RUN go mod tidy
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/bin/booking-cli ./cmd/booking-cli
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/bin/booking-cli "${BUILD_TARGET}"
 
 # Stage 2: Runner
 FROM alpine:3.20

@@ -1,0 +1,150 @@
+{
+    "root_group": {
+        "groups": {
+            "setup": {
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "event created": {
+                            "name": "event created",
+                            "path": "::setup::event created",
+                            "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                            "passes": 1,
+                            "fails": 0
+                        }
+                    }
+            }
+        },
+        "checks": {},
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "metrics": {
+        "http_req_sending": {
+            "max": 23.894,
+            "p(90)": 0.004,
+            "p(95)": 0.005,
+            "avg": 0.004490485014056063,
+            "min": 0,
+            "med": 0.002
+        },
+        "data_sent": {
+            "count": 403531796,
+            "rate": 6723496.187794795
+        },
+        "iterations": {
+            "count": 1826854,
+            "rate": 30438.359570202672
+        },
+        "accepted_bookings": {
+            "count": 503506,
+            "rate": 8389.22906469508
+        },
+        "vus": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "http_req_duration{expected_response:true}": {
+            "max": 80.99,
+            "p(90)": 20.43740000000001,
+            "p(95)": 23.031,
+            "avg": 14.729036817759999,
+            "min": 0.276,
+            "med": 14.258
+        },
+        "http_req_waiting": {
+            "p(95)": 32.218,
+            "avg": 16.366366318618084,
+            "min": 0.188,
+            "med": 15.33,
+            "max": 148.637,
+            "p(90)": 26.497
+        },
+        "http_req_receiving": {
+            "min": 0.002,
+            "med": 0.005,
+            "max": 26.745,
+            "p(90)": 0.012,
+            "p(95)": 0.016,
+            "avg": 0.015461959488252372
+        },
+        "iteration_duration": {
+            "p(95)": 32.28482105,
+            "avg": 16.414902610161473,
+            "min": 0.207042,
+            "med": 15.369209,
+            "max": 148.65725,
+            "p(90)": 26.565583
+        },
+        "http_req_blocked": {
+            "min": 0,
+            "med": 0,
+            "max": 33.359,
+            "p(90)": 0.001,
+            "p(95)": 0.001,
+            "avg": 0.004067029403092173
+        },
+        "http_req_failed": {
+            "passes": 1323348,
+            "fails": 503507,
+            "value": 0.7243858981692581
+        },
+        "http_req_connecting": {
+            "avg": 0.003333043399722479,
+            "min": 0,
+            "med": 0,
+            "max": 25.015,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_duration": {
+            "avg": 16.3863187631206,
+            "min": 0.195,
+            "med": 15.345,
+            "max": 148.644,
+            "p(90)": 26.539,
+            "p(95)": 32.246
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "business_errors": {
+            "fails": 503506,
+            "passes": 0,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_reqs": {
+            "count": 1826855,
+            "rate": 30438.376231829476
+        },
+        "http_req_tls_handshaking": {
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0
+        },
+        "data_received": {
+            "count": 515215325,
+            "rate": 8584325.467951369
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e0d6c-8bc2-797f-960f-400161accbb3"
+    }
+}

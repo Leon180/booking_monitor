@@ -145,6 +145,99 @@ docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@docker-compose up -d app
 	@echo "App restarted in Docker."
 
+# D12.5 — 4-stage comparison harness control surface. The compose file
+# `docker-compose.comparison.yml` brings up bench-isolated Postgres +
+# Redis + Kafka + 4 stage binaries on ports 8091-8094. Used by the
+# orchestration script `scripts/run_4stage_comparison.sh` (Slice 3).
+bench-up: ## D12.5 — bring up the 4-stage comparison harness (ports 8091-8094)
+	@echo "[1/4] Starting backing services (postgres + redis + kafka + prometheus)..."
+	@# Stage binaries hard-fail at startup if their DB has no tables
+	@# (Stage 4's inventoryRehydrate fx hook queries `events`; Stages
+	@# 1-3's sweepers query `orders`). So migrations MUST land before
+	@# the stage binaries start. Bring up backing services first.
+	@docker compose -f docker-compose.comparison.yml up -d --build \
+	  postgres-bench redis-bench zookeeper-bench kafka-bench prometheus-bench
+	@echo ""
+	@echo "[2/4] Waiting for postgres-bench healthy..."
+	@for i in $$(seq 1 30); do \
+	  if [ "$$(docker inspect -f '{{.State.Health.Status}}' booking_bench_pg 2>/dev/null)" = "healthy" ]; then \
+	    echo "  postgres-bench healthy"; break; \
+	  fi; \
+	  sleep 1; \
+	done
+	@echo ""
+	@echo "[3/4] Applying migrations to all 4 stage DBs..."
+	@for stage in 1 2 3 4; do \
+	  echo "  migrating booking_stage$$stage..."; \
+	  $(MAKE) -s migrate-up MIGRATE_DB_URL="postgres://booking:bench_pg_local@localhost:5434/booking_stage$$stage?sslmode=disable" 2>&1 | tail -3 || { echo "  ✗ migration failed for booking_stage$$stage"; exit 1; }; \
+	done
+	@echo ""
+	@echo "[4/4] Starting stage binaries..."
+	@docker compose -f docker-compose.comparison.yml up -d --build \
+	  booking-cli-stage1 booking-cli-stage2 booking-cli-stage3 booking-cli-stage4
+	@echo ""
+	@echo "Waiting for all 4 stages to pass /livez (60s budget)..."
+	@# Use /livez (not /readyz): stages 1-3 only register /livez (no
+	@# ops package), so /readyz returns 404 from those binaries.
+	@for stage in 1 2 3 4; do \
+	  port=$$((8090 + $$stage)); \
+	  ready=false; \
+	  for i in $$(seq 1 60); do \
+	    if curl -sSf "http://localhost:$${port}/livez" >/dev/null 2>&1; then \
+	      echo "  stage $$stage on :$${port} live"; \
+	      ready=true; break; \
+	    fi; \
+	    sleep 1; \
+	  done; \
+	  if [ "$${ready}" != "true" ]; then \
+	    echo "  ✗ stage $$stage on :$${port} did NOT pass /livez within 60s"; \
+	    docker compose -f docker-compose.comparison.yml logs --tail=30 booking-cli-stage$$stage; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo ""
+	@echo "All 4 stages ready:"
+	@echo "  stage 1: http://localhost:8091  (sync SELECT FOR UPDATE)"
+	@echo "  stage 2: http://localhost:8092  (Redis Lua + sync PG INSERT)"
+	@echo "  stage 3: http://localhost:8093  (Redis Lua + async stream/worker)"
+	@echo "  stage 4: http://localhost:8094  (Pattern A + saga compensator)"
+	@echo "  bench Prometheus: http://localhost:9091"
+	@echo ""
+	@echo "Next: scripts/run_4stage_comparison.sh (Slice 3)"
+
+bench-down: ## D12.5 — stop the 4-stage harness (keeps volumes for re-run)
+	@docker compose -f docker-compose.comparison.yml down
+
+bench-down-clean: ## D12.5 — stop AND remove volumes (resets all state)
+	@docker compose -f docker-compose.comparison.yml down -v
+
+bench-smoke: ## D12.5 — minimal smoke (VUS=1 DURATION=10s) to detect harness rot in CI
+	@$(MAKE) bench-up
+	@echo "Running 10s smoke against each stage (event create + k6 sanity for both scenarios)..."
+	@# Closes Slice 9 review SFH M4: bench-smoke originally did just
+	@# event-create curl (no k6 at all), so a broken k6 script (wrong
+	@# threshold name, wrong metric ref, JS syntax error) wouldn't
+	@# surface in CI. Now invokes k6 at VUS=1 / DURATION=5s against
+	@# both scenarios per stage to actually exercise the script paths.
+	@for stage in 1 2 3 4; do \
+	  port=$$((8090 + $$stage)); \
+	  echo "stage $$stage smoke (port $${port})..."; \
+	  curl -sSf -X POST "http://localhost:$${port}/api/v1/events" \
+	    -H 'Content-Type: application/json' \
+	    -d '{"name":"smoke","total_tickets":10,"price_cents":1000,"currency":"usd"}' \
+	    >/dev/null || { echo "  ✗ stage $$stage event create failed"; exit 1; }; \
+	  echo "  ✓ stage $$stage event create OK"; \
+	  echo "  → stage $$stage k6 intake-only smoke (VUS=1 DURATION=5s)..."; \
+	  k6 run -q --vus 1 --duration 5s \
+	    -e API_ORIGIN="http://localhost:$${port}" \
+	    -e VUS=1 -e DURATION=5s -e TICKET_POOL=10000 \
+	    scripts/k6_intake_only.js >/dev/null \
+	    || { echo "  ✗ stage $$stage k6 intake-only smoke FAILED"; exit 1; }; \
+	  echo "  ✓ stage $$stage k6 intake-only smoke OK"; \
+	done
+	@$(MAKE) bench-down-clean
+	@echo "bench-smoke OK"
+
 PAGE ?= 1
 SIZE ?= 10
 STATUS ?=

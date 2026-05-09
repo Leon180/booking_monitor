@@ -104,7 +104,7 @@ flowchart LR
     K4 -.-> S4[Saga]
 ```
 
-The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12 in [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md)) is planned for Phase 3 — same `internal/` packages, different fx wirings, side-by-side benchmark runs.
+The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12; see [`docs/d12/README.md`](docs/d12/README.md)) is shipped — same `internal/` packages, different fx wirings, side-by-side benchmark runs. Each stage's apples-to-apples report lives under [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/), generated via `make bench-up` + `scripts/run_4stage_comparison.sh` + `scripts/generate_comparison_md.py`.
 
 ### Pattern A flow (shipped in v0.5.0 + v0.6.0)
 
