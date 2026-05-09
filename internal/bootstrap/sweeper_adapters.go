@@ -1,6 +1,8 @@
 package bootstrap
 
 import (
+	"time"
+
 	"booking_monitor/internal/application/expiry"
 	"booking_monitor/internal/application/recon"
 	"booking_monitor/internal/application/saga"
@@ -166,6 +168,36 @@ func (prometheusSagaMetrics) ObserveResolveDuration(seconds float64) {
 }
 func (prometheusSagaMetrics) ObserveResolveAge(seconds float64) {
 	observability.SagaWatchdogResolveAgeSeconds.Observe(seconds)
+}
+
+// prometheusCompensatorMetrics implements saga.CompensatorMetrics
+// (PR-D12.4). Sibling to prometheusSagaMetrics above — the
+// watchdog and compensator are functionally separate subsystems
+// (DB-side sweeper vs Kafka-driven hot path), so the
+// observability ports + adapters are split too.
+//
+// The interface uses `time.Duration` rather than `float64
+// seconds` because that's the more idiomatic Go shape at the
+// callsite — the adapter layer here does the conversion. Pre-
+// D12.4 saga.Metrics passed `float64` straight through, leaving
+// the `.Seconds()` call at the watchdog callsite. The new
+// pattern moves that conversion to the boundary, which is the
+// right architectural layer.
+type prometheusCompensatorMetrics struct{}
+
+// NewPrometheusCompensatorMetrics is the fx-friendly constructor.
+func NewPrometheusCompensatorMetrics() saga.CompensatorMetrics {
+	return prometheusCompensatorMetrics{}
+}
+
+func (prometheusCompensatorMetrics) RecordEventProcessed(outcome string) {
+	observability.SagaCompensatorEventsTotal.WithLabelValues(outcome).Inc()
+}
+func (prometheusCompensatorMetrics) ObserveLoopDuration(d time.Duration) {
+	observability.SagaCompensationLoopDuration.Observe(d.Seconds())
+}
+func (prometheusCompensatorMetrics) SetConsumerLag(d time.Duration) {
+	observability.SagaCompensationConsumerLagSeconds.Set(d.Seconds())
 }
 
 // ── expiry sweeper (D6) ──────────────────────────────────────────────

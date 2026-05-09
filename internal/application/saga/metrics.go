@@ -1,5 +1,7 @@
 package saga
 
+import "time"
+
 // Metrics is the watchdog-side observability port — every metric
 // emission inside `Watchdog.Sweep` / `Watchdog.resolve` flows through
 // this interface, NOT through `infrastructure/observability` global
@@ -61,8 +63,84 @@ type Metrics interface {
 // `mlog.NewNop()` patterns already in the codebase.
 type NopMetrics struct{}
 
-func (NopMetrics) SetStuckFailedOrders(int)         {}
-func (NopMetrics) IncResolved(string)               {}
-func (NopMetrics) IncFindStuckErrors()              {}
-func (NopMetrics) ObserveResolveDuration(float64)   {}
-func (NopMetrics) ObserveResolveAge(float64)        {}
+func (NopMetrics) SetStuckFailedOrders(int)       {}
+func (NopMetrics) IncResolved(string)             {}
+func (NopMetrics) IncFindStuckErrors()            {}
+func (NopMetrics) ObserveResolveDuration(float64) {}
+func (NopMetrics) ObserveResolveAge(float64)      {}
+
+// CompensatorMetrics is the SAGA-COMPENSATOR-side observability
+// port (sibling to `Metrics` above which is watchdog-side only).
+// Added in PR-D12.4 because the Kafka-driven compensator hot path
+// (`Compensator.HandleOrderFailed`) was previously uninstrumented
+// — operators had no metrics for compensation throughput, error
+// rates by class, or consumer lag.
+//
+// Why a SIBLING interface rather than extending `Metrics`:
+//
+//   - The watchdog and compensator are functionally separate
+//     subsystems (DB-side sweeper vs Kafka-driven hot path).
+//     Conflating them would force the watchdog to mock
+//     compensator methods in tests and vice versa.
+//   - Decision 2 from the PR-D12.4 plan + plan-stage agent review
+//     CRITICAL #2: the metrics are injected DIRECTLY into the
+//     compensator, NOT via a decorator. Three of the compensator's
+//     return paths (compensated / already_compensated /
+//     path_c_skipped) all return `nil`, indistinguishable from
+//     the outside. The compensator must self-record its outcome
+//     before each return.
+//
+// Method signatures use `time.Duration` rather than `float64
+// seconds` (the watchdog's existing convention). Pinning the
+// type at the application boundary instead of asking callers to
+// `.Seconds()` is the more idiomatic Go shape; the adapter at
+// `internal/bootstrap/sweeper_adapters.go` does the conversion
+// to float64 for the Prometheus histogram/gauge.
+//
+// Outcome label values are documented in `compensator.go` next
+// to the call sites (Slice 2). The adapter's pre-warm in
+// `internal/infrastructure/observability/metrics_init.go`
+// enumerates them so dashboards show 0 for unseen outcomes
+// instead of "no data".
+type CompensatorMetrics interface {
+	// RecordEventProcessed bumps the per-outcome counter. Called
+	// at every return path of `Compensator.HandleOrderFailed`
+	// (the "did_record" sentinel pattern in Slice 2 enforces
+	// no-fall-through). Exact label values pinned by the
+	// integration test in Slice 4.
+	RecordEventProcessed(outcome string)
+
+	// ObserveLoopDuration records end-to-end compensation latency
+	// from `events_outbox.created_at` (threaded through
+	// `kafka.Message.Time` per Slice 0's data-path foundation) to
+	// the moment the compensator commits MarkCompensated. ONLY
+	// observed on the success path — `already_compensated` and
+	// `path_c_skipped` are no-op return paths whose sub-millisecond
+	// durations would skew p50/p99 to the floor and hide real
+	// degradation.
+	ObserveLoopDuration(d time.Duration)
+
+	// SetConsumerLag updates the consumer-lag gauge with
+	// `time.Since(msg.Time)` for the most-recently-processed
+	// message. PERFORMANCE metric, NOT liveness — a crashed
+	// consumer leaves this gauge stale at the last value.
+	// Liveness is observed via `up == 0`. The
+	// `SagaConsumerLagHigh` alert (Slice 3) is gated on `up == 1`
+	// to prevent false positives on consumer crash.
+	//
+	// In multi-replica deployments (future Phase 4), each replica
+	// sets the gauge independently; PromQL queries should use
+	// `max by (instance)` to aggregate. Documented in the
+	// Prometheus Help text.
+	SetConsumerLag(d time.Duration)
+}
+
+// NopCompensatorMetrics is the zero-behaviour
+// `CompensatorMetrics` implementation. Used in tests and any
+// future code path that needs a Compensator without
+// observability. Mirrors `NopMetrics` above.
+type NopCompensatorMetrics struct{}
+
+func (NopCompensatorMetrics) RecordEventProcessed(string) {}
+func (NopCompensatorMetrics) ObserveLoopDuration(time.Duration) {}
+func (NopCompensatorMetrics) SetConsumerLag(time.Duration) {}

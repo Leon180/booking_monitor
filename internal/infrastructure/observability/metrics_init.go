@@ -25,7 +25,8 @@ package observability
 //   - RedisXAddFailuresTotal,
 //     RedisDLQRoutedTotal                     → metrics_redis_streams.go
 //   - ReconResolvedTotal                      → metrics_recon.go
-//   - SagaWatchdogResolvedTotal               → metrics_saga.go
+//   - SagaWatchdogResolvedTotal,
+//     SagaCompensatorEventsTotal             → metrics_saga.go
 //
 // Cross-file references work because all files share `package observability`.
 
@@ -105,6 +106,33 @@ func init() {
 	// stuck-Failed orders; pre-warming makes "0 so far" visible.
 	for _, outcome := range []string{"compensated", "already_compensated", "max_age_exceeded", "getbyid_error", "marshal_error", "compensator_error"} {
 		SagaWatchdogResolvedTotal.WithLabelValues(outcome)
+	}
+	// Pre-warm saga-COMPENSATOR outcomes (PR-D12.4). Distinct from
+	// the watchdog set above — the compensator is the Kafka-driven
+	// hot path and has its own outcome labels (see
+	// `metrics_saga.go`'s SagaCompensatorEventsTotal Help text for
+	// per-label runbook). The "unknown" sentinel MUST be pre-warmed
+	// because the SagaCompensatorClassifierDrift alert (slated for
+	// PR-D12.4 Slice 3, not yet present in deploy/prometheus/alerts.yml)
+	// will fire on `rate(...{outcome="unknown"}[5m]) > 0` — without
+	// pre-warm the alert can't evaluate the series until the first
+	// fall-through, defeating the early-warning purpose.
+	for _, outcome := range []string{
+		"compensated",
+		"already_compensated",
+		"already_compensated_redis_error",
+		"path_c_skipped",
+		"unmarshal_error",
+		"getbyid_error",
+		"list_ticket_type_error",
+		"incrementticket_error",
+		"markcompensated_error",
+		"redis_revert_error",
+		"context_error",
+		"uow_infra_error",
+		"unknown",
+	} {
+		SagaCompensatorEventsTotal.WithLabelValues(outcome)
 	}
 	// Pre-warm sweeper-panic labels (PR-D fixup). The SweepGoroutinePanic
 	// alert fires immediately on any non-zero increase, so the series
