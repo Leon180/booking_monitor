@@ -221,6 +221,15 @@ GitHub Actions 設定檔在 [`.github/workflows/ci.yml`](../.github/workflows/ci
 - `SAGA_MAX_FAILED_AGE`(預設 `24h`)— 超過這個年齡 watchdog 不再重新驅動補償,改記錄 `max_age_exceeded`(需要人工檢視 — 自動 transition 會有 phantom-revert 風險)
 - `SAGA_BATCH_SIZE`(預設 `100`)— 每個 sweep tick 處理的訂單數。`Validate()` 會拒絕 `MaxFailedAge ≤ StuckThreshold`(跨欄位守門員)
 
+**Payment provider — D4.2** — 驅動 booking_monitor → Stripe SDK 介面卡
+- `PAYMENT_PROVIDER`(dev 預設 `mock`,production 預設 `stripe`)— 切換 `internal/bootstrap.NewPaymentGateway` 在「in-process mock」與「真實 `stripe-go v82` SDK 介面卡」之間。Production 啟動會直接拒絕 `mock`。
+- `STRIPE_API_KEY` — Stripe Restricted Key(production 是 `rk_live_*`,dev 是 `sk_test_*`)。Production 啟動會拒絕 `*_test_*` 金鑰(最後一道防線,避免不小心把 prod 跑到 test mode)。
+- `STRIPE_WEBHOOK_SECRET` — webhook 簽章密鑰(`whsec_*`)。test mode 與 live mode 是不同的值。向後相容:若 `STRIPE_WEBHOOK_SECRET` 沒設,會 fallback 讀 `PAYMENT_WEBHOOK_SECRET`(D5 → D4.2 過渡墊片)。
+- `STRIPE_API_TIMEOUT`(預設 `30s`)— 單次呼叫的 budget;config-validate 時會夾在 5min 上限以內。stripe-go 的 `MaxNetworkRetries` 迴圈裡每次重試是新的一次嘗試(**非**累計)。
+- `STRIPE_MAX_NETWORK_RETRIES`(預設 `2`)— stripe-go 內建的 429 / 5xx / 網路重試 budget(每次嘗試的延遲透過 `stripe_api_duration_seconds` 觀測)。
+
+Production cutover checklist + 金鑰輪替 playbook + 金鑰外洩事故處理見 [docs/runbooks/README.md § D4.2 cutover note](../docs/runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production)。
+
 ## `.claude/` 下的可用工具
 
 Claude Code 會自動探索 `.claude/agents/` 與 `.claude/skills/` 下的資產。以下工具採自 [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code)(MIT),完整來源清單見 [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md)。

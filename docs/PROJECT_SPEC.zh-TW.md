@@ -852,6 +852,29 @@ PR #90 用 `TicketTypeRepository.GetByID` 的 read-through cache 補回了一部
 
 **Active follow-up note。** 這塊更完整的規劃筆記在 [docs/design/redis_runtime_metadata_scaling.zh-TW.md](design/redis_runtime_metadata_scaling.zh-TW.md)。它記錄了為什麼 `amount_cents` 要在 reservation 時間點凍結、Lua script 變長到什麼程度仍合理,以及團隊目前對 Redis Functions 與未來 cluster-friendly key / queue topology 的看法。
 
+### 6.10 Payment provider 介面卡(D4.2)
+
+D4.2 把原本 in-process 的 mock payment gateway 換成真實的 `stripe-go v82` SDK 介面卡。Application 層仍然只持有兩個小 port — `PaymentGateway`(建立 PaymentIntent)與 `PaymentStatusReader`(讀 PaymentIntent 狀態)— infrastructure 層提供兩個實作:既有的 mock(`make stress-k6` 和單元測試還在用)以及新的 Stripe 介面卡 ([internal/infrastructure/payment/stripe_gateway.go](../internal/infrastructure/payment/stripe_gateway.go))。透過 `PAYMENT_PROVIDER ∈ {mock, stripe}` 設定切換。
+
+**介面卡設計。** 介面卡是 per-instance 物件,透過 `stripe.NewClient(key, WithBackends(...))` 建立 — 沒有 SDK global state mutation、沒有共用 HTTP client,在 `go test -race` 下多介面卡實例安全。`BackendConfig` 注入(a)專案的 HTTP client(專案 timeout / TLS 設定)、(b)會 strip 掉 bearer token 才寫日誌的 redacting `LeveledLogger`、(c)`MaxNetworkRetries`(stripe-go 內建的 429 / 5xx retry budget)。`internal/bootstrap` 套件提供 `NewPaymentGateway(...)`,依 `cfg.Payment.Provider` switch 後透過 fx 接出去。
+
+**Error 分類。** Stripe 的 `*stripe.Error` 由 `mapStripeError` 透過 `errors.Join` 翻譯成四個 `domain.ErrPayment*` sentinel(同時保留 `errors.Is` 對 sentinel 與底層 stripe-go error 的鏈式判斷):
+
+| stripe-go ErrorType | domain sentinel | Outcome label | HTTP 對應(`/pay`) |
+|:--|:--|:--|:--|
+| `card_error` | `ErrPaymentDeclined` | `declined` | 422 |
+| `api_error`(429 / 5xx)/ network err | `ErrPaymentTransient` | `transient` | 503 / retry |
+| `authentication_error` / `permission_error`(401 / 403) | `ErrPaymentMisconfigured` | `misconfigured` | 500(可 page) |
+| `invalid_request_error`(400)/ `idempotency_error` | `ErrPaymentInvalid` | `invalid` | 500(應用 bug) |
+
+擷取到的 Stripe `Request-Id` 會寫進日誌 + 串到 metric label,跨系統可對映。`classifyOutcome` 是純函式,被 `mapStripeError`(產出 typed error)和 metric emitter(產出 label)共用 — 讓兩個介面不會漂移。
+
+**GetStatus 介面變更。** D4.2 把 `PaymentStatusReader.GetStatus` 從 `(ctx, orderID uuid.UUID)` 改成 `(ctx, paymentIntentID string)`。Reconciler 改成從 order row 讀已寫入的 `payment_intent_id` 直接傳進來 — Stripe API 沒有 orderID 概念(PaymentIntent ID 才是 Stripe 端的 primary key),舊介面強迫 adapter 持有 repository,違反分層。新介面 layer-clean:domain port 講 Stripe 的詞彙,repo lookup 留在 application 層。Reconciler 對空字串(`SetPaymentIntentID` race 形成的 orphan)有 null-guard,直接增加 `recon_null_intent_id_skipped_total` 而不去呼叫帶空 ID 的 gateway。
+
+**Webhook 驗證器(Slice 3b)。** `Stripe-Signature` HMAC 驗證器 ([internal/infrastructure/api/webhook/verifier.go](../internal/infrastructure/api/webhook/verifier.go)) 委派給 stripe-go 的 `stripewebhook.ValidatePayloadWithTolerance`。同一份 crypto、同一份 header 解析、同一份 secret rotation 處理 — 但我們透過 `mapStripeWebhookError` 翻譯層保留自己的 typed error sentinel(`ErrSignatureMissing` / `Malformed` / `SkewExceeded` / `Mismatch`),這樣 alert 的 metric label 分類(`payment_webhook_signature_invalid_total{reason}`)不會因為 SDK 升級而改變形狀。兩個刻意的行為變更已寫進原始碼註解:(1)「header 沒有 v1」與「v1 對不上」都改用 `mismatch`(Stripe SDK 把這兩種折成同一個);(2)未來時間戳的 signature 現在會被接受(Stripe SDK 只檢查過去方向的 skew)。兩個變更都讓我們的驗證器與 Stripe 的官方參考實作對齊。
+
+**PCI 範圍。** 應用後端**永遠不會**收到 raw card data。Stripe Elements 在前端收集卡片資訊,直接送到 Stripe;我們的後端只看到 `PaymentIntent.ID`、`PaymentIntent.client_secret` 以及 lifecycle 的 webhook 事件。屬於 PCI DSS SAQ A 範圍之外。Production cutover checklist + key rotation playbook 見 [`docs/runbooks/README.md` § D4.2 cutover note](runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production)。
+
 ---
 
 ## 7. 可觀測性

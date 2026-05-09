@@ -220,6 +220,15 @@ See [docs/PROJECT_SPEC.md § 7](../docs/PROJECT_SPEC.md) for the full list. Most
 - `SAGA_MAX_FAILED_AGE` (default `24h`) — past this age the watchdog stops re-driving and emits `max_age_exceeded` (operator review required — phantom-revert risk if auto-transitioned)
 - `SAGA_BATCH_SIZE` (default `100`) — orders processed per sweep tick. `Validate()` rejects `MaxFailedAge ≤ StuckThreshold` (cross-field guard)
 
+**Payment provider — D4.2** — drives the booking_monitor → Stripe SDK adapter
+- `PAYMENT_PROVIDER` (default `mock` in dev, `stripe` in production) — switches `internal/bootstrap.NewPaymentGateway` between the in-process mock and the real `stripe-go v82` SDK adapter. Production startup REJECTS `mock`.
+- `STRIPE_API_KEY` — Stripe Restricted Key (`rk_live_*` in production, `sk_test_*` in dev). Production startup rejects `*_test_*` keys (last-line guard against accidentally running against test mode in prod).
+- `STRIPE_WEBHOOK_SECRET` — webhook signing secret (`whsec_*`). Distinct values for test mode vs live mode. Backward-compat: `PAYMENT_WEBHOOK_SECRET` falls back if `STRIPE_WEBHOOK_SECRET` is unset (D5 → D4.2 transition shim).
+- `STRIPE_API_TIMEOUT` (default `30s`) — per-call budget; clamped to 5min ceiling at config-validate. Each retry inside stripe-go's `MaxNetworkRetries` loop is a fresh attempt (NOT aggregate).
+- `STRIPE_MAX_NETWORK_RETRIES` (default `2`) — stripe-go's built-in 429 / 5xx / network retry budget (per-attempt latency observed via `stripe_api_duration_seconds`).
+
+See [docs/runbooks/README.md § D4.2 cutover note](../docs/runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production) for the production cutover checklist + key rotation playbook + leaked-key incident response.
+
 ## Available Tooling under `.claude/`
 
 Claude Code auto-discovers assets placed under `.claude/agents/` and `.claude/skills/`. These are adopted from [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) (MIT) — see [.claude/ATTRIBUTIONS.md](ATTRIBUTIONS.md).

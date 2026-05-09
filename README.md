@@ -163,7 +163,8 @@ D6's job is timing — when does the row expire. The saga compensator owns inven
 - **Async Processing**: Redis Streams with consumer groups and PEL recovery
 - **Transactional Outbox**: Atomic order + event persistence, Kafka publishing
 - **Saga Compensation**: Idempotent payment-failure + reservation-expiry rollback (DB + Redis)
-- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (mock implements idempotent `CreatePaymentIntent`)
+- **Idempotency**: 4 levels — API (`Idempotency-Key` header + N4 fingerprint validation), worker (DB UNIQUE constraint), saga (Redis SETNX), payment gateway (Stripe-side `Idempotency-Key` header keyed on `order_id` per Stripe convention)
+- **Pluggable Payment Provider (D4.2)**: `PAYMENT_PROVIDER ∈ {mock, stripe}` switches between the in-process mock (used by `make stress-k6`) and the real `stripe-go v82` SDK adapter. Production startup rejects `mock` + `*_test_*` keys as a last-line guard. See [`docs/runbooks/README.md` § D4.2 cutover note](docs/runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production) for the production cutover checklist + key rotation playbook.
 - **Rate Limiting**: Nginx (100 req/s/IP, burst 200)
 - **Leader Election**: PostgreSQL advisory locks for single OutboxRelay instance
 - **Full Observability**: Prometheus metrics, Grafana dashboards, Jaeger tracing, Zap logging

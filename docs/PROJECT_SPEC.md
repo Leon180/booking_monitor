@@ -870,6 +870,29 @@ If the retry still reports `metadata_missing`, the request fails with 500 and **
 
 **Active follow-up note.** The broader planning note for this area is [docs/design/redis_runtime_metadata_scaling.md](design/redis_runtime_metadata_scaling.md). It records why `amount_cents` is frozen at reservation time, when a longer Lua script is still acceptable, the current Lua-vs-Redis-Functions trade-off, and the topology constraints that still block a true Redis Cluster sharding story.
 
+### 6.10 Payment provider adapter (D4.2)
+
+D4.2 replaced the in-process mock payment gateway with a real `stripe-go v82` SDK adapter. The application code holds two small ports — `PaymentGateway` (creates PaymentIntents) and `PaymentStatusReader` (reads PaymentIntent status) — and the infrastructure layer ships two implementations behind those ports: the existing mock (still used by `make stress-k6` and unit tests) and the new Stripe adapter ([internal/infrastructure/payment/stripe_gateway.go](../internal/infrastructure/payment/stripe_gateway.go)). Selection is config-driven via `PAYMENT_PROVIDER ∈ {mock, stripe}`.
+
+**Adapter design.** The adapter is a per-instance value built via `stripe.NewClient(key, WithBackends(...))` — no global SDK state mutation, no shared HTTP client, multi-adapter-safe under `go test -race`. `BackendConfig` injects (a) a project HTTP client with the project timeout / TLS config, (b) a redacting `LeveledLogger` that strips bearer tokens before any log line lands, and (c) `MaxNetworkRetries` for stripe-go's built-in 429 / 5xx retry budget. The `internal/bootstrap` package provides `NewPaymentGateway(...)` which switches on `cfg.Payment.Provider` and wires the chosen implementation through fx.
+
+**Error taxonomy.** Stripe's `*stripe.Error` types are translated by `mapStripeError` to four `domain.ErrPayment*` sentinels via `errors.Join` (preserves `errors.Is` on both our sentinel AND the underlying stripe-go error):
+
+| stripe-go ErrorType | domain sentinel | Outcome label | HTTP mapping (in `/pay`) |
+|:--|:--|:--|:--|
+| `card_error` | `ErrPaymentDeclined` | `declined` | 422 |
+| `api_error` (429 / 5xx) / network err | `ErrPaymentTransient` | `transient` | 503 / retry |
+| `authentication_error` / `permission_error` (401 / 403) | `ErrPaymentMisconfigured` | `misconfigured` | 500 (page-worthy) |
+| `invalid_request_error` (400) / `idempotency_error` | `ErrPaymentInvalid` | `invalid` | 500 (application bug) |
+
+Captured Stripe `Request-Id` is logged + threaded through metric labels for cross-system correlation. `classifyOutcome` is a pure function shared between `mapStripeError` (which produces the typed error) and the metric emitter (which produces the label) — keeps the two surfaces from drifting.
+
+**GetStatus interface change.** D4.2 changed `PaymentStatusReader.GetStatus` from `(ctx, orderID uuid.UUID)` to `(ctx, paymentIntentID string)`. The reconciler now reads the persisted `payment_intent_id` from the order row and passes it directly — Stripe's API has no orderID concept (PaymentIntent IDs are the Stripe-side primary key), so the previous shape forced the adapter to hold a repository, violating the layer rule. The new shape is layer-clean: domain port speaks Stripe's vocabulary, repo lookup happens in the application layer where it belongs. The reconciler null-guards the empty-string case (`SetPaymentIntentID` race orphan) and increments `recon_null_intent_id_skipped_total` instead of calling the gateway with an empty ID.
+
+**Webhook verifier (Slice 3b).** The `Stripe-Signature` HMAC verifier ([internal/infrastructure/api/webhook/verifier.go](../internal/infrastructure/api/webhook/verifier.go)) delegates to `stripewebhook.ValidatePayloadWithTolerance` from stripe-go. Same crypto, same header parsing, same secret-rotation handling — but our typed error sentinels (`ErrSignatureMissing` / `Malformed` / `SkewExceeded` / `Mismatch`) are preserved via a `mapStripeWebhookError` translation layer so the alert metric label taxonomy (`payment_webhook_signature_invalid_total{reason}`) doesn't change shape under SDK upgrades. Two intentional behavior changes vs the pre-3b hand-rolled verifier are documented inline: (1) "no v1 in header" + "v1 didn't match" both surface as `mismatch` (Stripe SDK collapses them); (2) future-skewed timestamps are now accepted (Stripe SDK only checks past-skew). Both align our verifier with Stripe's reference implementation.
+
+**PCI scope.** The application **never receives raw card data**. Stripe Elements collects card details client-side and submits them directly to Stripe; our backend only sees `PaymentIntent.ID`, `PaymentIntent.client_secret`, and webhook events about lifecycle. Out of PCI DSS SAQ A scope. See [`docs/runbooks/README.md` § D4.2 cutover note](runbooks/README.md#d42-cutover-note--stripe-sdk-adapter-production) for the production cutover checklist + key rotation playbook.
+
 ---
 
 ## 7. Observability
