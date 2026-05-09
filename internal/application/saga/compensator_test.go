@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,8 +43,73 @@ func compensatorHarness(t *testing.T) (saga.Compensator, *mocks.MockOrderReposit
 	invRepo := mocks.NewMockInventoryRepository(ctrl)
 	uow := mocks.NewMockUnitOfWork(ctrl)
 
-	comp := saga.NewCompensator(invRepo, uow, mlog.NewNop())
+	comp := saga.NewCompensator(invRepo, uow, mlog.NewNop(), saga.NopCompensatorMetrics{})
 	return comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow
+}
+
+// compensatorHarnessWithSpy wires a recording metrics spy instead
+// of NopCompensatorMetrics so tests can assert the exact
+// RecordEventProcessed / ObserveLoopDuration / SetConsumerLag
+// calls. Used by TestHandleOrderFailed_OutcomeLabel_Exhaustive
+// (PR-D12.4 Slice 4) to pin the per-branch outcome classification.
+func compensatorHarnessWithSpy(t *testing.T) (saga.Compensator, *mocks.MockOrderRepository, *mocks.MockEventRepository, *mocks.MockTicketTypeRepository, *mocks.MockInventoryRepository, *mocks.MockUnitOfWork, *recordingCompensatorMetrics) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	orderRepo := mocks.NewMockOrderRepository(ctrl)
+	eventRepo := mocks.NewMockEventRepository(ctrl)
+	ticketTypeRepo := mocks.NewMockTicketTypeRepository(ctrl)
+	invRepo := mocks.NewMockInventoryRepository(ctrl)
+	uow := mocks.NewMockUnitOfWork(ctrl)
+
+	spy := &recordingCompensatorMetrics{}
+	comp := saga.NewCompensator(invRepo, uow, mlog.NewNop(), spy)
+	return comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow, spy
+}
+
+// recordingCompensatorMetrics captures every metric call so tests
+// can assert the exact outcomes / loop durations / lag values
+// emitted by `Compensator.HandleOrderFailed`. Concurrent-safe
+// because (a) HandleOrderFailed is called serially per saga
+// consumer message in production, and (b) tests may use this with
+// t.Parallel() — the mutex guarantees test-shared instances behave
+// correctly even though the production caller is single-threaded.
+type recordingCompensatorMetrics struct {
+	mu                  sync.Mutex
+	outcomes            []string
+	loopDurations       []time.Duration
+	consumerLagSettings []time.Duration
+}
+
+func (r *recordingCompensatorMetrics) RecordEventProcessed(outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
+}
+
+func (r *recordingCompensatorMetrics) ObserveLoopDuration(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loopDurations = append(r.loopDurations, d)
+}
+
+func (r *recordingCompensatorMetrics) SetConsumerLag(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.consumerLagSettings = append(r.consumerLagSettings, d)
+}
+
+func (r *recordingCompensatorMetrics) Outcomes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.outcomes))
+	copy(out, r.outcomes)
+	return out
+}
+
+func (r *recordingCompensatorMetrics) LoopDurationCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.loopDurations)
 }
 
 // reconstructOrder is the same shape the watchdog tests use — bypasses
@@ -97,7 +163,7 @@ func TestHandleOrderFailed_UnmarshalError(t *testing.T) {
 	t.Parallel()
 	comp, _, _, _, _, _ := compensatorHarness(t)
 
-	err := comp.HandleOrderFailed(context.Background(), []byte("not json"))
+	err := comp.HandleOrderFailed(context.Background(), []byte("not json"), time.Now())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unmarshal")
 }
@@ -120,7 +186,7 @@ func TestHandleOrderFailed_AlreadyCompensated(t *testing.T) {
 	// IncrementTicket / MarkCompensated NOT expected — short-circuit.
 	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.NoError(t, err)
 }
 
@@ -142,7 +208,7 @@ func TestHandleOrderFailed_AlreadyCompensated_LegacyEventStillRevertsRedis(t *te
 	ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return([]domain.TicketType{tt}, nil)
 	invRepo.EXPECT().RevertInventory(gomock.Any(), fallbackTicketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil), time.Now())
 	require.NoError(t, err)
 }
 
@@ -161,7 +227,7 @@ func TestHandleOrderFailed_GetByIDError(t *testing.T) {
 		DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
 	orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(domain.Order{}, dbErr)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr)
 }
@@ -188,7 +254,7 @@ func TestHandleOrderFailed_IncrementTicketError(t *testing.T) {
 	ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ticketTypeID, 1).Return(dbErr)
 
 	// MarkCompensated and RevertInventory NOT expected.
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr)
 }
@@ -211,7 +277,7 @@ func TestHandleOrderFailed_MarkCompensatedError(t *testing.T) {
 	ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ticketTypeID, 1).Return(nil)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(dbErr)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, dbErr)
 }
@@ -236,7 +302,7 @@ func TestHandleOrderFailed_RevertInventoryError(t *testing.T) {
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
 	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(redisErr)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, redisErr)
 }
@@ -257,7 +323,7 @@ func TestHandleOrderFailed_HappyPath(t *testing.T) {
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
 	invRepo.EXPECT().RevertInventory(gomock.Any(), ticketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
 	require.NoError(t, err)
 }
 
@@ -285,7 +351,7 @@ func TestHandleOrderFailed_LegacyEvent_FallsBackToSingleTicketType(t *testing.T)
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
 	invRepo.EXPECT().RevertInventory(gomock.Any(), fallbackTicketTypeID, 1, "order:"+orderID.String()).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil), time.Now())
 	require.NoError(t, err)
 }
 
@@ -308,7 +374,7 @@ func TestHandleOrderFailed_LegacyEvent_NoTicketTypes_SkipsIncrement(t *testing.T
 	// IncrementTicket and RevertInventory NOT expected (Path C skip).
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil), time.Now())
 	require.NoError(t, err)
 }
 
@@ -334,6 +400,287 @@ func TestHandleOrderFailed_LegacyEvent_MultipleTicketTypes_SkipsIncrement(t *tes
 	// IncrementTicket and RevertInventory NOT expected (Path C skip).
 	orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
 
-	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil))
+	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, uuid.Nil), time.Now())
 	require.NoError(t, err)
+}
+
+// TestHandleOrderFailed_OutcomeLabel_Exhaustive (PR-D12.4 Slice 4)
+// pins one test case per documented outcome label that
+// `Compensator.HandleOrderFailed` can emit. Each subtest sets up
+// the mock chain to drive the exact branch that produces the
+// outcome, then asserts the recording spy received that outcome
+// (and ONLY that outcome — `unknown` should never fire on a path
+// covered by an explicit `record()` call).
+//
+// Histogram observation discipline: `ObserveLoopDuration` MUST be
+// called exactly once on the `compensated` path AND zero times
+// on every other path (including `already_compensated` and
+// `path_c_skipped` no-op success paths — sub-millisecond no-ops
+// would skew p50/p99 to the floor and hide real degradation).
+//
+// This is the regression tripwire for the `did_record` sentinel +
+// per-branch classifier introduced in Slice 2: a future refactor
+// that adds a return path without `record()` lands here as a
+// failing assertion (the deferred sentinel records "unknown",
+// which the wantOutcomes list does not contain). Codex round-2
+// review of PR #106 + multi-agent review of Slice 1+2 caught the
+// equivalent gap on the EventPublisher / outcome paths in those
+// slices; this test prevents the same shape from re-emerging.
+func TestHandleOrderFailed_OutcomeLabel_Exhaustive(t *testing.T) {
+	cases := []struct {
+		name              string
+		setupMocks        func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (orderID, eventID, ticketTypeID uuid.UUID)
+		legacyEvent       bool // if true, use uuid.Nil for ticket_type_id in the payload (Path B/C trigger)
+		wantOutcome       string
+		wantHistogramHit  bool
+		wantNoError       bool // success paths return nil; error paths return an error
+	}{
+		{
+			name:             "compensated_full_path_observes_histogram",
+			wantOutcome:      "compensated",
+			wantHistogramHit: true,
+			wantNoError:      true,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ttID, 1).Return(nil)
+				orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
+				invRepo.EXPECT().RevertInventory(gomock.Any(), ttID, 1, "order:"+orderID.String()).Return(nil)
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "already_compensated_skips_histogram",
+			wantOutcome:      "already_compensated",
+			wantHistogramHit: false,
+			wantNoError:      true,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				already := reconstructOrder(t, orderID, eventID, domain.OrderStatusCompensated)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
+				invRepo.EXPECT().RevertInventory(gomock.Any(), ttID, 1, "order:"+orderID.String()).Return(nil)
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			// Path C × already-compensated cross-product. Order arrives
+			// already in `compensated` state (Kafka at-least-once
+			// redelivery) AND the legacy payload's uuid.Nil triggers
+			// resolveTicketTypeID's case-0 branch (no ticket_types for
+			// the event — pre-D4.1 data corruption window). End-state:
+			// `wasAlreadyCompensated = true` AND
+			// `ticketTypeIDForRevert == uuid.Nil`.
+			//
+			// At compensator.go:257-272 this lands the `already_compensated`
+			// outcome (NOT `path_c_skipped` — the `wasAlreadyCompensated`
+			// disambiguator is what distinguishes the two). No
+			// RevertInventory call — the uuid.Nil early-return skips it.
+			//
+			// Closes Slice 4 review M2 finding: the existing
+			// `already_compensated_skips_histogram` covers Path A (ttID
+			// non-nil); this case covers the Path C cross-product.
+			name:             "already_compensated_via_path_c_skips_histogram",
+			wantOutcome:      "already_compensated",
+			wantHistogramHit: false,
+			wantNoError:      true,
+			legacyEvent:      true,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID := uuid.New(), uuid.New()
+				already := reconstructOrder(t, orderID, eventID, domain.OrderStatusCompensated)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
+				// 0 ticket_types → resolveTicketTypeID returns (uuid.Nil, nil).
+				ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return([]domain.TicketType{}, nil)
+				// No RevertInventory expectation — uuid.Nil early-return at 257 skips it.
+				// No MarkCompensated expectation — already-compensated branch returns at 177.
+				return orderID, eventID, uuid.Nil
+			},
+		},
+		{
+			name:             "already_compensated_redis_error_skips_histogram",
+			wantOutcome:      "already_compensated_redis_error",
+			wantHistogramHit: false,
+			wantNoError:      false, // RevertInventory returns an error → method returns wrapped error
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				already := reconstructOrder(t, orderID, eventID, domain.OrderStatusCompensated)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(already, nil)
+				invRepo.EXPECT().RevertInventory(gomock.Any(), ttID, 1, "order:"+orderID.String()).Return(errors.New("redis: connection refused"))
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "path_c_skipped_skips_histogram",
+			wantOutcome:      "path_c_skipped",
+			wantHistogramHit: false,
+			wantNoError:      true,
+			legacyEvent:      true,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID := uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				tt1 := domain.ReconstructTicketType(uuid.New(), eventID, "VIP", 5000, "usd", 100, 100, nil, nil, nil, "", 0)
+				tt2 := domain.ReconstructTicketType(uuid.New(), eventID, "GA", 2000, "usd", 100, 100, nil, nil, nil, "", 0)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return([]domain.TicketType{tt1, tt2}, nil)
+				orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
+				return orderID, eventID, uuid.Nil
+			},
+		},
+		{
+			name:             "getbyid_error_skips_histogram",
+			wantOutcome:      "getbyid_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(domain.Order{}, errors.New("postgres: connection lost"))
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "list_ticket_type_error_skips_histogram",
+			wantOutcome:      "list_ticket_type_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			legacyEvent:      true,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID := uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().ListByEventID(gomock.Any(), eventID).Return(nil, errors.New("postgres: read replica unreachable"))
+				return orderID, eventID, uuid.Nil
+			},
+		},
+		{
+			name:             "incrementticket_error_skips_histogram",
+			wantOutcome:      "incrementticket_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ttID, 1).Return(errors.New("postgres: deadlock"))
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "markcompensated_error_skips_histogram",
+			wantOutcome:      "markcompensated_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ttID, 1).Return(nil)
+				orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(errors.New("postgres: invalid state transition"))
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "redis_revert_error_skips_histogram",
+			wantOutcome:      "redis_revert_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).DoAndReturn(runUowThrough(orderRepo, eventRepo, ticketTypeRepo))
+				orderRepo.EXPECT().GetByID(gomock.Any(), orderID).Return(failed, nil)
+				ticketTypeRepo.EXPECT().IncrementTicket(gomock.Any(), ttID, 1).Return(nil)
+				orderRepo.EXPECT().MarkCompensated(gomock.Any(), orderID).Return(nil)
+				invRepo.EXPECT().RevertInventory(gomock.Any(), ttID, 1, "order:"+orderID.String()).Return(errors.New("redis: connection refused"))
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "context_error_skips_histogram",
+			wantOutcome:      "context_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				// UoW returns context.Canceled directly (not wrapped in stepError).
+				// The classifier should catch this via errors.Is(errUow, context.Canceled).
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(context.Canceled)
+				return orderID, eventID, ttID
+			},
+		},
+		{
+			name:             "uow_infra_error_skips_histogram",
+			wantOutcome:      "uow_infra_error",
+			wantHistogramHit: false,
+			wantNoError:      false,
+			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork) (uuid.UUID, uuid.UUID, uuid.UUID) {
+				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
+				// UoW returns an unwrapped infra error (NOT a stepError, NOT context.Canceled).
+				// Simulates a tx-begin failure from the UoW machinery itself.
+				uow.EXPECT().Do(gomock.Any(), gomock.Any()).Return(errors.New("postgres: failed to begin transaction"))
+				return orderID, eventID, ttID
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow, spy := compensatorHarnessWithSpy(t)
+			orderID, eventID, ttID := tc.setupMocks(t, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow)
+
+			payloadTicketTypeID := ttID
+			if tc.legacyEvent {
+				payloadTicketTypeID = uuid.Nil
+			}
+			err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, payloadTicketTypeID), time.Now())
+
+			if tc.wantNoError {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+
+			outcomes := spy.Outcomes()
+			require.Len(t, outcomes, 1, "exactly one outcome MUST be recorded; got: %v", outcomes)
+			assert.Equal(t, tc.wantOutcome, outcomes[0],
+				"branch must record %q, NOT %q (regression in did_record sentinel or per-branch classifier)",
+				tc.wantOutcome, outcomes[0])
+			assert.NotEqual(t, "unknown", outcomes[0],
+				"normal paths must NEVER trip the deferred-sentinel \"unknown\" — that label is reserved for code regressions")
+
+			if tc.wantHistogramHit {
+				assert.Equal(t, 1, spy.LoopDurationCount(),
+					"compensated success path MUST observe histogram exactly once")
+			} else {
+				assert.Equal(t, 0, spy.LoopDurationCount(),
+					"non-compensated paths (including already_compensated and path_c_skipped no-op successes) MUST NOT observe histogram — would skew p50/p99 to floor")
+			}
+		})
+	}
+}
+
+// TestHandleOrderFailed_UnmarshalError_RecordsOutcome — separate
+// from the table-driven test above because unmarshal failures
+// short-circuit BEFORE any UoW setup, so the mock chain is empty.
+func TestHandleOrderFailed_UnmarshalError_RecordsOutcome(t *testing.T) {
+	t.Parallel()
+	comp, _, _, _, _, _, spy := compensatorHarnessWithSpy(t)
+
+	err := comp.HandleOrderFailed(context.Background(), []byte("not json"), time.Now())
+	require.Error(t, err)
+
+	outcomes := spy.Outcomes()
+	require.Len(t, outcomes, 1)
+	assert.Equal(t, "unmarshal_error", outcomes[0])
+	assert.Equal(t, 0, spy.LoopDurationCount(),
+		"unmarshal failure observes no histogram — never reached the success path")
 }
