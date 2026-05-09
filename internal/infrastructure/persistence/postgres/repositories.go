@@ -376,8 +376,23 @@ func (r *postgresOrderRepository) transitionStatus(ctx context.Context, id uuid.
 func (r *postgresOrderRepository) FindStuckCharging(
 	ctx context.Context, minAge time.Duration, limit int,
 ) ([]domain.StuckCharging, error) {
+	// D4.2: project payment_intent_id so the reconciler can call the
+	// real Stripe gateway's GetStatus(intentID). COALESCE to empty
+	// string for legacy rows where the SetPaymentIntentID race left
+	// the column NULL — `resolve` has a dedicated null-guard.
+	//
+	// Slice 1 review MED #5: `payment_intent_id = ''` (literal empty
+	// string) is treated as semantically EQUIVALENT to NULL by the
+	// null-guard. Real Stripe intent IDs always start with `pi_`;
+	// empty string is never a legitimate value from any adapter.
+	// Migration 000015 added the `payment_intent_id_unique_idx`
+	// partial UNIQUE; consider extending with `CHECK (payment_intent_id
+	// IS NULL OR payment_intent_id <> '')` in a future migration to
+	// surface data corruption explicitly. Tracked as a follow-up.
 	const sqlStmt = `
-		SELECT id, EXTRACT(EPOCH FROM (NOW() - updated_at))
+		SELECT id,
+		       EXTRACT(EPOCH FROM (NOW() - updated_at)),
+		       COALESCE(payment_intent_id, '')
 		  FROM orders
 		 WHERE status = 'charging'
 		   AND updated_at < NOW() - $1::interval
@@ -399,12 +414,14 @@ func (r *postgresOrderRepository) FindStuckCharging(
 	for rows.Next() {
 		var id uuid.UUID
 		var ageSeconds float64
-		if err := rows.Scan(&id, &ageSeconds); err != nil {
+		var paymentIntentID string
+		if err := rows.Scan(&id, &ageSeconds, &paymentIntentID); err != nil {
 			return nil, fmt.Errorf("orderRepository.FindStuckCharging scan: %w", err)
 		}
 		out = append(out, domain.StuckCharging{
-			ID:  id,
-			Age: time.Duration(ageSeconds * float64(time.Second)),
+			ID:              id,
+			Age:             time.Duration(ageSeconds * float64(time.Second)),
+			PaymentIntentID: paymentIntentID,
 		})
 	}
 	if err := rows.Err(); err != nil {

@@ -78,6 +78,27 @@ var ReconFindStuckErrorsTotal = promauto.NewCounter(
 	},
 )
 
+// ReconNullIntentIDSkippedTotal fires when the reconciler encounters
+// a stuck-charging row with `payment_intent_id IS NULL` — caused by
+// the documented `SetPaymentIntentID` race in
+// `internal/application/payment/service.go:166` (gateway-side intent
+// create succeeded, follow-on UPDATE failed). The reconciler skips
+// the row (cannot call Stripe.GetStatus without an intent ID; calling
+// with empty would produce a silent wrong-verdict — see
+// `stripe_gateway.go` GetStatus null-guard).
+//
+// Pairs with the alert: `rate(recon_null_intent_id_skipped_total[5m]) > 0`
+// fires immediately. Triage: search Stripe dashboard by
+// `metadata.order_id` for the orphan PaymentIntent + reconcile manually.
+//
+// D4.2.
+var ReconNullIntentIDSkippedTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "recon_null_intent_id_skipped_total",
+		Help: "Stuck-charging rows skipped because payment_intent_id IS NULL (documented SetPaymentIntentID race; manual reconcile via Stripe dashboard)",
+	},
+)
+
 // ReconStuckChargingOrders is a gauge of orders currently in Charging
 // state older than RECON_CHARGING_THRESHOLD. Reset to the latest count
 // on every sweep. Pairs with the alert

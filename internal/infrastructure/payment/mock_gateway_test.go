@@ -89,8 +89,10 @@ func TestMockGateway_GetStatus_AlwaysNotFound(t *testing.T) {
 	// Post-D7 the mock has no charge history; recon's NotFound branch
 	// handles the rare stuck-Charging order it might still encounter
 	// in transition.
+	// D4.2: GetStatus signature changed from uuid.UUID to string
+	// (Stripe wire shape). Mock impl is unaffected — input ignored.
 	gw := NewMockGateway()
-	got, err := gw.GetStatus(context.Background(), uuid.New())
+	got, err := gw.GetStatus(context.Background(), "pi_test_arbitrary")
 	require.NoError(t, err)
 	assert.Equal(t, domain.ChargeStatusNotFound, got)
 }
@@ -100,7 +102,7 @@ func TestMockGateway_GetStatus_HonoursCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	got, err := gw.GetStatus(ctx, uuid.New())
+	got, err := gw.GetStatus(ctx, "pi_test_arbitrary")
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, domain.ChargeStatusUnknown, got, "cancelled ctx must surface as Unknown + ctx.Err per port contract")
 }

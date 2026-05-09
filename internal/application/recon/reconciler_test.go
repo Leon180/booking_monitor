@@ -21,18 +21,24 @@ import (
 
 // fakeStatusReader is a hand-rolled PaymentStatusReader for these
 // tests because (a) it's tiny, (b) we need precise control over the
-// (status, err) tuple returned per orderID, and (c) avoiding a mock
+// (status, err) tuple returned per intent ID, and (c) avoiding a mock
 // keeps test intent obvious at read time. Mirrors the fakeIdempotency
 // pattern from PR #41.
+//
+// D4.2: keys changed from uuid.UUID (orderID) to string (paymentIntentID)
+// matching the new domain.PaymentStatusReader signature. Test setups
+// use orderID.String() as the synthetic intent ID for 1:1 stand-in
+// — keeps test scenarios architecturally honest while avoiding the
+// "fake real Stripe pi_3xxx ID" charade.
 type fakeStatusReader struct {
-	statuses map[uuid.UUID]domain.ChargeStatus
-	errors   map[uuid.UUID]error
+	statuses map[string]domain.ChargeStatus
+	errors   map[string]error
 	calls    int
 }
 
-func (f *fakeStatusReader) GetStatus(_ context.Context, id uuid.UUID) (domain.ChargeStatus, error) {
+func (f *fakeStatusReader) GetStatus(_ context.Context, intentID string) (domain.ChargeStatus, error) {
 	f.calls++
-	return f.statuses[id], f.errors[id]
+	return f.statuses[intentID], f.errors[intentID]
 }
 
 // recordingReconMetrics is the test-side `recon.Metrics` implementation —
@@ -43,14 +49,15 @@ func (f *fakeStatusReader) GetStatus(_ context.Context, id uuid.UUID) (domain.Ch
 // and makes assertion intent explicit at read time
 // (`metrics.resolved["charged"]` vs `testutil.ToFloat64(observability.X)`).
 type recordingReconMetrics struct {
-	stuckChargingOrders int
-	resolved            map[string]int
-	findStuckErrors     int
-	gatewayErrors       int
-	markErrors          int
-	resolveDurations    []float64
-	resolveAges         []float64
-	gatewayDurations    []float64
+	stuckChargingOrders  int
+	resolved             map[string]int
+	findStuckErrors      int
+	gatewayErrors        int
+	markErrors           int
+	nullIntentIDSkipped  int // D4.2 — recon null-intent-id guard
+	resolveDurations     []float64
+	resolveAges          []float64
+	gatewayDurations     []float64
 }
 
 func newRecordingReconMetrics() *recordingReconMetrics {
@@ -62,6 +69,7 @@ func (m *recordingReconMetrics) IncFindStuckErrors()               { m.findStuck
 func (m *recordingReconMetrics) IncGatewayErrors()                 { m.gatewayErrors++ }
 func (m *recordingReconMetrics) IncResolved(outcome string)        { m.resolved[outcome]++ }
 func (m *recordingReconMetrics) IncMarkErrors()                    { m.markErrors++ }
+func (m *recordingReconMetrics) IncNullIntentIDSkipped()           { m.nullIntentIDSkipped++ }
 func (m *recordingReconMetrics) ObserveResolveDuration(s float64)  { m.resolveDurations = append(m.resolveDurations, s) }
 func (m *recordingReconMetrics) ObserveResolveAge(s float64)       { m.resolveAges = append(m.resolveAges, s) }
 func (m *recordingReconMetrics) ObserveGatewayDuration(s float64)  { m.gatewayDurations = append(m.gatewayDurations, s) }
@@ -189,13 +197,13 @@ func TestSweep_ChargedVerdict_MarksConfirmed(t *testing.T) {
 
 	id := uuid.New()
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusCharged},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusCharged},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	h.repo.EXPECT().MarkConfirmed(gomock.Any(), id).Return(nil)
 	// CRITICAL: NO outbox emit for the success path. Confirmed is terminal;
 	// no saga compensation needed. This is the asymmetry between Charged
@@ -212,13 +220,13 @@ func TestSweep_DeclinedVerdict_FailsOrderAndEmitsOutbox(t *testing.T) {
 	id := uuid.New()
 	order := makeChargingOrder(t, id)
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusDeclined},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusDeclined},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 
 	var reason string
 	expectFailOrder(t, h, id, order, nil, nil, &reason)
@@ -236,13 +244,13 @@ func TestSweep_NotFoundVerdict_FailsOrderAndEmitsOutbox(t *testing.T) {
 	id := uuid.New()
 	order := makeChargingOrder(t, id)
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusNotFound},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusNotFound},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 
 	var reason string
 	expectFailOrder(t, h, id, order, nil, nil, &reason)
@@ -256,13 +264,13 @@ func TestSweep_UnknownVerdict_SkipsNoMark(t *testing.T) {
 
 	id := uuid.New()
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusUnknown},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusUnknown},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	// CRITICAL: NO Mark{Confirmed,Failed} call expected. Unknown =
 	// retry next sweep cycle. If MarkConfirmed/MarkFailed gets called
 	// here the test fails — gomock's ctrl.Finish (auto via NewController)
@@ -282,18 +290,72 @@ func TestSweep_GatewayError_SkipsAndCounts(t *testing.T) {
 		// signal than (Unknown, nil) which is a successful but
 		// unclassifiable verdict. Both skip Mark*, but
 		// recon_gateway_errors_total only fires on the err case.
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusUnknown},
-		errors:   map[uuid.UUID]error{id: errors.New("connection refused")},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusUnknown},
+		errors:   map[string]error{id.String(): errors.New("connection refused")},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	// No Mark* / GetByID / UoW.Do expected.
 
 	// Sweep returns nil (per-order error doesn't abort the sweep).
 	require.NoError(t, h.r.Sweep(context.Background()))
+}
+
+// TestSweep_NullIntentID_SkipsAndIncrementsMetric — D4.2 plan-review
+// CRITICAL C1. Pins the null-guard added in this PR: stuck-charging
+// rows where `payment_intent_id IS NULL` (caused by the documented
+// `SetPaymentIntentID` race in
+// `internal/application/payment/service.go:166`) MUST NOT be sent
+// to the gateway. Calling GetStatus with an empty intent ID would
+// hit `GET /v1/payment_intents/` (malformed URL), return 404, the
+// adapter would map to ChargeStatusNotFound, and the reconciler would
+// then call `failOrder` for an order that was actually charged
+// successfully. SILENT WRONG VERDICT.
+//
+// The null-guard skips the row, leaves it in `charging`, and
+// increments `recon_null_intent_id_skipped_total` so ops can find
+// the orphan via Stripe dashboard search.
+func TestSweep_NullIntentID_SkipsAndIncrementsMetric(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New()
+	// fakeStatusReader configured to fail loudly if GetStatus IS called
+	// — null-guard should prevent the call entirely. We assert this
+	// via gw.calls == 0 below.
+	gw := &fakeStatusReader{}
+	h := newReconHarness(t, gw, 1*time.Hour)
+
+	h.repo.EXPECT().
+		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]domain.StuckCharging{
+			// PaymentIntentID intentionally empty — simulating the
+			// documented SetPaymentIntentID race outcome.
+			{ID: id, Age: 30 * time.Second, PaymentIntentID: ""},
+		}, nil)
+	// No GetByID / Mark* / UoW.Do / GetStatus expectations are set.
+	// gomock's ctrl.Finish (via t.Cleanup auto-registered by
+	// gomock.NewController(t)) will fail the test if any of those
+	// mock methods are called unexpectedly — implicit safety net
+	// that the null-guard short-circuits the resolve path BEFORE
+	// any of those are invoked. Per Slice 1 review LOW #6.
+
+	require.NoError(t, h.r.Sweep(context.Background()))
+
+	assert.Equal(t, 0, gw.calls,
+		"GetStatus must NOT be called for null-intent-id rows — "+
+			"empty intent ID would produce a silent wrong-verdict at the gateway")
+	assert.Equal(t, 1, h.metrics.nullIntentIDSkipped,
+		"recon_null_intent_id_skipped_total must increment exactly once "+
+			"for the skipped row (operator alert signal)")
+	assert.Equal(t, 0, h.metrics.gatewayErrors,
+		"null-intent-id is a config-side issue (missing intent ID), "+
+			"NOT a gateway infrastructure error — must NOT increment "+
+			"recon_gateway_errors_total")
+	// Order stays in 'charging' — no MarkFailed call. Reconciler
+	// continues to find this row on next sweep until ops triages.
 }
 
 func TestSweep_MaxAgeExceeded_FailsOrderAndEmitsOutbox(t *testing.T) {
@@ -308,7 +370,7 @@ func TestSweep_MaxAgeExceeded_FailsOrderAndEmitsOutbox(t *testing.T) {
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 10 * time.Second}}, nil) // > 5s max
+		Return([]domain.StuckCharging{{ID: id, Age: 10 * time.Second, PaymentIntentID: id.String()}}, nil) // > 5s max
 
 	var reason string
 	expectFailOrder(t, h, id, order, nil, nil, &reason)
@@ -330,13 +392,13 @@ func TestFailOrder_OutboxCreateError_EmitsMarkErrorMetric(t *testing.T) {
 	id := uuid.New()
 	order := makeChargingOrder(t, id)
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusDeclined},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusDeclined},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	expectFailOrder(t, h, id, order, nil, errors.New("outbox dead"), nil)
 
 	require.NoError(t, h.r.Sweep(context.Background()),
@@ -357,13 +419,13 @@ func TestSweep_MarkConfirmedDBError_EmitsMarkErrorMetric(t *testing.T) {
 
 	id := uuid.New()
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusCharged},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusCharged},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	// MarkConfirmed returns a real DB error (NOT ErrInvalidTransition).
 	// This must increment recon_mark_errors_total and Sweep must still
 	// return nil (per-order errors don't abort the sweep).
@@ -404,13 +466,13 @@ func TestSweep_TransitionLost_BenignNoError(t *testing.T) {
 	// "transition_lost"} ticks up.
 	id := uuid.New()
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{id: domain.ChargeStatusCharged},
+		statuses: map[string]domain.ChargeStatus{id.String(): domain.ChargeStatusCharged},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
 
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second}}, nil)
+		Return([]domain.StuckCharging{{ID: id, Age: 30 * time.Second, PaymentIntentID: id.String()}}, nil)
 	h.repo.EXPECT().MarkConfirmed(gomock.Any(), id).Return(domain.ErrInvalidTransition)
 
 	require.NoError(t, h.r.Sweep(context.Background()),
@@ -427,9 +489,9 @@ func TestSweep_CtxCancelled_ExitsAtLoopBoundary(t *testing.T) {
 	id1 := uuid.New()
 	id2 := uuid.New()
 	gw := &fakeStatusReader{
-		statuses: map[uuid.UUID]domain.ChargeStatus{
-			id1: domain.ChargeStatusCharged,
-			id2: domain.ChargeStatusCharged,
+		statuses: map[string]domain.ChargeStatus{
+			id1.String(): domain.ChargeStatusCharged,
+			id2.String(): domain.ChargeStatusCharged,
 		},
 	}
 	h := newReconHarness(t, gw, 1*time.Hour)
@@ -439,8 +501,8 @@ func TestSweep_CtxCancelled_ExitsAtLoopBoundary(t *testing.T) {
 	h.repo.EXPECT().
 		FindStuckCharging(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return([]domain.StuckCharging{
-			{ID: id1, Age: 30 * time.Second},
-			{ID: id2, Age: 30 * time.Second},
+			{ID: id1, Age: 30 * time.Second, PaymentIntentID: id1.String()},
+			{ID: id2, Age: 30 * time.Second, PaymentIntentID: id2.String()},
 		}, nil)
 	// First order: succeeds, then cancel before second iteration.
 	h.repo.EXPECT().MarkConfirmed(gomock.Any(), id1).

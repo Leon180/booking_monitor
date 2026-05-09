@@ -78,7 +78,11 @@ func NewMockGateway() *MockGateway {
 // GetStatus itself never blocks — it's effectively a constant. The
 // ctx is honoured for symmetry with the port contract; a real adapter's
 // HTTP call respects it.
-func (g *MockGateway) GetStatus(ctx context.Context, _ uuid.UUID) (domain.ChargeStatus, error) {
+// D4.2 changed the parameter from `orderID uuid.UUID` to
+// `paymentIntentID string` to match Stripe's actual API shape (Stripe
+// has no "get intent by metadata.order_id" cheap call). Mock impl is
+// unaffected: it always returns NotFound regardless of input.
+func (g *MockGateway) GetStatus(ctx context.Context, _ string) (domain.ChargeStatus, error) {
 	// Honour ctx even on a constant path so callers can rely on the
 	// timeout boundary. Returning ChargeStatusUnknown + ctx.Err() is
 	// the documented "transient infra failure" branch — the reconciler
