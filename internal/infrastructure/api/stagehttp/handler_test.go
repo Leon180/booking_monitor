@@ -22,12 +22,21 @@ import (
 )
 
 // Unit tests for stagehttp handlers. Shape-only — the SQL semantics
-// of HandlePayIntent + HandleTestConfirm's UPDATE paths are covered
-// by test/integration/postgres/sync_booking_test.go (testcontainers-
-// backed, ~6s suite). These tests cover the HTTP-shape concerns:
+// of HandlePayIntent + HandleTestConfirm's UPDATE paths live in:
+//
+//   - test/integration/postgres/stagehttp_pay_test.go      (5 tests, /pay)
+//   - test/integration/postgres/stagehttp_confirm_test.go  (9 tests, /confirm)
+//
+// Both are testcontainers-backed against a real postgres:15-alpine
+// container. They pin the SQL predicates and side effects this
+// file's fakes can't reach (atomic `payment_intent_id IS NOT NULL`
+// guard, atomic `reserved_until > NOW()` TTL guard, /pay-first
+// pre-check before Compensator, etc.).
+//
+// These unit tests cover what the integration tests can't reach:
 //   - Status code mapping for booking.Service errors via MapBookingError
 //   - Response body shape (BookingAcceptedResponse for 202, error JSON for 4xx)
-//   - Handler-level guards (invalid UUID → 400, missing outcome → 400)
+//   - Handler-level guards that reject before any DB call (invalid UUID → 400, missing outcome → 400)
 //   - Compensator sentinel mapping (ErrCompensateNotEligible → 409)
 //
 // Mocks rather than gomock — fakeService / fakeCompensator are
@@ -306,11 +315,15 @@ func TestHandleGetOrder_InvalidID(t *testing.T) {
 // HandleTestConfirm — non-SQL paths only
 // ────────────────────────────────────────────────────────────────
 //
-// The SQL paths (succeeded UPDATE, failed compensation) are covered
-// by test/integration/postgres/sync_booking_test.go via the live
-// Stage 1 binary smoke (live_smoke_test runs in PR-D12.1). These
-// tests cover what the integration path can't: invalid input
-// pre-routing + Compensator sentinel mapping.
+// The SQL paths (succeeded UPDATE atomic predicates, failed
+// Compensator orchestration, /pay-first pre-check, sentinel
+// mapping for ErrCompensateNotEligible vs generic errors) are
+// covered by test/integration/postgres/stagehttp_confirm_test.go
+// against a real postgres:15-alpine container with a recording
+// fakeCompensator. These unit tests cover what that file can't:
+// invalid input rejection BEFORE any DB call (invalid UUID, missing/
+// unknown outcome) — exercising those there would just mean
+// spinning up a container per case for no DB-side coverage.
 
 func TestHandleTestConfirm_InvalidUUID(t *testing.T) {
 	r := newGinRouter()
