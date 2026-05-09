@@ -1,6 +1,6 @@
 # D12 — 4-stage architecture comparison harness
 
-> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) shipped.** Stages 3–4 + the multi-target harness land in PR-D12.3 through PR-D12.5.
+> Status: **PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) shipped.** Stage 4 observability + the multi-target harness land in PR-D12.4 + PR-D12.5.
 
 D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Four separate Go binaries share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all four under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
 
@@ -10,7 +10,7 @@ D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadm
 |---|---|---|---|
 | **1** | `cmd/booking-cli-stage1/` | API → Postgres `BEGIN; SELECT FOR UPDATE; UPDATE event_ticket_types; INSERT orders; COMMIT;` | (baseline) |
 | **2** | `cmd/booking-cli-stage2/` | API → Redis Lua atomic deduct → SYNCHRONOUS PG INSERT; revert.lua on INSERT failure | Redis hot-path inventory (SoT migrates to `ticket_type_qty:{id}`); no async buffering — saturation IS the sync PG INSERT |
-| 3 | `cmd/booking-cli-stage3/` (PR-D12.3) | API → Redis Lua → `orders:stream` → worker → DB INSERT | async via stream + worker; no event-driven downstream |
+| **3** | `cmd/booking-cli-stage3/` | API → Redis Lua → `orders:stream` → async worker → DB INSERT (worker UoW: `DecrementTicket` + `Order.Create`); revert.lua + UPDATE on compensator path | async via stream + worker buffers the PG INSERT off the request hot path; no Kafka outbox / saga consumer (in-binary expiry sweeper handles abandon) |
 | 4 | `cmd/booking-cli/` (current; +observability in PR-D12.4) | API → Redis Lua → `orders:stream` → worker → DB INSERT; **money movement via** `/pay` + D5 webhook (not Kafka-driven post-D7); `order.failed` outbox → Kafka → in-process saga compensator (D5 webhook `payment_failed` + D6 expiry sweeper + recon force-fail as the only producers) | full Pattern A end-to-end with saga compensation only on the failure path |
 
 > **Stage 4 ≠ the README's "Architecture Evolution" Stage 4 diagram.** The README's evolution section labels its Stage 4 as the *historical* `v0.2.0–v0.4.0` pre-D7 architecture (`payment_worker` + `order.created` Kafka topic). D12 Stage 4 is the **current post-D7 binary** — `payment_worker` removed, saga consumer in-process inside `app`. `comparison.md` (lands in PR-D12.5) calls this out explicitly so readers don't conflate the two.
@@ -290,6 +290,182 @@ The cost: **Stage 2 carries strictly more failure modes than Stage 1.** The INSE
 
 ---
 
+## Stage 3 — Redis Lua + orders:stream + async worker (PR-D12.3)
+
+### Architecture
+
+```
+POST /book
+  ┌─────────────────────────────────────────────────────────┐
+  │ EVAL deduct.lua  (Stage 4's existing script — reused    │
+  │                   verbatim, NOT a Stage-3-specific fork)│
+  │   KEYS: ticket_type_qty:{id}, ticket_type_meta:{id}     │
+  │   ARGV: count, user_id, order_id, reserved_until_unix,  │
+  │         ticket_type_id                                  │
+  │   1. DECRBY ticket_type_qty:{id} count                  │
+  │   2. if new < 0: INCRBY (restore) → return "sold_out"   │
+  │   3. HMGET ticket_type_meta:{id} (event_id, price, currency)
+  │   4. if metadata missing: INCRBY → return "metadata_missing"
+  │   5. amount_cents = price_cents × count                 │
+  │   6. XADD orders:stream {message fields}                │
+  │   7. return "ok", event_id, amount_cents, currency      │
+  └─────────────────────────────────────────────────────────┘
+  ↓ return 202 Accepted (no PG round-trip on hot path)
+
+────────────  async worker goroutine  ────────────
+  XReadGroup orders:stream → parseMessage
+  ↓ on parse-fail: handleParseFailure (best-effort revert.lua + DLQ)
+  ↓ on ok:
+  uow.Do(ctx, func(repos) {
+    repos.TicketType.DecrementTicket(ttID, qty)   // PG inventory −qty
+    repos.Order.Create(order)                     // INSERT order row
+  })
+  ↓ on UoW error (23505 / transient): handleFailure
+     (revert.lua INCRBY + DLQ; UoW rollback already restored PG)
+
+POST /pay              ← stagehttp.HandlePayIntent (unchanged from Stages 1+2)
+                          PaymentIntent prefix: `pi_stage3_`
+POST /test/payment/confirm/:id   ← stagehttp.HandleTestConfirm (unchanged)
+
+In-binary expiry sweeper goroutine — same shape as Stages 1+2;
+only difference is the injected Compensator (now stage3Compensator).
+
+stage3Compensator (shared by sweeper + /confirm-failed)
+  BEGIN
+    SELECT ticket_type_id, quantity, status FROM orders WHERE id=$1 FOR UPDATE
+       (NullUUID scan; sql.ErrNoRows → ErrCompensateNotEligible)
+       (status != 'awaiting_payment' → ErrCompensateNotEligible)
+       (ttID NULL → ErrCompensateNotEligible — pre-D4.1 legacy guard)
+    EVAL revert.lua against ticket_type_qty:{ttID}     ← Stage 2/3 ONLY
+       (idempotent via saga:reverted:order:<id> SETNX)
+    UPDATE event_ticket_types SET available_tickets += qty, version += 1
+       (RowsAffected check: 0 rows → orphaned ticket_type, surface as
+        hard error so the sweeper retries / ops investigates)
+    UPDATE orders SET status='compensated' WHERE status='awaiting_payment'
+  COMMIT
+
+POST /events
+  PG tx: INSERT events + INSERT event_ticket_types + COMMIT
+  ↓ on PG commit success:
+  inventoryRepo.SetTicketTypeRuntime(ctx, tt)
+     HSET ticket_type_meta:{id} event_id price_cents currency
+     SET ticket_type_qty:{id} total_tickets EX 24h
+  ↓ on Redis hydrate failure:
+  compensateDanglingEvent(detached_ctx, db, eventID, ttID)
+     DELETE event_ticket_types + DELETE events  (FK-safe order)
+  return 500 (same fail-and-compensate pattern as Stage 2;
+  duplicated across stage 2 and stage 3 cmd binaries due to
+  `package main` constraint).
+```
+
+### What Stage 3 adds vs Stage 2
+
+| Layer | Stage 2 | Stage 3 |
+|---|---|---|
+| Hot-path serialization | Lua + sync PG INSERT (PG INSERT IS the bottleneck by design) | Lua + async PG INSERT (PG round-trip moves OFF the request path; saturation moves to Lua + worker throughput) |
+| Service impl | `synclua.Service` (new in PR-D12.2) | Stage 4's existing `booking.Service` (reused verbatim) |
+| Async worker | none | `internal/application/worker/` (Stage 4's existing, reused verbatim) |
+| Lua script | `deduct_sync.lua` (Stage-2-specific fork, no XADD) | `deduct.lua` (Stage 4's existing, includes XADD) |
+| PG inventory column on hot path | UNCHANGED (Stage 2 has no worker; INSERT orders only) | DECREMENTED inside worker UoW (`repos.TicketType.DecrementTicket`) |
+| PG inventory column on compensation | UNCHANGED (symmetric) | INCREMENTED back (symmetric — the load-bearing rule) |
+| Compensator | revert.lua + UPDATE orders only | revert.lua + UPDATE event_ticket_types += qty + UPDATE orders |
+| Outbox / Kafka / saga | none | none (deferred to Stage 4) |
+
+The architectural change is **adding the async worker**. The PG-inventory-column behavior MUST flip in lockstep: Stage 2's hot path doesn't decrement the column → compensator doesn't increment. Stage 3's worker UoW DOES decrement → compensator MUST increment. Asymmetric in either direction is a permanent inventory leak.
+
+### Reuse strategy — the Stage 4 substrate
+
+Stage 3's PR is small (~700 LOC vs Stage 2's ~2.5k) because almost everything below the cmd-binary layer is Stage 4's:
+
+- `internal/application/booking/service.go` — Stage 4's BookingService is exactly what Stage 3 needs (Lua + XADD + metadata-missing repair). Wired via `fx.Provide(booking.NewService)` + `fx.As(new(booking.Service))`.
+- `internal/application/worker/` — Stage 4's worker (`OrderMessageProcessor` + metrics decorator + `Service`) is wired inline in Stage 3's `installServer` via the same closure pattern Stage 4 uses (no `worker.Module`; the package doesn't export an fx options bundle).
+- `internal/infrastructure/cache/lua/deduct.lua` — same script. Stage 3 has no need for Stage 2's `deduct_sync.lua` variant.
+- `internal/infrastructure/api/stagehttp/` — `HandleBook` / `HandleGetOrder` / `HandlePayIntent` / `HandleTestConfirm` reused across Stages 1-3.
+
+What's NEW in Stage 3:
+- `cmd/booking-cli-stage3/main.go` + `server.go` — fx wiring + /events handler + `stage3Compensator` + sweeper + `compensateDanglingEvent`.
+- `test/integration/postgres/stage3_booking_test.go` — 7 tests including the bidirectional PG-symmetry assertion (worker decrements ↔ compensator increments).
+- Refreshed comments in `cmd/booking-cli-stage1/server.go` + `internal/infrastructure/api/stagehttp/compensator.go` to reflect the now-settled per-stage compensator semantics.
+
+### PG-symmetry rule — the load-bearing invariant (DIFFERENT from Stage 2)
+
+The critical Stage 3 design rule is **scoped**:
+
+- **`stage3Compensator.Compensate`** (sweeper / `HandleTestConfirm` outcome=failed): MUST `UPDATE event_ticket_types SET available_tickets = available_tickets + qty`. The worker decremented → the compensator increments.
+- **Worker `handleFailure`** (per-message DLQ path, e.g. 23505 INSERT failure): MUST NOT call `IncrementTicket`. The UoW rollback already undid the decrement atomically; explicit increment would double-count → permanent +qty drift.
+
+The integration test pins both directions:
+
+- `TestStage3Booking_AbandonCompensator_PGSymmetry`: book → wait for worker → compensate → assert PG column back at seeded value (and Redis qty back at seeded value, and order status='compensated').
+- `TestStage3Booking_WorkerHandleFailure23505_PGUnchanged`: book once → wait for worker → book duplicate same user → wait for worker UoW rollback → assert PG column UNCHANGED at the post-first-book value (NOT the seeded value, NOT inflated by an erroneous handleFailure increment), and Redis qty restored.
+
+If a future contributor misreads "MUST increment PG" as a global rule and adds `IncrementTicket` to `handleFailure`, the second test fails loudly. Symmetric for the AbandonCompensator test.
+
+### Defense-in-depth: NullUUID + RowsAffected guards
+
+Two defensive guards in `stage3Compensator.Compensate` (caught by Slice 1 multi-agent code review and applied to both Stage 2 and Stage 3):
+
+1. **NullUUID scan**: `orders.ticket_type_id` is `UUID NULL`. Bare `uuid.UUID` scan would fail hard on a legacy NULL row with a non-`sql.ErrNoRows` error → bypasses the eligibility guard → spurious sweeper error logs. `uuid.NullUUID` + `.Valid` check returns `ErrCompensateNotEligible` cleanly.
+2. **RowsAffected check on UPDATE event_ticket_types**: if the `ttID` doesn't match any `event_ticket_types.id` row (orphaned order — schema has no FK from `orders.ticket_type_id`, so cross-DB-drift / data corruption can produce this), the UPDATE silently no-ops. Without the rows-affected check, revert.lua + MarkCompensated would commit while PG inventory stayed short — permanent leak. The check turns the no-op into a hard error so the sweeper retries (revert.lua's SETNX guard short-circuits Redis re-INCRBY) and ops sees the recurring error.
+
+The integration test `TestStage3Booking_CompensatorOrphanedTicketType_PGLeakGuard` pins the second guard.
+
+### Failure modes Stage 3 inherits + adds
+
+Inherited from Stage 4's worker pipeline:
+- PEL recovery on restart (`worker.Service.Start` → `EnsureGroup` → `Subscribe` → `processPending` first).
+- DLQ classifier for malformed messages (deterministic-failure fast path skipping retry budget).
+- handleFailure compensation contract (revert.lua + DLQ XAdd; failure stays in PEL).
+- handleParseFailure best-effort revert (Codex P1a from D4.1 follow-up).
+
+Added by Stage 3 specifically:
+- Sweeper-vs-PEL race silent-skip via the compensator's `sql.ErrNoRows` guard.
+- Orphaned-ticket_type leak guard via the RowsAffected check.
+
+Known limitation (acknowledged in plan §risks #5):
+- `domain.ErrUserAlreadyBought` is NOT in `domain.IsMalformedOrderInput`'s sentinel list, so the worker treats 23505 as transient and burns `WORKER_MAX_RETRIES` × linear-backoff before routing to DLQ. Functionally correct (revert.lua restores Redis at the end; PG never permanently changes because each attempt's UoW rolls back), but wasteful — 3 PG transactions per duplicate user attempt. Inherited from Stage 4 verbatim; fix belongs in a post-D12 cleanup PR that touches Stage 4.
+
+### How to run Stage 3
+
+```bash
+# Build
+go build -o bin/booking-cli-stage3 ./cmd/booking-cli-stage3
+
+# Run (requires Postgres + Redis)
+DATABASE_URL='postgres://booking:smoketest_pg_local@localhost:5433/booking?sslmode=disable' \
+  REDIS_PASSWORD=smoketest_redis_local REDIS_ADDR=localhost:6379 \
+  PORT=8093 \
+  BOOKING_RESERVATION_WINDOW=20s \
+  EXPIRY_SWEEP_INTERVAL=5s \
+  EXPIRY_GRACE_PERIOD=1s \
+  bin/booking-cli-stage3 server
+```
+
+**Known dev-time foot-gun**: Stage 3 reads from `orders:stream` with the consumer group `orders:group`. Both names are package-level constants in `internal/infrastructure/cache/redis_queue.go` — NOT configurable. Running Stage 3 alongside Stage 4 (or any other binary using the same constants) against shared Redis causes silent message routing — workers compete and split the stream. Mitigation until PR-D12.5 (per-stage Redis DB index): only run ONE stage binary at a time against shared Redis. Tests are isolated via per-test testcontainers and unaffected.
+
+### How Stage 3 was verified
+
+| Verification | What it pins |
+|---|---|
+| **Service-level integration tests** ([`test/integration/postgres/stage3_booking_test.go`](../../test/integration/postgres/stage3_booking_test.go)) — 7 tests, ~13s total | HappyPath_AsyncWorkerInsertsOrder (full async flow with real worker goroutine; PG column AND Redis qty decrement by 1) / SoldOut / **AbandonCompensator_PGSymmetry** (compensator increments PG back to seeded value — the load-bearing rule) / **WorkerHandleFailure23505_PGUnchanged** (the inverse symmetry: UoW rollback restores PG; handleFailure must NOT IncrementTicket) / CompensatorAcceptsErrNoRows (sweeper-vs-PEL race silent-skip) / **CompensatorOrphanedTicketType_PGLeakGuard** (the new RowsAffected leak guard from Slice 1 H2) / ConcurrentContention (Lua + worker UoW serialization; PG column drains to 0) |
+| **/events compensation tests** ([`cmd/booking-cli-stage3/compensate_test.go`](../../cmd/booking-cli-stage3/compensate_test.go)) — 2 tests | `compensateDanglingEvent` deletes both rows in FK-safe order + idempotent on missing rows |
+| **Live HTTP smoke** | `make demo-up` stack + Stage 3 binary on `:8093`. All 3 k6 paths exercised: happy → paid; payment-failed → compensated + PG column back at seed + Redis qty restored; abandon → TTL → sweeper → same restoration |
+| **Graceful shutdown across THREE goroutines** | Single shared `runCtx` coordinates HTTP + worker + sweeper. SIGTERM → fx OnStop chain → `cancel()` signals all three → `srv.Shutdown(stopCtx)` drains HTTP → `wg.Wait()` bounded by stopCtx for worker + sweeper. End-to-end ~6ms when both background goroutines are between work |
+| **Multi-agent review pre-PR (no Codex due to limit)** | Plan reviewed by code-reviewer + silent-failure-hunter (8 findings actioned in plan revisions); per-slice reviews of Slice 1 (2 HIGH findings actioned: NullUUID + RowsAffected; same fixes applied to Stage 2) and Slice 2 (5 findings actioned: waitForRedisQty polling, FK comment correction, EnsureGroup scope clarification, user_id assertion, no-op compile assertion deletion) |
+
+### Architectural cost Stage 3 surfaces vs Stage 2
+
+The PG INSERT moves OFF the request hot path. `BookTicket` returns 202 after Lua + XADD (~1ms localhost). The worker drains the stream asynchronously, paying the PG round-trip latency offline. The expected throughput characteristic:
+
+- Stage 2 hot path: Lua DECRBY + HMGET (~0.5ms) + PG INSERT + commit fsync (~3-8ms) → ~150-300 req/s per request thread (estimate; actual ceiling measured in PR-D12.5).
+- Stage 3 hot path: Lua DECRBY + HMGET + XADD (~0.7ms) → 1000+ req/s estimated ceiling. PG INSERT throughput becomes a worker-side concurrency problem (single worker; multiple workers possible but not wired in PR-D12.3). The estimate is latency arithmetic, not measured against this PR's binary; PR-D12.5's `comparison.md` does the actual benchmarking.
+
+The cost: **Stage 3 carries strictly more failure modes than Stage 2.** Async timing means a /book that returns 202 with an order_id may never produce a row (worker INSERT-fails → handleFailure → DLQ; client polls GET /orders/:id → 404 forever). Async timing also means the response shape is "eventually consistent" — the Pattern A reservation's reserved_until is computed at API-time, but if the worker is backpressured the order may already be expired by the time it lands in PG (the sweeper handles this correctly via `WHERE reserved_until <= NOW() - grace`). Per-message PEL recovery, parse-fail compensation, retry budget classification, sweeper-vs-PEL race — Stage 3 inherits all the failure-mode complexity of Stage 4's worker pipeline.
+
+PR-D12.5's `comparison.md` will frame Stage 4 (with Kafka + saga) as the next layer of failure-mode complexity Stage 3 doesn't carry — the saga compensator handles cross-process compensation that Stage 3's in-binary sweeper handles in-process.
+
+---
+
 ## What's in PR-D12.1
 
 ```
@@ -319,11 +495,27 @@ docs/d12/README.md                                      (Stage 2 section — thi
 
 Total: ~1.7k LOC. Tests outnumber production code by ~1.5×, matching Stage 1's verification posture. Codex round-1 caught two findings (P1 PG inflation in compensator + P2 dangling 201 on Redis hydrate failure); both actioned as fixup before push.
 
-## Future PRs (D12.3 through D12.5)
+## What's in PR-D12.3
+
+```
+cmd/booking-cli-stage3/main.go                          (~85 LOC; Cobra wrapper)
+cmd/booking-cli-stage3/server.go                        (~565 LOC; fx wiring + /events handler + stage3Compensator + sweeper + compensateDanglingEvent)
+cmd/booking-cli-stage3/compensate_test.go               (~70 LOC, 2 tests)
+test/integration/postgres/stage3_booking_test.go        (~565 LOC, 7 tests including bidirectional PG-symmetry pair + orphaned-ticket_type leak guard)
+
+MODIFIED:
+internal/infrastructure/api/stagehttp/compensator.go    (refreshed Compensator interface doc to describe per-stage settled designs)
+cmd/booking-cli-stage1/server.go                        (refreshed stale Stage 2/3 comparison comment)
+cmd/booking-cli-stage2/server.go                        (NullUUID scan + sql.ErrNoRows guard fixup; same H1 fix as Stage 3)
+docs/d12/README.md                                      (new Stage 3 section — this file)
+```
+
+Total: ~1.4k LOC. Smaller than PR-D12.2 because Stage 3 reuses Stage 4's `booking.Service` + `worker` package + `deduct.lua` verbatim — only the cmd binary + compensator + integration tests are new. Multi-agent review pre-PR (no Codex due to limit) caught 8 plan-stage findings + 2 Slice 1 HIGH findings (NullUUID, RowsAffected — applied to Stage 2 too) + 5 Slice 2 findings; all actioned before push.
+
+## Future PRs (D12.4 + D12.5)
 
 | PR | Scope | Effort |
 |---|---|---|
-| **PR-D12.3** | Stage 3 binary (Lua + stream + worker, no outbox) — likely small if Stage 4's worker is reusable with a different fx wiring | ~3-4 days |
 | **PR-D12.4** | Stage 4 (current cmd/booking-cli) + observability changes: Prometheus scrape-config `stage` target labels for ALL 4 binaries; new saga-throughput metrics (`saga_compensator_events_processed_total{outcome}`, `saga_compensation_loop_duration_seconds` histogram with `events_outbox.created_at → MarkCompensated commit` data path via `kafka.Message.Time`, `saga_compensation_consumer_lag` gauge) | ~3 days |
 | **PR-D12.5** | Harness + `comparison.md`: per-stage Postgres DB + per-stage Redis DB index; docker-compose comparison profile; orchestration script; first comparison.md with the full 6-paper citation map (Psarakis CIDR'25 / SIGMOD'25 tutorial / Faleiro PVLDB'17 / Cheng PVLDB'24 / Laigner TOSEM'25 / Kløvedal preprint) | ~5-7 days |
 

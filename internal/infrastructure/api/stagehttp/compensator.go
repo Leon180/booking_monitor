@@ -36,17 +36,38 @@ import (
 var ErrCompensateNotEligible = errors.New("order not awaiting_payment at lock time")
 
 // Compensator is the failure-path architectural seam across Stages
-// 1-3. Each stage's binary supplies its own implementation:
+// 1-3. Each stage's binary supplies its own implementation,
+// reflecting the stage's forward-path SoT discipline:
 //
-//   - Stage 1: SQL-only — BEGIN; SELECT FOR UPDATE event_ticket_types;
-//     UPDATE available_tickets += qty; UPDATE orders SET
-//     status='compensated'; COMMIT.
-//   - Stage 2: Redis revert (INCRBY) + the same SQL compensation tx.
-//     Order matters — Redis revert must happen before the SQL UPDATE
-//     so a /confirm-failed → crash before SQL commit doesn't leave
-//     soft-locked Redis inventory.
-//   - Stage 3: emit `order.failed` to `orders:stream` (or directly
-//     INCRBY Redis + SQL update inline; depends on D12.3 design).
+//   - Stage 1: PG-only — BEGIN; SELECT FOR UPDATE order;
+//     UPDATE event_ticket_types += qty; UPDATE orders SET
+//     status='compensated'; COMMIT. Symmetric with Stage 1's
+//     SELECT-FOR-UPDATE forward path that decremented PG inventory.
+//   - Stage 2: revert.lua + UPDATE orders status only — NO
+//     event_ticket_types update. Symmetric with Stage 2's forward
+//     path (Redis Lua deduct + sync INSERT, no PG inventory column
+//     decrement). Codex round-1 P1 in PR #106 enforced this — an
+//     asymmetric compensator that incremented the PG column would
+//     drift it +qty per abandon. Order: revert.lua INSIDE the tx,
+//     before UPDATE orders, so a Redis failure rolls back the SQL.
+//     PR-D12.3 H1 added the `uuid.NullUUID` scan +
+//     `sql.ErrNoRows → ErrCompensateNotEligible` guard to handle
+//     legacy NULL `ticket_type_id` rows + sweeper-vs-confirm races.
+//   - Stage 3: revert.lua + UPDATE event_ticket_types += qty +
+//     UPDATE orders status. Stage 3's worker DECREMENTS the PG
+//     column inside its UoW (symmetric with Stage 4's worker post-
+//     D7), so the compensator MUST increment it back. Order:
+//     revert.lua INSIDE the tx, before the UPDATE statements
+//     (matches Stage 2's pattern, NOT Stage 4's saga compensator
+//     which does PG-first-Redis-after). Same `uuid.NullUUID` +
+//     `sql.ErrNoRows` guards as Stage 2; ALSO has the
+//     RowsAffected check on `UPDATE event_ticket_types` to catch
+//     orphaned ticket_type rows (PG-leak guard from PR-D12.3 H2).
+//
+// The PG-symmetry rule (compensator's UPDATE event_ticket_types
+// behavior must match the stage's forward-path PG behavior) is the
+// single most load-bearing invariant across stages 1-3 — drift
+// either direction is a permanent inventory leak.
 //
 // Implementations MUST:
 //   - Be idempotent on order_id (sweeper + /confirm-failed can fire

@@ -237,8 +237,12 @@ func handleCreateEvent(db *sql.DB) gin.HandlerFunc {
 //
 // Used by both the stagehttp HandleTestConfirm (outcome=failed
 // branch) and the in-binary expiry sweeper goroutine. Stage 2's
-// Compensator will additionally INCRBY the Redis qty key; Stage 3's
-// will emit to orders:stream.
+// Compensator does revert.lua + UPDATE orders only (no PG inventory
+// column update — symmetric with its forward path). Stage 3's
+// Compensator does revert.lua + UPDATE event_ticket_types += qty +
+// UPDATE orders (symmetric with its async-worker forward path that
+// decrements event_ticket_types). See stagehttp/compensator.go's
+// interface doc for the full per-stage rationale.
 type stage1Compensator struct {
 	db *sql.DB
 }
