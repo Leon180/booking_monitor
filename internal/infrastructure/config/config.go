@@ -152,11 +152,29 @@ type ReconConfig struct {
 }
 
 // PaymentConfig holds the tunables for the D4 `/pay` + D5 webhook
-// surfaces. Most knobs are webhook-side because the gateway-side
-// idempotency + per-event price snapshot eliminate the configuration
-// surface a real Stripe adapter would need (api keys, version pin,
-// retry budget — handled by the adapter, not us).
+// surfaces + (D4.2) the real Stripe SDK adapter switch.
+//
+// Provider selects which `domain.PaymentGateway` adapter the fx graph
+// wires:
+//   - "mock"    — `internal/infrastructure/payment/mock_gateway.go`
+//                 (default for dev / CI / tests; "always succeed" semantics)
+//   - "stripe"  — `internal/infrastructure/payment/stripe_gateway.go`
+//                 (production; talks to api.stripe.com via stripe-go v82)
+//
+// Production-mode validation REQUIRES `Provider == "stripe"` plus a
+// non-empty `Stripe.APIKey` and `Stripe.WebhookSecret` (or the legacy
+// `WebhookSecret` falls through with a deprecation warning).
 type PaymentConfig struct {
+	// Provider selects the gateway adapter (D4.2). Default "mock"
+	// preserves backward compatibility — existing `make demo-up` /
+	// integration tests / CI continue using `MockGateway` without
+	// requiring a Stripe account.
+	Provider string `yaml:"provider" env:"PAYMENT_PROVIDER" env-default:"mock"`
+
+	// Stripe is the configuration sub-tree for the Stripe SDK adapter
+	// (D4.2). All fields are required ONLY when `Provider == "stripe"`.
+	Stripe StripePaymentConfig `yaml:"stripe"`
+
 	// WebhookSecret is the HMAC-SHA256 signing secret the provider
 	// shares with us. Source of truth: the provider's dashboard
 	// (Stripe: developer settings → webhooks → signing secret;
@@ -164,10 +182,17 @@ type PaymentConfig struct {
 	// integration tests, anything non-empty works as long as the
 	// mock signer + the verifier read the same value.
 	//
-	// HARD RULE: empty value MUST cause startup failure (see
-	// `application/payment/webhook_service.go` consumer + the
-	// VerifySignature config-error branch). Silently accepting any
-	// signature against an empty key is a forgery vector.
+	// D4.2 backward-compat note: when `Provider == "stripe"`, the
+	// canonical env var is `STRIPE_WEBHOOK_SECRET` (Stripe.WebhookSecret).
+	// This `PAYMENT_WEBHOOK_SECRET` field is kept for backward compat
+	// with pre-D4.2 deploys; if STRIPE_WEBHOOK_SECRET is empty AND
+	// PAYMENT_WEBHOOK_SECRET is set, Validate() fills the former from
+	// the latter and emits a deprecation warning to stderr.
+	//
+	// HARD RULE: empty value MUST cause startup failure when
+	// Provider != "mock" (see `application/payment/webhook_service.go`
+	// consumer + the VerifySignature config-error branch). Silently
+	// accepting any signature against an empty key is a forgery vector.
 	WebhookSecret string `yaml:"webhook_secret" env:"PAYMENT_WEBHOOK_SECRET"`
 
 	// WebhookReplayTolerance bounds how far the `t=<unix>` in the
@@ -192,6 +217,66 @@ type PaymentConfig struct {
 	// the configured server port — override for tests / containers.
 	// Only consulted when `Server.EnableTestEndpoints` is true.
 	WebhookLoopbackURL string `yaml:"webhook_loopback_url" env:"PAYMENT_WEBHOOK_LOOPBACK_URL" env-default:"http://127.0.0.1:8080/webhook/payment"`
+}
+
+// StripePaymentConfig holds the configuration tree for the real Stripe
+// SDK adapter (D4.2). All fields are required ONLY when
+// `Payment.Provider == "stripe"`. Production-mode validation rejects
+// missing APIKey / WebhookSecret + test keys without explicit opt-in
+// via `STRIPE_ALLOW_TEST_KEY`.
+//
+// Sub-config (not flattened into PaymentConfig) so the YAML namespace
+// is unambiguous (`payment.stripe.api_key`) and so Mock-only deploys
+// don't need to read or set any of these fields.
+type StripePaymentConfig struct {
+	// APIKey is the Stripe secret key. Accepts any of:
+	//   sk_test_*  — full-account test key (dev only)
+	//   sk_live_*  — full-account live key (PRODUCTION POLICY VIOLATION;
+	//                use restricted keys instead)
+	//   rk_test_*  — restricted-scope test key (recommended for staging)
+	//   rk_live_*  — restricted-scope live key (recommended for production)
+	//
+	// Production deploys SHOULD use restricted-scope keys with
+	// `payment_intent:read,write` scope only. Adapter doesn't enforce
+	// key format — runbook + Stripe dashboard policy are the
+	// scope-enforcement layer. Validate() rejects test keys (sk_test_/
+	// rk_test_) when APP_ENV=production unless AllowTestKey is true.
+	APIKey string `yaml:"api_key" env:"STRIPE_API_KEY"`
+
+	// WebhookSecret is the Stripe signing secret (whsec_*) for
+	// inbound webhook payload verification. Replaces the legacy
+	// `Payment.WebhookSecret` field — Validate() falls back to that
+	// field with a deprecation warning if this one is empty.
+	WebhookSecret string `yaml:"webhook_secret" env:"STRIPE_WEBHOOK_SECRET"`
+
+	// Timeout is the per-Stripe-call HTTP deadline. Stripe's docs
+	// prescribe 30s; faster timeouts cause spurious failures during
+	// their occasional 3-5s response time on PaymentIntent create.
+	// Adapter clamps to 5min ceiling (defends against config-typo
+	// `STRIPE_TIMEOUT=300` interpreted as seconds-when-meant-as-ms).
+	Timeout time.Duration `yaml:"timeout" env:"STRIPE_TIMEOUT" env-default:"30s"`
+
+	// MaxNetworkRetries is the per-Backend retry budget (passed to
+	// `BackendConfig.MaxNetworkRetries`). Default 2 matches stripe-go's
+	// `DefaultMaxNetworkRetries` const. Adapter clamps to 10 max
+	// (defends against config-typo `STRIPE_MAX_NETWORK_RETRIES=9999`
+	// holding a recon goroutine for tens of minutes).
+	MaxNetworkRetries int64 `yaml:"max_network_retries" env:"STRIPE_MAX_NETWORK_RETRIES" env-default:"2"`
+
+	// AllowTestKey is the explicit opt-in for "production stack
+	// pointing at Stripe test mode" runs (CI smoke against a staging
+	// environment that uses production-mode app config but Stripe
+	// test keys). Default false: production-mode validation rejects
+	// `sk_test_*` / `rk_test_*` / `pk_test_*` API keys at startup
+	// unless this is true.
+	//
+	// Boolean parsing (plan-review HIGH #3): cleanenv delegates to
+	// `strconv.ParseBool` which accepts ONLY `1/t/T/TRUE/true/True/
+	// 0/f/F/FALSE/false/False`. **Strings like `yes` / `on` / `Y` are
+	// rejected** with a parse error that surfaces as a startup
+	// failure with no payment-config context. Set this to literal
+	// `true` (or `1`) — anything else fails loud but confusingly.
+	AllowTestKey bool `yaml:"allow_test_key" env:"STRIPE_ALLOW_TEST_KEY" env-default:"false"`
 }
 
 // ExpiryConfig holds the tunables for the `expiry-sweeper` subcommand
@@ -568,6 +653,36 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
 
+	// D4.2 backward-compat: if STRIPE_WEBHOOK_SECRET is unset but the
+	// legacy PAYMENT_WEBHOOK_SECRET is set, populate the new field
+	// from the legacy field and emit a deprecation warning. Stripe
+	// adapter (Slice 1) reads `Payment.Stripe.WebhookSecret`; webhook
+	// handler reads `Payment.WebhookSecret` (legacy path); this
+	// fallback unifies them so dev/CI deploys that still set the
+	// legacy var keep working without explicit env updates.
+	if cfg.Payment.Stripe.WebhookSecret == "" && cfg.Payment.WebhookSecret != "" {
+		cfg.Payment.Stripe.WebhookSecret = cfg.Payment.WebhookSecret
+		fmt.Fprintln(os.Stderr,
+			"WARN: STRIPE_WEBHOOK_SECRET is empty; falling back to legacy PAYMENT_WEBHOOK_SECRET. "+
+				"Set STRIPE_WEBHOOK_SECRET explicitly — PAYMENT_WEBHOOK_SECRET is deprecated and will be "+
+				"removed in a future release. (D4.2)")
+	}
+	// D4.2 plan-review M1: when BOTH STRIPE_WEBHOOK_SECRET and
+	// PAYMENT_WEBHOOK_SECRET are set with DIFFERENT values, the
+	// silent precedence (STRIPE wins) hides typos. A mid-migration
+	// deploy that typo'd the new var would silently 401 every
+	// inbound webhook with no diagnostic. Surface the conflict
+	// loudly so operators can detect-and-correct.
+	if cfg.Payment.Stripe.WebhookSecret != "" &&
+		cfg.Payment.WebhookSecret != "" &&
+		cfg.Payment.Stripe.WebhookSecret != cfg.Payment.WebhookSecret {
+		fmt.Fprintln(os.Stderr,
+			"WARN: Both STRIPE_WEBHOOK_SECRET and PAYMENT_WEBHOOK_SECRET are set with DIFFERENT values; "+
+				"STRIPE_WEBHOOK_SECRET takes precedence. If this is intentional, remove "+
+				"PAYMENT_WEBHOOK_SECRET to suppress this warning; if not, the values likely diverged "+
+				"due to a typo during D4.2 migration. (D4.2)")
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
@@ -656,6 +771,75 @@ func (c *Config) Validate() error {
 		// so it can never reach a live deployment.
 		if c.Server.EnableTestEndpoints {
 			missing = append(missing, "server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS (forbidden when APP_ENV=production)")
+		}
+
+		// D4.2: production must use the real Stripe adapter. MockGateway
+		// is "always succeed" semantics — running it in production
+		// would silently confirm payments without any actual money
+		// movement. Reject startup.
+		//
+		// Plan-review M2 ordering: the Provider whitelist check
+		// (below the production block) runs FIRST when Provider is a
+		// typo (so a "stipe" → "must be 'mock' or 'stripe'" error is
+		// the only message), avoiding 4 overlapping confusing errors
+		// for a single typo. Production-mode block here only runs
+		// for known-valid values "mock" / "stripe" / "".
+		if c.Payment.Provider == "mock" || c.Payment.Provider == "" {
+			missing = append(missing, fmt.Sprintf(
+				"payment.provider / PAYMENT_PROVIDER must be 'stripe' in production (got %q); MockGateway is a dev-only adapter that never moves real money",
+				c.Payment.Provider))
+		}
+	}
+
+	// D4.2 Plan-review M2: whitelist Provider FIRST. Reject typo'ed
+	// values with a single clear message. If we get past this switch
+	// the Provider is known-valid (mock / stripe / empty-as-mock).
+	switch c.Payment.Provider {
+	case "mock", "stripe":
+		// OK
+	case "":
+		// Empty falls through to env-default "mock"; cleanenv's
+		// env-default kicks in BEFORE Validate, but a `&Config{...}`
+		// literal that bypasses env loading would have empty here.
+		// Treat as "mock" rather than rejecting.
+	default:
+		missing = append(missing, fmt.Sprintf(
+			"payment.provider / PAYMENT_PROVIDER must be 'mock' or 'stripe' (got %q)",
+			c.Payment.Provider))
+	}
+
+	// D4.2 Plan-review M6: when Provider=stripe, require APIKey +
+	// WebhookSecret regardless of APP_ENV. Without this, a dev/staging
+	// deploy that sets PAYMENT_PROVIDER=stripe but forgets the keys
+	// passes Validate and fails late at fx-construction time
+	// (NewStripeGateway returns "APIKey is required") — loud-but-
+	// delayed. Catching it at startup gives a "config validation:"
+	// prefix consistent with other config errors.
+	if c.Payment.Provider == "stripe" {
+		if c.Payment.Stripe.APIKey == "" {
+			missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY (required when PAYMENT_PROVIDER=stripe)")
+		} else {
+			// Refuse to start with a Stripe test key in production-mode
+			// unless explicitly opted in. A `sk_test_` / `rk_test_` /
+			// `pk_test_` key in production silently runs against
+			// Stripe's test mode — money never actually moves; we look
+			// healthy but customers don't get charged.
+			//
+			// Plan-review L7: also reject `pk_test_` (Stripe publishable
+			// key, test-mode) for completeness — a copy-paste from the
+			// Stripe dashboard could put it in STRIPE_API_KEY by
+			// mistake; pk_* is server-side-invalid but our prefix
+			// match would silently accept it.
+			if normalizedAppEnv(c.App.Env) == "production" &&
+				(strings.HasPrefix(c.Payment.Stripe.APIKey, "sk_test_") ||
+					strings.HasPrefix(c.Payment.Stripe.APIKey, "rk_test_") ||
+					strings.HasPrefix(c.Payment.Stripe.APIKey, "pk_test_")) &&
+				!c.Payment.Stripe.AllowTestKey {
+				missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY is a test key (sk_test_/rk_test_/pk_test_); set STRIPE_ALLOW_TEST_KEY=true to allow (deliberate staging-vs-prod cutover scenarios only)")
+			}
+		}
+		if c.Payment.Stripe.WebhookSecret == "" && c.Payment.WebhookSecret == "" {
+			missing = append(missing, "payment.stripe.webhook_secret / STRIPE_WEBHOOK_SECRET (or legacy PAYMENT_WEBHOOK_SECRET) required when PAYMENT_PROVIDER=stripe")
 		}
 	}
 

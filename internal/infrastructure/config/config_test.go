@@ -60,6 +60,22 @@ func validBase() *config.Config {
 			SweepInterval:     60 * time.Second,
 			AbsoluteTolerance: 100,
 		},
+		// D4.2: production-mode validation requires Provider=stripe +
+		// non-empty APIKey + non-empty WebhookSecret. validBase()
+		// sets these to test-shaped values so the existing
+		// production-guard tests (which override App.Env="" /
+		// "production") still pass without needing per-test Stripe
+		// setup. The Stripe adapter doesn't validate key format
+		// (rk_live_/sk_test_/etc.) at config time — runtime errors
+		// surface from Stripe's API call, not Validate().
+		Payment: config.PaymentConfig{
+			Provider:      "stripe",
+			WebhookSecret: "whsec_test_legacy_field",
+			Stripe: config.StripePaymentConfig{
+				APIKey:        "rk_live_validBaseFakeKey_xxxxxxxxxx",
+				WebhookSecret: "whsec_test_validBaseFakeSecret",
+			},
+		},
 	}
 }
 
@@ -248,4 +264,158 @@ func TestValidate_AggregatesAllMissing(t *testing.T) {
 	// Belt-and-suspenders: verify it really is one error string,
 	// not multiple wrapped errors.
 	assert.Equal(t, 1, strings.Count(msg, "missing required config fields"))
+}
+
+// TestValidate_PaymentProviderWhitelist — D4.2 Slice 2a. Provider
+// values are whitelisted at all times (not just production); a
+// misspelled `PAYMENT_PROVIDER=stipe` should fail loud, not silently
+// fall through to mock.
+func TestValidate_PaymentProviderWhitelist(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		val     string
+		wantErr bool
+	}{
+		{"mock_accepted", "mock", false},
+		{"stripe_accepted", "stripe", false},
+		{"empty_treated_as_mock", "", false},
+		{"misspelled_stipe_rejected", "stipe", true},
+		{"misspelled_strpe_rejected", "strpe", true},
+		{"unknown_paypal_rejected", "paypal", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validBase()
+			c.App.Env = "development" // bypass production-mode requirements
+			c.Payment.Provider = tt.val
+
+			err := c.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "PAYMENT_PROVIDER")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestValidate_ProductionRequiresStripe — D4.2 Slice 2a. Production
+// mode REJECTS Provider=mock (silent no-op-payments risk) and
+// requires non-empty APIKey + WebhookSecret.
+func TestValidate_ProductionRequiresStripe(t *testing.T) {
+	t.Parallel()
+
+	t.Run("production_with_mock_rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.Payment.Provider = "mock"
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be 'stripe' in production")
+		assert.Contains(t, err.Error(), "MockGateway is a dev-only adapter")
+	})
+
+	t.Run("production_with_stripe_no_apikey_rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.Payment.Provider = "stripe"
+		c.Payment.Stripe.APIKey = ""
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "STRIPE_API_KEY")
+	})
+
+	t.Run("production_with_stripe_no_webhook_secret_rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.Payment.Provider = "stripe"
+		c.Payment.Stripe.WebhookSecret = ""
+		c.Payment.WebhookSecret = "" // also clear legacy fallback
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "STRIPE_WEBHOOK_SECRET")
+	})
+
+	t.Run("production_with_empty_provider_rejected", func(t *testing.T) {
+		// Plan-review LOW #8: Provider="" + production-mode must
+		// also be rejected (cleanenv's env-default fills "mock"
+		// before Validate, but a `&Config{...}` literal that
+		// bypasses env loading would have empty here).
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.Payment.Provider = ""
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be 'stripe' in production")
+	})
+
+	t.Run("production_with_legacy_webhook_secret_only_passes", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.Payment.Provider = "stripe"
+		c.Payment.Stripe.WebhookSecret = ""
+		c.Payment.WebhookSecret = "whsec_legacy_present" // backward-compat
+
+		err := c.Validate()
+		require.NoError(t, err,
+			"legacy PAYMENT_WEBHOOK_SECRET should satisfy the validation "+
+				"(LoadConfig promotes it to Stripe.WebhookSecret with a "+
+				"deprecation warning; here we test the validator directly "+
+				"sees either field as sufficient)")
+	})
+}
+
+// TestValidate_ProductionRejectsStripeTestKey — D4.2 Slice 2a.
+// Production with `sk_test_*` / `rk_test_*` keys silently runs against
+// Stripe test mode (money never moves). Must be rejected unless
+// STRIPE_ALLOW_TEST_KEY is explicitly set.
+func TestValidate_ProductionRejectsStripeTestKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		apiKey       string
+		allowTestKey bool
+		wantErr      bool
+	}{
+		{"sk_test_rejected", "sk_test_xxxxxx", false, true},
+		{"rk_test_rejected", "rk_test_xxxxxx", false, true},
+		{"sk_test_allowed_with_opt_in", "sk_test_xxxxxx", true, false},
+		{"rk_test_allowed_with_opt_in", "rk_test_xxxxxx", true, false},
+		{"sk_live_accepted", "sk_live_xxxxxx", false, false},
+		{"rk_live_accepted", "rk_live_xxxxxx", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validBase()
+			c.App.Env = "production"
+			c.Payment.Provider = "stripe"
+			c.Payment.Stripe.APIKey = tt.apiKey
+			c.Payment.Stripe.AllowTestKey = tt.allowTestKey
+
+			err := c.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "STRIPE_ALLOW_TEST_KEY")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
