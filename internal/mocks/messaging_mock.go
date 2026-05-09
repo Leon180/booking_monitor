@@ -10,6 +10,7 @@
 package mocks
 
 import (
+	domain "booking_monitor/internal/domain"
 	context "context"
 	reflect "reflect"
 
@@ -54,16 +55,16 @@ func (mr *MockEventPublisherMockRecorder) Close() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockEventPublisher)(nil).Close))
 }
 
-// Publish mocks base method.
-func (m *MockEventPublisher) Publish(ctx context.Context, topic string, payload []byte) error {
+// PublishOutboxEvent mocks base method.
+func (m *MockEventPublisher) PublishOutboxEvent(ctx context.Context, e domain.OutboxEvent) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Publish", ctx, topic, payload)
+	ret := m.ctrl.Call(m, "PublishOutboxEvent", ctx, e)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// Publish indicates an expected call of Publish.
-func (mr *MockEventPublisherMockRecorder) Publish(ctx, topic, payload any) *gomock.Call {
+// PublishOutboxEvent indicates an expected call of PublishOutboxEvent.
+func (mr *MockEventPublisherMockRecorder) PublishOutboxEvent(ctx, e any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Publish", reflect.TypeOf((*MockEventPublisher)(nil).Publish), ctx, topic, payload)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PublishOutboxEvent", reflect.TypeOf((*MockEventPublisher)(nil).PublishOutboxEvent), ctx, e)
 }

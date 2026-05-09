@@ -146,35 +146,69 @@ type EventRepository interface {
 }
 
 // OutboxEvent is the outbox-row aggregate. Field names unexported.
-// ID is factory-assigned (UUIDv7), not DB-assigned.
+// ID is factory-assigned (UUIDv7), not DB-assigned. CreatedAt is
+// factory-assigned (`time.Now()`) at construction; the postgres
+// schema's `events_outbox.created_at DEFAULT NOW()` is a defensive
+// fallback for direct-SQL inserts that bypass the factory.
+//
+// CreatedAt is load-bearing for the saga compensation latency
+// histogram (PR-D12.4): it's the histogram's start time, threaded
+// from here through `EventPublisher.PublishOutboxEvent` →
+// `kafka.Message.Time` → SagaConsumer's `time.Since(msg.Time)`. A
+// regression that loses CreatedAt anywhere in this chain produces
+// zero-value time → astronomical histogram observations all
+// landing in `+Inf` → broken percentile calculations. The
+// integration test at
+// `test/integration/postgres/outbox_kafka_time_test.go` is the
+// regression tripwire.
 type OutboxEvent struct {
 	id          uuid.UUID
 	eventType   string
 	payload     []byte // JSON
 	status      string
+	createdAt   time.Time
 	processedAt *time.Time
 }
 
 // ReconstructOutboxEvent rehydrates from a persisted row.
-func ReconstructOutboxEvent(id uuid.UUID, eventType string, payload []byte, status string, processedAt *time.Time) OutboxEvent {
+func ReconstructOutboxEvent(id uuid.UUID, eventType string, payload []byte, status string, createdAt time.Time, processedAt *time.Time) OutboxEvent {
 	return OutboxEvent{
 		id:          id,
 		eventType:   eventType,
 		payload:     payload,
 		status:      status,
+		createdAt:   createdAt,
 		processedAt: processedAt,
 	}
 }
 
 // Accessors.
-func (e OutboxEvent) ID() uuid.UUID          { return e.id }
-func (e OutboxEvent) EventType() string      { return e.eventType }
-func (e OutboxEvent) Payload() []byte        { return e.payload }
-func (e OutboxEvent) Status() string         { return e.status }
+func (e OutboxEvent) ID() uuid.UUID           { return e.id }
+func (e OutboxEvent) EventType() string       { return e.eventType }
+func (e OutboxEvent) Payload() []byte         { return e.payload }
+func (e OutboxEvent) Status() string          { return e.status }
+func (e OutboxEvent) CreatedAt() time.Time    { return e.createdAt }
 func (e OutboxEvent) ProcessedAt() *time.Time { return e.processedAt }
 
 // NewOrderFailedOutbox constructs a pending outbox event for an
-// `order.failed` payload (saga compensation trigger).
+// `order.failed` payload (saga compensation trigger). CreatedAt
+// is set to `time.Now().UTC()` so the downstream histogram
+// measures from this moment. The `Create` repo method explicitly
+// writes this value into `events_outbox.created_at` (see
+// `internal/infrastructure/persistence/postgres/repositories.go`'s
+// outbox INSERT — the `$5` parameter); the schema's
+// `DEFAULT NOW()` is preserved as a defensive fallback for
+// direct-SQL bypasses that skip the factory.
+//
+// SCHEMA-DEBT NOTE: `events_outbox.created_at` is `TIMESTAMP`
+// (timezone-naive) per migration 000003 + 000008. The factory
+// path (UTC time → explicit INSERT → UTC read-back) is correct.
+// But the DB-side `DEFAULT NOW()` fallback fires in server-local
+// time on non-UTC DB servers, which lib/pq interprets as UTC+0
+// — silently embedding a wrong timestamp. Migration 000008
+// already documents this debt as a separate cleanup. Future
+// migration: `ALTER TABLE events_outbox ALTER COLUMN created_at
+// TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC'`.
 func NewOrderFailedOutbox(payload []byte) (OutboxEvent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -185,6 +219,7 @@ func NewOrderFailedOutbox(payload []byte) (OutboxEvent, error) {
 		eventType: EventTypeOrderFailed,
 		payload:   payload,
 		status:    OutboxStatusPending,
+		createdAt: time.Now().UTC(),
 	}, nil
 }
 

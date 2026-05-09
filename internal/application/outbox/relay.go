@@ -127,7 +127,7 @@ func (r *Relay) processBatch(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		if err := r.publisher.Publish(ctx, e.EventType(), e.Payload()); err != nil {
+		if err := r.publisher.PublishOutboxEvent(ctx, e); err != nil {
 			r.log.Error(ctx, "outbox relay: failed to publish event",
 				mlog.String("event_id", e.ID().String()),
 				tag.Topic(e.EventType()),
