@@ -52,26 +52,40 @@ type Harness struct {
 }
 
 // migrationsDir resolves to deploy/postgres/migrations/ regardless of
-// whether the test is run from the repo root or a sub-package. Walks
-// up from the harness file's directory looking for the canonical
-// path; fails the test loudly if not found so a misconfigured layout
-// can't silently apply zero migrations.
+// the calling test package's depth in the repo tree. Walks UP from
+// the test's working directory (which Go test sets to the test's
+// package directory) until it finds the canonical path; fails
+// loudly if absent so a misconfigured layout can't silently apply
+// zero migrations.
 //
-// Hardcoded relative path because Go test working directory is
-// always the package directory of the test under execution
-// (test/integration/postgres/), so the path "../../../deploy/..."
-// is deterministic.
+// The walk-up is bounded at 8 levels — more than any realistic test
+// package depth — so a malformed path can't loop forever. Callers
+// today (test/integration/postgres = depth 3, cmd/booking-cli-stage2
+// = depth 2) both resolve in <= 3 hops.
 func migrationsDir(t *testing.T) string {
 	t.Helper()
-	const rel = "../../../deploy/postgres/migrations"
-	abs, err := filepath.Abs(rel)
+	cwd, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("migrationsDir: filepath.Abs(%q): %v", rel, err)
+		t.Fatalf("migrationsDir: getwd: %v", err)
 	}
-	if _, err := os.Stat(abs); err != nil {
-		t.Fatalf("migrationsDir: %q not accessible — repo layout drift? %v", abs, err)
+	dir := cwd
+	for i := 0; i < 8; i++ {
+		candidate := filepath.Join(dir, "deploy", "postgres", "migrations")
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			abs, absErr := filepath.Abs(candidate)
+			if absErr != nil {
+				t.Fatalf("migrationsDir: filepath.Abs(%q): %v", candidate, absErr)
+			}
+			return abs
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
 	}
-	return abs
+	t.Fatalf("migrationsDir: deploy/postgres/migrations not found walking up from %q (8 levels) — repo layout drift?", cwd)
+	return ""
 }
 
 // StartPostgres boots a fresh postgres:15-alpine testcontainer,
