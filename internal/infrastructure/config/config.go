@@ -808,6 +808,24 @@ func (c *Config) Validate() error {
 			c.Payment.Provider))
 	}
 
+	// Round-4 multi-agent review fix: staging mock-mode silent
+	// money-void guard. Production rejects mock above, but a staging
+	// environment (APP_ENV=staging or any non-production value) where
+	// the operator sets STRIPE_API_KEY=rk_live_*** + STRIPE_WEBHOOK_SECRET
+	// but forgets PAYMENT_PROVIDER=stripe boots silently in mock mode —
+	// the app looks healthy, real Stripe keys sit unused, no money
+	// moves. Cross-field check: if Stripe credentials are present BUT
+	// provider is mock, refuse startup regardless of APP_ENV. Cost:
+	// 4 LOC. Benefit: catches the staging-mock combo at startup
+	// instead of "mock mode is broken in staging" tickets after
+	// money fails to move.
+	if (c.Payment.Provider == "mock" || c.Payment.Provider == "") &&
+		(c.Payment.Stripe.APIKey != "" || c.Payment.Stripe.WebhookSecret != "") {
+		missing = append(missing, fmt.Sprintf(
+			"payment.provider / PAYMENT_PROVIDER is %q but Stripe credentials are present (STRIPE_API_KEY or STRIPE_WEBHOOK_SECRET set) — likely misconfiguration; either set PAYMENT_PROVIDER=stripe to use them, OR unset the Stripe vars to use the mock provider intentionally",
+			c.Payment.Provider))
+	}
+
 	// D4.2 Plan-review M6: when Provider=stripe, require APIKey +
 	// WebhookSecret regardless of APP_ENV. Without this, a dev/staging
 	// deploy that sets PAYMENT_PROVIDER=stripe but forgets the keys

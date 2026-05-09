@@ -89,24 +89,11 @@ func newSpy() *stripeMetricsSpy {
 	return &stripeMetricsSpy{}
 }
 
-// captureLogger captures every log line into a slice for redaction
-// asserts. Implements the Logger surface the StripeGateway uses
-// (specifically the LeveledLogger interface that wraps it).
-type captureLogger struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func newCaptureLogger() *captureLogger {
-	return &captureLogger{}
-}
-
-// AsLogger returns the equivalent `*mlog.Logger`. We tap into the
-// project's mlog package via NewNop()'s structure but route lines
-// to our slice. Simpler: we use NewNop() in the constructor and let
-// the redactingLeveledLogger forward — but for redaction tests we
-// need to observe the formatted output. So we run the redactor
-// directly against synthetic log lines below in TestStripeGateway_LogRedaction.
+// Redaction tests run the `redact` helper directly against synthetic
+// log lines (see TestStripeGateway_LogRedaction below) — observing
+// stripe-go's actual log output would require wiring a custom zap
+// core, and `redact` is the only non-trivial behavior of the
+// redactingLeveledLogger anyway.
 
 // stripeImpersonator is the test server. Routes are stubbed per-test
 // via the handlers map; each test wires up the response shape it
