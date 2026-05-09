@@ -27,9 +27,34 @@ import (
 
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/config"
-	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/infrastructure/observability"
 	paymentInfra "booking_monitor/internal/infrastructure/payment"
+	mlog "booking_monitor/internal/log"
 )
+
+// prometheusStripeMetrics implements `payment.StripeMetrics` by
+// forwarding each method call into the Prometheus globals declared
+// in `internal/infrastructure/observability/metrics_stripe.go`.
+// Mirrors the `prometheusReconMetrics` / `prometheusCompensatorMetrics`
+// patterns — keeps the application-side adapter free of direct
+// Prometheus imports while letting the production wiring do the real
+// emission.
+type prometheusStripeMetrics struct{}
+
+// NewPrometheusStripeMetrics returns the Prometheus-backed
+// StripeMetrics implementation. fx wires it as the production
+// adapter; tests substitute `NopStripeMetrics` or a spy.
+func NewPrometheusStripeMetrics() paymentInfra.StripeMetrics {
+	return prometheusStripeMetrics{}
+}
+
+func (prometheusStripeMetrics) IncCall(op, outcome string) {
+	observability.StripeAPICallsTotal.WithLabelValues(op, outcome).Inc()
+}
+
+func (prometheusStripeMetrics) ObserveDuration(op string, seconds float64) {
+	observability.StripeAPIDurationSeconds.WithLabelValues(op).Observe(seconds)
+}
 
 // NewPaymentGateway returns the configured payment gateway adapter.
 // Returns an error (NOT panic) on:
@@ -46,14 +71,18 @@ import (
 // `domain.PaymentGateway` is the combined port (PaymentIntentCreator
 // + PaymentStatusReader). Each subcommand's fx graph projects to
 // the narrow port it needs via `fx.As` — see file-level comment.
-func NewPaymentGateway(cfg *config.Config, logger *mlog.Logger) (domain.PaymentGateway, error) {
+func NewPaymentGateway(
+	cfg *config.Config,
+	logger *mlog.Logger,
+	metrics paymentInfra.StripeMetrics,
+) (domain.PaymentGateway, error) {
 	switch cfg.Payment.Provider {
 	case "stripe":
 		sg, err := paymentInfra.NewStripeGateway(paymentInfra.StripeConfig{
 			APIKey:            cfg.Payment.Stripe.APIKey,
 			Timeout:           cfg.Payment.Stripe.Timeout,
 			MaxNetworkRetries: cfg.Payment.Stripe.MaxNetworkRetries,
-		}, logger)
+		}, logger, metrics)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap: stripe adapter init: %w", err)
 		}
@@ -62,6 +91,8 @@ func NewPaymentGateway(cfg *config.Config, logger *mlog.Logger) (domain.PaymentG
 		// Empty-string treated as "mock" — Validate() already accepts
 		// this case (env-default is "mock"; literal-empty is for
 		// `&Config{...}` test constructions that bypass cleanenv).
+		// MockGateway doesn't take StripeMetrics — never emits to the
+		// counter (mock-only deploys see the pre-warmed-zero series).
 		return paymentInfra.NewMockGateway(), nil
 	default:
 		// Defense-in-depth — `config.Validate` already whitelists the

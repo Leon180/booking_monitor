@@ -48,6 +48,49 @@ import (
 	mlog "booking_monitor/internal/log"
 )
 
+// StripeMetrics is the per-call observability port — every Stripe
+// API call inside `StripeGateway.{CreatePaymentIntent,GetStatus}`
+// flows an `IncCall(op, outcome)` + `ObserveDuration(op, seconds)`
+// pair through this interface, NOT through the global
+// `internal/infrastructure/observability` Prometheus singletons. The
+// adapter pattern matches `recon.Metrics` / `saga.CompensatorMetrics`
+// — the Prometheus-backed implementation lives in
+// `internal/bootstrap/payment_provider.go` (`NewPrometheusStripeMetrics`)
+// and forwards into the prom vars in
+// `internal/infrastructure/observability/metrics_stripe.go`.
+//
+// Tests substitute `NopStripeMetrics` (zero behaviour) or a
+// captured-call spy. Slice 3a's tests rely on the spy variant.
+//
+// Outcome label vocabulary (must align with `metrics_init.go`
+// pre-warm + `metrics_stripe.go` Help text):
+//
+//   - "success"        — call succeeded
+//   - "declined"       — wrapped errors.Is(err, ErrPaymentDeclined)
+//   - "transient"      — wrapped errors.Is(err, ErrPaymentTransient)
+//   - "misconfigured"  — wrapped errors.Is(err, ErrPaymentMisconfigured)
+//   - "invalid"        — wrapped errors.Is(err, ErrPaymentInvalid)
+//
+// Op label vocabulary:
+//
+//   - "create_payment_intent"  — POST /v1/payment_intents
+//   - "get_status"             — GET  /v1/payment_intents/:id
+type StripeMetrics interface {
+	// IncCall increments the per-(op, outcome) counter.
+	IncCall(op, outcome string)
+	// ObserveDuration records the wall-clock duration of one call.
+	ObserveDuration(op string, seconds float64)
+}
+
+// NopStripeMetrics is the zero-behaviour implementation. Mirrors the
+// `NopMetrics` patterns in `recon` / `saga`. Used by tests + by
+// `MockGateway`'s callers (the mock doesn't talk to Stripe so its
+// callers never invoke a `StripeMetrics` method).
+type NopStripeMetrics struct{}
+
+func (NopStripeMetrics) IncCall(string, string)            {}
+func (NopStripeMetrics) ObserveDuration(string, float64)   {}
+
 // StripeConfig is the configuration injected into NewStripeGateway.
 // Held separately from the global `Config` so this file doesn't pull
 // the cleanenv struct as a dependency — the bootstrap layer translates
@@ -77,8 +120,9 @@ type StripeConfig struct {
 
 // StripeGateway is the production-grade Stripe adapter.
 type StripeGateway struct {
-	client *stripe.Client
-	log    *mlog.Logger
+	client  *stripe.Client
+	log     *mlog.Logger
+	metrics StripeMetrics
 }
 
 // NewStripeGateway constructs a StripeGateway with production-grade
@@ -92,9 +136,17 @@ type StripeGateway struct {
 // can surface it as a clean startup failure rather than a runtime
 // panic. The fx graph in `cmd/booking-cli/server.go` (Slice 2a)
 // upgrades this to fx.Shutdowner if the constructor fails.
-func NewStripeGateway(cfg StripeConfig, logger *mlog.Logger) (*StripeGateway, error) {
+func NewStripeGateway(cfg StripeConfig, logger *mlog.Logger, metrics StripeMetrics) (*StripeGateway, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("stripe: APIKey is required (set STRIPE_API_KEY)")
+	}
+	if metrics == nil {
+		// Defensive: callers should always inject metrics (production
+		// wires `prometheusStripeMetrics`; tests use `NopStripeMetrics`),
+		// but a nil dep would panic on the first IncCall call. Default
+		// to nop so a partial wiring slip surfaces as missing-metric
+		// rather than nil-deref crash.
+		metrics = NopStripeMetrics{}
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second // Stripe-documented default
@@ -149,8 +201,9 @@ func NewStripeGateway(cfg StripeConfig, logger *mlog.Logger) (*StripeGateway, er
 	client := stripe.NewClient(cfg.APIKey, stripe.WithBackends(backends))
 
 	return &StripeGateway{
-		client: client,
-		log:    scoped,
+		client:  client,
+		log:     scoped,
+		metrics: metrics,
 	}, nil
 }
 
@@ -168,6 +221,27 @@ func (g *StripeGateway) CreatePaymentIntent(
 	ctx context.Context, orderID uuid.UUID, amountCents int64,
 	currency string, metadata map[string]string,
 ) (domain.PaymentIntent, error) {
+	const op = "create_payment_intent"
+	start := time.Now()
+	// Always observe the duration histogram + emit one outcome
+	// counter increment, exactly once per call. Defer + named-return-
+	// like pattern using a closure variable so both branches (error
+	// and success) participate without duplicating the call.
+	//
+	// Slice 2b review LOW #2: initialize to "transient" (a pre-warmed
+	// label) rather than zero-value "". A panic between this defer
+	// registration and the first explicit `outcome = ...` assignment
+	// would otherwise emit `outcome=""`, breaking the pre-warm
+	// guarantee (creates a new label that isn't in the alert's
+	// pre-warmed series). "transient" matches `mapStripeError`'s
+	// fall-through policy for unclassified errors — semantically
+	// correct for "something panicked, treat as retryable".
+	outcome := "transient"
+	defer func() {
+		g.metrics.ObserveDuration(op, time.Since(start).Seconds())
+		g.metrics.IncCall(op, outcome)
+	}()
+
 	// Build params. AutomaticPaymentMethods.Enabled lets Stripe pick
 	// the right payment method types (card, ACH, etc.) based on the
 	// merchant's dashboard config — modern Stripe practice over
@@ -189,8 +263,11 @@ func (g *StripeGateway) CreatePaymentIntent(
 
 	pi, err := g.client.V1PaymentIntents.Create(ctx, params)
 	if err != nil {
-		return domain.PaymentIntent{}, mapStripeError(err)
+		mapped := mapStripeError(err)
+		outcome = classifyOutcome(mapped)
+		return domain.PaymentIntent{}, mapped
 	}
+	outcome = "success"
 
 	return domain.PaymentIntent{
 		ID:           pi.ID,
@@ -215,16 +292,74 @@ func (g *StripeGateway) CreatePaymentIntent(
 // (added in this PR) catches the row before reaching the gateway,
 // so this branch is defense-in-depth.
 func (g *StripeGateway) GetStatus(ctx context.Context, paymentIntentID string) (domain.ChargeStatus, error) {
+	const op = "get_status"
+	start := time.Now()
+	// Slice 2b review LOW #2: same panic-safe init as
+	// CreatePaymentIntent. "transient" is pre-warmed.
+	outcome := "transient"
+	defer func() {
+		g.metrics.ObserveDuration(op, time.Since(start).Seconds())
+		g.metrics.IncCall(op, outcome)
+	}()
+
 	if paymentIntentID == "" {
+		outcome = "invalid"
 		return domain.ChargeStatusUnknown, fmt.Errorf("stripe: empty payment intent ID: %w", domain.ErrPaymentInvalid)
 	}
 
 	pi, err := g.client.V1PaymentIntents.Retrieve(ctx, paymentIntentID, &stripe.PaymentIntentRetrieveParams{})
 	if err != nil {
-		return domain.ChargeStatusUnknown, mapStripeError(err)
+		mapped := mapStripeError(err)
+		outcome = classifyOutcome(mapped)
+		return domain.ChargeStatusUnknown, mapped
 	}
+	outcome = "success"
 
 	return g.mapStripeStatusToCharge(pi.Status, paymentIntentID), nil
+}
+
+// classifyOutcome maps a wrapped error from `mapStripeError` to the
+// `StripeAPICallsTotal` outcome label vocabulary. Pure function;
+// uses `errors.Is` against the domain sentinels (which `mapStripeError`
+// wires via `errors.Join` so this works even when the underlying
+// `*stripe.Error` is also in the chain).
+//
+// Defaults to "transient" — same fall-through policy `mapStripeError`
+// uses for unclassified Stripe error types. Keeps the metric label
+// exhaustively populated even if a future error class slips past
+// the sentinel-tagging logic.
+//
+// Known conflation (Slice 2b review INFO #4): `context.Canceled`
+// from caller cancellation (recon max-age, request timeout) lands in
+// the `errors.As(err, &serr) == false` branch of mapStripeError,
+// gets wrapped as ErrPaymentTransient, and emits `outcome="transient"`
+// here. That conflates "we cancelled the call" (expected during
+// graceful shutdown / sweep timeout) with "Stripe returned 5xx"
+// (real degradation). Alert tuning on
+// `rate(stripe_api_calls_total{outcome="transient"}[5m]) > N`
+// will false-positive on shutdown bursts. A dedicated `"cancelled"`
+// outcome label would disambiguate; deferred until alert tuning
+// surfaces a need.
+func classifyOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, domain.ErrPaymentDeclined):
+		return "declined"
+	case errors.Is(err, domain.ErrPaymentMisconfigured):
+		return "misconfigured"
+	case errors.Is(err, domain.ErrPaymentInvalid):
+		return "invalid"
+	case errors.Is(err, domain.ErrPaymentTransient):
+		return "transient"
+	default:
+		// Defensive — `mapStripeError`'s default branch wraps
+		// unclassified errors as ErrPaymentTransient, so this case
+		// shouldn't fire in practice. Matches the metric's
+		// pre-warmed label set; never emits a fresh label that
+		// would break alert evaluation.
+		return "transient"
+	}
 }
 
 // mapStripeStatusToCharge translates Stripe's PaymentIntent.Status

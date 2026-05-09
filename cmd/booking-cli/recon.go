@@ -106,6 +106,13 @@ func runRecon(cmd *cobra.Command, _ []string) {
 			// the reconciler consumes. (Pre-D7 there was a third
 			// interface `PaymentCharger`; D7 deleted it along with the
 			// legacy A4 auto-charge path.)
+			//
+			// Slice 2b: same `prometheusStripeMetrics` adapter the
+			// server fx graph uses — recon's GetStatus calls also
+			// emit per-(op, outcome) metrics so dashboards see both
+			// hot-path (server CreatePaymentIntent) and recon-path
+			// (GetStatus) Stripe latency / failure-class.
+			bootstrap.NewPrometheusStripeMetrics,
 			fx.Annotate(bootstrap.NewPaymentGateway, fx.As(new(domain.PaymentStatusReader))),
 			// Translate the wire-format infrastructure config into the
 			// application-layer recon.Config + provide the Prometheus-

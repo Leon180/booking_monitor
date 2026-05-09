@@ -99,6 +99,10 @@ func runServer(_ *cobra.Command, _ []string) {
 		// bootstrap.NewPaymentGateway helper); there's no cross-graph
 		// wiring here.
 		fx.Provide(
+			// D4.2 Slice 2b: per-call Stripe observability (counter +
+			// histogram). MockGateway never emits to these metrics;
+			// production Stripe adapter records (op, outcome) per call.
+			bootstrap.NewPrometheusStripeMetrics,
 			fx.Annotate(bootstrap.NewPaymentGateway, fx.As(new(domain.PaymentIntentCreator))),
 			payment.NewService,
 		),
