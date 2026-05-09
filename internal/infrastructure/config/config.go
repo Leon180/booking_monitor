@@ -837,6 +837,18 @@ func (c *Config) Validate() error {
 				!c.Payment.Stripe.AllowTestKey {
 				missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY is a test key (sk_test_/rk_test_/pk_test_); set STRIPE_ALLOW_TEST_KEY=true to allow (deliberate staging-vs-prod cutover scenarios only)")
 			}
+			// Final-pre-merge review fix: also reject the LIVE publishable
+			// key (`pk_live_*`). Same justification as `pk_test_` —
+			// publishable keys belong in the FRONTEND, not the backend's
+			// STRIPE_API_KEY. Stripe rejects pk_live_ on every server-side
+			// API call with 401; without this guard the deploy boots
+			// successfully and produces a flood of confusing
+			// `ErrPaymentMisconfigured` responses instead of failing fast
+			// at startup.
+			if normalizedAppEnv(c.App.Env) == "production" &&
+				strings.HasPrefix(c.Payment.Stripe.APIKey, "pk_live_") {
+				missing = append(missing, "payment.stripe.api_key / STRIPE_API_KEY is a publishable key (pk_live_*) — Stripe rejects publishable keys on server-side API calls with 401; use a Restricted Key (rk_live_*) instead")
+			}
 		}
 		if c.Payment.Stripe.WebhookSecret == "" && c.Payment.WebhookSecret == "" {
 			missing = append(missing, "payment.stripe.webhook_secret / STRIPE_WEBHOOK_SECRET (or legacy PAYMENT_WEBHOOK_SECRET) required when PAYMENT_PROVIDER=stripe")

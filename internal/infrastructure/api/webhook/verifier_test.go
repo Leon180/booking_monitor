@@ -4,12 +4,15 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	stripewebhook "github.com/stripe/stripe-go/v82/webhook"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"booking_monitor/internal/infrastructure/api/webhook"
@@ -153,4 +156,37 @@ func TestVerifySignature(t *testing.T) {
 			"empty secret must not leak as a per-request signature failure")
 		require.Equal(t, "config_error", webhook.ClassifySignatureError(err))
 	})
+}
+
+// TestClassifySignatureError_DefaultRouting pins the contract that
+// final-pre-merge multi-agent review flagged: an unmapped error (a
+// future stripe-go variant we haven't translated yet, or any error
+// not matching one of our four taxonomy sentinels and not wrapped
+// with ErrConfigError) MUST land in the `config_error` bucket. The
+// alert rule is configured to treat config_error as page-worthy, so
+// this routing is the safety net that keeps unmapped variants from
+// silently 401-flooding under no label at all.
+func TestClassifySignatureError_DefaultRouting(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "nil → empty label", err: nil, want: ""},
+		{
+			name: "bare unknown error → config_error (default branch)",
+			err:  errors.New("future stripe-go variant we haven't mapped"),
+			want: "config_error",
+		},
+		{
+			name: "wrapped unknown error → config_error",
+			err:  fmt.Errorf("unmapped stripe-go webhook error: %w", errors.New("v83 future variant")),
+			want: "config_error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, webhook.ClassifySignatureError(tc.err))
+		})
+	}
 }

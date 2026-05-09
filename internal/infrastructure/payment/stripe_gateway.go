@@ -134,6 +134,18 @@ type StripeGateway struct {
 	metrics StripeMetrics
 }
 
+// Compile-time interface assertions — mirror the MockGateway pattern.
+// Without these, an interface drift (e.g. a future GetStatus signature
+// change) only surfaces at runtime when fx.As panics during DI wiring.
+// The bootstrap layer projects the gateway via fx.As to the three
+// `domain.Payment*` ports; pinning all three at compile time catches
+// drift at `go build` time. Final-pre-merge multi-agent review fix.
+var (
+	_ domain.PaymentStatusReader  = (*StripeGateway)(nil)
+	_ domain.PaymentIntentCreator = (*StripeGateway)(nil)
+	_ domain.PaymentGateway       = (*StripeGateway)(nil)
+)
+
 // NewStripeGateway constructs a StripeGateway with production-grade
 // defaults wired through `stripe.BackendConfig`:
 //
@@ -329,7 +341,7 @@ func (g *StripeGateway) GetStatus(ctx context.Context, paymentIntentID string) (
 	}
 	outcome = "success"
 
-	return g.mapStripeStatusToCharge(pi.Status, paymentIntentID), nil
+	return g.mapStripeStatusToCharge(ctx, pi.Status, paymentIntentID), nil
 }
 
 // classifyOutcome maps a wrapped error from `mapStripeError` to the
@@ -384,7 +396,13 @@ func classifyOutcome(err error) string {
 // surface unknown-future-status as a Warn log so operators can
 // distinguish "stuck in known 3DS flow" from "stuck because Stripe
 // added a status we don't handle yet" (Slice 1 review MED #3).
-func (g *StripeGateway) mapStripeStatusToCharge(s stripe.PaymentIntentStatus, intentID string) domain.ChargeStatus {
+//
+// `ctx` is threaded purely so the Warn log emits with the same
+// trace/correlation IDs as the enclosing GetStatus request — without
+// it the warn line orphaned itself under context.Background() and
+// lost cross-system correlation. Final-pre-merge multi-agent review
+// fix.
+func (g *StripeGateway) mapStripeStatusToCharge(ctx context.Context, s stripe.PaymentIntentStatus, intentID string) domain.ChargeStatus {
 	switch s {
 	case stripe.PaymentIntentStatusSucceeded:
 		// Money moved. Reconciler transitions Charging → Confirmed.
@@ -413,7 +431,7 @@ func (g *StripeGateway) mapStripeStatusToCharge(s stripe.PaymentIntentStatus, in
 		// zero-value design); recon retries until max-age force-fail.
 		// Slice 1 review MED #3: log Warn so operators can grep for
 		// "unknown Stripe status" before the 24h max-age burns.
-		g.log.Warn(context.Background(), "stripe: unknown PaymentIntent status — mapping to ChargeStatusUnknown; recon will retry until max-age",
+		g.log.Warn(ctx, "stripe: unknown PaymentIntent status — mapping to ChargeStatusUnknown; recon will retry until max-age",
 			mlog.String("stripe_status", string(s)),
 			mlog.String("intent_id", intentID),
 		)
@@ -632,6 +650,18 @@ func redactJSONField(s, key string) string {
 					continue
 				}
 				valueEnd++
+			}
+			// Unterminated string handling: if the inner loop scanned to
+			// end-of-input without finding a closing `"` (truncated /
+			// partially-buffered log line), fail SAFE — redact to end of
+			// string rather than silently dropping the unterminated tail.
+			// We accept that any non-sensitive bytes after the unterminated
+			// string also get redacted; that's fine for log output where
+			// the malformed JSON is itself unusable. Prevents the silent
+			// data-loss case flagged by final-pre-merge multi-agent review.
+			if valueEnd >= len(s) {
+				s = s[:valueStart] + replacement
+				return s
 			}
 			s = s[:valueStart] + replacement + s[valueEnd:]
 			scanFrom = valueStart + len(replacement)

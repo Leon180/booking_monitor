@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -222,7 +223,15 @@ func (r *Reconciler) resolve(parent context.Context, s domain.StuckCharging) {
 	// Resolution: skip the row, leave it in `charging`, and emit a
 	// dedicated metric so ops can find the orphan via Stripe dashboard
 	// search by `metadata.order_id` and reconcile manually.
-	if s.PaymentIntentID == "" {
+	// TrimSpace fail-safe: a botched migration / pre-D4.2 binary could
+	// have written a whitespace-only `payment_intent_id` ("" + a stray
+	// space). Without trimming, that value bypasses the empty-string
+	// guard and we end up calling `GetStatus(ctx, " ")` — Stripe returns
+	// 404, mapStripeError surfaces as ErrPaymentTransient, ops sees a
+	// fake gateway error rather than the dedicated null-intent-id metric
+	// for an orphan row that needs manual triage. Final-pre-merge
+	// multi-agent review fix.
+	if strings.TrimSpace(s.PaymentIntentID) == "" {
 		r.log.Warn(parent, "recon: stuck-charging row has empty payment_intent_id; skipping (cannot call gateway without intent ID — ops triage required)",
 			tag.OrderID(s.ID),
 			mlog.Duration("age", s.Age),

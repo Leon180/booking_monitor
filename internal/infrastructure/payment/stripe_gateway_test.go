@@ -436,6 +436,87 @@ func TestStripeGateway_GetStatus_EmptyIntentID_ReturnsInvalid(t *testing.T) {
 	}, spy.callOutcomes())
 }
 
+// TestStripeGateway_GetStatus_ErrorClassifications closes the gap that
+// final-pre-merge multi-agent review flagged: the per-error-class
+// CreatePaymentIntent tests (CardError, RateLimit, AuthError,
+// IdempotencyError) cover mapStripeError's logic, but neither covers
+// the GetStatus method's deferred-metric path on error. A future
+// refactor that moved the metric record() out of the defer (or changed
+// the GetStatus shape) would silently break metric emission on
+// GetStatus errors. This test pins the contract: GetStatus errors emit
+// `op="get_status"` with the matching outcome, AND the typed sentinel
+// reaches the caller.
+func TestStripeGateway_GetStatus_ErrorClassifications(t *testing.T) {
+	cases := []struct {
+		name       string
+		httpStatus int
+		errType    string
+		errCode    string
+		errMsg     string
+		wantOutc   string
+		wantSent   error
+	}{
+		{
+			// Stripe v82 collapsed the legacy ErrorTypeAuthentication
+			// into ErrorTypeAPI; mapStripeError disambiguates by
+			// HTTPStatusCode (401/403 → misconfigured). Test mirrors
+			// the existing CreatePaymentIntent AuthError case.
+			name:       "401 auth → misconfigured",
+			httpStatus: http.StatusUnauthorized,
+			errType:    "api_error",
+			errCode:    "invalid_api_key",
+			errMsg:     "Invalid API key.",
+			wantOutc:   "misconfigured",
+			wantSent:   domain.ErrPaymentMisconfigured,
+		},
+		{
+			name:       "429 rate-limit → transient",
+			httpStatus: http.StatusTooManyRequests,
+			errType:    "api_error",
+			errCode:    "rate_limit",
+			errMsg:     "Too many requests.",
+			wantOutc:   "transient",
+			wantSent:   domain.ErrPaymentTransient,
+		},
+		{
+			name:       "400 invalid_request → invalid",
+			httpStatus: http.StatusBadRequest,
+			errType:    "invalid_request_error",
+			errCode:    "resource_missing",
+			errMsg:     "No such payment_intent.",
+			wantOutc:   "invalid",
+			wantSent:   domain.ErrPaymentInvalid,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			imp := newStripeImpersonator()
+			defer imp.close()
+
+			imp.handle("GET", "/v1/payment_intents/pi_test_id", func(w http.ResponseWriter, r *http.Request) {
+				writeStripeError(w, tc.httpStatus, tc.errType, tc.errCode, tc.errMsg)
+			})
+
+			gw, spy := gatewayWithImpersonator(t, imp)
+			got, err := gw.GetStatus(context.Background(), "pi_test_id")
+
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, tc.wantSent),
+				"%s should map to %T sentinel", tc.name, tc.wantSent)
+			assert.Equal(t, domain.ChargeStatusUnknown, got,
+				"error response → ChargeStatusUnknown (recon retries)")
+
+			// Pin the deferred metric path: GetStatus errors must emit
+			// the matching outcome label under op="get_status".
+			assert.Equal(t, []struct{ op, outcome string }{
+				{op: "get_status", outcome: tc.wantOutc},
+			}, spy.callOutcomes())
+		})
+	}
+}
+
 func TestStripeGateway_LogRedaction(t *testing.T) {
 	t.Parallel()
 	// Verify the redactingLeveledLogger strips known sensitive fields
@@ -483,6 +564,22 @@ func TestStripeGateway_LogRedaction(t *testing.T) {
 		// case (above) is the realistic redaction path —
 		// stripe-go SDK formats request params as flat
 		// dot-notation, not nested JSON.
+		{
+			// Final-pre-merge multi-agent review fix: unterminated
+			// JSON-string handling. If a log line is truncated mid-
+			// value (`{"client_secret":"pi_xxx_secret_yyy` with no
+			// closing quote), the redactor MUST still strip the
+			// sensitive value rather than silently passing it
+			// through. Pre-fix, the inner loop's valueEnd reached
+			// len(s) and the substitution `s[:valueStart] +
+			// replacement + s[valueEnd:]` evaluated `s[len(s):]` =
+			// "", redacting to end of string — which IS the desired
+			// fail-safe behavior, but only by accident; the explicit
+			// `valueEnd >= len(s)` guard makes the intent visible.
+			name: "json_unterminated_string",
+			in:   `{"id":"pi_xxx","client_secret":"pi_xxx_secret_yyy`,
+			want: "pi_xxx_secret_yyy",
+		},
 	}
 
 	for _, tc := range cases {
