@@ -27,7 +27,7 @@ type fakeCompensator struct {
 	payload []byte
 }
 
-func (f *fakeCompensator) HandleOrderFailed(_ context.Context, payload []byte) error {
+func (f *fakeCompensator) HandleOrderFailed(_ context.Context, payload []byte, _ time.Time) error {
 	f.calls++
 	f.payload = payload
 	return f.err
@@ -283,7 +283,7 @@ type perCallCompensator struct {
 	calls int
 }
 
-func (p *perCallCompensator) HandleOrderFailed(_ context.Context, _ []byte) error {
+func (p *perCallCompensator) HandleOrderFailed(_ context.Context, _ []byte, _ time.Time) error {
 	idx := p.calls
 	p.calls++
 	if idx < len(p.errs) {
