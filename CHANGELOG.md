@@ -4,17 +4,46 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
-## [Unreleased] — Phase 3 closeout (post-v0.6.0: D4.2 + D9-minimal + D10-minimal + D12 + D14 + D15)
+## [Unreleased]
 
-Remaining scope per [`docs/post_phase2_roadmap.md`](docs/post_phase2_roadmap.md):
+Post-v1.0.0 follow-ups not blocking the Phase 3 closure:
 
-- **D12 4-version comparison harness**: `cmd/booking-cli-stage{1,2,3,4}` binaries against the same `internal/` packages. Markdown comparison report per benchmark run; this is the senior-interview architectural-evolution talking point.
-- **D9-minimal / D10-minimal**: k6 scenario for two-step flow + asciinema terminal walkthrough.
-- **Portfolio narrative (D14, D15)**: README mermaid architecture diagrams + multi-post `docs/blog/` series with hybrid-STAR template. (D16 — this CHANGELOG + retroactive tags — closed by v0.6.0.)
-- **D4.2** (parallel-safe): real Stripe SDK adapter to replace MockGateway in production.
 - **SLOWLOG + big-key observability** (scheduled cloud routine, due ~2026-05-22): `RedisSlowlogElevated` warning alert + `make redis-bigkeys` Make target.
+- **TT-Cache-1 / TT-Cache-4 / TT-Cache-5 / TT-Cache-6** ([roadmap](docs/post_phase2_roadmap.md)) — only relevant if D8 demo expands to multi-ticket-type-per-event; the cache PR works correctly today for the single-ticket-type case.
+- **D4.3** (deferred from D4.2 PR runbook) — dual-secret webhook rotation (`STRIPE_WEBHOOK_SECRET` + `STRIPE_WEBHOOK_SECRET_NEXT`) for zero-downtime rotation. Today's runbook acknowledges the brief mismatch-spike window during single-secret rotation.
+- **O3.2 bare-metal benchmark** (parked) — find the real ceiling on dedicated hardware. Multi-day effort; runs only if the project pivots toward a true scale-test goal.
 
-Will land as v1.0.0 when all of Phase 3 is complete.
+## [1.0.0] — 2026-05-09 — Phase 3 complete (D4.2 + D9/D10-minimal + D12 + D14 part 4 + D15 part 4)
+
+Closes the Phase 3 portfolio arc started 2026-04-30. Pattern A is end-to-end against a real payment provider, the architectural-evolution comparison harness ships across four binaries (Stage 4 = the existing `cmd/booking-cli` full-stack binary, no rename per the roadmap's "just add the version label" choice), and the portfolio narrative closes with the 4th blog post + post-merge polish on the README mermaid diagrams + asciinema walkthrough.
+
+The roadmap's v1.0.0 anchor was "D1-D16 complete" — D1-D6 shipped in v0.5.0, D7+D8-minimal+D16 shipped in v0.6.0, this release brings the remaining D-items together. (D11 + D13 were [explicitly dropped](docs/post_phase2_roadmap.md) during the 2026-05-03 scope decision — they are NOT silent gaps.)
+
+### Added
+
+- **D4.2 — real Stripe SDK adapter ([#110](https://github.com/Leon180/booking_monitor/pull/110); 2026-05-09)** — Replaced the in-process mock with a real `stripe-go v82.5.1` adapter at [`internal/infrastructure/payment/stripe_gateway.go`](internal/infrastructure/payment/stripe_gateway.go), selected via `PAYMENT_PROVIDER=stripe`. Mock stays in-tree for `make stress-k6` + unit tests. New `domain.ErrPayment*` sentinel taxonomy (Declined / Transient / Misconfigured / Invalid) wraps `*stripe.Error` types via `errors.Join`. Webhook verifier delegated to `stripewebhook.ValidatePayloadWithTolerance` while preserving our typed sentinels via `mapStripeWebhookError`. Two new metrics — `stripe_api_calls_total{op,outcome}` + `stripe_api_duration_seconds{op}` (`ExponentialBuckets(0.01, 2, 14)` covering 10ms→81.92s). Bilingual docs + runbook section (PCI SAQ A scope statement, sandbox→live cutover checklist, webhook secret rotation playbook, leaked-key incident response). 4 rounds of multi-agent review actioned (1 HIGH + 7 MEDIUMs + 7 LOWs); live smoke against Stripe test API validated end-to-end (real PaymentIntent minted, idempotency verified, signed webhook accepted).
+
+- **D12 — 4-version comparison harness ([#104](https://github.com/Leon180/booking_monitor/pull/104) → [#109](https://github.com/Leon180/booking_monitor/pull/109); 2026-05-08/09)** — Senior-interview architectural-evolution talking point. Three new binaries — `cmd/booking-cli-stage1` (sync `SELECT FOR UPDATE`), `cmd/booking-cli-stage2` (Redis Lua + sync DB write), `cmd/booking-cli-stage3` (Redis Lua + async worker) — share the same `internal/` packages with the existing `cmd/booking-cli` (Stage 4 = full stack: outbox + saga). Stage 1 handlers extracted to `internal/infrastructure/api/stagehttp/` so Stages 2/3 reuse without copy-paste ([#105](https://github.com/Leon180/booking_monitor/pull/105)). Stage 4 gained saga compensator end-to-end loop duration histogram + consumer lag-since-write gauge + 13-outcome `saga_compensator_events_processed_total` taxonomy ([#108](https://github.com/Leon180/booking_monitor/pull/108)). Multi-target k6 harness + auto-generated `comparison.md` per run at `docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/comparison.md` ([#109](https://github.com/Leon180/booking_monitor/pull/109)) reports BOTH `http_reqs/s` (capacity at load-shed gate) and `accepted_bookings/s` (booking hot path) per Ticketmaster / Stripe / Shopify funnel-stage decomposition. Stage 1 row-lock plateau ~1,643/s; Stages 2-4 cluster ~8,400/s.
+
+- **D9-minimal + D10-minimal — demo polish ([#102](https://github.com/Leon180/booking_monitor/pull/102), [#103](https://github.com/Leon180/booking_monitor/pull/103); 2026-05-08)** — k6 scenario for the two-step reservation+payment flow at [`scripts/k6_two_step_flow.js`](scripts/k6_two_step_flow.js); baseline capture under [`docs/benchmarks/20260509_014318_two_step_baseline_c100_d90s/`](docs/benchmarks/20260509_014318_two_step_baseline_c100_d90s/). Asciinema terminal walkthrough at [`docs/demo/walkthrough.cast`](docs/demo/walkthrough.cast) (~2-3 minutes: `make demo-up` → curl reservation → curl payment → curl `/api/v1/orders/:id` showing state transitions). Embedded link in README.
+
+- **D14 — README mermaid refresh ([#100](https://github.com/Leon180/booking_monitor/pull/100); 2026-05-08)** — Pattern A label refresh + cross-link from PROJECT_SPEC. README contains 6 mermaid blocks total (booking flow / saga loop / outbox path / Redis hot path / state machine / sequence diagram).
+
+- **D15 part 4 — engineering blog ([#101](https://github.com/Leon180/booking_monitor/pull/101); 2026-05-09)** — Closing post in the bilingual (EN + zh-TW) blog series: [`2026-05-saga-pure-forward-recovery.md`](docs/blog/2026-05-saga-pure-forward-recovery.md) — "saga shouldn't manage the happy path; D7 narrowing as Garcia-Molina 1987 §5's engineering implementation". The earlier 3 posts (parts 1-3) shipped during the v0.5.0 development window via PRs [#81](https://github.com/Leon180/booking_monitor/pull/81), [#82](https://github.com/Leon180/booking_monitor/pull/82), [#83](https://github.com/Leon180/booking_monitor/pull/83) but were never explicitly credited in a release entry; they're listed below for completeness:
+  - [`2026-05-cache-truth-architecture.md`](docs/blog/2026-05-cache-truth-architecture.md) ([#81](https://github.com/Leon180/booking_monitor/pull/81); 2026-05-03) — the FLUSHALL incident → 411-of-1000 silent message loss → cache-truth contract evolution.
+  - [`2026-05-lua-single-thread-ceiling.md`](docs/blog/2026-05-lua-single-thread-ceiling.md) ([#82](https://github.com/Leon180/booking_monitor/pull/82); 2026-05-03) — single-key Lua serialization as the physics ceiling at 8,330 acc/s, found via VU scaling.
+  - [`2026-05-detect-but-dont-fix.md`](docs/blog/2026-05-detect-but-dont-fix.md) ([#83](https://github.com/Leon180/booking_monitor/pull/83); 2026-05-03) — drift detection without auto-correction; the operational discipline trade-off.
+
+### Changed
+
+- **`PaymentStatusReader.GetStatus` interface** ([#110](https://github.com/Leon180/booking_monitor/pull/110)) — `(ctx, orderID uuid.UUID)` → `(ctx, paymentIntentID string)`. Breaking for any external implementer of the port (none in-tree; reconciler is the only caller). Necessary because Stripe's API has no orderID concept — the prior shape forced the adapter to hold a repository, violating the layer rule. Reconciler now reads persisted `payment_intent_id` from order row, threads it through directly, and null-guards `strings.TrimSpace == ""` (orphan case emits `recon_null_intent_id_skipped_total` instead of calling Stripe with empty string).
+- **`StuckCharging` struct** ([#110](https://github.com/Leon180/booking_monitor/pull/110)) — gained `PaymentIntentID string` field. Repository scan widened to `COALESCE(payment_intent_id, '')`.
+- **Production-mode config validation** ([#110](https://github.com/Leon180/booking_monitor/pull/110)) — rejects `PAYMENT_PROVIDER=mock` AND `*_test_*` keys AND `pk_live_*` (publishable key). Cross-field guard refuses `mock` provider whenever Stripe credentials are present, regardless of `APP_ENV` (catches the silent "real keys but wrong provider switch" misconfig in staging).
+- **Note on planned env-var name** — the roadmap's planned `PAYMENT_GATEWAY_MODE` rendered as `PAYMENT_PROVIDER` during implementation. Selection semantics unchanged.
+
+### Compare
+
+- v0.6.0…v1.0.0: https://github.com/Leon180/booking_monitor/compare/v0.6.0...v1.0.0
 
 ## [0.6.0] — 2026-05-08 — D7 saga scope narrowed + D8-minimal browser demo
 
