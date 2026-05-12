@@ -8,6 +8,7 @@ import (
 	stdlog "log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,6 +32,18 @@ import (
 	"booking_monitor/internal/infrastructure/messaging"
 	"booking_monitor/internal/infrastructure/observability"
 )
+
+// driftSweepMaxConsecutiveFailures is the budget for consecutive
+// drift-sweep failures before installServer escalates to
+// fx.Shutdown. A permanently-misconfigured detector (PG / Redis
+// permission error, schema drift, etc.) would otherwise loop forever
+// emitting Error logs while the `inventory_drift_*` gauges stayed
+// blank — operators would not see a firing alert because the alert
+// is on gauge value, not on log volume. 5 is conservative: at the
+// default 30s sweep interval the escalation fires after 2.5min of
+// continuous failure, which is well outside the noise band of a
+// transient PG/Redis blip and well inside any k8s readiness window.
+const driftSweepMaxConsecutiveFailures = 5
 
 // runServer is the `server` subcommand entry for Stage 5. Mirrors
 // Stage 2's runServer plus the worker provider chain (the
@@ -123,8 +136,8 @@ func runServer(_ *cobra.Command, _ []string) {
 		// at-least-once loop plus the terminal-error compensation path
 		// that reverts Redis qty when the processor rolls back.
 		fx.Provide(
-			func(cfg *config.Config, p worker.MessageProcessor, inv domain.InventoryRepository, logger *mlog.Logger) *messaging.IntakeConsumer {
-				return messaging.NewIntakeConsumer(&cfg.Kafka, p, inv, logger)
+			func(cfg *config.Config, p worker.MessageProcessor, inv domain.InventoryRepository, m booking.Stage5Metrics, logger *mlog.Logger) *messaging.IntakeConsumer {
+				return messaging.NewIntakeConsumer(&cfg.Kafka, p, inv, m, logger)
 			},
 		),
 
@@ -288,13 +301,38 @@ func installServer(
 			// prometheus series. Detection only, no auto-correct
 			// (deliberately operator-gated — see the type docstring
 			// for the recovery reasoning).
+			//
+			// Co-residency caveat: the detector lives in this Stage 5
+			// server process, NOT in a separate recon binary. This
+			// keeps the operational footprint small (one Deployment,
+			// one /metrics, one shared lifecycle for the benchmark
+			// harness) — but it means the detector is BLIND during
+			// a Stage 5 pod restart, which is the same window where a
+			// Kafka publish failure is most likely. A production
+			// deployment that wants continuous drift coverage across
+			// restarts should split this goroutine into a sibling
+			// recon Deployment + remove it from installServer.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				logger.Info(runCtx, "stage5 inventory drift detector starting",
-					mlog.Duration("sweep_interval", driftInterval))
+					mlog.Duration("sweep_interval", driftInterval),
+					mlog.Int("escalate_after_consec_failures", driftSweepMaxConsecutiveFailures))
 				ticker := time.NewTicker(driftInterval)
 				defer ticker.Stop()
+				// Consecutive-failure tracker. A permanently-broken
+				// detector (PG / Redis permission error, schema drift)
+				// would otherwise emit a log storm and silently become
+				// a dead safety net — operators relying on the
+				// `inventory_drift_*` gauges would see no data at all,
+				// not a firing alert. After N consecutive failures we
+				// escalate to fx.Shutdown so k8s restarts the pod (and
+				// the next start either succeeds or fails fast +
+				// CrashLoopBackOffs the misconfiguration into visibility).
+				// atomic.Int32 not strictly required here (single
+				// goroutine reads + writes) but matches the discipline
+				// the consumer uses for `lastMessageAt`.
+				var consecFailures atomic.Int32
 				for {
 					select {
 					case <-runCtx.Done():
@@ -302,11 +340,18 @@ func installServer(
 						return
 					case <-ticker.C:
 						if err := driftDetector.Sweep(runCtx); err != nil && runCtx.Err() == nil {
-							// Sweep failures are operational signals;
-							// the next tick gets a fresh chance. Log
-							// at Error so the dashboard alert fires
-							// but DO NOT abort the loop.
-							logger.Error(runCtx, "stage5 drift sweep failed", tag.Error(err))
+							n := consecFailures.Add(1)
+							logger.Error(runCtx, "stage5 drift sweep failed",
+								tag.Error(err),
+								mlog.Int("consec_failures", int(n)))
+							if int(n) >= driftSweepMaxConsecutiveFailures {
+								logger.Error(runCtx, "stage5 drift sweep exceeded consecutive-failure budget — escalating fx.Shutdown",
+									mlog.Int("consec_failures", int(n)))
+								_ = shutdowner.Shutdown(fx.ExitCode(1))
+								return
+							}
+						} else if runCtx.Err() == nil {
+							consecFailures.Store(0)
 						}
 					}
 				}

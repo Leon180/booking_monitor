@@ -52,6 +52,14 @@ const (
 	// healthy Redis; > 3s implies Redis is so degraded the drift
 	// reconciler is the right fallback).
 	intakeRevertCompensationTimeout = 3 * time.Second
+
+	// intakeCommitTimeout bounds the detached-context offset commit
+	// call. CommitMessages is a local metadata write in
+	// segmentio/kafka-go and completes in microseconds when the broker
+	// is healthy; 2s is generous and prevents a degraded-broker commit
+	// from blocking the consumer loop indefinitely. See the
+	// commitOrLog docstring for why a detached ctx is required.
+	intakeCommitTimeout = 2 * time.Second
 )
 
 // IntakeConsumer drains the Stage 5 `booking.intake.v5` Kafka topic
@@ -101,6 +109,7 @@ type IntakeConsumer struct {
 	reader        *kafka.Reader
 	processor     worker.MessageProcessor
 	inventory     domain.InventoryRepository
+	metrics       booking.Stage5Metrics
 	log           *mlog.Logger
 	lastMessageAt atomic.Int64 // UnixNano; 0 = never received a message
 }
@@ -119,6 +128,7 @@ func NewIntakeConsumer(
 	cfg *config.KafkaConfig,
 	processor worker.MessageProcessor,
 	inventory domain.InventoryRepository,
+	metrics booking.Stage5Metrics,
 	logger *mlog.Logger,
 ) *IntakeConsumer {
 	scoped := logger.With(mlog.String("component", "stage5_intake_consumer"))
@@ -136,6 +146,7 @@ func NewIntakeConsumer(
 		reader:    r,
 		processor: processor,
 		inventory: inventory,
+		metrics:   metrics,
 		log:       scoped,
 	}
 }
@@ -190,8 +201,23 @@ func (c *IntakeConsumer) handleMessage(ctx context.Context, msg kafka.Message) {
 		// Malformed payload — no amount of retry fixes this. Commit
 		// the offset so the message is not redelivered, and log at
 		// Error so an operator sees it (this is the signal that a
-		// producer is publishing bad shapes — drift reconciler will
-		// recover the leaked Redis inventory unit).
+		// producer is publishing bad shapes).
+		//
+		// Recovery latency vs the terminal-error path: this path does
+		// NOT call compensateLeakedInventory because a truly malformed
+		// payload has no extractable ticket_type_id / quantity to
+		// pass to RevertInventory. The Lua-deducted Redis qty sits
+		// leaked until the drift reconciler's next sweep
+		// (`INVENTORY_DRIFT_SWEEP_INTERVAL`, default 30s) picks it up
+		// — meaningfully slower than the terminal-error path
+		// (~ms revert). This asymmetry is acceptable because: (a) a
+		// malformed payload implies a producer regression which is
+		// already a paging signal regardless of inventory, and (b) the
+		// extra 30s window is far smaller than reservation TTL
+		// (15min default) so the user experience is unchanged. If a
+		// future deploy sees sustained `decode failed` rate the right
+		// fix is to harden the producer, not to add a partial-decode
+		// path that depends on producer goodwill.
 		c.log.Error(ctx, "stage5 intake message decode failed; committing to skip",
 			tag.Error(err),
 			tag.Partition(msg.Partition),
@@ -258,6 +284,14 @@ func (c *IntakeConsumer) compensateLeakedInventory(
 	defer cancel()
 	compensationID := "order:" + intake.OrderID.String()
 	if revertErr := c.inventory.RevertInventory(revertCtx, intake.TicketTypeID, intake.Quantity, compensationID); revertErr != nil {
+		// Counter is the ALERTABLE signal — logs alone are vulnerable
+		// to pipeline gaps. The drift reconciler will eventually pick
+		// up the leaked qty on its next sweep, but until it does the
+		// inventory is silently held; this metric closes the
+		// observability window between "revert dropped" and "drift
+		// detector noticed". Alert recipe lives next to the counter
+		// declaration in metrics_stage5.go.
+		c.metrics.RecordIntakeRevertFailure()
 		c.log.Error(ctx, "stage5 intake terminal-error revert failed; drift reconciler will retry",
 			tag.Error(procErr),
 			mlog.NamedError("revert_error", revertErr),
@@ -279,8 +313,21 @@ func (c *IntakeConsumer) compensateLeakedInventory(
 // future redelivery may run Process again. The worker's UoW is the
 // place that must be idempotent against that (duplicate orders are
 // blocked by the DB unique constraint on `orders.id`).
+//
+// Uses a detached context (not the caller's ctx) because Process can
+// take meaningful time and the caller's ctx may have been cancelled
+// by shutdown mid-process. With the caller's ctx, CommitMessages
+// would fail with context.Canceled and the offset would never commit
+// — Kafka would redeliver on the next rebalance. Safe but noisy: the
+// log line would say "commit offset failed: context canceled" with
+// a misleading-looking broker error when the real cause is graceful
+// shutdown. Detached ctx + 2s bound (CommitMessages is a local
+// metadata write in segmentio/kafka-go; microseconds when the broker
+// is healthy) makes the shutdown-time commit succeed cleanly.
 func (c *IntakeConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
-	if err := c.reader.CommitMessages(ctx, msg); err != nil {
+	commitCtx, cancel := context.WithTimeout(context.Background(), intakeCommitTimeout)
+	defer cancel()
+	if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
 		c.log.Error(ctx, "stage5 intake commit offset failed",
 			tag.Error(err),
 			tag.Partition(msg.Partition),
@@ -350,11 +397,15 @@ func intakeToQueued(im booking.IntakeMessage, kmsg kafka.Message) *worker.Queued
 // blocking FetchMessage in Start has no idle hook, so this companion
 // is the only way to drive the gauge to zero on a quiet system.
 //
-// Currently a no-op for the gauge because IntakeConsumer doesn't yet
-// emit a lag metric (Session 2 scope keeps the consumer minimal; the
-// gauge wires in alongside the broader Stage 5 metrics in Session 3's
-// benchmark surface). The lifecycle plumbing is here now so adding the
-// metric later is a one-line change inside the if-branch.
+// TODO(stage5-session3): wire the lag gauge. Currently the
+// shouldResetLagIntake result is discarded — the goroutine + ticker
+// + decision function are all in place but no metric is emitted.
+// When the lag gauge lands, call `c.metrics.SetIntakeConsumerLag(0)`
+// inside the if-branch and add the gauge field to Stage5Metrics.
+// Until then this goroutine consumes one ticker per consumer with
+// zero observable effect — kept here so the lifecycle plumbing is
+// pre-wired (no future re-Start of the consumer can ship without
+// this goroutine).
 func (c *IntakeConsumer) runIdleReset(ctx context.Context) {
 	ticker := time.NewTicker(intakeIdleResetTickInterval)
 	defer ticker.Stop()
@@ -363,8 +414,8 @@ func (c *IntakeConsumer) runIdleReset(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Hook reserved for the lag-gauge zero call when metrics
-			// land in Session 3.
+			// TODO(stage5-session3): emit gauge=0 when shouldResetLagIntake
+			// returns true. Currently a deliberate no-op — see fn doc.
 			_ = shouldResetLagIntake(c.lastMessageAt.Load(), time.Now(), intakeIdleResetThreshold)
 		}
 	}

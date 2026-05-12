@@ -39,6 +39,31 @@ var stage5KafkaPublishFailuresTotal = promauto.NewCounterVec(
 	[]string{"reverted"},
 )
 
+// stage5IntakeRevertFailuresTotal counts Stage 5 CONSUMER-side revert
+// failures: terminal-error processing required reverting the leaked
+// Redis qty (Lua deducted at publish time, worker UoW rolled back),
+// and RevertInventory itself failed. Distinct counter from
+// stage5_kafka_publish_failures_total because the failure modes have
+// different operational signatures:
+//
+//   - publish-failures fire BEFORE the 202 is returned — the user
+//     sees a 5xx and the operator gets a paged "durability gate down".
+//   - intake-revert-failures fire AFTER the 202 — the user already
+//     has the order_id; the failure is fully internal and only the
+//     drift reconciler will eventually pick it up.
+//
+// Alert recipe: `rate(stage5_intake_revert_failures_total[5m]) > 0`
+// for 2m → page operator. Pairs with the drift reconciler's
+// inventory_drift_* series as the upstream signal that drift WILL
+// appear in the next sweep (closes the observability gap that a
+// pure-logs failure path created).
+var stage5IntakeRevertFailuresTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "stage5_intake_revert_failures_total",
+		Help: "Stage 5 consumer-side terminal-error revert failures (leaked Redis qty pending drift-reconciler recovery)",
+	},
+)
+
 // prometheusStage5Metrics implements booking.Stage5Metrics by writing
 // to the prometheus counters declared above. Mirrors the
 // prometheusBookingMetrics pattern in booking_metrics.go so the
@@ -58,4 +83,11 @@ func (prometheusStage5Metrics) RecordPublishFailure(reverted bool) {
 		label = "true"
 	}
 	stage5KafkaPublishFailuresTotal.WithLabelValues(label).Inc()
+}
+
+// RecordIntakeRevertFailure increments the consumer-side revert
+// failure counter. See the var-level docstring for the operational
+// rationale + alert recipe.
+func (prometheusStage5Metrics) RecordIntakeRevertFailure() {
+	stage5IntakeRevertFailuresTotal.Inc()
 }

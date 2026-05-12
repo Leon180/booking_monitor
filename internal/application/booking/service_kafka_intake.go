@@ -22,6 +22,27 @@ import (
 // on its next sweep.
 const revertCompensationTimeout = 3 * time.Second
 
+// ErrStage5PublishFailed is the OUTER wrapper for any
+// publish-or-revert failure on the Stage 5 hot path. Exists for two
+// reasons:
+//
+//  1. HTTP layer ordering. MapBookingError checks `errors.Is(err, X)`
+//     in a switch; the first match wins. Today no path can plausibly
+//     produce a publishErr that transitively wraps a `domain.ErrSoldOut`
+//     (sold-out is checked + returned BEFORE publish), but a future
+//     refactor could introduce one — at which point a Kafka outage
+//     would silently return 409 "sold out" to the client instead of
+//     a paged 503. Wrapping with this sentinel at the service boundary
+//     gives MapBookingError a stable hook to map this case to 503
+//     explicitly, regardless of what publishErr's chain contains.
+//  2. Operator log queries. A single sentinel name in the structured
+//     log makes "find all Stage 5 publish failures across the fleet"
+//     a `errors.Is == ErrStage5PublishFailed` query rather than a
+//     pattern-match against multiple wrap-string variants.
+//
+// Defense-in-depth, not a current-bug fix.
+var ErrStage5PublishFailed = errors.New("stage5 kafka intake publish failed")
+
 // kafkaIntakeService is the Stage 5 BookingService variant.
 //
 // It differs from `service` (Stages 2-4) in exactly one place: after
@@ -164,8 +185,14 @@ func (s *kafkaIntakeService) BookTicket(ctx context.Context, userID int, ticketT
 			// callers using errors.Is on either sentinel still match.
 			// `%v` on revertErr (the previous impl) silently broke
 			// `errors.Is(err, revertSentinel)`.
-			return domain.Order{}, fmt.Errorf("stage5 drift (publish+revert both failed): %w",
-				errors.Join(publishErr, revertErr))
+			//
+			// Outer wrap with ErrStage5PublishFailed gives the HTTP
+			// error mapper (stagehttp.MapBookingError) a stable
+			// match-first sentinel to map this branch to 503 — see
+			// the sentinel's docstring for the defense-in-depth
+			// rationale.
+			return domain.Order{}, fmt.Errorf("stage5 drift (publish+revert both failed): %w: %w",
+				ErrStage5PublishFailed, errors.Join(publishErr, revertErr))
 		}
 		// Publish failed but revert succeeded — clean compensation.
 		// log.Error (not Warn) because a publish-fail is an SLA-impacting
@@ -176,7 +203,7 @@ func (s *kafkaIntakeService) BookTicket(ctx context.Context, userID int, ticketT
 			tag.OrderID(orderID),
 			tag.TicketTypeID(ticketTypeID),
 		)
-		return domain.Order{}, fmt.Errorf("stage5 intake publish failed (reverted): %w", publishErr)
+		return domain.Order{}, fmt.Errorf("%w (reverted): %w", ErrStage5PublishFailed, publishErr)
 	}
 
 	// Step 4: build the in-memory domain.Order to return. The actual

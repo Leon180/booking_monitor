@@ -39,6 +39,24 @@ type Stage5Metrics interface {
 	// the revert ALSO failed (drift — inventory permanently leaked
 	// until the drift reconciler / manual ops intervenes).
 	RecordPublishFailure(reverted bool)
+
+	// RecordIntakeRevertFailure counts revert failures on the
+	// CONSUMER side: a worker.MessageProcessor terminal-error
+	// triggered compensation, and the RevertInventory call FAILED.
+	// Distinct from RecordPublishFailure(false) which fires on the
+	// publish-side dual-failure — these are different code paths
+	// with different operational signatures, so they get distinct
+	// counters rather than overlapping labels.
+	//
+	// Why both directions matter: the publish side is bounded by the
+	// request lifetime (3s) and the user gets a 5xx if it fails;
+	// the consumer side is bounded by intakeRevertCompensationTimeout
+	// (3s) but the Kafka offset is about to be committed regardless,
+	// so a counter is the ONLY observable signal that a revert
+	// silently dropped on the consumer path. Without this counter,
+	// sustained Redis degradation during terminal-error processing
+	// would only show as log lines (vulnerable to log-pipeline gaps).
+	RecordIntakeRevertFailure()
 }
 
 // Stage5NopMetrics is the test / dev no-op implementation of
@@ -48,3 +66,6 @@ type Stage5NopMetrics struct{}
 
 // RecordPublishFailure is a no-op.
 func (Stage5NopMetrics) RecordPublishFailure(bool) {}
+
+// RecordIntakeRevertFailure is a no-op.
+func (Stage5NopMetrics) RecordIntakeRevertFailure() {}
