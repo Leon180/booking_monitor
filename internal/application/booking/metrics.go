@@ -22,3 +22,29 @@ type Metrics interface {
 	// call. Status must be one of "success", "sold_out", "error".
 	RecordBookingOutcome(status string)
 }
+
+// Stage5Metrics is the Stage 5-specific observability port. Stage 5's
+// hot path has additional failure modes (Kafka publish failure with
+// or without successful revert) that the base Metrics interface
+// doesn't model. Defined here (not in observability) so the
+// kafkaIntakeService can depend on the interface without importing
+// the prometheus-backed singleton — same pattern as Metrics above.
+//
+// A no-op implementation (Stage5NopMetrics) lives in this package so
+// tests can construct the service without wiring Prometheus.
+type Stage5Metrics interface {
+	// RecordPublishFailure increments the publish-failure counter.
+	// `reverted` is true when the inventory was successfully rolled
+	// back after the publish failed (clean compensation); false when
+	// the revert ALSO failed (drift — inventory permanently leaked
+	// until the drift reconciler / manual ops intervenes).
+	RecordPublishFailure(reverted bool)
+}
+
+// Stage5NopMetrics is the test / dev no-op implementation of
+// Stage5Metrics. The Prometheus-backed implementation lives in
+// `internal/infrastructure/observability`.
+type Stage5NopMetrics struct{}
+
+// RecordPublishFailure is a no-op.
+func (Stage5NopMetrics) RecordPublishFailure(bool) {}

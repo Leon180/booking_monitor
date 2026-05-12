@@ -26,6 +26,7 @@ import (
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
 	"booking_monitor/internal/infrastructure/messaging"
+	"booking_monitor/internal/infrastructure/observability"
 )
 
 // runServer is the `server` subcommand entry for Stage 5. Mirrors
@@ -41,33 +42,56 @@ func runServer(_ *cobra.Command, _ []string) {
 	app := fx.New(
 		bootstrap.CommonModule(cfg),
 
-		// cache.Module provides Redis client + InventoryRepository +
-		// OrderQueue + idempotency repository. Stage 5 still imports
-		// the full module for Redis client + ordering of fx lifecycle
-		// hooks, but does NOT use the Redis Stream queue (Kafka
-		// replaces it). The OrderQueue provider stays in the graph;
-		// the worker provider is the Kafka consumer (Session 2),
-		// not the Redis Stream consumer.
-		cache.Module,
+		// cache.BaseModule provides Redis client + OrderQueue +
+		// idempotency repository + observability collectors WITHOUT
+		// the standard InventoryRepository — Stage 5 provides its
+		// own inventory below, aliased to both InventoryRepository
+		// and Stage5InventoryRepository so exactly one
+		// *redisInventoryRepository is constructed and both consumers
+		// (handleCreateEvent's domain.InventoryRepository injection
+		// and the booking service's domain.Stage5InventoryRepository
+		// injection) see the SAME instance. Using cache.Module here
+		// would create a second instance via NewRedisInventoryRepository
+		// — same *redis.Client under the hood, but wasted allocation
+		// and a confusing graph.
+		cache.BaseModule,
 
-		// Stage 5 InventoryRepository — extended view that exposes
-		// DeductInventoryNoStream. Provided alongside the standard
-		// InventoryRepository (cache.Module already provides that)
-		// so any cache.Module consumer that uses InventoryRepository
-		// still works. fx returns the most specific type per
-		// constructor; the booking Service injects the Stage5 view.
-		fx.Provide(cache.NewStage5RedisInventoryRepository),
+		// Single inventory provider aliased to both interfaces. fx.As
+		// (multi-call form, fx v1.20+) registers the same constructor
+		// result under both interface keys — no second instance.
+		// NewStage5RedisInventoryRepository returns the Stage5
+		// (DeductInventoryNoStream-exposing) view; that view embeds
+		// InventoryRepository so the alias is safe.
+		fx.Provide(
+			fx.Annotate(
+				cache.NewStage5RedisInventoryRepository,
+				fx.As(new(domain.InventoryRepository)),
+				fx.As(new(domain.Stage5InventoryRepository)),
+			),
+		),
+
+		// Stage5Metrics — prometheus-backed counter for
+		// stage5_kafka_publish_failures_total. The application layer
+		// holds the booking.Stage5Metrics interface; this provider
+		// injects the prometheus adapter from infrastructure.
+		fx.Provide(observability.NewStage5Metrics),
 
 		// IntakePublisher — Kafka producer for `booking.intake.v5`
 		// with acks=all. Stage 5's BookingService calls this after
 		// the Lua deduct succeeds; on Kafka publish failure the
 		// service calls RevertInventory before returning the error.
-		fx.Provide(
-			fx.Annotate(
-				newIntakePublisher,
-				fx.As(new(booking.IntakePublisher)),
-			),
-		),
+		//
+		// Provided as TWO keys (one constructor, one instance):
+		//   1. *messaging.IntakePublisher (concrete) — used by
+		//      installServer's OnStop hook to call Close() for clean
+		//      Kafka writer shutdown.
+		//   2. booking.IntakePublisher (interface) — used by the
+		//      booking service so it never imports messaging /
+		//      segmentio/kafka-go.
+		// fx.As would drop the concrete type, so the second provider
+		// is a thin pass-through that aliases the same pointer.
+		fx.Provide(newIntakePublisher),
+		fx.Provide(func(p *messaging.IntakePublisher) booking.IntakePublisher { return p }),
 
 		// Stage 5 booking.Service — Lua deduct (no XADD) + Kafka
 		// publish (acks=all) + revert.lua on publish failure.
@@ -102,10 +126,15 @@ func runServer(_ *cobra.Command, _ []string) {
 // type so the fx graph can also access Close() for OnStop; the public
 // alias as booking.IntakePublisher happens in the fx.Annotate call
 // above so the BookingService receives the interface.
+//
+// WriteTimeout is read from cfg.Kafka.WriteTimeout (env
+// KAFKA_WRITE_TIMEOUT, default 5s) rather than hardcoded so ops can
+// tune the durability-gate latency vs availability tradeoff without
+// rebuilding — the same dial the rest of the Kafka surface uses.
 func newIntakePublisher(cfg *config.Config) *messaging.IntakePublisher {
 	return messaging.NewIntakePublisher(messaging.MessagingConfig{
 		Brokers:      cfg.Kafka.Brokers,
-		WriteTimeout: 5 * time.Second,
+		WriteTimeout: cfg.Kafka.WriteTimeout,
 	})
 }
 
@@ -139,6 +168,7 @@ func installServer(
 	inventoryRepo domain.InventoryRepository,
 	bookingService booking.Service,
 	compensator stagehttp.Compensator,
+	intakePublisher *messaging.IntakePublisher,
 	logger *mlog.Logger,
 ) {
 	gin.SetMode(gin.ReleaseMode)
@@ -180,6 +210,18 @@ func installServer(
 
 	lc.Append(fx.Hook{
 		OnStart: func(_ context.Context) error {
+			// Session 1 scaffolding warning: no Kafka consumer is
+			// wired yet. /book deducts inventory + publishes to
+			// `booking.intake.v5` successfully, but nothing drains
+			// the topic — bookings accumulate in Kafka and orders
+			// never land in PG. Smoke verifies the hot path
+			// (acks=all latency, revert.lua on publish fail) only;
+			// the consumer + drift reconciler arrive in Session 2.
+			// Error-level log (not Warn) so a misconfigured prod
+			// deploy is obvious in the first scrape.
+			logger.Error(context.Background(),
+				"stage5 SESSION 1 SCAFFOLDING — no Kafka consumer wired; bookings will accumulate in topic with no PG persistence")
+
 			// HTTP server in its own goroutine; failure escalates
 			// via shutdowner so a port-collision after OnStart returns
 			// kills the process (k8s restart on the next probe).
@@ -250,6 +292,18 @@ func installServer(
 			}()
 			select {
 			case <-done:
+				// 4. Close the Kafka writer AFTER the HTTP server +
+				//    background goroutines have drained — guarantees
+				//    no in-flight Publish call races with Close().
+				//    The writer's own bounded-close (10s ceiling
+				//    inside IntakePublisher.Close) keeps OnStop
+				//    bounded even if the broker is unreachable.
+				//    Log + continue on error rather than failing
+				//    OnStop, since by this point the data plane is
+				//    already drained.
+				if err := intakePublisher.Close(); err != nil {
+					logger.Error(stopCtx, "stage5 IntakePublisher.Close error", tag.Error(err))
+				}
 				return nil
 			case <-stopCtx.Done():
 				return stopCtx.Err()

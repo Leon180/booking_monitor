@@ -14,6 +14,14 @@ import (
 	"booking_monitor/internal/log/tag"
 )
 
+// revertCompensationTimeout bounds the detached revert call when
+// Stage 5 needs to roll back a Redis Lua deduct after Kafka publish
+// failed. 3s is generous given revert.lua is a single EXISTS+INCRBY
+// pipeline on a healthy Redis; if Redis is so degraded that revert
+// takes >3s, the drift reconciler will catch the leaked inventory
+// on its next sweep.
+const revertCompensationTimeout = 3 * time.Second
+
 // kafkaIntakeService is the Stage 5 BookingService variant.
 //
 // It differs from `service` (Stages 2-4) in exactly one place: after
@@ -30,6 +38,7 @@ type kafkaIntakeService struct {
 	ticketTypeRepo    domain.TicketTypeRepository
 	inventoryRepo     domain.Stage5InventoryRepository
 	publisher         IntakePublisher
+	metrics           Stage5Metrics
 	reservationWindow time.Duration
 	logger            *mlog.Logger
 }
@@ -40,11 +49,14 @@ type kafkaIntakeService struct {
 //
 // inventoryRepo is the EXTENDED Stage5InventoryRepository which
 // exposes DeductInventoryNoStream alongside the standard methods.
+// metrics is the Stage5Metrics port (prometheus-backed impl lives in
+// observability; tests can pass Stage5NopMetrics{}).
 func NewKafkaIntakeService(
 	orderRepo domain.OrderRepository,
 	ticketTypeRepo domain.TicketTypeRepository,
 	inventoryRepo domain.Stage5InventoryRepository,
 	publisher IntakePublisher,
+	metrics Stage5Metrics,
 	cfg *config.Config,
 	logger *mlog.Logger,
 ) Service {
@@ -53,6 +65,7 @@ func NewKafkaIntakeService(
 		ticketTypeRepo:    ticketTypeRepo,
 		inventoryRepo:     inventoryRepo,
 		publisher:         publisher,
+		metrics:           metrics,
 		reservationWindow: cfg.Booking.ReservationWindow,
 		logger:            logger.With(mlog.String("component", "stage5_booking_service")),
 	}
@@ -120,23 +133,45 @@ func (s *kafkaIntakeService) BookTicket(ctx context.Context, userID int, ticketT
 	if publishErr := s.publisher.PublishIntake(ctx, msg); publishErr != nil {
 		// Step 3c (compensation): the Lua deduct succeeded but Kafka
 		// publish failed. Revert the Redis qty so other bookings can
-		// claim the ticket. compensationID := orderID-as-string keeps
-		// revert.lua's idempotency-key shape consistent with the saga
-		// compensator path.
+		// claim the ticket.
+		//
+		// CRITICAL: use a DETACHED context for the revert call, not
+		// the request `ctx`. If the request was cancelled mid-publish
+		// (client disconnect / upstream timeout), `ctx` is already
+		// dead — reusing it would immediately fail the revert with
+		// `context.Canceled` and leak the inventory unit permanently.
+		// Mirrors the pattern in `handleCreateEvent`'s
+		// compensateDanglingEvent.
+		//
+		// compensationID := orderID-as-string keeps revert.lua's
+		// idempotency-key shape consistent with the saga compensator.
 		compensationID := orderID.String()
-		if revertErr := s.inventoryRepo.RevertInventory(ctx, ticketTypeID, quantity, compensationID); revertErr != nil {
-			// Drift: Lua deducted, Kafka publish failed, revert also failed.
-			// This is the dual-write race scenario the drift reconciler
-			// detects. Surface both errors and let the operator decide.
+		revertCtx, cancel := context.WithTimeout(context.Background(), revertCompensationTimeout)
+		defer cancel()
+		if revertErr := s.inventoryRepo.RevertInventory(revertCtx, ticketTypeID, quantity, compensationID); revertErr != nil {
+			// Drift: Lua deducted, Kafka publish failed, revert also
+			// failed. This is the dual-write race scenario the drift
+			// reconciler detects. Record reverted=false so Prometheus
+			// alert can fire on rate.
+			s.metrics.RecordPublishFailure(false)
 			s.logger.Error(ctx, "stage5 drift: Kafka publish failed AND inventory revert failed",
 				tag.Error(publishErr),
 				tag.OrderID(orderID),
 				tag.TicketTypeID(ticketTypeID),
 				mlog.NamedError("revert_error", revertErr),
 			)
-			return domain.Order{}, fmt.Errorf("stage5 drift (publish+revert both failed): publish=%w; revert=%v", publishErr, revertErr)
+			// errors.Join preserves both errors in the chain so
+			// callers using errors.Is on either sentinel still match.
+			// `%v` on revertErr (the previous impl) silently broke
+			// `errors.Is(err, revertSentinel)`.
+			return domain.Order{}, fmt.Errorf("stage5 drift (publish+revert both failed): %w",
+				errors.Join(publishErr, revertErr))
 		}
-		s.logger.Warn(ctx, "stage5 Kafka publish failed; inventory reverted",
+		// Publish failed but revert succeeded — clean compensation.
+		// log.Error (not Warn) because a publish-fail is an SLA-impacting
+		// event for ops: client gets a 5xx, durability gate breached.
+		s.metrics.RecordPublishFailure(true)
+		s.logger.Error(ctx, "stage5 Kafka publish failed; inventory reverted",
 			tag.Error(publishErr),
 			tag.OrderID(orderID),
 			tag.TicketTypeID(ticketTypeID),
@@ -187,6 +222,16 @@ func (s *kafkaIntakeService) deductWithMetadataRepair(
 	result, err = s.inventoryRepo.DeductInventoryNoStream(ctx, ticketTypeID, quantity)
 	if err != nil {
 		if errors.Is(err, domain.ErrTicketTypeRuntimeMetadataMissing) {
+			// Rare race: TTL on the meta key expired between
+			// SetTicketTypeMetadata and the second deduct call, or
+			// the qty key vanished too. The HTTP handler only sees
+			// a 500 counter, so log here at Error level with full
+			// ticket_type context so ops can correlate to the Redis
+			// TTL config without request tracing.
+			s.logger.Error(ctx, "stage5 redis metadata still missing after repair",
+				tag.TicketTypeID(ticketTypeID),
+				tag.Error(err),
+			)
 			return domain.DeductInventoryResult{}, fmt.Errorf("redis runtime metadata still missing after repair ticket_type_id=%s: %w", ticketTypeID, err)
 		}
 		return domain.DeductInventoryResult{}, fmt.Errorf("redis inventory error after repair: %w", err)

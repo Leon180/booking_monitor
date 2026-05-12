@@ -47,6 +47,19 @@ var deductArgsPool = sync.Pool{
 	},
 }
 
+// deductNoStreamArgsPool is the Stage 5 equivalent of deductArgsPool.
+// deduct_no_xadd.lua takes ARGV[1]=count only (no user_id/order_id/
+// reserved_until/ticket_type_id — those are passed by the caller into
+// the IntakeMessage instead). Separate pool so the slice cap matches
+// the script's ARGV count exactly, mirroring deductArgsPool /
+// revertArgsPool stylistic discipline.
+var deductNoStreamArgsPool = sync.Pool{
+	New: func() interface{} {
+		s := make([]interface{}, 1)
+		return &s
+	},
+}
+
 // revertArgsPool is a 1-element slice for revert.lua's single ARGV
 // (count). Separate from deductArgsPool so the two pools never share
 // a backing array.
@@ -57,15 +70,20 @@ var revertArgsPool = sync.Pool{
 	},
 }
 
-// Module provides the Redis client and the cache-backed
-// implementations (inventory, order queue, idempotency). It also
-// provides the QueueMetrics impl so the metrics provider always
-// travels with the queue consumer that needs it — including
-// cache.Module without the matching observability provider would
-// otherwise fail at fx startup, not at compile time.
-var Module = fx.Options(
+// BaseModule provides everything in the cache layer EXCEPT the
+// InventoryRepository. Stage 5 (cmd/booking-cli-stage5) consumes
+// BaseModule and supplies its own inventory provider aliased to
+// both InventoryRepository and Stage5InventoryRepository, so the
+// fx graph constructs exactly ONE *redisInventoryRepository
+// instance covering both interface keys (otherwise Stages 1-4
+// would create one via NewRedisInventoryRepository and Stage 5
+// would create a second via NewStage5RedisInventoryRepository,
+// wasting an allocation and confusing the graph).
+//
+// Stages 1-4 should consume Module (below), which composes
+// BaseModule + the standard inventory provider.
+var BaseModule = fx.Options(
 	fx.Provide(NewRedisClient),
-	fx.Provide(NewRedisInventoryRepository),
 	fx.Provide(NewRedisOrderQueue),
 	fx.Provide(NewRedisIdempotencyRepository),
 	// Decorator pattern: the plain Redis repo above is wrapped with
@@ -86,6 +104,14 @@ var Module = fx.Options(
 	// metrics, but no client-side connection-pool view — which is the
 	// most common "Redis is slow" cause when server is idle).
 	fx.Invoke(registerRedisPoolCollector),
+)
+
+// Module is the default cache module consumed by Stages 1-4. It
+// composes BaseModule with the standard NewRedisInventoryRepository
+// provider (whose deduct.lua includes XADD orders:stream).
+var Module = fx.Options(
+	BaseModule,
+	fx.Provide(NewRedisInventoryRepository),
 )
 
 // registerStreamsCollector attaches the StreamsCollector to the
@@ -386,14 +412,24 @@ func (r *redisInventoryRepository) DeductInventoryNoStream(
 ) (domain.DeductInventoryResult, error) {
 	keys := []string{inventoryKey(ticketTypeID), ticketTypeMetaKey(ticketTypeID)}
 
+	// Pool the args slice to keep the Stage 5 hot path allocation
+	// discipline aligned with DeductInventory's deductArgsPool.
+	argsPtr := deductNoStreamArgsPool.Get().(*[]interface{})
+	args := *argsPtr
+	args[0] = count
+	defer deductNoStreamArgsPool.Put(argsPtr)
+
 	script, ok := r.scripts["deduct_no_xadd"]
 	if !ok {
 		return domain.DeductInventoryResult{}, errDeductScriptNotFound
 	}
 
-	raw, err := script.Run(ctx, r.client, keys, count).Result()
+	raw, err := script.Run(ctx, r.client, keys, args...).Result()
 	if err != nil {
-		return domain.DeductInventoryResult{}, err
+		// Wrap with ticket_type + count so production logs are
+		// debuggable without request tracing — matches
+		// SetTicketTypeRuntime / SetTicketTypeMetadata style.
+		return domain.DeductInventoryResult{}, fmt.Errorf("DeductInventoryNoStream ticket_type=%s count=%d: %w", ticketTypeID, count, err)
 	}
 
 	res, ok := raw.([]interface{})
