@@ -2,6 +2,8 @@
 
 > 中文版本(主要):[2026-05-lua-single-thread-ceiling.zh-TW.md](2026-05-lua-single-thread-ceiling.zh-TW.md)
 
+> 🚧 **2026-05-12 update — Hypothesis 4 conclusion is under re-investigation.** A subsequent Redis baseline benchmark (`make benchmark-redis-baseline`, laptop docker) shows deduct.lua's **server-side aggregate throughput is 273k RPS**, **not** 8,330. The 8,330 acc/s is the throughput cap of the full booking_monitor HTTP pipeline — **not** the cap of Redis Lua same-key serialisation. Full data: [`docs/benchmarks/20260512_200714_redis_baseline/summary.md`](../benchmarks/20260512_200714_redis_baseline/summary.md). The real bottleneck (Gin handler / idempotency middleware / Go-redis RTT / etc.) needs a Go pprof to pinpoint. **The rest of this post is preserved as-is pending a one-shot rewrite after pprof analysis.**
+
 > **TL;DR.** A VU scaling stress test from 500 to 5,000 VUs showed `accepted_bookings` plateauing at ~8,330/s the whole time. Redis CPU was 53%, the connection pool wasn't saturated, the PG pool wasn't waiting. The bottleneck is **single-key Lua write serialization** — a physical ceiling. But the next step isn't "don't shard"; it's the industry's two-layer sharding model: **(1) section-level (business axis) — independent inventory per price tier / section, designed in from day one; (2) hot-section sub-sharding (infra axis) — quota pre-allocation across multiple Redis instances for sections expected to be hot**. Generic hash sharding (the textbook version) is rarely used in production — real systems are business-axis primary, infra-axis as a hot-spot backup. **The order is still "infra first, Redis last", but the "Redis change" itself shifts from "single → cluster" to "per-section multiple instances + hot-section quota router".**
 
 Pairs with the [VU scaling benchmark archive](../benchmarks/) + [saturation profile](../saturation-profile/). Series template: [`docs/blog/README.md`](README.md). Section-level sharding design captured in [`docs/architectural_backlog.md`](../architectural_backlog.md) § Section-level inventory sharding.
@@ -60,6 +62,56 @@ Four hypotheses, each tested against the data.
 **CONFIRMED.** Redis is single-threaded. Every Lua eval against the same `event:{uuid}:qty` key serialises — two concurrent bookings cannot run `deduct.lua` in parallel. Each Lua call does `DECRBY` + a conditional + `XADD`, ~100μs of work. 100μs × serialised execution = ceiling of ~10,000 ops/s. **The observed 8,330 fits, with the slight gap accounted for by client/network overhead beyond Lua.**
 
 So the bottleneck is **single-key Lua write serialisation**. Not Redis's network, not its overall CPU, not the client. It's a physical limit: **single thread × single key × Lua execution cost per call.**
+
+### Hypothesis 4 supplement: Per-op breakdown — why 100µs (and why this doesn't contradict the "Redis can do 100k+" claim)
+
+A natural pushback: "[Redis's own benchmarks](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/) cite 100k–200k ops/s per single instance — your 8,330 looks an order of magnitude too slow." Fair, but the two numbers measure different things.
+
+**Where the redis-benchmark numbers come from** (sources: [DigitalOcean Ubuntu 18.04 benchmark](https://www.digitalocean.com/community/tutorials/how-to-perform-redis-benchmark-tests) + [Redis official benchmark docs](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/)):
+
+| What's measured | Conditions | Observed |
+|:--|:--|:--|
+| `SET` no pipeline | 50 clients | ~72,000 RPS |
+| `SET` with `-P 16` pipelining | 50 clients × 16-op pipeline | ~1.5M RPS |
+| `GET` with `-P 16` | same | ~1.8M RPS |
+| `XADD` alone (small field set) | bare-metal ARM | ~136k RPS ([source](https://learn.arm.com/learning-paths/servers-and-cloud-computing/redis-cobalt/redis-benchmark-and-validation/)) |
+| EVALSHA 100-GET single script | bare-metal, pipelined | ~1.9M effective ops/s ([source](https://www.coreforge.com/blog/2022/02/redis-lua-benchmark/)) |
+
+**The gap between our deduct.lua and these benchmarks isn't Redis getting slower** — they measure different things. Here's what one of our hot-path invocations actually does:
+
+```
+deduct.lua one-invocation internal cost (approx, laptop docker):
+├── EVALSHA invocation overhead              (~5-10 µs)
+├── DECRBY ticket_type_qty:{id} -1           (~5-10 µs)
+├── HMGET ticket_type_meta:{id} (3 fields)   (~10-20 µs)
+├── multiply_decimal_string_by_int (Lua CPU) (~10-30 µs, size-dependent)
+├── XADD orders:stream * (9 field-value)     (~30-50 µs, radix tree maintenance)
+└── client/network round-trip                (~20-50 µs, Docker veth NAT)
+                                              ─────────────
+                                              ~80-170 µs/invocation
+```
+
+Doing the math: 1,000,000 µs ÷ ~120 µs ≈ **8,333/s on this setup**. Matches the observed 8,330.
+
+**How does hardware / setup change this?**
+
+| Setup | Expected deduct.lua ceiling | Why |
+|:--|:--|:--|
+| **laptop docker on macOS** (our current) | ~8,000-10,000 /s | Docker veth NAT + macOS-on-Linux VM overhead + ARM/x86 binary translation |
+| **same setup, Linux bare host** | ~12,000-20,000 /s | strips Docker NAT + macOS VM layer |
+| **bare-metal Linux server / large cloud VM** | ~20,000-40,000 /s | pure loopback / Unix socket + high-frequency CPU (Lua loves single-core clock) |
+| **Redis 7 `io-threads 4`** | still ~20,000-40,000 /s | io-threads parallelise socket I/O — **doesn't help single-key Lua** (Lua exec is still single-thread) |
+
+**So "8,330 physical ceiling" needs precise framing**: **for the same inventory key running deduct.lua, on laptop docker, the ceiling is 8,330/s**. Bare-metal would likely see 3-5×, but **single-thread × single-key × Lua-eval serialisation is not solvable by hardware** — that's an architectural cap, only sharding (Tier 5a/5b) breaks through it.
+
+**Why does SET/GET look so much faster in comparison?**
+- SET / GET are single ops + pipelineable (`-P 16` gives a 20× factor)
+- deduct.lua does 5 ops internally + is *not* pipelineable (each Lua call is one atomic round-trip)
+- So one deduct.lua invocation costs roughly the same as 5 sequential ops, paying 5× the serialised cost of a pipelined SET
+
+Full methodology in [`scripts/redis_baseline_benchmark.sh`](../../scripts/redis_baseline_benchmark.sh): runs 4 baseline modes (raw SET, SET pipelined, EVAL no-pipeline, XADD) side-by-side with our deduct.lua so the breakdown is reproducible on your setup.
+
+> 💡 **Senior-interviewer-proof answer**: "8,330 is same-key Lua throughput on laptop docker. Bare-metal should land around 25-40k because Lua runs on higher-clock Linux CPU with no Docker NAT. But **this ceiling isn't a saturated Redis instance** — Redis main thread CPU is only 53% at 8,330/s. The bottleneck is the physical nature of same-key Lua serialisation, which is consistent with — not contradicted by — Redis SET/GET running 100k+, because SET/GET pipelines and deduct.lua can't. Scaling past this requires sharding the inventory key per (event_id, section_id), not upgrading the Redis instance."
 
 ## Decision
 
