@@ -126,6 +126,10 @@ benchmark-compare: ## Run two-run comparison benchmark (usage: make benchmark-co
 	@chmod +x scripts/benchmark_compare.sh
 	@./scripts/benchmark_compare.sh $(VUS) $(DURATION)
 
+benchmark-redis-baseline: ## Compare deduct.lua vs raw Redis SET/GET/XADD/EVAL baselines (usage: make benchmark-redis-baseline REQS=100000 CLIENTS=50)
+	@chmod +x scripts/redis_baseline_benchmark.sh
+	@./scripts/redis_baseline_benchmark.sh $(REQS) $(CLIENTS)
+
 profile-saturation: ## Run one-shot saturation diagnostic (usage: make profile-saturation VUS=500 DURATION=60s)
 	@chmod +x scripts/profile_saturation.sh
 	@# Override the global DURATION ?= 30s for this target only.
