@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# scripts/run_4stage_comparison.sh — D12.5 4-stage comparison harness
+# scripts/run_5stage_comparison.sh — D12.5 comparison harness
+# (originally 4-stage; PR #113 extended to 5 stages — Stage 5 is the
+# Damai-aligned durable Kafka intake).
 #
-# Runs the same k6 two-step flow scenario sequentially against each
-# of the 4 stage binaries (Stage 1 sync SELECT FOR UPDATE → Stage 4
-# Pattern A + saga compensator) and archives the per-stage outputs
-# into a timestamped directory under `docs/benchmarks/comparisons/`.
+# Runs the same k6 two-step flow + intake-only scenarios sequentially
+# against each of the 5 stage binaries (Stage 1 sync SELECT FOR UPDATE
+# → Stage 5 Damai durable Kafka intake) and archives the per-stage
+# outputs into a timestamped directory under `docs/benchmarks/comparisons/`.
 #
 # Usage:
-#   ./scripts/run_4stage_comparison.sh [VUS] [DURATION] [--keep-stack]
+#   ./scripts/run_5stage_comparison.sh [VUS] [DURATION] [--keep-stack]
 #
 # Defaults: VUS=500, DURATION=60s
 # `--keep-stack` (last arg, optional): leave the bench stack up after
@@ -22,7 +24,7 @@
 # ────────────────────────────────────────────────────────────────
 # Failure-mode guards (all from D12.5 plan-review):
 #   - set -euo pipefail            top of file
-#   - free-port pre-flight check   abort if 8091-8094 / 5434 / 6380 / 9091 / 19092 are in use
+#   - free-port pre-flight check   abort if 8091-8095 / 5434 / 6380 / 9091 / 19092 are in use
 #   - post-/livez smoke request    confirm DB is reachable under a real query, not just /livez
 #   - ticket_type_id UUID assert   catch silent shape-drift in the events response
 #   - --summary-export=json        parse k6 metrics from structured JSON, not regex over stdout
@@ -49,7 +51,7 @@ if [[ ! "$DURATION" =~ ^([0-9]+[smh])+$ ]]; then
 fi
 
 TS=$(date +%Y%m%d_%H%M%S)
-OUTDIR="docs/benchmarks/comparisons/${TS}_4stage_c${VUS}_d${DURATION}"
+OUTDIR="docs/benchmarks/comparisons/${TS}_5stage_c${VUS}_d${DURATION}"
 mkdir -p "$OUTDIR"
 
 # ─── Step 1: pre-flight + auto-capture run_conditions.txt ───────
@@ -81,7 +83,7 @@ cat "$OUTDIR/run_conditions.txt" | tail -20
 
 echo ""
 echo "── free-port check ──"
-PORTS_TO_CHECK="5434 6380 8091 8092 8093 8094 9091 19092"
+PORTS_TO_CHECK="5434 6380 8091 8092 8093 8094 8095 9091 19092"
 if command -v lsof >/dev/null 2>&1; then
     PORT_CONFLICT=0
     for port in $PORTS_TO_CHECK; do
@@ -106,7 +108,7 @@ fi
 
 # ─── Step 2-4: bring up backing services + apply migrations + start stages ───
 echo ""
-echo "[2/8] Bringing up bench stack (backing services → migrations → stage binaries → wait /livez × 4)..."
+echo "[2/8] Bringing up bench stack (backing services → migrations → stage binaries → wait /livez × 5)..."
 
 # Cleanup trap: if anything below this point fails (set -e propagates),
 # tear the bench stack down on exit so the next invocation doesn't
@@ -133,7 +135,7 @@ make bench-up
 # benchmark window driving load against a half-broken stage.
 echo ""
 echo "[3/8] Post-/livez DB-reachable smoke per stage..."
-for stage in 1 2 3 4; do
+for stage in 1 2 3 4 5; do
     port=$((8090 + stage))
     smoke_resp=$(curl -sS -X POST "http://localhost:$port/api/v1/events" \
         -H 'Content-Type: application/json' \
@@ -237,7 +239,7 @@ except Exception as e:
 # ─── Step 6-7: run k6 sequentially per stage (BOTH scenarios) ───
 echo ""
 echo "[4/8] Running k6 sequentially per stage (full_flow + intake_only)..."
-for stage in 1 2 3 4; do
+for stage in 1 2 3 4 5; do
     port=$((8090 + stage))
     stage_dir="$OUTDIR/stage$stage"
     mkdir -p "$stage_dir"
@@ -261,8 +263,9 @@ for stage in 1 2 3 4; do
     # ─── Step 9: inter-stage drain ──────────────────────────────
     # closes plan-review MED #1: replace 10s magic constant with
     # an actual drain check on this stage's PG connections. Stop
-    # before stage 4 because there's no "stage 5" to wait for.
-    if [ "$stage" -lt 4 ]; then
+    # before the LAST stage (stage 5) because there's no next
+    # stage to wait for.
+    if [ "$stage" -lt 5 ]; then
         # Sanity: postgres-bench MUST be running for the drain check
         # to be meaningful. If we silently fall back to "0" on a
         # missing container, the drain "succeeds" while PG is dead —
@@ -348,7 +351,7 @@ fi
 echo ""
 echo "[7/8] Output archived:"
 ls -la "$OUTDIR"
-for stage in 1 2 3 4; do
+for stage in 1 2 3 4 5; do
     if [ -f "$OUTDIR/stage$stage/summary.json" ]; then
         ls -la "$OUTDIR/stage$stage/" 2>/dev/null | tail -3 | sed 's/^/    /'
     fi
@@ -356,7 +359,7 @@ done
 
 echo ""
 echo "[8/8] Next: Slice 4's scripts/generate_comparison_md.sh reads"
-echo "      $OUTDIR/stage{1..4}/summary.json + run_conditions.txt"
+echo "      $OUTDIR/stage{1..5}/summary.json + run_conditions.txt"
 echo "      and emits $OUTDIR/comparison.md"
 echo ""
-echo "✓ 4-stage comparison run complete: $OUTDIR/"
+echo "✓ 5-stage comparison run complete: $OUTDIR/"

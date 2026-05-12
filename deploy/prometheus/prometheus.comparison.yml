@@ -1,4 +1,5 @@
-# D12.5 — Bench-only Prometheus scrape config for the 4-stage harness.
+# D12.5 — Bench-only Prometheus scrape config for the comparison
+# harness. Originally 4-stage; PR #113 extended to 5 stages.
 #
 # Mounted at /etc/prometheus/prometheus.yml inside `prometheus-bench`
 # (see docker-compose.comparison.yml).
@@ -35,10 +36,10 @@ global:
 #    Pick a different label name on the metric side OR rename here.
 #
 # 2. The `stage` label values are the literal strings `stage1`,
-#    `stage2`, `stage3`, `stage4` — NOT `1`, `2`, `3`, `4` and NOT
+#    `stage2`, `stage3`, `stage4`, `stage5` — NOT `1`-`5` and NOT
 #    `s1`, `s2`, etc. PromQL filters typo-fail silently (return 0
 #    results, not an error). The orchestration script (Slice 3)
-#    asserts `up{stage="stageN"} == 1` × 4 to catch this.
+#    asserts `up{stage="stageN"} == 1` × 5 to catch this.
 #
 # 3. PromQL aggregations on the booking-stages job should use
 #    `sum by (stage)` — but be aware the `architecture` label is
@@ -56,11 +57,11 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # The 4 stage binaries. Container-internal port is 8080 (uniform
+  # The 5 stage binaries. Container-internal port is 8080 (uniform
   # across stages — set via PORT env var in compose). Host-mapped
-  # ports 8091-8094 are NOT used here; intra-compose scraping uses
+  # ports 8091-8095 are NOT used here; intra-compose scraping uses
   # the service hostname + container-internal port. The discrepancy
-  # between Section 1's host port table (8091-8094) and this
+  # between Section 1's host port table (8091-8095) and this
   # scrape config (8080) trips up readers who diff them — hence
   # this comment.
   #
@@ -93,3 +94,7 @@ scrape_configs:
         labels:
           stage: stage4
           architecture: pattern-a-with-saga
+      - targets: ["booking-cli-stage5:8080"]
+        labels:
+          stage: stage5
+          architecture: durable-kafka-intake

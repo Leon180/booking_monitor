@@ -1,5 +1,6 @@
--- D12.5 — Per-stage Postgres database isolation for the 4-stage
--- comparison harness (PR #108 + this PR).
+-- D12.5 — Per-stage Postgres database isolation for the comparison
+-- harness (PR #108 + this PR). Originally created 4 stage DBs; PR #113
+-- (Stage 5 Damai-aligned durable Kafka intake) added stage5.
 --
 -- The harness's `docker-compose.comparison.yml` (Slice 1) mounts this
 -- file at `/docker-entrypoint-initdb.d/02_create_stage_dbs.sql` on the
@@ -8,9 +9,9 @@
 -- volume initialization, in lexical order — so this file runs after
 -- `01_*.sql` (if any) which handles user/role setup.
 --
--- The 4 databases (`booking_stage1` through `booking_stage4`) host
+-- The 5 databases (`booking_stage1` through `booking_stage5`) host
 -- isolated migration namespaces for each comparison-harness stage so
--- a benchmark run in Stage 1 cannot contaminate Stage 4's data, and
+-- a benchmark run in Stage 1 cannot contaminate Stage 5's data, and
 -- vice versa. Stages share the same Postgres SERVER (single container)
 -- to keep the bench resource footprint small.
 --
@@ -52,7 +53,7 @@
 -- ## Why uniform-migration policy
 --
 -- The orchestration script (Slice 3) applies ALL migrations to ALL
--- 4 stage DBs uniformly, even though Stage 1 doesn't need migration
+-- 5 stage DBs uniformly, even though Stage 1 doesn't need migration
 -- 000010 (saga audit table) and Stages 1-3 don't use migration 000013
 -- (saga state widening). The ~10ms per stage of unused-migration cost
 -- is far cheaper than the maintenance burden of "Stage 1 has
@@ -72,6 +73,9 @@ SELECT 'CREATE DATABASE booking_stage3'
 SELECT 'CREATE DATABASE booking_stage4'
  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'booking_stage4')\gexec
 
+SELECT 'CREATE DATABASE booking_stage5'
+ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'booking_stage5')\gexec
+
 -- Post-create verification block. Converts a silently-incomplete
 -- create (e.g., role demoted to non-superuser between blocks; a
 -- single `\gexec` SELECT erroring out without halting psql) into
@@ -85,9 +89,9 @@ BEGIN
     SELECT count(*) INTO n_stage_dbs
       FROM pg_database
      WHERE datname LIKE 'booking_stage%';
-    IF n_stage_dbs <> 4 THEN
+    IF n_stage_dbs <> 5 THEN
         RAISE EXCEPTION
-          'expected 4 booking_stage* databases after init, found %. partial-create scenario; check superuser permission + earlier init scripts',
+          'expected 5 booking_stage* databases after init, found %. partial-create scenario; check superuser permission + earlier init scripts',
           n_stage_dbs;
     END IF;
 END $$;

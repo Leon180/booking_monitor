@@ -149,11 +149,12 @@ docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@docker-compose up -d app
 	@echo "App restarted in Docker."
 
-# D12.5 — 4-stage comparison harness control surface. The compose file
-# `docker-compose.comparison.yml` brings up bench-isolated Postgres +
-# Redis + Kafka + 4 stage binaries on ports 8091-8094. Used by the
-# orchestration script `scripts/run_4stage_comparison.sh` (Slice 3).
-bench-up: ## D12.5 — bring up the 4-stage comparison harness (ports 8091-8094)
+# D12.5 — comparison harness control surface (originally 4-stage; PR #113
+# extended to 5 stages). The compose file `docker-compose.comparison.yml`
+# brings up bench-isolated Postgres + Redis + Kafka + 5 stage binaries on
+# ports 8091-8095. Used by the orchestration script
+# `scripts/run_5stage_comparison.sh` (Slice 3).
+bench-up: ## D12.5 — bring up the 5-stage comparison harness (ports 8091-8095)
 	@echo "[1/4] Starting backing services (postgres + redis + kafka + prometheus)..."
 	@# Stage binaries hard-fail at startup if their DB has no tables
 	@# (Stage 4's inventoryRehydrate fx hook queries `events`; Stages
@@ -170,20 +171,20 @@ bench-up: ## D12.5 — bring up the 4-stage comparison harness (ports 8091-8094)
 	  sleep 1; \
 	done
 	@echo ""
-	@echo "[3/4] Applying migrations to all 4 stage DBs..."
-	@for stage in 1 2 3 4; do \
+	@echo "[3/4] Applying migrations to all 5 stage DBs..."
+	@for stage in 1 2 3 4 5; do \
 	  echo "  migrating booking_stage$$stage..."; \
 	  $(MAKE) -s migrate-up MIGRATE_DB_URL="postgres://booking:bench_pg_local@localhost:5434/booking_stage$$stage?sslmode=disable" 2>&1 | tail -3 || { echo "  ✗ migration failed for booking_stage$$stage"; exit 1; }; \
 	done
 	@echo ""
 	@echo "[4/4] Starting stage binaries..."
 	@docker compose -f docker-compose.comparison.yml up -d --build \
-	  booking-cli-stage1 booking-cli-stage2 booking-cli-stage3 booking-cli-stage4
+	  booking-cli-stage1 booking-cli-stage2 booking-cli-stage3 booking-cli-stage4 booking-cli-stage5
 	@echo ""
-	@echo "Waiting for all 4 stages to pass /livez (60s budget)..."
+	@echo "Waiting for all 5 stages to pass /livez (60s budget)..."
 	@# Use /livez (not /readyz): stages 1-3 only register /livez (no
 	@# ops package), so /readyz returns 404 from those binaries.
-	@for stage in 1 2 3 4; do \
+	@for stage in 1 2 3 4 5; do \
 	  port=$$((8090 + $$stage)); \
 	  ready=false; \
 	  for i in $$(seq 1 60); do \
@@ -200,16 +201,17 @@ bench-up: ## D12.5 — bring up the 4-stage comparison harness (ports 8091-8094)
 	  fi; \
 	done
 	@echo ""
-	@echo "All 4 stages ready:"
+	@echo "All 5 stages ready:"
 	@echo "  stage 1: http://localhost:8091  (sync SELECT FOR UPDATE)"
 	@echo "  stage 2: http://localhost:8092  (Redis Lua + sync PG INSERT)"
 	@echo "  stage 3: http://localhost:8093  (Redis Lua + async stream/worker)"
 	@echo "  stage 4: http://localhost:8094  (Pattern A + saga compensator)"
+	@echo "  stage 5: http://localhost:8095  (Damai-aligned durable Kafka intake)"
 	@echo "  bench Prometheus: http://localhost:9091"
 	@echo ""
-	@echo "Next: scripts/run_4stage_comparison.sh (Slice 3)"
+	@echo "Next: scripts/run_5stage_comparison.sh (Slice 3)"
 
-bench-down: ## D12.5 — stop the 4-stage harness (keeps volumes for re-run)
+bench-down: ## D12.5 — stop the 5-stage harness (keeps volumes for re-run)
 	@docker compose -f docker-compose.comparison.yml down
 
 bench-down-clean: ## D12.5 — stop AND remove volumes (resets all state)
@@ -223,7 +225,7 @@ bench-smoke: ## D12.5 — minimal smoke (VUS=1 DURATION=10s) to detect harness r
 	@# threshold name, wrong metric ref, JS syntax error) wouldn't
 	@# surface in CI. Now invokes k6 at VUS=1 / DURATION=5s against
 	@# both scenarios per stage to actually exercise the script paths.
-	@for stage in 1 2 3 4; do \
+	@for stage in 1 2 3 4 5; do \
 	  port=$$((8090 + $$stage)); \
 	  echo "stage $$stage smoke (port $${port})..."; \
 	  curl -sSf -X POST "http://localhost:$${port}/api/v1/events" \
