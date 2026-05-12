@@ -155,15 +155,35 @@ func NewRedisClient(cfg *config.Config, logger *mlog.Logger) *redis.Client {
 //go:embed lua/deduct.lua
 var deductScriptSource string
 
+//go:embed lua/deduct_no_xadd.lua
+var deductNoXaddScriptSource string
+
 //go:embed lua/revert.lua
 var revertScriptSource string
 
+// NewRedisInventoryRepository returns the standard InventoryRepository
+// used by Stages 2-4 (deduct.lua includes XADD orders:stream).
+//
+// Stage 5 binary should call NewStage5RedisInventoryRepository instead
+// (or upcast via the Stage5InventoryRepository interface) to get the
+// no-XADD Lua variant for Damai-aligned durable Kafka intake.
 func NewRedisInventoryRepository(client *redis.Client, cfg *config.Config) domain.InventoryRepository {
+	return newRedisInventoryRepository(client, cfg)
+}
+
+// NewStage5RedisInventoryRepository returns the extended interface that
+// also exposes DeductInventoryNoStream. Used by cmd/booking-cli-stage5.
+func NewStage5RedisInventoryRepository(client *redis.Client, cfg *config.Config) domain.Stage5InventoryRepository {
+	return newRedisInventoryRepository(client, cfg)
+}
+
+func newRedisInventoryRepository(client *redis.Client, cfg *config.Config) *redisInventoryRepository {
 	return &redisInventoryRepository{
 		client: client,
 		scripts: map[string]*redis.Script{
-			"deduct": redis.NewScript(deductScriptSource),
-			"revert": redis.NewScript(revertScriptSource),
+			"deduct":          redis.NewScript(deductScriptSource),
+			"deduct_no_xadd":  redis.NewScript(deductNoXaddScriptSource),
+			"revert":          redis.NewScript(revertScriptSource),
 		},
 		inventoryTTL: cfg.Redis.InventoryTTL,
 	}
@@ -300,6 +320,78 @@ func (r *redisInventoryRepository) DeductInventory(
 	}
 
 	raw, err := script.Run(ctx, r.client, keys, args...).Result()
+	if err != nil {
+		return domain.DeductInventoryResult{}, err
+	}
+
+	res, ok := raw.([]interface{})
+	if !ok || len(res) == 0 {
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua result %T: %w", raw, errUnexpectedLuaResult)
+	}
+
+	status, ok := res[0].(string)
+	if !ok {
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua status %T: %w", res[0], errUnexpectedLuaResult)
+	}
+
+	switch status {
+	case "ok":
+		if len(res) != 4 {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected ok payload len=%d: %w", len(res), errUnexpectedLuaResult)
+		}
+		eventIDStr, ok1 := res[1].(string)
+		amountCentsStr, ok2 := res[2].(string)
+		currency, ok3 := res[3].(string)
+		if !ok1 || !ok2 || !ok3 {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: malformed ok payload: %w", errUnexpectedLuaResult)
+		}
+		eventID, parseEventErr := uuid.Parse(eventIDStr)
+		if parseEventErr != nil {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: parse event_id %q: %w", eventIDStr, parseEventErr)
+		}
+		amountCents, parseAmountErr := strconv.ParseInt(amountCentsStr, 10, 64)
+		if parseAmountErr != nil {
+			return domain.DeductInventoryResult{}, fmt.Errorf("redis: parse amount_cents %q: %w", amountCentsStr, parseAmountErr)
+		}
+		return domain.DeductInventoryResult{
+			Accepted:    true,
+			EventID:     eventID,
+			AmountCents: amountCents,
+			Currency:    currency,
+		}, nil
+	case "sold_out":
+		return domain.DeductInventoryResult{Accepted: false}, nil
+	case "metadata_missing":
+		return domain.DeductInventoryResult{}, domain.ErrTicketTypeRuntimeMetadataMissing
+	default:
+		return domain.DeductInventoryResult{}, fmt.Errorf("redis: unexpected lua status %q: %w", status, errUnexpectedLuaResult)
+	}
+}
+
+// DeductInventoryNoStream is the Stage 5 variant of DeductInventory.
+// Identical atomicity semantics (DECRBY guarded by availability +
+// HMGET booking metadata + amount_cents computation) but DOES NOT
+// XADD to orders:stream. The caller is responsible for publishing
+// the booking message to a durable queue (Stage 5 uses Kafka with
+// acks=all) and for calling RevertInventory on publish failure.
+//
+// Result parsing is intentionally duplicated from DeductInventory
+// rather than extracted — the two paths diverge in `args` shape and
+// reading them side-by-side keeps the script→Go contract obvious
+// when changing either. See `deduct_no_xadd.lua` for the Lua side.
+func (r *redisInventoryRepository) DeductInventoryNoStream(
+	ctx context.Context,
+	ticketTypeID uuid.UUID,
+	count int,
+) (domain.DeductInventoryResult, error) {
+	keys := []string{inventoryKey(ticketTypeID), ticketTypeMetaKey(ticketTypeID)}
+
+	script, ok := r.scripts["deduct_no_xadd"]
+	if !ok {
+		return domain.DeductInventoryResult{}, errDeductScriptNotFound
+	}
+
+	raw, err := script.Run(ctx, r.client, keys, count).Result()
 	if err != nil {
 		return domain.DeductInventoryResult{}, err
 	}
