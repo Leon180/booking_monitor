@@ -17,7 +17,10 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/fx"
 
+	"booking_monitor/internal/application"
 	"booking_monitor/internal/application/booking"
+	"booking_monitor/internal/application/recon"
+	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/stagehttp"
@@ -99,12 +102,45 @@ func runServer(_ *cobra.Command, _ []string) {
 		fx.Provide(booking.NewKafkaIntakeService),
 
 		// Worker fx wiring — Stage 5 worker reads from Kafka
-		// (`booking.intake.v5`), NOT Redis Stream. The actual Kafka
-		// consumer impl arrives in Session 2; until then this
-		// provider is omitted and the binary won't drain bookings
-		// from Kafka (smoke verifies hot path only).
-		//
-		// fx.Provide(...) — Session 2.
+		// (`booking.intake.v5`), NOT Redis Stream. Same processor
+		// the Stage 3/4 worker uses (UoW with DecrementTicket +
+		// Order.Create); only the transport differs. The metrics
+		// decorator wraps the base processor so processor outcomes
+		// land on the same `worker_*` series Stages 3/4 emit.
+		fx.Provide(
+			observability.NewWorkerMetrics,
+			func(uow application.UnitOfWork, metrics worker.Metrics, logger *mlog.Logger) worker.MessageProcessor {
+				base := worker.NewOrderMessageProcessor(uow, logger)
+				return worker.NewMessageProcessorMetricsDecorator(base, metrics)
+			},
+		),
+
+		// Stage 5 Kafka consumer. Mirrors *messaging.IntakePublisher's
+		// dual-provider shape (concrete + interface alias) so installServer
+		// can call Close() in OnStop while the goroutine launcher receives
+		// the concrete *IntakeConsumer for its Start() loop. The consumer
+		// owns the FetchMessage → processor.Process → CommitMessages
+		// at-least-once loop plus the terminal-error compensation path
+		// that reverts Redis qty when the processor rolls back.
+		fx.Provide(
+			func(cfg *config.Config, p worker.MessageProcessor, inv domain.InventoryRepository, logger *mlog.Logger) *messaging.IntakeConsumer {
+				return messaging.NewIntakeConsumer(&cfg.Kafka, p, inv, logger)
+			},
+		),
+
+		// InventoryDriftDetector — Stage 5 needs it as the safety net
+		// for the (rare) dual-write scenario where the publish-time
+		// Lua deducted but Kafka publish + revert both failed AND the
+		// consumer-side compensation didn't fire (e.g. message was
+		// never delivered because the broker outage took both halves
+		// down). Same detector type as the recon subcommand uses; we
+		// run it co-resident with the server to keep Stage 5 a single
+		// process for the benchmark comparison.
+		fx.Provide(
+			bootstrap.NewDriftConfig,
+			bootstrap.NewPrometheusDriftMetrics,
+			recon.NewInventoryDriftDetector,
+		),
 
 		// Stage 5's stagehttp.Compensator: revert.lua + UPDATE
 		// event_ticket_types += qty + UPDATE orders. Symmetric with
@@ -169,6 +205,8 @@ func installServer(
 	bookingService booking.Service,
 	compensator stagehttp.Compensator,
 	intakePublisher *messaging.IntakePublisher,
+	intakeConsumer *messaging.IntakeConsumer,
+	driftDetector *recon.InventoryDriftDetector,
 	logger *mlog.Logger,
 ) {
 	gin.SetMode(gin.ReleaseMode)
@@ -208,20 +246,10 @@ func installServer(
 	runCtx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
+	driftInterval := driftDetector.SweepInterval()
+
 	lc.Append(fx.Hook{
 		OnStart: func(_ context.Context) error {
-			// Session 1 scaffolding warning: no Kafka consumer is
-			// wired yet. /book deducts inventory + publishes to
-			// `booking.intake.v5` successfully, but nothing drains
-			// the topic — bookings accumulate in Kafka and orders
-			// never land in PG. Smoke verifies the hot path
-			// (acks=all latency, revert.lua on publish fail) only;
-			// the consumer + drift reconciler arrive in Session 2.
-			// Error-level log (not Warn) so a misconfigured prod
-			// deploy is obvious in the first scrape.
-			logger.Error(context.Background(),
-				"stage5 SESSION 1 SCAFFOLDING — no Kafka consumer wired; bookings will accumulate in topic with no PG persistence")
-
 			// HTTP server in its own goroutine; failure escalates
 			// via shutdowner so a port-collision after OnStart returns
 			// kills the process (k8s restart on the next probe).
@@ -235,14 +263,54 @@ func installServer(
 				}
 			}()
 
-			// Worker — Stage 5's Kafka consumer (reads `booking.intake.v5`
-			// and INSERTs to PG). Wired in Session 2; not present in
-			// Session 1 scaffolding. Bookings accepted in Session 1
-			// pile up in Kafka with no consumer, which is fine for
-			// hot-path smoke verification (the consumer's job is
-			// strictly PG persistence + ACKing the offset).
-			//
-			// go func() { workerSvc.Start(runCtx) ... }  ← Session 2
+			// Stage 5 Kafka consumer — drains booking.intake.v5 into
+			// PG via the existing worker.MessageProcessor (UoW with
+			// DecrementTicket + Order.Create). A permanent consumer
+			// failure escalates via fx.Shutdown so k8s restarts the
+			// pod instead of silently halving inventory throughput.
+			// IntakeConsumer.Start currently only returns nil on
+			// ctx-cancel; the escalation branch covers a future
+			// non-nil-error return path.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := intakeConsumer.Start(runCtx); err != nil && runCtx.Err() == nil {
+					logger.Error(context.Background(), "stage5 intake consumer failed — escalating fx.Shutdown",
+						tag.Error(err))
+					_ = shutdowner.Shutdown(fx.ExitCode(1))
+				}
+			}()
+
+			// Inventory drift detector — safety net for the Lua-deducted
+			// + publish-AND-revert-both-failed window. Reads Redis qty +
+			// PG `event_ticket_types.available_tickets` per ListAvailable
+			// event and reports drift via the `inventory_drift_*`
+			// prometheus series. Detection only, no auto-correct
+			// (deliberately operator-gated — see the type docstring
+			// for the recovery reasoning).
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				logger.Info(runCtx, "stage5 inventory drift detector starting",
+					mlog.Duration("sweep_interval", driftInterval))
+				ticker := time.NewTicker(driftInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-runCtx.Done():
+						logger.Info(context.Background(), "stage5 inventory drift detector stopping")
+						return
+					case <-ticker.C:
+						if err := driftDetector.Sweep(runCtx); err != nil && runCtx.Err() == nil {
+							// Sweep failures are operational signals;
+							// the next tick gets a fresh chance. Log
+							// at Error so the dashboard alert fires
+							// but DO NOT abort the loop.
+							logger.Error(runCtx, "stage5 drift sweep failed", tag.Error(err))
+						}
+					}
+				}
+			}()
 
 			// Expiry sweeper — same shape as Stages 1+2 sweepers.
 			wg.Add(1)
@@ -292,17 +360,22 @@ func installServer(
 			}()
 			select {
 			case <-done:
-				// 4. Close the Kafka writer AFTER the HTTP server +
-				//    background goroutines have drained — guarantees
-				//    no in-flight Publish call races with Close().
-				//    The writer's own bounded-close (10s ceiling
-				//    inside IntakePublisher.Close) keeps OnStop
-				//    bounded even if the broker is unreachable.
-				//    Log + continue on error rather than failing
-				//    OnStop, since by this point the data plane is
-				//    already drained.
+				// 4. Close the Kafka writer + reader AFTER the HTTP
+				//    server + background goroutines have drained —
+				//    guarantees no in-flight Publish call races with
+				//    Writer.Close() and no in-flight FetchMessage call
+				//    races with Reader.Close(). Each component's
+				//    bounded-close (10s ceiling inside
+				//    IntakePublisher.Close / IntakeConsumer.Close)
+				//    keeps OnStop bounded even if the broker is
+				//    unreachable. Log + continue on error rather than
+				//    failing OnStop, since by this point the data
+				//    plane is already drained.
 				if err := intakePublisher.Close(); err != nil {
 					logger.Error(stopCtx, "stage5 IntakePublisher.Close error", tag.Error(err))
+				}
+				if err := intakeConsumer.Close(); err != nil {
+					logger.Error(stopCtx, "stage5 IntakeConsumer.Close error", tag.Error(err))
 				}
 				return nil
 			case <-stopCtx.Done():
