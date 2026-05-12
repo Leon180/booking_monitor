@@ -20,6 +20,23 @@ go.work
 # Environment variables
 .env
 
+# Private interview prep notes — never commit
+docs/interview_prep.md
+docs/interview_prep_notion.md
+
+# Private resume drafts — never commit
+docs/resume_en.md
+docs/resume_zh-TW.md
+
+# Private LinkedIn profile draft — never commit
+docs/linkedin_profile.md
+
+# Private job-platform profile drafts — never commit
+docs/job_platform_profiles.md
+
+# Private 2-month interview prep plan (from external session)
+docs/interview_plan_2months.md
+
 # IDEs
 .idea/
 .vscode/

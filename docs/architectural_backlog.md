@@ -213,6 +213,14 @@ Each entry: **what**, **why deferred**, **revisit when**. Dated so future triage
 
 ## Operational follow-ups (sourced from concrete events)
 
+### Idempotency middleware 3-op Redis pattern + cache memory cap (2026-05-12)
+- **What.** `POST /api/v1/book` with `Idempotency-Key` header sends 3 Redis round-trips: middleware `Get` (cache lookup) → handler runs `deduct.lua` → middleware `Set` (cache the 202 response + fingerprint). The three are **not atomic** — if `Set` fails after the deduct succeeds, the client retry with the same key sees a cache miss and triggers a second deduct. Safety net at lower layer: server-minted UUIDv7 `order_id` + DB UNIQUE on `orders.id` + reconciler catches Redis-vs-DB drift, so the worst case is over-reservation in Redis (drift) not double-booked orders. **Real production cap is Redis memory, not throughput** — at ~500 B per cached response, the 512 MB `noeviction` Redis fills at roughly 1M idempotent operations per 24h TTL window. Benchmarked 2026-05-12: Path B (with Idempotency-Key) ceiling on this Redis = ~10-15 k req/s sustained before OOM cascade; Path A (no Idempotency-Key, intake-only) ceiling = ~25-30 k req/s.
+- **Why deferred.** Both bottlenecks are real but only matter at scales above current portfolio scope (single-event, single-instance). The non-atomic-Redis-write race is bounded by the lower-layer UUID+DB safety net documented in `docs/benchmarks/20260512_220000_path_b_idempotency/summary.md`.
+- **Revisit when.**
+  - **Cache memory cap**: first triggered by production traffic forecast > 1M unique idempotent operations per day (e.g., the system serves a sustained-flash-sale-tour). Cheapest fix: store only response fingerprint + status code + a pointer (rather than the full body) — ~6× memory savings without changing middleware contract.
+  - **3-op non-atomic race**: revisit if the upper-layer safety net (UUID+DB+reconciler) loosens for some reason. Optionally combine into one Lua script (`idempotency_and_deduct.lua`); cost is per-endpoint Lua scripts replacing the generic middleware pattern.
+- **Source.** [`docs/benchmarks/20260512_220000_path_b_idempotency/summary.md`](benchmarks/20260512_220000_path_b_idempotency/summary.md) (Round 6 of the May-12 detective story).
+
 ### DLQ-12K-entries triage
 - **What.** During PR #66's smoke test, `OrdersDLQNonEmpty` was firing with 12092 entries — these had been accumulating silently under the prior null receiver. Documented in [`docs/checkpoints/20260501-senior-multi-agent-review.md`](checkpoints/20260501-senior-multi-agent-review.md) Outcome.
 - **Why deferred.** PR #66 was scoped to alert delivery; triaging actual DLQ contents is operational work, not infrastructure.

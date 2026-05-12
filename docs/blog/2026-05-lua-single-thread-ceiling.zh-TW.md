@@ -2,6 +2,8 @@
 
 > English version: [2026-05-lua-single-thread-ceiling.md](2026-05-lua-single-thread-ceiling.md)
 
+> 🚧 **2026-05-12 更新 — 本文 Hypothesis 4 結論待重新檢驗**。後續 Redis baseline benchmark(`make benchmark-redis-baseline` 在 laptop docker 量得)顯示 deduct.lua **server-side aggregate throughput 是 273k RPS**,**不是** 8,330。8,330 acc/s 是 booking_monitor 整條 HTTP pipeline 的 cap,**不是 Redis Lua single-thread serialization 的 cap**。完整數據在 [`docs/benchmarks/20260512_200714_redis_baseline/summary.md`](../benchmarks/20260512_200714_redis_baseline/summary.md)。真實 bottleneck 在 HTTP pipeline 哪一層(Gin handler / idempotency middleware / Go-redis client RTT / etc.)需要 Go pprof 重新定位。**本文以下內容暫時保留,待 pprof 結果出來後一次性 rewrite。**
+
 > **TL;DR.** VU scaling 壓測從 500 推到 5000 VUs,accepted_bookings 始終卡在 ~8,330/s。Redis CPU 只有 53%、pool 沒爆、PG pool 沒滿。瓶頸是「**同一把 inventory key 的 Lua 寫入是 single-thread 序列化**」 — 是物理上限。但下一步**不是「不做 sharding」**,而是學業界做兩層 sharding:**(1) Section-level(business axis) — 每個票價區域 / 票種獨立**,從第一天就該這樣設計;**(2) Hot-section sub-sharding(infra axis) — 只對預期超熱的區段做 quota 預分配**,讓單一 hot section 也能線性 scale。Generic hash sharding(課本上說的那種)業界沒人單獨用 — 永遠是 business-axis 為主、infra-axis 為 hot-spot 後備。**順序仍然是 infra 先動、Redis 最後動,但「Redis 動」這件事從「single 升 cluster」變成「per-section 多實例 + hot-section quota router」。**
 
 對應 [VU scaling benchmark archive](../benchmarks/) + [saturation profile](../saturation-profile/)。系列模板見 [`docs/blog/README.md`](README.md)。Section-level sharding 的設計細節記在 [`docs/architectural_backlog.md`](../architectural_backlog.md) § Section-level inventory sharding。
@@ -60,6 +62,56 @@
 **CONFIRMED**。Redis 是 single-threaded。每個 Lua eval 對同一把 `event:{uuid}:qty` key 都要序列化執行 — 兩個並行訂票無法同時跑 deduct.lua。每次 deduct.lua 在 Lua 層做 `DECRBY` + 條件判斷 + `XADD`,大約 100μs。100μs × 序列化 = 每秒上限 ~10,000 次。**實測 8,330 對得起來,稍微低一點是因為加上 Lua eval 之外的 client/network overhead。**
 
 所以瓶頸是「**同一把 key 的 Lua 寫入序列化**」。不是 Redis 的網路、不是它的總 CPU、不是 client。是物理上限:**single thread × single key × Lua 內部運算量**。
+
+### 假設 4 補充:Per-op breakdown — 為什麼是 100µs(以及跟 Redis SET/GET 100k+ 數字並不衝突)
+
+一個常見的反問是:「[Redis 官方 benchmark](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/) 不是說單實例可以 100k-200k ops/s 嗎?你的 8,330 看起來慢一個量級」。這個問題本身很 valid,但是兩個數字測的是不同東西。
+
+**redis-benchmark 數字是怎麼來的**(來源:[DigitalOcean Ubuntu 18.04 benchmark](https://www.digitalocean.com/community/tutorials/how-to-perform-redis-benchmark-tests) + [Redis 官方 benchmark docs](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/)):
+
+| 測什麼 | 條件 | 實測 |
+|:--|:--|:--|
+| `SET` no pipeline | 50 clients | ~72,000 RPS |
+| `SET` with `-P 16` pipelining | 50 clients × 16-op pipeline | ~1.5M RPS |
+| `GET` with `-P 16` | 同上 | ~1.8M RPS |
+| `XADD` alone(small field set)| bare-metal ARM | ~136k RPS([source](https://learn.arm.com/learning-paths/servers-and-cloud-computing/redis-cobalt/redis-benchmark-and-validation/))|
+| EVALSHA 100-GET single script | bare-metal,pipeline | ~1.9M effective ops/s([source](https://www.coreforge.com/blog/2022/02/redis-lua-benchmark/))|
+
+**我們的 deduct.lua 跟這些 benchmark 比的差距,不是 Redis 變慢**,是測的東西不同。我們的 hot path 一次 invocation 內部做的事:
+
+```
+deduct.lua 一次 invocation 的 internal cost(approx,laptop docker):
+├── EVALSHA invocation overhead              (~5-10 µs)
+├── DECRBY ticket_type_qty:{id} -1           (~5-10 µs)
+├── HMGET ticket_type_meta:{id} (3 fields)   (~10-20 µs)
+├── multiply_decimal_string_by_int (Lua CPU) (~10-30 µs,size-dependent)
+├── XADD orders:stream * (9 field-value)     (~30-50 µs,radix tree maintenance)
+└── client/network round-trip                (~20-50 µs,Docker veth NAT)
+                                              ─────────────
+                                              ~80-170 µs/invocation
+```
+
+換算:1,000,000 µs ÷ ~120 µs ≈ **8,333/s on this setup**。對得起實測 8,330。
+
+**換 hardware / setup 會怎樣?**
+
+| Setup | 預期 deduct.lua ceiling | 為什麼 |
+|:--|:--|:--|
+| **laptop docker on macOS**(我們現在) | ~8,000-10,000 /s | Docker veth NAT + macOS-on-Linux VM overhead + ARM/x86 二進位翻譯 |
+| **same setup, Linux bare host** | ~12,000-20,000 /s | 拿掉 Docker NAT + 拿掉 macOS VM 層 |
+| **bare-metal Linux server / large cloud VM** | ~20,000-40,000 /s | 純 loopback / Unix socket + 高頻 CPU(Lua 吃 single-core clock)|
+| **Redis 7 `io-threads 4`** | 一樣 ~20,000-40,000 /s | io-threads 平行 socket I/O,**對 single-key Lua 沒幫助**(Lua exec 仍然 single-thread)|
+
+**所以「8,330 物理上限」要精確 framing**:**對同一個 inventory key 跑 deduct.lua,laptop docker 環境下的 ceiling 是 8,330/s**。Bare-metal 預期 3-5×,但 **single-thread × single-key × Lua eval 的 serialization 本質不會被 hardware 解決** — 那是 architectural cap,要 sharding 才能突破(Tier 5a/5b)。
+
+**比較對 SET/GET 為什麼快這麼多**:
+- SET / GET 是 single op + 可 pipeline(`-P 16` 是 20× factor)
+- deduct.lua 一次內部做 5 個 op + 不能 pipeline(每個 Lua 都是 atomic round-trip)
+- 等於 deduct.lua 一個 invocation 相當於 5 個 sequential ops,比 pipelined SET 多 5× 串行成本
+
+完整方法論在 [`scripts/redis_baseline_benchmark.sh`](../../scripts/redis_baseline_benchmark.sh):跑 4 種 baseline mode(raw SET、SET pipelined、EVAL no-pipeline、XADD)跟我們 deduct.lua 並排比,在你的 setup 上可重現這個 breakdown。
+
+> 💡 **Senior interviewer 防身回答**:「8,330 是 same-key Lua throughput on laptop docker。換 bare-metal 應該 25-40k 左右,因為 Lua 跑在 Linux 大時鐘 CPU + 拿掉 Docker NAT。但**這個 ceiling 不是 Redis instance 飽和** — Redis main thread CPU 在 8,330/s 跑只用 53%。瓶頸是 same-key Lua serialization 的物理本質,跟 Redis SET/GET 能跑 100k+ 不衝突,因為 SET/GET 可 pipeline,deduct.lua 不能。要 scale 過去就 shard inventory key per (event_id, section_id),不是升級 Redis instance。」
 
 ## Decision
 

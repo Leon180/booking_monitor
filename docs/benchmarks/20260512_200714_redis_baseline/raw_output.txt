@@ -1,0 +1,83 @@
+
+═══════════════════════════════════════════════════════════════
+  Environment snapshot
+═══════════════════════════════════════════════════════════════
+Timestamp: 20260512_200714
+Host: Darwin MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+
+Redis version + flags:
+# Server
+redis_version:7.4.8
+redis_git_sha1:00000000
+redis_git_dirty:0
+redis_build_id:9bb04eb328b7100a
+redis_mode:standalone
+os:Linux 6.12.76-linuxkit aarch64
+arch_bits:64
+monotonic_clock:POSIX clock_gettime
+multiplexing_api:epoll
+atomicvar_api:c11-builtin
+gcc_version:14.2.0
+process_id:1
+process_supervised:no
+run_id:96266513bb49ed94f02dd9b6d985475aafa6412e
+tcp_port:6379
+server_time_usec:1778587634713848
+uptime_in_seconds:326179
+uptime_in_days:3
+hz:10
+
+Persistence config (we should see appendonly:no and rdb_changes_since_last_save):
+# Persistence
+loading:0
+async_loading:0
+current_cow_peak:0
+current_cow_size:0
+current_cow_size_age:0
+current_fork_perc:0.00
+current_save_keys_processed:0
+current_save_keys_total:0
+rdb_changes_since_last_save:1205615
+
+Memory:
+# Memory
+used_memory:5384328
+used_memory_human:5.13M
+used_memory_rss:8986624
+used_memory_rss_human:8.57M
+used_memory_peak:8089672
+
+═══════════════════════════════════════════════════════════════
+  Mode A: SET no pipeline (-n 100000 -c 50)
+═══════════════════════════════════════════════════════════════
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=288056.0 (overall: 288056.0) avg_msec=0.092 (overall: 0.092)                                                                      SET: 290697.66 requests per second, p50=0.095 msec
+
+
+═══════════════════════════════════════════════════════════════
+  Mode B: SET pipelined (-P 16 -n 100000 -c 50)
+═══════════════════════════════════════════════════════════════
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: 3030303.00 requests per second, p50=0.215 msec
+
+
+═══════════════════════════════════════════════════════════════
+  Mode C: GET pipelined (-P 16 -n 100000 -c 50)
+═══════════════════════════════════════════════════════════════
+ GET: rps=0.0 (overall: inf) avg_msec=0.203 (overall: 0.203)                                                            GET: 3333333.50 requests per second, p50=0.191 msec
+
+
+═══════════════════════════════════════════════════════════════
+  Mode D: XADD alone (small field set, -n 100000 -c 50)
+═══════════════════════════════════════════════════════════════
+ XADD: rps=0.0 (overall: 102000.0) avg_msec=0.124 (overall: 0.124)                                                                  XADD: rps=287452.0 (overall: 286713.2) avg_msec=0.092 (overall: 0.092)                                                                       XADD: 286532.94 requests per second, p50=0.095 msec
+
+
+═══════════════════════════════════════════════════════════════
+  Mode E: EVAL no-pipeline (single DECR script)
+═══════════════════════════════════════════════════════════════
+ eval return redis.call('DECR', KEYS[1]) 1 baseline:counter: rps=0.0 (overall: inf) avg_msec=0.191 (overall: 0.191)                                                                                                                   eval return redis.call('DECR', KEYS[1]) 1 baseline:counter: rps=287127.5 (overall: 287326.7) avg_msec=0.093 (overall: 0.094)                                                                                                                             eval return redis.call('DECR', KEYS[1]) 1 baseline:counter: 289017.34 requests per second, p50=0.095 msec
+
+═══════════════════════════════════════════════════════════════
+  Mode F: deduct.lua (DECRBY + HMGET + multiply + XADD)
+═══════════════════════════════════════════════════════════════
+  loaded deduct.lua SHA: 91900195bb7dbfaa47bc7554238940aa4afeebe7
+ evalsha 91900195bb7dbfaa47bc7554238940aa4afeebe7 2 ticket_type_qty:baseline ticket_type_meta:baseline 1 1 baseline-order-id 0 baseline-tt: rps=0.0 (overall: inf) avg_msec=0.179 (overall: 0.179)                                                                                                                                                                                                  evalsha 91900195bb7dbfaa47bc7554238940aa4afeebe7 2 ticket_type_qty:baseline ticket_type_meta:baseline 1 1 baseline-order-id 0 baseline-tt: rps=272328.0 (overall: 272436.0) avg_msec=0.153 (overall: 0.153)                                                                                                                                                                                                            evalsha 91900195bb7dbfaa47bc7554238940aa4afeebe7 2 ticket_type_qty:baseline ticket_type_meta:baseline 1 1 baseline-order-id 0 baseline-tt: 273972.59 requests per second, p50=0.151 msec
