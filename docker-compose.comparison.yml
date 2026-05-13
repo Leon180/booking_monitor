@@ -58,9 +58,16 @@ services:
       - --requirepass
       - bench_redis_local
       - --maxmemory
-      - 512mb
+      - 4gb
       - --maxmemory-policy
       - noeviction
+      # 4gb (bumped from 512mb) sized for the 5-stage harness with
+      # VUS=500 × 60s × both scenarios. The previous 512mb cap
+      # exhausted on the 5th stage's intake_only run (idempotency
+      # keys + inventory keys + Lua script cache accumulate across
+      # stages since they share one Redis DB per stage index).
+      # noeviction kept so a runaway test surfaces as a hard error
+      # rather than silently evicting inventory keys mid-run.
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "bench_redis_local", "ping"]
       interval: 5s
@@ -256,6 +263,28 @@ services:
       KAFKA_BROKERS: kafka-bench:9092
       PORT: "8080"
       ENABLE_TEST_ENDPOINTS: "true"
+      # D4.2 (PR #110) introduced two strict checks that conflict with
+      # the bench harness's previous "PAYMENT_PROVIDER=mock + legacy
+      # PAYMENT_WEBHOOK_SECRET" pattern:
+      #   1. Config validator: PAYMENT_PROVIDER=mock + Stripe creds → FAIL
+      #   2. Webhook fx provider: empty webhook secret → FAIL
+      # The only env shape that satisfies BOTH is full Stripe-mode with
+      # the test-key opt-in. The bench uses the test-key value
+      # `sk_test_bench_dummy`; stripe-go SDK is wired but never called
+      # by k6_intake_only.js (the durability-cost scenario). The
+      # k6_two_step_flow.js DOES hit /pay and will fail with a real
+      # Stripe 401 — accepted as a known limitation since the
+      # Stage 4 vs Stage 5 architectural delta is intake-only.
+      PAYMENT_PROVIDER: stripe
+      STRIPE_API_KEY: sk_test_bench_dummy
+      STRIPE_WEBHOOK_SECRET: bench_webhook_secret
+      STRIPE_ALLOW_TEST_KEY: "true"
+      # Legacy field also required: the webhook fx handler reads
+      # cfg.Payment.WebhookSecret directly (NOT the new Stripe.WebhookSecret),
+      # and the D4.2 fallback only goes legacy→new, not new→legacy. So
+      # without the legacy var, the webhook fx provider fails to start
+      # with "PAYMENT_WEBHOOK_SECRET is empty (refusing to start with a
+      # forgeable verifier)" even when STRIPE_WEBHOOK_SECRET is set.
       PAYMENT_WEBHOOK_SECRET: bench_webhook_secret
       OTEL_SERVICE_VERSION: stage4-pattern-a-with-saga
       BOOKING_RESERVATION_WINDOW: 20s
@@ -302,6 +331,19 @@ services:
       KAFKA_WRITE_TIMEOUT: 5s
       PORT: "8080"
       ENABLE_TEST_ENDPOINTS: "true"
+      # Same Stripe-mode-with-test-key shape as stage4 — see stage4 env
+      # block above for the D4.2 conflict rationale. Stripe-go SDK is
+      # wired but never called by k6_intake_only.js.
+      PAYMENT_PROVIDER: stripe
+      STRIPE_API_KEY: sk_test_bench_dummy
+      STRIPE_WEBHOOK_SECRET: bench_webhook_secret
+      STRIPE_ALLOW_TEST_KEY: "true"
+      # Legacy field also required: the webhook fx handler reads
+      # cfg.Payment.WebhookSecret directly (NOT the new Stripe.WebhookSecret),
+      # and the D4.2 fallback only goes legacy→new, not new→legacy. So
+      # without the legacy var, the webhook fx provider fails to start
+      # with "PAYMENT_WEBHOOK_SECRET is empty (refusing to start with a
+      # forgeable verifier)" even when STRIPE_WEBHOOK_SECRET is set.
       PAYMENT_WEBHOOK_SECRET: bench_webhook_secret
       OTEL_SERVICE_VERSION: stage5-durable-kafka-intake
       BOOKING_RESERVATION_WINDOW: 20s

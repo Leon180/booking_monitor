@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-scripts/generate_comparison_md.py — D12.5 Slice 4
+scripts/generate_comparison_md.py — D12.5 Slice 4 (PR #113 extended to 5 stages)
 
-Reads a 4-stage comparison directory produced by
-`scripts/run_4stage_comparison.sh` and emits `comparison.md` with the
+Reads a comparison directory produced by
+`scripts/run_5stage_comparison.sh` (formerly run_4stage_*; renamed in
+PR #113 when Stage 5 landed) and emits `comparison.md` with the
 headline metrics table populated from per-stage summary.json files.
 
 The prose template (run conditions, stage-by-stage analysis, caveats,
@@ -16,12 +17,12 @@ Usage:
 
 Example:
     python3 scripts/generate_comparison_md.py \\
-        docs/benchmarks/comparisons/20260510_120000_4stage_c500_d60s/
+        docs/benchmarks/comparisons/20260513_120000_5stage_c500_d60s/
 
 Output:
     Writes <comparison-dir>/comparison.md
     Reads <comparison-dir>/run_conditions.txt
-    Reads <comparison-dir>/stage{1,2,3,4}/summary.json
+    Reads <comparison-dir>/stage{1,2,3,4,5}/summary.json
 
 Why Python (not bash):
 - k6 summary.json has nested keys (`metrics.http_reqs.count`, etc.)
@@ -300,6 +301,55 @@ hot-path numbers therefore mirror Stage 3; the failure-path
 `up{job="booking-stages",stage="stage4"} == 1` in
 `prometheus_snapshot.json`.
 """),
+    (5, "stage5", "Damai-aligned durable Kafka intake (acks=all)", """
+Stage 5 keeps the Redis Lua deduct of Stages 2-4 but replaces the
+ephemeral `XADD orders:stream` with a Kafka publish at
+`RequiredAcks: kafka.RequireAll` — the broker holds the 202 response
+until the message is replicated across all in-sync replicas. This
+is the durability boundary: Stages 3/4 lose in-flight bookings on a
+Redis crash; Stage 5 only loses bookings if the entire Kafka ISR
+fails simultaneously.
+
+Architectural lineage: the Damai (Alibaba)
+SpringCloud + Kafka + Redis + Sentinel reference stack popularised
+this pattern at scale, and the 12306 withholding-inventory +
+reservation-timeout shape is consistent with the same trade-off
+(durability > throughput at the durability gate).
+
+The hot path adds one synchronous network round-trip (acks=all
+roundtrip to all in-sync replicas) on top of Stage 3's Lua-only
+baseline — the "durability tax". The intake-only k6 scenario
+brackets this cost cleanly: the difference between Stage 4 and
+Stage 5 intake-only RPS is the price of replacing
+`XADD orders:stream` with replicated Kafka.
+
+Failure-mode surface vs Stage 4:
+- **Publish-side**: Lua deduct succeeds, Kafka publish fails →
+  `kafkaIntakeService` calls `RevertInventory` with a detached
+  context (`stage5_kafka_publish_failures_total{reverted=true}`).
+  Dual failure (publish + revert both fail) → `reverted=false` +
+  drift reconciler picks up the leaked qty.
+- **Consumer-side**: `IntakeConsumer.handleMessage` decodes the
+  Kafka message and calls the same `worker.MessageProcessor` Stage
+  3/4 uses. Terminal-error path (sold-out race, duplicate,
+  malformed) compensates the leaked Redis qty via detached-ctx
+  revert; transient errors leave the offset uncommitted for
+  Kafka rebalance redelivery.
+- **Safety net**: `InventoryDriftDetector` runs co-resident as a
+  30s-cadence sweep — alerts (not auto-corrects) on Redis vs
+  PG `event_ticket_types.available_tickets` drift.
+
+Stage 5's purpose in the harness is to **price the durability gate**:
+the throughput delta between Stage 4 (Stream) and Stage 5 (Kafka
+acks=all) is the architectural cost of replacing ephemeral durability
+with replicated durability. Verify via
+`up{job="booking-stages",stage="stage5"} == 1` in
+`prometheus_snapshot.json`; the Stage 5-specific counters
+`stage5_kafka_publish_failures_total` and
+`stage5_intake_revert_failures_total` should be zero on a healthy
+benchmark run (any non-zero value points at a Kafka broker or
+Redis revert problem, not a load-test artifact).
+"""),
 ]
 
 
@@ -323,9 +373,11 @@ def render_markdown(input_dir: Path) -> str:
     vus = _extract_run_field(run_conditions, "vus", "?")
 
     # Slice 8: load the pure-intake scenario summary if it exists.
-    # When all 4 stages have intake_only_summary.json (the Slice 8
+    # When all stages have intake_only_summary.json (the Slice 8
     # canonical run), render the second TL;DR table; otherwise omit
-    # the section so a pre-Slice-8 run doesn't surface dashes.
+    # the section so a pre-Slice-8 run doesn't surface dashes. Cardinality
+    # is `len(STAGES)` (5 after PR #113), not a literal — kept dynamic
+    # so a future stage addition doesn't silently break the section.
     intake_only_per_stage = {
         n: load_intake_only_metrics(input_dir / dir_name)
         for n, dir_name, *_ in STAGES
@@ -449,7 +501,7 @@ def render_markdown(input_dir: Path) -> str:
             file=sys.stderr,
         )
 
-    # Slice 8: build the intake-only TL;DR section if all 4 stages
+    # Slice 8: build the intake-only TL;DR section if all stages
     # have intake_only_summary.json. Single-block substitution keeps
     # the conditional logic out of the TEMPLATE constant — when the
     # section is absent, the substitution is just an empty string.
@@ -516,7 +568,7 @@ def render_markdown(input_dir: Path) -> str:
 
 # Slice 8: pure-intake (Ticketmaster pattern) TL;DR section. Inserted
 # into TEMPLATE between the funnel decomposition and the per-stage
-# analysis when all 4 stages have intake_only_summary.json. When
+# analysis when all stages have intake_only_summary.json. When
 # absent (pre-Slice-8 layout), an empty string is substituted instead
 # and the report is full-flow-only.
 INTAKE_ONLY_SECTION = """\
@@ -571,8 +623,8 @@ Two distinct architectural facts surface only in the intake-only view:
    `SELECT FOR UPDATE` ceiling is whatever single-row lock contention
    Postgres can sustain on this laptop hardware — a single architectural
    number that doesn't depend on what the rest of the funnel is doing.
-   Stages 2-4 (Redis Lua deduct) sit much higher because the cache-tier
-   atomic op replaces the row lock entirely.
+   Stages 2-5 (Redis Lua deduct family) sit much higher because the
+   cache-tier atomic op replaces the row lock entirely.
 
 2. **Stages 2/3/4 cluster at the same isolated ceiling — but for a
    different reason than Stage 1.** Run-state asymmetry is important:
@@ -600,7 +652,18 @@ Two distinct architectural facts surface only in the intake-only view:
    adds cost** — the cost lives in the operational-reality column
    under realistic mixed workload.
 
-If you need higher resolution on the isolated ceiling for Stages 2-4,
+3. **Stage 5 sits BELOW Stages 2-4 by the size of one acks=all roundtrip
+   — that delta is the durability tax.** Stages 3/4 ack the 202 as soon
+   as the Lua deduct's `XADD orders:stream` returns; Redis Stream is
+   in-memory and lost on a Redis crash. Stage 5's `kafka.RequireAll`
+   publish blocks the 202 until every in-sync replica has the message.
+   On a healthy bench broker that adds ~ms; on a contended production
+   broker it adds more. The architectural payoff is durability: only a
+   simultaneous all-ISR failure loses an in-flight booking, vs. a
+   single-Redis-instance crash in Stages 3/4. Read the Stage 4 ↔ Stage 5
+   intake-only delta as a price tag, not a regression.
+
+If you need higher resolution on the isolated ceiling for Stages 2-5,
 the test parameters that would expose it: larger pool (so the run
 window doesn't pool-deplete), more VUs, longer duration, and ideally
 bare-metal hardware. Out of scope for this comparison; tracked as a
@@ -610,15 +673,15 @@ follow-up under PR-D12.6.
 
 
 TEMPLATE = """\
-# 4-Stage Architecture Comparison — {timestamp}
+# Architecture Comparison — {timestamp}
 
 > Source artifacts: `{input_dir}`
 > Generated by: `scripts/generate_comparison_md.py`
 > See [docs/d12/README.md](../../d12/README.md) for the architectural
-> definitions of each stage and PR-D12.{{1,2,3,4,5}} histories.
+> definitions of each stage and PR-D12.{{1,2,3,4,5}} + PR #113 histories.
 
-This report quantifies the cost of four architectural decisions in the
-booking hot path under the same load profile. All four stages preserve
+This report quantifies the cost of five architectural decisions in the
+booking hot path under the same load profile. All five stages preserve
 the same 2-step API contract (per the apples-to-apples invariant
 established in PR-D12.1) so the same `scripts/k6_two_step_flow.js`
 runs unmodified against any stage. The headline question this report
@@ -719,13 +782,18 @@ Latency columns:
 | Stage 1 → 2: Redis Lua atomic deduct | Move bottleneck off PG row-lock onto cache-tier atomic op | None added (still synchronous) | Always, if hot-row contention is the bottleneck |
 | Stage 2 → 3: async worker via `orders:stream` | Move PG INSERT off request path; hot path becomes ~Lua-only | PEL recovery, DLQ classifier, sweeper-vs-PEL race, "202 with order_id but no DB row" failure mode | When PG INSERT fsync time dominates request latency |
 | Stage 3 → 4: outbox + Kafka + saga compensator | None on the hot-path critical path (worker UoW + Lua deduct unchanged); the in-process saga consumer + outbox relay + expiry sweeper + saga watchdog DO add background goroutines that compete for CPU/memory at high VUs (visible at c500+ but not at c10) | Cross-process compensation guarantees + saga consumer + Kafka topic management + 13 outcome labels + 4 alerts | When you need at-least-once cross-process compensation and the operational cost of Kafka is acceptable |
+| Stage 4 → 5: replace `XADD orders:stream` with Kafka `acks=all` publish | Durability — Stages 3/4 lose in-flight bookings on a Redis crash because Stream is in-memory; Stage 5 holds the 202 until the message is replicated across all in-sync replicas | Synchronous all-ISR-acks roundtrip on every 202 (visible as a multi-× intake-RPS reduction vs Stages 3/4); publish-side compensation (RevertInventory on publish-fail) + consumer-side compensation (terminal-error revert) + drift reconciler as safety net for both halves failing | When the cost of losing an in-flight reservation is operationally unacceptable (Damai / 12306 / large-flash-sale shape) — pay the durability tax to eliminate the ghost-202 window |
 
-The progression from Stage 1 to Stage 4 is **not strictly faster** — the
+The progression from Stage 1 to Stage 5 is **not strictly faster** — the
 saga in Stage 4 is failure-path insurance with zero hot-path
-contribution. Stage 3 vs Stage 4 hot-path numbers should be ~equal in
-this benchmark (k6 doesn't drive payment failures). The Stage 3 → 4
-delta you'd see in production is in *failure-path observability +
-guarantees*, not in `http_reqs/s`.
+contribution, and Stage 5's acks=all durability gate adds a deliberate
+synchronous network roundtrip. Stage 3 vs Stage 4 hot-path numbers
+should be ~equal in this benchmark (k6 doesn't drive payment failures);
+Stage 5 sits meaningfully below Stages 3/4 by the size of one all-ISR-acks
+Kafka roundtrip. The Stage 3 → 4 delta you'd see in production is in
+*failure-path observability + guarantees*, not in `http_reqs/s`; the
+Stage 4 → 5 delta is the architectural cost of replicated durability vs.
+ephemeral in-memory durability.
 
 ## Caveats
 
@@ -856,14 +924,14 @@ def main(argv: list[str]) -> int:
     if n_present == 0:
         print(
             f"FATAL: no stage full_flow_summary.json / summary.json files found "
-            f"under {input_dir}/stage{{1..4}}/. Wrong input directory?",
+            f"under {input_dir}/stage{{1..{len(STAGES)}}}/. Wrong input directory?",
             file=sys.stderr,
         )
         return 1
-    partial = n_present < 4
+    partial = n_present < len(STAGES)
     if partial:
         print(
-            f"WARN: only {n_present}/4 stages have summary.json. "
+            f"WARN: only {n_present}/{len(STAGES)} stages have summary.json. "
             f"comparison.md will mark missing stages as ⚠️.",
             file=sys.stderr,
         )
@@ -873,7 +941,7 @@ def main(argv: list[str]) -> int:
     out_path.write_text(md)
     print(f"✓ wrote {out_path} ({len(md)} chars)")
     # Exit 2 (not 0) on partial-stage success so CI consumers can
-    # distinguish "all 4 stages clean" from "some stages missing
+    # distinguish "all stages clean" from "some stages missing
     # but generated anyway". Strict callers gate on `$? == 0`;
     # tolerant callers gate on `$? -le 2`. (Closes Slice 4
     # parser-review LOW #3.)
