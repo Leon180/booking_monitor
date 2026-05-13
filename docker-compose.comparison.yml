@@ -1,11 +1,13 @@
-# D12.5 — 4-stage architecture comparison harness
+# D12.5 — architecture comparison harness (originally 4-stage; PR #113
+# extended to 5 stages — Stage 5 is the Damai-aligned durable Kafka
+# intake).
 #
-# Brings up 4 stage binaries (Stage 1: sync SELECT FOR UPDATE through
-# Stage 4: Pattern A + saga compensator) on ports 8091-8094 alongside
-# bench-isolated Postgres + Redis + (Stage-4-only) Kafka. The harness
-# orchestration script `scripts/run_4stage_comparison.sh` (Slice 3)
-# drives the per-stage k6 runs; Slice 1 (this file) only stands up
-# the infrastructure.
+# Brings up 5 stage binaries (Stage 1: sync SELECT FOR UPDATE through
+# Stage 5: Damai durable Kafka intake) on ports 8091-8095 alongside
+# bench-isolated Postgres + Redis + Kafka. The harness orchestration
+# script `scripts/run_5stage_comparison.sh` (Slice 3) drives the
+# per-stage k6 runs; Slice 1 (this file) only stands up the
+# infrastructure.
 #
 # All bench services use NON-DEFAULT host ports to avoid colliding
 # with the production stack in `docker-compose.yml`:
@@ -13,7 +15,7 @@
 #   Redis      6379 prod → 6380 bench
 #   Kafka      9092 prod → 9093 bench
 #   Prometheus 9090 prod → 9091 bench
-#   Stage 4    8080 prod → 8091-8094 bench (4 stages)
+#   App        8080 prod → 8091-8095 bench (5 stages)
 #
 # Bring up:
 #   make bench-up
@@ -56,9 +58,16 @@ services:
       - --requirepass
       - bench_redis_local
       - --maxmemory
-      - 512mb
+      - 4gb
       - --maxmemory-policy
       - noeviction
+      # 4gb (bumped from 512mb) sized for the 5-stage harness with
+      # VUS=500 × 60s × both scenarios. The previous 512mb cap
+      # exhausted on the 5th stage's intake_only run (idempotency
+      # keys + inventory keys + Lua script cache accumulate across
+      # stages since they share one Redis DB per stage index).
+      # noeviction kept so a runaway test surfaces as a hard error
+      # rather than silently evicting inventory keys mid-run.
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "bench_redis_local", "ping"]
       interval: 5s
@@ -132,11 +141,11 @@ services:
       timeout: 3s
       retries: 10
 
-  # ─── Stage binaries 1-4 ─────────────────────────────────────
+  # ─── Stage binaries 1-5 ─────────────────────────────────────
   # Each builds from a different cmd/ target via the BUILD_TARGET
   # ARG (Dockerfile change in this slice). Each container's
   # internal listen port is 8080 (binary default); host-mapped per
-  # stage to 8091-8094.
+  # stage to 8091-8095.
 
   booking-cli-stage1:
     build:
@@ -254,8 +263,89 @@ services:
       KAFKA_BROKERS: kafka-bench:9092
       PORT: "8080"
       ENABLE_TEST_ENDPOINTS: "true"
+      # D4.2 (PR #110) introduced two strict checks that conflict with
+      # the bench harness's previous "PAYMENT_PROVIDER=mock + legacy
+      # PAYMENT_WEBHOOK_SECRET" pattern:
+      #   1. Config validator: PAYMENT_PROVIDER=mock + Stripe creds → FAIL
+      #   2. Webhook fx provider: empty webhook secret → FAIL
+      # The only env shape that satisfies BOTH is full Stripe-mode with
+      # the test-key opt-in. The bench uses the test-key value
+      # `sk_test_bench_dummy`; stripe-go SDK is wired but never called
+      # by k6_intake_only.js (the durability-cost scenario). The
+      # k6_two_step_flow.js DOES hit /pay and will fail with a real
+      # Stripe 401 — accepted as a known limitation since the
+      # Stage 4 vs Stage 5 architectural delta is intake-only.
+      PAYMENT_PROVIDER: stripe
+      STRIPE_API_KEY: sk_test_bench_dummy
+      STRIPE_WEBHOOK_SECRET: bench_webhook_secret
+      STRIPE_ALLOW_TEST_KEY: "true"
+      # Legacy field also required: the webhook fx handler reads
+      # cfg.Payment.WebhookSecret directly (NOT the new Stripe.WebhookSecret),
+      # and the D4.2 fallback only goes legacy→new, not new→legacy. So
+      # without the legacy var, the webhook fx provider fails to start
+      # with "PAYMENT_WEBHOOK_SECRET is empty (refusing to start with a
+      # forgeable verifier)" even when STRIPE_WEBHOOK_SECRET is set.
       PAYMENT_WEBHOOK_SECRET: bench_webhook_secret
       OTEL_SERVICE_VERSION: stage4-pattern-a-with-saga
+      BOOKING_RESERVATION_WINDOW: 20s
+      EXPIRY_SWEEP_INTERVAL: 5s
+      EXPIRY_GRACE_PERIOD: 1s
+
+  # Stage 5 = `cmd/booking-cli-stage5` — Damai-aligned durable Kafka
+  # intake. The /book hot path swaps Stage 3/4's XADD orders:stream
+  # for a Kafka publish with acks=all (RequireAll across all in-sync
+  # replicas), then a per-process IntakeConsumer drains the topic
+  # into PG via the same worker.MessageProcessor Stages 3/4 use.
+  # An InventoryDriftDetector runs co-resident as the safety net for
+  # the rare publish-then-revert-both-failed window.
+  #
+  # Distinct Redis DB (4) so the Stage 5 inventory keyspace doesn't
+  # collide with Stages 1-4 when the harness runs sequentially.
+  # KAFKA_WRITE_TIMEOUT bumped from default 5s so a contended bench
+  # broker has slack before the durability gate trips — matches what
+  # a production deploy would tune for the same shape of workload.
+  booking-cli-stage5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_TARGET: ./cmd/booking-cli-stage5
+    container_name: booking_bench_stage5
+    command: ["/app/booking-cli", "server"]
+    ports:
+      - "8095:8080"
+    depends_on:
+      postgres-bench:
+        condition: service_healthy
+      redis-bench:
+        condition: service_healthy
+      kafka-bench:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgres://booking:bench_pg_local@postgres-bench:5432/booking_stage5?sslmode=disable
+      REDIS_ADDR: redis-bench:6379
+      REDIS_PASSWORD: bench_redis_local
+      REDIS_DB: "4"
+      KAFKA_BROKERS: kafka-bench:9092
+      KAFKA_WRITE_TIMEOUT: 5s
+      PORT: "8080"
+      ENABLE_TEST_ENDPOINTS: "true"
+      # Same Stripe-mode-with-test-key shape as stage4 — see stage4 env
+      # block above for the D4.2 conflict rationale. Stripe-go SDK is
+      # wired but never called by k6_intake_only.js.
+      PAYMENT_PROVIDER: stripe
+      STRIPE_API_KEY: sk_test_bench_dummy
+      STRIPE_WEBHOOK_SECRET: bench_webhook_secret
+      STRIPE_ALLOW_TEST_KEY: "true"
+      # Legacy field also required: the webhook fx handler reads
+      # cfg.Payment.WebhookSecret directly (NOT the new Stripe.WebhookSecret),
+      # and the D4.2 fallback only goes legacy→new, not new→legacy. So
+      # without the legacy var, the webhook fx provider fails to start
+      # with "PAYMENT_WEBHOOK_SECRET is empty (refusing to start with a
+      # forgeable verifier)" even when STRIPE_WEBHOOK_SECRET is set.
+      PAYMENT_WEBHOOK_SECRET: bench_webhook_secret
+      OTEL_SERVICE_VERSION: stage5-durable-kafka-intake
       BOOKING_RESERVATION_WINDOW: 20s
       EXPIRY_SWEEP_INTERVAL: 5s
       EXPIRY_GRACE_PERIOD: 1s

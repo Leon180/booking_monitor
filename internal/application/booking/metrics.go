@@ -22,3 +22,50 @@ type Metrics interface {
 	// call. Status must be one of "success", "sold_out", "error".
 	RecordBookingOutcome(status string)
 }
+
+// Stage5Metrics is the Stage 5-specific observability port. Stage 5's
+// hot path has additional failure modes (Kafka publish failure with
+// or without successful revert) that the base Metrics interface
+// doesn't model. Defined here (not in observability) so the
+// kafkaIntakeService can depend on the interface without importing
+// the prometheus-backed singleton — same pattern as Metrics above.
+//
+// A no-op implementation (Stage5NopMetrics) lives in this package so
+// tests can construct the service without wiring Prometheus.
+type Stage5Metrics interface {
+	// RecordPublishFailure increments the publish-failure counter.
+	// `reverted` is true when the inventory was successfully rolled
+	// back after the publish failed (clean compensation); false when
+	// the revert ALSO failed (drift — inventory permanently leaked
+	// until the drift reconciler / manual ops intervenes).
+	RecordPublishFailure(reverted bool)
+
+	// RecordIntakeRevertFailure counts revert failures on the
+	// CONSUMER side: a worker.MessageProcessor terminal-error
+	// triggered compensation, and the RevertInventory call FAILED.
+	// Distinct from RecordPublishFailure(false) which fires on the
+	// publish-side dual-failure — these are different code paths
+	// with different operational signatures, so they get distinct
+	// counters rather than overlapping labels.
+	//
+	// Why both directions matter: the publish side is bounded by the
+	// request lifetime (3s) and the user gets a 5xx if it fails;
+	// the consumer side is bounded by intakeRevertCompensationTimeout
+	// (3s) but the Kafka offset is about to be committed regardless,
+	// so a counter is the ONLY observable signal that a revert
+	// silently dropped on the consumer path. Without this counter,
+	// sustained Redis degradation during terminal-error processing
+	// would only show as log lines (vulnerable to log-pipeline gaps).
+	RecordIntakeRevertFailure()
+}
+
+// Stage5NopMetrics is the test / dev no-op implementation of
+// Stage5Metrics. The Prometheus-backed implementation lives in
+// `internal/infrastructure/observability`.
+type Stage5NopMetrics struct{}
+
+// RecordPublishFailure is a no-op.
+func (Stage5NopMetrics) RecordPublishFailure(bool) {}
+
+// RecordIntakeRevertFailure is a no-op.
+func (Stage5NopMetrics) RecordIntakeRevertFailure() {}

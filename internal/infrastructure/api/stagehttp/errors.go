@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/domain"
 )
 
@@ -32,6 +33,15 @@ import (
 // guard for unexpected SQL / driver-state errors.
 func MapBookingError(err error) (int, string) {
 	switch {
+	// Stage 5 Kafka publish failure — matched FIRST so the
+	// errors.Is chain walk doesn't dispatch to a transitively
+	// wrapped domain sentinel (e.g. a future refactor that lets
+	// publishErr wrap ErrSoldOut would otherwise return 409
+	// "sold out" for a Kafka outage). Map to 503 Service
+	// Unavailable per RFC 7231 §6.6.4 — the request was valid,
+	// the durability gate is temporarily down.
+	case errors.Is(err, booking.ErrStage5PublishFailed):
+		return http.StatusServiceUnavailable, "service temporarily unavailable; retry"
 	case errors.Is(err, domain.ErrTicketTypeNotFound):
 		return http.StatusNotFound, "ticket_type not found"
 	case errors.Is(err, domain.ErrOrderNotFound):
