@@ -1,10 +1,10 @@
-# D12 — 4-stage architecture comparison harness
+# D12 — architecture comparison harness (5 stages)
 
-> Status: **D12 closed — PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) + PR-D12.5 (multi-target harness + comparison.md) all shipped.** See [docs/benchmarks/comparisons/](../benchmarks/comparisons/) for the apples-to-apples comparison reports.
+> Status: **D12 closed (4-stage) — PR-D12.1 (Stage 1) + PR-D12.2 (Stage 2) + PR-D12.3 (Stage 3) + PR-D12.4 (Stage 4 + observability) + PR-D12.5 (multi-target harness + comparison.md) all shipped.** **PR #113 (post-v1.0.0) extends the harness with Stage 5 — Damai-aligned durable Kafka intake.** See [docs/benchmarks/comparisons/](../benchmarks/comparisons/) for the apples-to-apples comparison reports.
 
-D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Four separate Go binaries share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all four under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
+D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadmap.md`](../post_phase2_roadmap.md) L104-L111). Five separate Go binaries (four under `cmd/booking-cli-stage{1,2,3,5}/` plus the production `cmd/booking-cli/` as Stage 4) share the same `internal/` packages but use different fx wirings and different `booking.Service` implementations — running the same workload across all five under [`scripts/k6_two_step_flow.js`](../../scripts/k6_two_step_flow.js) + [`scripts/k6_intake_only.js`](../../scripts/k6_intake_only.js) produces a side-by-side benchmark table that quantifies each architectural decision's cost vs. headroom.
 
-## The 4 stages
+## The 5 stages
 
 | Stage | `cmd/` binary | Architecture | What it adds vs. previous |
 |---|---|---|---|
@@ -12,8 +12,11 @@ D12 is the senior-portfolio centerpiece of Phase 3 (per [`docs/post_phase2_roadm
 | **2** | `cmd/booking-cli-stage2/` | API → Redis Lua atomic deduct → SYNCHRONOUS PG INSERT; revert.lua on INSERT failure | Redis hot-path inventory (SoT migrates to `ticket_type_qty:{id}`); no async buffering — saturation IS the sync PG INSERT |
 | **3** | `cmd/booking-cli-stage3/` | API → Redis Lua → `orders:stream` → async worker → DB INSERT (worker UoW: `DecrementTicket` + `Order.Create`); revert.lua + UPDATE on compensator path | async via stream + worker buffers the PG INSERT off the request hot path; no Kafka outbox / saga consumer (in-binary expiry sweeper handles abandon) |
 | **4** | `cmd/booking-cli/` (current) | API → Redis Lua → `orders:stream` → worker → DB INSERT; **money movement via** `/pay` + D5 webhook (not Kafka-driven post-D7); `order.failed` outbox → Kafka → in-process saga compensator (D5 webhook `payment_failed` + D6 expiry sweeper + recon force-fail as the only producers) | full Pattern A end-to-end with saga compensation only on the failure path; PR-D12.4 adds throughput observability (3 metrics + 4 alerts + outcome-label exhaustiveness) |
+| **5** | `cmd/booking-cli-stage5/` | API → Redis Lua atomic deduct (variant `deduct_no_xadd.lua` — same atomic Redis op as Stages 2-4 minus the `XADD orders:stream`) → Kafka publish with `RequiredAcks: kafka.RequireAll` → `IntakeConsumer.FetchMessage` → `worker.MessageProcessor.Process` (same UoW as Stages 3/4) → CommitMessages; `InventoryDriftDetector` runs co-resident as safety net | Replaces ephemeral in-memory Redis Stream with replicated Kafka as the durability layer — the 202 to the client is held until the broker confirms acks from all in-sync replicas. Damai-aligned production architecture. PR #113 measured the durability tax at ~4.4× intake-RPS reduction vs Stage 4 |
 
 > **Stage 4 ≠ the README's "Architecture Evolution" Stage 4 diagram.** The README's evolution section labels its Stage 4 as the *historical* `v0.2.0–v0.4.0` pre-D7 architecture (`payment_worker` + `order.created` Kafka topic). D12 Stage 4 is the **current post-D7 binary** — `payment_worker` removed, saga consumer in-process inside `app`. `comparison.md` (lands in PR-D12.5) calls this out explicitly so readers don't conflate the two.
+
+> **Stage 5 architectural lineage.** The Damai (Alibaba) SpringCloud + Kafka + Redis + Sentinel reference stack popularised the "Lua deduct then synchronous-replicated-durable publish" pattern at scale, and the 12306 withholding-inventory + reservation-timeout shape is consistent with the same trade-off (durability over throughput at the durability gate). Stage 5 implements that pattern with `kafka-go`'s `kafka.RequireAll` ack mode plus a co-resident drift reconciler — the architectural decision the harness prices as the cost of replacing ephemeral in-memory durability (Stages 3/4's `XADD orders:stream`) with replicated durability. Pair-reads: [`internal/application/booking/service_kafka_intake.go`](../../internal/application/booking/service_kafka_intake.go) (publish + revert compensation), [`internal/infrastructure/messaging/kafka_intake_consumer.go`](../../internal/infrastructure/messaging/kafka_intake_consumer.go) (consumer + terminal-error revert), [`internal/application/recon/inventory_drift.go`](../../internal/application/recon/inventory_drift.go) (safety-net detector — reused from D11).
 
 ## Apples-to-apples contract
 
@@ -114,7 +117,7 @@ DATABASE_URL='postgres://booking:smoketest_pg_local@localhost:5433/booking?sslmo
   bin/booking-cli-stage1 server
 ```
 
-The env vars match Stage 4's so `make demo-up`-style overrides propagate without per-stage adaptation. PR-D12.5 will introduce per-stage Postgres database isolation (`booking_stage1`, `booking_stage2`, …) so all four binaries can run side-by-side without cross-talk.
+The env vars match Stage 4's so `make demo-up`-style overrides propagate without per-stage adaptation. PR-D12.5 will introduce per-stage Postgres database isolation (`booking_stage1`, `booking_stage2`, …) so all four binaries can run side-by-side without cross-talk. PR #113 added a fifth stage DB (`booking_stage5`) plus the corresponding compose entry, scrape target, and bench-up loop extension.
 
 ### How Stage 1 was verified
 
@@ -722,10 +725,10 @@ ADDED:
 deploy/postgres/init/02_create_stage_dbs.sql          (per-stage DB provisioning, idempotent \gexec)
 docker-compose.comparison.yml                          (9 services on non-conflicting ports)
 deploy/prometheus/prometheus.comparison.yml            (per-stage scrape labels: stage + architecture)
-scripts/run_4stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × 4 (both scenarios) → snapshot → tear-down)
+scripts/run_5stage_comparison.sh                       (orchestration: pre-flight → bench-up → smoke → k6 × N stages (both scenarios) → snapshot → tear-down; renamed from run_4stage in PR #113)
 scripts/k6_intake_only.js                              (Slice 8 — pure-intake k6 scenario, Ticketmaster-pattern booking-layer ceiling)
 scripts/generate_comparison_md.py                      (k6 summary.json → comparison.md emitter; 9-citation map; dual-scenario rendering)
-docs/benchmarks/comparisons/<TS>_4stage_c500_d60s/     (the canonical run output, both scenarios)
+docs/benchmarks/comparisons/<TS>_5stage_c500_d60s/     (the canonical run output, both scenarios — PR #113's run is the first 5-stage report)
 
 MODIFIED:
 Dockerfile                                             (BUILD_TARGET arg; backward-compatible default ./cmd/booking-cli)
@@ -736,9 +739,9 @@ README.md + README.zh-TW.md                            (D12 cross-link to compar
 docs/PROJECT_SPEC.md + docs/PROJECT_SPEC.zh-TW.md      (Stage 4 evolution note: now-past-tense for D12 benchmarking; bilingual)
 ```
 
-Total: ~1.9k LOC including the orchestration + helper scripts + 2 k6 scenarios. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors; Slice 8: final 2-CRIT + 6-HIGH gate review). All actioned before PR-open.
+Total: ~1.9k LOC including the orchestration + helper scripts + 2 k6 scenarios. No application-code changes — all 4 stage binaries already exist. Multi-agent review pre-PR (no Codex due to limit): plan-stage 19 findings + per-slice reviews (Slice 0: 3 findings; Slice 1: zero — empirically verified; Slice 2: 5 findings; Slice 3: 9 findings incl. CRITICAL cleanup-trap; Slice 4: 12 findings incl. 3 CRITICAL citation venue errors; Slice 8: final 2-CRIT + 6-HIGH gate review). All actioned before PR-open. **PR #113 (post-v1.0.0) extension** added Stage 5 (`cmd/booking-cli-stage5/` — full new binary), the harness plumbing (compose service + init SQL + scrape target + Make loop), and the generator-script Stage 5 prose + cardinality refactor (`/4` → `len(STAGES)`). Pre-existing bench-harness bug from D4.2 (validator + webhook handler conflict on the legacy `PAYMENT_WEBHOOK_SECRET`-only shape) worked around by switching the bench env to `PAYMENT_PROVIDER=stripe` + `sk_test_bench_dummy` + `STRIPE_ALLOW_TEST_KEY=true`.
 
-The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × 4-stage benchmark cost on every push.
+The `make bench-smoke` target (VUS=1, DURATION=10s) is the CI rot-prevention path: runs in CI as a non-gating job to detect harness drift without paying the full 60s × all-stages benchmark cost on every push.
 
 **Citation map**: 9 verified citations in the comparison.md (5 industry sources + 4 peer-reviewed). Slice 4 review caught fabrications in the original 7-paper plan (Faleiro PVLDB'17 → CIDR'17, Atikoglu SIGMOD'12 → SIGMETRICS'12, Kløvedal 2025 preprint dropped as unverifiable). Slice 7 added 3 funnel-methodology citations (Ticketmaster Q1'23 / Stripe PaymentIntent docs / Shopify BFCM'24 engineering announcement) when the headline metric was migrated from aggregate `http_reqs/s` to **booking-intake RPS**.
 
