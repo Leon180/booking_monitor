@@ -426,17 +426,17 @@ type InventoryDriftConfig struct {
 	// positives in production at the chosen value.
 	AbsoluteTolerance int `yaml:"absolute_tolerance" env:"INVENTORY_DRIFT_ABSOLUTE_TOLERANCE" env-default:"100"`
 
-	// AutoRehydrate enables automatic SETNX restoration of cache_missing qty
-	// keys detected during a drift sweep. Disabled by default — auto-mutation
+	// AutoRehydrate enables metadata-only refresh of cache_missing keys
+	// detected during a drift sweep. Disabled by default — auto-mutation
 	// in a sweep loop requires deliberate opt-in by the operator.
 	//
-	// Safe only for the cache_missing direction: SETNX is atomic at the Redis
-	// server level (redis.io/docs/latest/commands/setnx/) and preserves any
-	// live value written by a concurrent Lua deduct between detection and the
-	// SETNX call. cache_high auto-correction is intentionally NOT supported —
-	// overwriting Redis when cache > DB during an async write-behind window
-	// would lose in-flight deductions (write-behind conflation risk per the
-	// Redis consistency blog).
+	// When enabled, the detector calls SetTicketTypeMetadata (HSET) to
+	// refresh ticket_type_meta:{id} (the immutable booking snapshot key)
+	// for each cache_missing ticket type. The qty key ticket_type_qty:{id}
+	// is intentionally NOT touched — restoring it via SETNX from a DB value
+	// captured before in-flight Lua deductions are committed would produce
+	// Redis qty > DB qty → cache_high, which is P0 in flash-sale context.
+	// Qty restoration is operator-gated via the startup rehydrate path only.
 	AutoRehydrate bool `yaml:"auto_rehydrate" env:"INVENTORY_DRIFT_AUTO_REHYDRATE" env-default:"false"`
 }
 

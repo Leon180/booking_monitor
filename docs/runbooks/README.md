@@ -525,11 +525,17 @@ Then map the dominant label to its handler:
 
 ---
 
-## InventoryDriftDetected
+## InventoryDriftCacheHigh / InventoryDriftCacheMissing / InventoryDriftCacheLowExcess
 
-**Symptom.** `increase(inventory_drift_detected_total[5m]) > 0 for 5m`. Severity **warning**. The drift detector running in the `recon` process found at least one event with a ticket type whose Redis cache disagrees with the Postgres source-of-truth (`event_ticket_types.available_tickets`) beyond the configured `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100). The `direction` label tells you WHICH failure mode and routes you to the right diagnosis branch.
+**Symptom.** Three separate alerts on `inventory_drift_detected_total{direction}` — the drift detector in the `recon` process found at least one ticket type whose Redis cache disagrees with the Postgres source-of-truth (`event_ticket_types.available_tickets`) beyond `INVENTORY_DRIFT_ABSOLUTE_TOLERANCE` (default 100).
 
-**Why this is warning-severity (not critical).** Drift between Redis and DB is RECOVERABLE — the rehydrate path (`cache.RehydrateInventory`) re-runs at app startup and SETNX-guards in-flight values, so a manual restart is the worst-case remediation. The risk is sustained drift left undetected: customers see "sold out" while DB still has inventory (`cache_low_excess`), or successful 202s with no DB row (`cache_high`). The `for: 5m` window discriminates "transient in-flight blip" (one busy moment crosses tolerance briefly) from "sustained corruption worth paging".
+| Alert | Severity | `for` | Trigger |
+|---|---|---|---|
+| `InventoryDriftCacheHigh` | **critical** | **0s** (page immediately) | `direction="cache_high"` — Redis qty > DB qty. P0: false 202 Accepted possible in flash-sale context. |
+| `InventoryDriftCacheMissing` | warning | 5m | `direction="cache_missing"` — DB has inventory, Redis key absent. Rehydrate didn't run. |
+| `InventoryDriftCacheLowExcess` | warning | 5m | `direction="cache_low_excess"` — Redis < DB by more than tolerance. Worker failing to commit or recon leaking. |
+
+The `direction` label routes you to the right diagnosis branch below. The `for: 5m` soak on the warning alerts discriminates "transient in-flight blip" from "sustained corruption worth paging"; `cache_high` has no soak because even a single occurrence is anomalous in a flash-sale context.
 
 **Diagnosis (branches by `direction` label):**
 
@@ -562,7 +568,17 @@ Redis > DB. Anomalous regardless of magnitude — only saga compensation desync 
    ```
    If non-zero, the compensator is partially succeeding (Redis revert happens before the DB transition; failure between them leaves Redis ahead).
 
-3. **Reconcile manually.** `UPDATE events SET available_tickets = <redis_qty> WHERE id = '<event_id>'` aligns DB to Redis IF the customer was charged and confirmed. **Verify by joining `orders` first** before any UPDATE — getting this wrong creates duplicate/missing inventory.
+3. **Reconcile manually.** Post-D4.1 the source of truth is `event_ticket_types.available_tickets`, keyed by `ticket_type_id` (not `event_id`). Find the affected ticket type from the drift detector log (`component=inventory_drift, ticket_type_id=<uuid>`), then:
+   ```sql
+   -- Verify join first — never UPDATE without confirming the current state
+   SELECT ett.id, ett.available_tickets, ett.total_tickets,
+          (SELECT COUNT(*) FROM orders WHERE ticket_type_id = ett.id AND status IN ('confirmed','awaiting_payment')) AS live_orders
+   FROM event_ticket_types ett
+   WHERE ett.id = '<ticket-type-uuid>';
+   ```
+   Only if Redis is confirmed ahead of DB AND the customer was charged: `UPDATE event_ticket_types SET available_tickets = <redis_qty> WHERE id = '<ticket-type-uuid>'`. **Getting this wrong creates duplicate/missing inventory — when in doubt, page the on-call engineer.**
+
+   > **`InventoryDriftCacheHigh` is critical (for: 0s)** — do not wait for the `for: 5m` soak that applies to the warning alerts. Page immediately and start diagnosis.
 
 ### `direction="cache_low_excess"`
 
