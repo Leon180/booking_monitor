@@ -6,12 +6,45 @@ This is a portfolio / learning project, not a published library — versions mar
 
 ## [Unreleased]
 
-Post-v1.0.0 follow-ups not blocking the Phase 3 closure:
+Post-v1.1.0 follow-ups:
 
 - **SLOWLOG + big-key observability** (scheduled cloud routine, due ~2026-05-22): `RedisSlowlogElevated` warning alert + `make redis-bigkeys` Make target.
-- **TT-Cache-1 / TT-Cache-4 / TT-Cache-5 / TT-Cache-6** ([roadmap](docs/post_phase2_roadmap.md)) — only relevant if D8 demo expands to multi-ticket-type-per-event; the cache PR works correctly today for the single-ticket-type case.
-- **D4.3** (deferred from D4.2 PR runbook) — dual-secret webhook rotation (`STRIPE_WEBHOOK_SECRET` + `STRIPE_WEBHOOK_SECRET_NEXT`) for zero-downtime rotation. Today's runbook acknowledges the brief mismatch-spike window during single-secret rotation.
-- **O3.2 bare-metal benchmark** (parked) — find the real ceiling on dedicated hardware. Multi-day effort; runs only if the project pivots toward a true scale-test goal.
+- **Payment retry window** (known UX debt): `payment_failed` webhook currently fires saga compensation immediately; should preserve `awaiting_payment` state for retry within `reserved_until` window.
+- **Webhook provider event-ID dedup** (hardening): store Stripe `evt_*` ID to make double-delivery provably idempotent at the HTTP boundary, not just at the state-machine layer.
+- **WORKER_ID uniqueness enforcement** (pre-multi-replica): add `os.Hostname()` default + production guard before horizontal scaling.
+- **TT-Cache-1 / TT-Cache-4 / TT-Cache-5 / TT-Cache-6** ([roadmap](docs/post_phase2_roadmap.md)) — only relevant if D8 demo expands to multi-ticket-type-per-event.
+- **D4.3** (deferred from D4.2 PR runbook) — dual-secret webhook rotation for zero-downtime rotation.
+- **O3.2 bare-metal benchmark** (parked) — find the real ceiling on dedicated hardware.
+
+## [1.1.0] — 2026-05-18 — Stage 5 durable intake + saga idempotency fence + shutdown hardening
+
+Post-v1.0.0 production-hardening sprint. Three architectural additions (Stage 5, saga PG fence, drift detector auto-rehydrate) plus reliability fixes surfaced by a 5-agent multi-layer review (go-reviewer + silent-failure-hunter + backend-architect + two search-specialist production-alignment agents).
+
+### Added
+
+- **Stage 5 — durable Kafka intake ([#113](https://github.com/Leon180/booking_monitor/pull/113); 2026-05-13)** — Fifth evolutionary stage binary (`cmd/booking-cli-stage5`). Replaces fire-and-forget Redis Stream write with a synchronous Kafka produce on the booking hot path, eliminating the Stage 4 outbox-relay connection-hold pattern that caused 100% business errors at t≈43s under 500-VU load. Durability trade-off: −38% intake throughput (8,378 → 5,139 accepted/s) and +5.7× latency (16.9 ms → 97 ms avg) for at-least-once crash-safe intake. New `k6_intake_only.js` script separates intake-ceiling measurement from full-flow measurement per the dual-scenario benchmark methodology.
+
+- **Saga PG idempotency fence — PR-A ([#114](https://github.com/Leon180/booking_monitor/pull/114); 2026-05-14)** — `saga_compensations` table (migration 000016) stores `(compensation_id, order_id, redis_reverted_at)` inside the same UoW transaction as `MarkCompensated`. `WasRedisReverted` / `MarkRedisReverted` make the Redis revert step idempotent against Redis crashes: after a crash and drift-detector restore, pending Kafka redeliveries hit `WasRedisReverted=true` (from PG) and skip `revert.lua` instead of double-INCRBY. `RecordCompletion` uses `ON CONFLICT DO NOTHING` for Kafka-at-least-once redelivery. New `IncMarkRedisRevertedError` metric + outcome labels `already_compensated_redis_mark_failed` / `compensated_redis_mark_failed`. 7 unit test cases + 3 integration cases covering the full idempotency matrix.
+
+- **Gap B drift detector auto-rehydrate + `cache_high` alert split ([#115](https://github.com/Leon180/booking_monitor/pull/115); 2026-05-15)** — Drift detector now auto-rehydrates Redis from PG when cache is low (`cache_low_excess` path) without requiring operator intervention. `cache_high` alert split into two distinct alerts: `InventoryCacheHighExcess` (P2, investigate) vs `InventoryCacheHighExcessCritical` (P0, immediate action — indicates double-INCRBY or phantom revert). Removed SETNX guard from drift detector so post-crash Redis starts at 0; pending saga INCRBYs accumulate from 0 rather than being blocked, preventing the cache_high double-count scenario. Bilingual docs updated (§2 metric inventory + §5 alert catalog).
+
+- **5-stage breaking-point benchmark ([#117](https://github.com/Leon180/booking_monitor/pull/117); 2026-05-18)** — `docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/` — full 10-raw-output dataset (5 stages × 2 scenarios) with `comparison.md` documenting three breaking points: BP-1 worker queue backpressure cliff (Stage 2→3, p95 51ms→1,120ms), BP-2 Stage 4 hard crash (t≈43s, 100% business errors), BP-3 Stage 5 durability tax (−38% intake throughput). Extends the 4-stage harness from PR #109 to 5 stages.
+
+- **`redis_pel_recovery_failures_total` metric ([#118](https://github.com/Leon180/booking_monitor/pull/118); 2026-05-18)** — New Prometheus counter on startup PEL recovery failure (`processPending` error). Previously log-and-continue with no observable signal; non-zero rate now indicates inventory drift from a previous crash.
+
+### Fixed
+
+- **CI integration test timeout ([#116](https://github.com/Leon180/booking_monitor/pull/116); 2026-05-15)** — `go test -timeout` raised 5m→9m, job `timeout-minutes` raised 10→15. Suite grew to ~75 top-level tests after PR-A's `saga_compensation_test.go`; each boots its own `postgres:15-alpine` container (~3-5s), pushing wall-clock past the original 5m limit sized for ~43 tests. Long-term fix (one-container-per-package via `TestMain`) tracked as a follow-up PR.
+
+- **Shutdown spurious DLQ routing — C2 ([#118](https://github.com/Leon180/booking_monitor/pull/118); 2026-05-18)** — `processWithRetry` now returns `errShutdownDuringBackoff` sentinel (not `ctx.Err()`) when graceful shutdown cancels a retry backoff sleep. Both `Subscribe` and `processPending` gate on `errors.Is(err, errShutdownDuringBackoff)` to leave the message in PEL instead of routing to DLQ + reverting inventory. Previously a pod receiving SIGTERM mid-retry would spuriously revert inventory and dead-letter messages that were merely interrupted, not exhausted.
+
+- **Saga commit offset on graceful shutdown — C3 ([#118](https://github.com/Leon180/booking_monitor/pull/118); 2026-05-18)** — `SagaConsumer.commitOrLog` now uses `context.WithTimeout(context.Background(), 2s)` instead of the cancellable loop ctx, mirroring `IntakeConsumer.commitOrLog`. Previously the offset commit failed on shutdown, causing Kafka to redeliver already-compensated messages on the next pod start.
+
+- **`SagaConsumer` fetch-error backoff ctx — agent review ([#118](https://github.com/Leon180/booking_monitor/pull/118); 2026-05-18)** — `time.Sleep(time.Second)` in the fetch-error path replaced with `select { case <-ctx.Done() / case <-time.After }`, matching `IntakeConsumer`. Prevents a 1s shutdown delay when the broker is unreachable at SIGTERM time.
+
+### Compare
+
+- v1.0.0…v1.1.0: https://github.com/Leon180/booking_monitor/compare/v1.0.0...v1.1.0
 
 ## [1.0.0] — 2026-05-09 — Phase 3 complete (D4.2 + D9/D10-minimal + D12 + D14 part 4 + D15 part 4)
 

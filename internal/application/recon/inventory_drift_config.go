@@ -43,6 +43,18 @@ type DriftConfig struct {
 	// Qty restoration is operator-gated via startup rehydrate only.
 	// Only applies to cache_missing. cache_high is never auto-corrected.
 	AutoRehydrate bool
+
+	// MaxConsecutiveFailures is how many consecutive Sweep errors the
+	// cmd-side runner tolerates before it escalates to fx.Shutdown.
+	// A permanently-broken detector (PG / Redis permission error, schema
+	// drift) would otherwise emit a log storm while the
+	// `inventory_drift_*` gauges stayed blank — operators relying on
+	// those gauges would see absence instead of a firing alert.
+	// Escalating to fx.Shutdown surfaces the misconfiguration via
+	// k8s CrashLoopBackOff rather than silently degrading.
+	//
+	// Must be > 0. Default 5 (at a 60s sweep interval → ~5 min).
+	MaxConsecutiveFailures int
 }
 
 // ErrInvalidDriftConfig signals a misconfigured DriftConfig. Mirrors
@@ -64,6 +76,9 @@ func (c DriftConfig) Validate() error {
 	}
 	if c.AbsoluteTolerance < 0 {
 		return fmt.Errorf("%w: AbsoluteTolerance must be >= 0 (got %d)", ErrInvalidDriftConfig, c.AbsoluteTolerance)
+	}
+	if c.MaxConsecutiveFailures <= 0 {
+		return fmt.Errorf("%w: MaxConsecutiveFailures must be > 0 (got %d)", ErrInvalidDriftConfig, c.MaxConsecutiveFailures)
 	}
 	return nil
 }

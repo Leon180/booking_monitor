@@ -96,6 +96,12 @@ func NewInventoryDriftDetector(
 // read it without re-deriving from infrastructure cfg.
 func (d *InventoryDriftDetector) SweepInterval() time.Duration { return d.cfg.SweepInterval }
 
+// MaxConsecutiveFailures exposes the escalation threshold so the cmd-side
+// runner can read it without re-deriving from infrastructure cfg.
+func (d *InventoryDriftDetector) MaxConsecutiveFailures() int {
+	return d.cfg.MaxConsecutiveFailures
+}
+
 // Sweep runs ONE drift-detection cycle. ListAvailable events from DB,
 // look up the cache for each, classify drift. Returns the first
 // non-recoverable error encountered. Per-event lookup failures (Redis

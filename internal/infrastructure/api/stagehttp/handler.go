@@ -12,8 +12,11 @@ import (
 	"github.com/google/uuid"
 
 	"booking_monitor/internal/application/booking"
+	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/domain"
 	"booking_monitor/internal/infrastructure/api/dto"
+	mlog "booking_monitor/internal/log"
+	"booking_monitor/internal/log/tag"
 )
 
 // V1Prefix is the API version prefix used by all stagehttp handlers.
@@ -331,6 +334,33 @@ func HandleTestConfirm(db *sql.DB, comp Compensator) gin.HandlerFunc {
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "compensation failed"})
 		}
+	}
+}
+
+// HandleCreateEvent is the Stage 5 POST /api/v1/events handler.
+// Delegates entirely to event.Service.CreateEvent, which handles the
+// PG UoW, Redis hydrate, and dangling-event compensation internally.
+// Uses the same dto shapes as the Stage 4 booking handler so the
+// response contract is identical.
+func HandleCreateEvent(svc event.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req dto.CreateEventRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+
+		result, err := svc.CreateEvent(c.Request.Context(), req.Name, req.TotalTickets, req.PriceCents, req.Currency)
+		if err != nil {
+			status, msg := MapEventError(err)
+			if status == http.StatusInternalServerError {
+				mlog.Error(c.Request.Context(), "HandleCreateEvent: CreateEvent failed", tag.Error(err))
+			}
+			c.JSON(status, gin.H{"error": msg})
+			return
+		}
+
+		c.JSON(http.StatusCreated, dto.EventResponseFromDomain(result.Event, result.TicketTypes))
 	}
 }
 

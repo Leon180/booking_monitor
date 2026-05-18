@@ -41,4 +41,21 @@ type IntakeMessage struct {
 // returning the error to the client.
 type IntakePublisher interface {
 	PublishIntake(ctx context.Context, msg IntakeMessage) error
+	// Close flushes in-flight messages and releases broker connections.
+	// Must be called during graceful shutdown before the process exits.
+	Close() error
+}
+
+// IntakeConsumer is the Stage 5 contract for consuming booking reservation
+// messages from the durable queue and persisting them to PG. Symmetric
+// counterpart to IntakePublisher — both live here so application code
+// and cmd wiring never import the concrete messaging package.
+type IntakeConsumer interface {
+	// Start blocks until ctx is cancelled, draining the intake topic.
+	Start(ctx context.Context) error
+	// Ping verifies broker reachability. Called from fx OnStart with the
+	// startup context so the process fails fast if the broker is down.
+	Ping(ctx context.Context) error
+	// Close shuts down the reader and releases broker connections.
+	Close() error
 }

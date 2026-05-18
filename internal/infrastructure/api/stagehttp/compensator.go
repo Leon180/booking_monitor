@@ -18,64 +18,22 @@
 package stagehttp
 
 import (
-	"context"
-	"errors"
-
-	"github.com/google/uuid"
+	"booking_monitor/internal/application/expiry"
 )
 
-// ErrCompensateNotEligible is returned by Compensator.Compensate
-// when the order isn't in `awaiting_payment` state at lock time.
-// Callers branch on this so concurrent races (e.g. /confirm-
-// succeeded landing between sweeper SELECT and FOR UPDATE) don't
-// log as errors.
+// Compensator is the failure-path architectural seam across Stages 1-3
+// and Stage 5. Defined in internal/application/expiry so Stage 5
+// (production path) can use it without importing a "stage HTTP" package.
+// This alias keeps Stage 1-3 binaries compile-compatible — all existing
+// implementations and call sites continue to work unchanged.
 //
-// Defined here (rather than in each stage's cmd binary) so the
-// HandleTestConfirm handler can sentinel-check it consistently
-// across stages.
-var ErrCompensateNotEligible = errors.New("order not awaiting_payment at lock time")
+// Stage-by-stage PG-symmetry rule: the compensator's UPDATE
+// event_ticket_types behaviour MUST match the stage's forward-path PG
+// behaviour. See expiry.Compensator doc for the full contract.
+type Compensator = expiry.Compensator
 
-// Compensator is the failure-path architectural seam across Stages
-// 1-3. Each stage's binary supplies its own implementation,
-// reflecting the stage's forward-path SoT discipline:
-//
-//   - Stage 1: PG-only — BEGIN; SELECT FOR UPDATE order;
-//     UPDATE event_ticket_types += qty; UPDATE orders SET
-//     status='compensated'; COMMIT. Symmetric with Stage 1's
-//     SELECT-FOR-UPDATE forward path that decremented PG inventory.
-//   - Stage 2: revert.lua + UPDATE orders status only — NO
-//     event_ticket_types update. Symmetric with Stage 2's forward
-//     path (Redis Lua deduct + sync INSERT, no PG inventory column
-//     decrement). Codex round-1 P1 in PR #106 enforced this — an
-//     asymmetric compensator that incremented the PG column would
-//     drift it +qty per abandon. Order: revert.lua INSIDE the tx,
-//     before UPDATE orders, so a Redis failure rolls back the SQL.
-//     PR-D12.3 H1 added the `uuid.NullUUID` scan +
-//     `sql.ErrNoRows → ErrCompensateNotEligible` guard to handle
-//     legacy NULL `ticket_type_id` rows + sweeper-vs-confirm races.
-//   - Stage 3: revert.lua + UPDATE event_ticket_types += qty +
-//     UPDATE orders status. Stage 3's worker DECREMENTS the PG
-//     column inside its UoW (symmetric with Stage 4's worker post-
-//     D7), so the compensator MUST increment it back. Order:
-//     revert.lua INSIDE the tx, before the UPDATE statements
-//     (matches Stage 2's pattern, NOT Stage 4's saga compensator
-//     which does PG-first-Redis-after). Same `uuid.NullUUID` +
-//     `sql.ErrNoRows` guards as Stage 2; ALSO has the
-//     RowsAffected check on `UPDATE event_ticket_types` to catch
-//     orphaned ticket_type rows (PG-leak guard from PR-D12.3 H2).
-//
-// The PG-symmetry rule (compensator's UPDATE event_ticket_types
-// behavior must match the stage's forward-path PG behavior) is the
-// single most load-bearing invariant across stages 1-3 — drift
-// either direction is a permanent inventory leak.
-//
-// Implementations MUST:
-//   - Be idempotent on order_id (sweeper + /confirm-failed can fire
-//     for the same row in a tight race).
-//   - Return ErrCompensateNotEligible when the order is observed in
-//     a non-awaiting_payment state at lock time (caller skips/maps
-//     to 409 — NOT a real error).
-//   - Respect ctx cancellation so fx-bounded shutdowns don't hang.
-type Compensator interface {
-	Compensate(ctx context.Context, orderID uuid.UUID) error
-}
+// ErrCompensateNotEligible re-exports expiry.ErrCompensateNotEligible
+// so Stage 1-3 binaries and stagehttp handlers that already import
+// stagehttp need not be updated. It is the same sentinel pointer —
+// errors.Is checks against either name are equivalent.
+var ErrCompensateNotEligible = expiry.ErrCompensateNotEligible
