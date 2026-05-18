@@ -295,6 +295,39 @@ func TestDriftSweep_PerEventCtxCancelled_NoCacheReadErrorBump(t *testing.T) {
 	assert.Zero(t, h.metrics.driftedEvents)
 }
 
+// TestDriftSweep_MultiTTEvent_AllTypesChecked verifies that checkOne iterates
+// ALL ticket types and returns the worst outcome. Under the old early-exit
+// logic, TT2's cache_high would have been silently skipped because TT1 already
+// returned cache_missing. This is the P0 regression guard.
+func TestDriftSweep_MultiTTEvent_AllTypesChecked(t *testing.T) {
+	t.Parallel()
+	h := newDriftHarness(t, 5)
+	ctx := context.Background()
+
+	e := eventWithAvail(t, 150)
+
+	tt1ID, err := uuid.NewV7()
+	require.NoError(t, err)
+	tt2ID, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	tt1 := domain.ReconstructTicketType(tt1ID, e.ID(), "Standard", 2000, "usd", 100, 100, nil, nil, nil, "", 0)
+	tt2 := domain.ReconstructTicketType(tt2ID, e.ID(), "VIP", 5000, "usd", 50, 50, nil, nil, nil, "", 0)
+
+	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
+	h.ticketType.EXPECT().ListByEventID(ctx, e.ID()).Return([]domain.TicketType{tt1, tt2}, nil)
+	// TT1: cache_missing — first non-clean; old code would have returned here
+	h.inventory.EXPECT().GetInventory(ctx, tt1ID).Return(0, false, nil)
+	// TT2: cache_high (Redis=60 > DB=50) — P0 case; must still be detected
+	h.inventory.EXPECT().GetInventory(ctx, tt2ID).Return(60, true, nil)
+
+	require.NoError(t, h.d.Sweep(ctx))
+	assert.Equal(t, 1, h.metrics.driftedEvents, "event is drifted")
+	assert.Equal(t, 1, h.metrics.detected["cache_missing"], "TT1 cache_missing detected")
+	assert.Equal(t, 1, h.metrics.detected["cache_high"],
+		"TT2 cache_high MUST be detected even though TT1 already flagged cache_missing")
+}
+
 func TestDriftSweep_CtxCancelledAtLoopBoundary_ExitsCleanly(t *testing.T) {
 	t.Parallel()
 	h := newDriftHarness(t, 5)

@@ -200,15 +200,16 @@ func (d *InventoryDriftDetector) checkOne(ctx context.Context, e domain.Event) c
 			tag.EventID(e.ID()), tag.Error(err))
 		return checkOutcomeSkipped
 	}
+	// Iterate ALL ticket types to find the worst outcome. Early-exit on
+	// the first non-clean would silently skip cache_high on a later TT
+	// when the first TT is cache_missing — the P0 case goes undetected.
+	worst := checkOutcomeClean
 	for _, tt := range ticketTypes {
-		outcome := d.checkTicketType(ctx, e, tt)
-		if outcome != checkOutcomeClean {
-			return outcome
+		if outcome := d.checkTicketType(ctx, e, tt); outcome > worst {
+			worst = outcome
 		}
 	}
-
-	// Within tolerance — no metric emission, no log line.
-	return checkOutcomeClean
+	return worst
 }
 
 // autoRehydrate refreshes the immutable metadata key (HSET via
