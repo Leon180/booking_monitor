@@ -1,0 +1,626 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: scripts/k6_two_step_flow.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 500 max VUs, 1m30s max duration (incl. graceful stop):
+              * two_step_flow: 500 looping VUs for 1m0s (gracefulStop: 30s)
+
+time="2026-05-13T14:28:26+08:00" level=info msg="[setup] event_id=019e2005-b826-7f1f-b4e4-18a92eafb336 ticket_type_id=019e2005-b826-7f20-8054-b814d6466ff2 pool=500000" source=console
+
+running (0m01.0s), 500/500 VUs, 399 complete and 0 interrupted iterations
+two_step_flow   [   2% ] 500 VUs  0m01.0s/1m0s
+
+running (0m02.0s), 500/500 VUs, 694 complete and 0 interrupted iterations
+two_step_flow   [   3% ] 500 VUs  0m02.0s/1m0s
+
+running (0m03.0s), 500/500 VUs, 714 complete and 0 interrupted iterations
+two_step_flow   [   5% ] 500 VUs  0m03.0s/1m0s
+
+running (0m04.0s), 500/500 VUs, 836 complete and 0 interrupted iterations
+two_step_flow   [   7% ] 500 VUs  0m04.0s/1m0s
+
+running (0m05.0s), 500/500 VUs, 836 complete and 0 interrupted iterations
+two_step_flow   [   8% ] 500 VUs  0m05.0s/1m0s
+
+running (0m06.0s), 500/500 VUs, 952 complete and 0 interrupted iterations
+two_step_flow   [  10% ] 500 VUs  0m06.0s/1m0s
+
+running (0m07.0s), 500/500 VUs, 952 complete and 0 interrupted iterations
+two_step_flow   [  12% ] 500 VUs  0m07.0s/1m0s
+
+running (0m08.0s), 500/500 VUs, 1037 complete and 0 interrupted iterations
+two_step_flow   [  13% ] 500 VUs  0m08.0s/1m0s
+
+running (0m09.0s), 500/500 VUs, 1044 complete and 0 interrupted iterations
+two_step_flow   [  15% ] 500 VUs  0m09.0s/1m0s
+
+running (0m10.0s), 500/500 VUs, 1083 complete and 0 interrupted iterations
+two_step_flow   [  17% ] 500 VUs  0m10.0s/1m0s
+
+running (0m11.0s), 500/500 VUs, 1120 complete and 0 interrupted iterations
+two_step_flow   [  18% ] 500 VUs  0m11.0s/1m0s
+
+running (0m12.0s), 500/500 VUs, 1125 complete and 0 interrupted iterations
+two_step_flow   [  20% ] 500 VUs  0m12.0s/1m0s
+
+running (0m13.0s), 500/500 VUs, 1178 complete and 0 interrupted iterations
+two_step_flow   [  22% ] 500 VUs  0m13.0s/1m0s
+
+running (0m14.0s), 500/500 VUs, 1181 complete and 0 interrupted iterations
+two_step_flow   [  23% ] 500 VUs  0m14.0s/1m0s
+
+running (0m15.0s), 500/500 VUs, 1221 complete and 0 interrupted iterations
+two_step_flow   [  25% ] 500 VUs  0m15.0s/1m0s
+
+running (0m16.0s), 500/500 VUs, 1225 complete and 0 interrupted iterations
+two_step_flow   [  27% ] 500 VUs  0m16.0s/1m0s
+
+running (0m17.0s), 500/500 VUs, 1245 complete and 0 interrupted iterations
+two_step_flow   [  28% ] 500 VUs  0m17.0s/1m0s
+
+running (0m18.0s), 500/500 VUs, 1265 complete and 0 interrupted iterations
+two_step_flow   [  30% ] 500 VUs  0m18.0s/1m0s
+
+running (0m19.0s), 500/500 VUs, 1281 complete and 0 interrupted iterations
+two_step_flow   [  32% ] 500 VUs  0m19.0s/1m0s
+
+running (0m20.0s), 500/500 VUs, 1296 complete and 0 interrupted iterations
+two_step_flow   [  33% ] 500 VUs  0m20.0s/1m0s
+
+running (0m21.0s), 500/500 VUs, 1302 complete and 0 interrupted iterations
+two_step_flow   [  35% ] 500 VUs  0m21.0s/1m0s
+
+running (0m22.0s), 500/500 VUs, 1317 complete and 0 interrupted iterations
+two_step_flow   [  37% ] 500 VUs  0m22.0s/1m0s
+
+running (0m23.0s), 500/500 VUs, 1321 complete and 0 interrupted iterations
+two_step_flow   [  38% ] 500 VUs  0m23.0s/1m0s
+
+running (0m24.0s), 500/500 VUs, 1326 complete and 0 interrupted iterations
+two_step_flow   [  40% ] 500 VUs  0m24.0s/1m0s
+
+running (0m25.0s), 500/500 VUs, 1328 complete and 0 interrupted iterations
+two_step_flow   [  42% ] 500 VUs  0m25.0s/1m0s
+
+running (0m26.0s), 500/500 VUs, 1329 complete and 0 interrupted iterations
+two_step_flow   [  43% ] 500 VUs  0m26.0s/1m0s
+
+running (0m27.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  45% ] 500 VUs  0m27.0s/1m0s
+
+running (0m28.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  47% ] 500 VUs  0m28.0s/1m0s
+
+running (0m29.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  48% ] 500 VUs  0m29.0s/1m0s
+
+running (0m30.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  50% ] 500 VUs  0m30.0s/1m0s
+
+running (0m31.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  52% ] 500 VUs  0m31.0s/1m0s
+
+running (0m32.0s), 500/500 VUs, 1331 complete and 0 interrupted iterations
+two_step_flow   [  53% ] 500 VUs  0m32.0s/1m0s
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-08aa-7ebf-8413-98154644d448/pay\": EOF"
+
+running (0m33.0s), 500/500 VUs, 1332 complete and 0 interrupted iterations
+two_step_flow   [  55% ] 500 VUs  0m33.0s/1m0s
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0a5c-7272-a929-6b63033f7dfb/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7ba0-9dda-2338c95e72dd/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-78d1-a2fc-b062addfef76/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bccb-7ddd-acc7-b9453a00f1e3/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-76ed-adf9-80dd8e12d93c/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-7a62-b186-8356a504d15a/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-7360-8ff8-ec2e30bf7bd0/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-740c-80fe-09d3d2761808/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-7904-8af7-98ba804dfc74/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd12-7188-911d-1b0370478f7e/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7c27-ad0f-962ca1b3adb9/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf8-7436-8770-8de50a1d7c37/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-7b43-b78d-05dffec1548f/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-7abc-baaa-f50916579107/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-73e4-9875-3d3fd41b7b68/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd0f-7a48-8aad-43080cd074f2/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-741b-b9f6-f69f99f3190c/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-7369-8d69-a4f8c686fda5/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-73ce-a13b-e527cf9e068c/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-7bdf-8ae1-2248940832b9/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd12-7407-ad37-0b1f66b830a4/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-793f-955a-d5fb76c40dc3/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd0f-7934-b821-09a21cb860bf/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcc9-744d-a6cb-9c75b73dd10f/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7325-bdff-9eb10311709a/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7d25-bf0d-bb9b18b983e8/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7e6e-b44e-c3df44ac12f7/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd12-705e-8896-5df266c3c166/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7c20-9401-23aa1969a02e/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7a02-abd3-f294f44709c9/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7ce1-bf99-8226a6d15f2d/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-74ba-aeac-c77978b91222/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7388-8522-f9761ac00cf6/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf0-7811-ac70-85c12ceb089c/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7e4b-ae61-efd23df5cb84/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-78da-90c6-52dcbf316642/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd13-7c71-8ecd-5f3017cda15b/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-7ae0-9b0d-8ef303d92e48/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-741d-b5cb-a495e0b9e9c0/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcea-780b-afa0-dade0dcdf46f/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd15-7293-8f02-faf7b2dfb360/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd38-7d21-94d9-cdef83446eb6/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bccc-71fd-8680-c1374883f33f/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3d-703e-a326-9cae5348b44b/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-7423-850e-4630a365c840/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-772d-ac39-93f33697b965/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfc-7dd5-9e0b-98c8221df7ae/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7c83-b82a-7a62233b2da6/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd39-75f1-9837-682c3da35994/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-7143-8806-30cf9cd33abd/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7db5-a566-24f47d8ede39/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7d0a-b1f7-c8438757b4c7/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf8-7cea-8909-dbe979a641fa/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf0-744a-b70a-e52d5510a2c0/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-72c4-b4fe-077fcc703f9d/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7e03-8bec-89745864f56d/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-7a0b-9db1-33f2b9bd026c/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-7130-b2ce-f724d8709c68/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3d-71c3-a044-f6f3bcd214ea/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-7a24-adec-dd60c4e401f2/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd38-7d99-a229-0d0b8f9369a2/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-741a-8d64-417c72476851/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0ac2-73b1-a80b-69417070f7e4/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-7a75-9ee4-6eed85e5c0cf/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd12-74da-8fde-e5355e4c8aa6/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcea-70dc-9057-f1ccdd1be5a4/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7a49-ba53-37126591c92b/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf8-741a-8997-8534b81789ad/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7631-953f-e60e73cdf000/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-796c-95ac-fce1e89fce7f/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7cc5-a73a-eccd5a1a6d62/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf8-7eb3-a151-68147534c2a4/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7a0f-a918-82e4df21a4d0/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7f37-8e9e-1f35abf383dc/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfb-70be-9367-314357a94448/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-761e-a3f7-f9ee0ddbd5ac/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfb-7082-961c-c5acea8166dc/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-73eb-82a1-35e9995051ab/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-730e-b931-73947a6673ff/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd18-776e-8476-3ab6934b1709/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-7851-a424-6e76a691266b/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3d-70a6-bd33-d2fe9b972db6/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0c6d-7692-9ed7-789d7da92a30/pay\": EOF"
+time="2026-05-13T14:28:59+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0cb2-767c-b3a2-f97db7368ba0/pay\": EOF"
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0c2c-7d52-b2d0-33e55455847a/pay\": EOF"
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0ca1-739c-a04c-0649836e17b7/pay\": EOF"
+
+running (0m34.0s), 500/500 VUs, 1418 complete and 0 interrupted iterations
+two_step_flow   [  57% ] 500 VUs  0m34.0s/1m0s
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0da0-7b14-8e3a-ca3f69550cde/pay\": EOF"
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0de7-728a-bc41-4e2170d1737d/pay\": EOF"
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0e24-7661-9860-1579b750a19f/pay\": EOF"
+time="2026-05-13T14:29:00+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-0e99-7827-8864-e744de690fd5/pay\": EOF"
+
+running (0m35.0s), 500/500 VUs, 1423 complete and 0 interrupted iterations
+two_step_flow   [  58% ] 500 VUs  0m35.0s/1m0s
+time="2026-05-13T14:29:01+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-11e9-7d08-b595-8a96bf6d8180/pay\": EOF"
+time="2026-05-13T14:29:02+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-1360-7952-b482-7399c21f3783/pay\": EOF"
+time="2026-05-13T14:29:02+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-1372-7ebd-9fa7-57ce5960a712/pay\": EOF"
+
+running (0m36.0s), 500/500 VUs, 1453 complete and 0 interrupted iterations
+two_step_flow   [  60% ] 500 VUs  0m36.0s/1m0s
+time="2026-05-13T14:29:02+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-15f4-739c-abcd-527ed7970cfc/pay\": EOF"
+
+running (0m37.0s), 500/500 VUs, 1457 complete and 0 interrupted iterations
+two_step_flow   [  62% ] 500 VUs  0m37.0s/1m0s
+time="2026-05-13T14:29:04+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-1b40-768d-a618-e6aa72c487b0/pay\": EOF"
+
+running (0m38.0s), 500/500 VUs, 1471 complete and 0 interrupted iterations
+two_step_flow   [  63% ] 500 VUs  0m38.0s/1m0s
+
+running (0m39.0s), 500/500 VUs, 1473 complete and 0 interrupted iterations
+two_step_flow   [  65% ] 500 VUs  0m39.0s/1m0s
+time="2026-05-13T14:29:05+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-215b-742a-b556-290383f4b354/pay\": EOF"
+
+running (0m40.0s), 500/500 VUs, 1475 complete and 0 interrupted iterations
+two_step_flow   [  67% ] 500 VUs  0m40.0s/1m0s
+
+running (0m41.0s), 500/500 VUs, 1482 complete and 0 interrupted iterations
+two_step_flow   [  68% ] 500 VUs  0m41.0s/1m0s
+
+running (0m42.0s), 500/500 VUs, 1483 complete and 0 interrupted iterations
+two_step_flow   [  70% ] 500 VUs  0m42.0s/1m0s
+
+running (0m43.0s), 500/500 VUs, 1488 complete and 0 interrupted iterations
+two_step_flow   [  72% ] 500 VUs  0m43.0s/1m0s
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7edb-a45f-13c15e29d241/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7d21-9fee-e1eb257ec3d7/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7c4a-854b-64ff7909798f/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-794b-b1e8-b219a9ce0d66/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7c63-a7b4-44978961b161/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7dcc-acdf-9a58623ba89e/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bc9d-7b02-accb-474cbe611521/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-7dcc-ae9d-a3b9973132c7/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd10-767e-a5df-19a68baf5053/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-7487-9151-d039f614636a/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf8-7444-b167-7b406d9f3e9a/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfb-70f0-9b7b-5d8d30f8b581/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7d93-b822-83ef5fd53b95/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd15-71e8-9bf6-ae18ab47b098/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-7387-bc98-04b75273250a/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7e39-b43c-0c13a22b21ce/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf0-7881-8971-31041b683e76/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcfa-7aaa-9225-d4e7703a6256/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcea-713f-8a64-1ceef57cce34/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-7826-91d8-91d8f67317f1/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd18-79e3-9f44-3734a5a3d7f7/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-73f1-85b9-cca6b56a3317/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-7830-bea4-20d3c7896609/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcf9-7071-bcdb-bb5ee84d5f0f/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-736c-8f6a-8d7adb5fdb4f/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bced-741a-a8d2-30732fcb5cb2/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd10-7394-85b5-3ef95b7aa20b/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcec-7e2d-b75f-203e0c26fff0/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-7725-b61c-90e5e3b7f58e/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce9-7e22-badb-c6fe14124011/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-7cf7-a03f-62482827ceeb/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd06-727e-a0f5-32c07deedca1/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcda-7dc8-9494-f9d0957e36a3/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bccc-7217-888b-0cf120e35669/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-7eb1-b688-e114554f8451/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7bf9-bc88-0edc5fa11df8/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd3a-7bb9-8b42-3a3823db42fd/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7dc8-a078-dbfb56a32cbe/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcec-7e2e-8408-8d7c5f67987a/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bcdf-7b5d-a086-11cc5e11390c/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd15-72f0-91c4-1f62a6bc7381/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bce8-7da8-9f18-368dad7a94a9/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-7313-91fc-75c5aa2ad9c0/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-7a70-b653-d12dd214c0cd/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd07-719e-bb54-988c91dace34/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd11-743a-b4cf-daa3d40687c9/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd38-7cc4-86b7-f4111e6d5b54/pay\": EOF"
+time="2026-05-13T14:29:09+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2005-bd18-7d2c-8cbc-21bd8bb6b532/pay\": EOF"
+
+running (0m44.0s), 500/500 VUs, 1537 complete and 0 interrupted iterations
+two_step_flow   [  73% ] 500 VUs  0m44.0s/1m0s
+
+running (0m45.0s), 500/500 VUs, 1541 complete and 0 interrupted iterations
+two_step_flow   [  75% ] 500 VUs  0m45.0s/1m0s
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39d4-7675-887f-4dcbc5562f2a/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39de-7acc-9a96-ea22973df01d/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39da-7eee-a180-cfa957852669/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39f4-7eec-ac8d-ef7cfcd6ccf9/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a1f-7579-ad6a-c9076bcd9272/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39df-719c-b70e-d65abd95c042/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39f8-7af2-9f87-7bb49f335e23/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a03-7472-bb00-f43228e10b6c/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a23-7424-9a98-83d69f325708/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a6a-7af6-89d8-469570913946/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a1f-75b4-b6ee-3899ef00ccdb/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39a9-72b8-ad75-c20eaea9f997/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a46-7860-8a77-f37ac24902d8/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a93-74d2-836a-6fce79feca08/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a46-7ccf-aeee-f7116ffae945/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a93-7500-a83b-c35de189b065/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a6d-7cf6-b607-a11d6fa379f7/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39df-7133-a4d2-029109f334bc/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a68-74c2-9598-25201bf53ab6/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a68-7549-84a9-7d8df9484c72/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a93-7bd2-8e84-d5841acd166e/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3ab2-758e-8a3e-43b454691407/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a46-77f8-9931-5cb808903925/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3aaf-70e5-8839-e9135e6919fd/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a68-758b-a042-a3c60ec8ae47/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3ad0-7dec-b929-cd3e882b1ac3/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a43-734e-9229-7e4e32b8b119/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a88-781d-9883-61aaf0b5f5e0/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a93-7533-86f6-c3d40e3f9020/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3aab-7d42-bccd-e99702643d14/pay\": EOF"
+time="2026-05-13T14:29:11+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3ab2-772a-b3c2-ee7c26faff3d/pay\": EOF"
+time="2026-05-13T14:29:12+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3bab-7316-9d0a-7507a3e304a5/pay\": EOF"
+
+running (0m46.0s), 500/500 VUs, 1597 complete and 0 interrupted iterations
+two_step_flow   [  77% ] 500 VUs  0m46.0s/1m0s
+time="2026-05-13T14:29:12+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3cb8-7263-9b35-21d23f0c89fc/pay\": EOF"
+
+running (0m47.0s), 500/500 VUs, 1599 complete and 0 interrupted iterations
+two_step_flow   [  78% ] 500 VUs  0m47.0s/1m0s
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-41d0-722f-8b94-01e652f1e95c/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-423f-7e38-b77a-651a8ef1765c/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-423f-7a13-929c-2c3a81140c0e/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4288-7360-94ed-8c30a48c088d/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-433e-7815-a4b1-ad55b3f912db/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-42b7-7d49-ab6e-0306f925d484/pay\": EOF"
+time="2026-05-13T14:29:13+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-42c7-79a2-b32a-0427f6bcdd9f/pay\": EOF"
+time="2026-05-13T14:29:14+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-42b6-7766-a836-449822fb6a43/pay\": EOF"
+time="2026-05-13T14:29:14+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-42e7-7130-98c4-ecd0686e14e5/pay\": EOF"
+time="2026-05-13T14:29:14+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-42ad-778e-8b2e-8c7bc22de0ba/pay\": EOF"
+
+running (0m48.0s), 500/500 VUs, 1631 complete and 0 interrupted iterations
+two_step_flow   [  80% ] 500 VUs  0m48.0s/1m0s
+time="2026-05-13T14:29:14+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-43eb-7593-89a4-a222b83779de/pay\": EOF"
+time="2026-05-13T14:29:14+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4427-7ba6-84c4-c3961d5499e9/pay\": EOF"
+time="2026-05-13T14:29:15+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-45da-7de3-ac8d-e0506b9e37c6/pay\": EOF"
+
+running (0m49.0s), 500/500 VUs, 1634 complete and 0 interrupted iterations
+two_step_flow   [  82% ] 500 VUs  0m49.0s/1m0s
+time="2026-05-13T14:29:15+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4a7d-7798-a847-3822ee18f0b7/pay\": EOF"
+time="2026-05-13T14:29:15+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4a59-7028-a342-9b00eab67b76/pay\": EOF"
+time="2026-05-13T14:29:15+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4a8b-744a-ab02-e4b8d869a89f/pay\": EOF"
+time="2026-05-13T14:29:15+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4b33-7048-91c9-8c90993396d7/pay\": EOF"
+time="2026-05-13T14:29:16+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4b33-7a62-9bd5-728c61a88fb2/pay\": EOF"
+time="2026-05-13T14:29:16+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-4b07-7111-ab1d-e913dacffe9c/pay\": EOF"
+
+running (0m50.0s), 500/500 VUs, 1659 complete and 0 interrupted iterations
+two_step_flow   [  83% ] 500 VUs  0m50.0s/1m0s
+
+running (0m51.0s), 500/500 VUs, 1663 complete and 0 interrupted iterations
+two_step_flow   [  85% ] 500 VUs  0m51.0s/1m0s
+
+running (0m52.0s), 500/500 VUs, 1680 complete and 0 interrupted iterations
+two_step_flow   [  87% ] 500 VUs  0m52.0s/1m0s
+
+running (0m53.0s), 500/500 VUs, 1689 complete and 0 interrupted iterations
+two_step_flow   [  88% ] 500 VUs  0m53.0s/1m0s
+
+running (0m54.0s), 500/500 VUs, 1691 complete and 0 interrupted iterations
+two_step_flow   [  90% ] 500 VUs  0m54.0s/1m0s
+
+running (0m55.0s), 500/500 VUs, 1710 complete and 0 interrupted iterations
+two_step_flow   [  92% ] 500 VUs  0m55.0s/1m0s
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-39b3-7768-829e-494692dc11e1/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-60fe-7477-8378-d67b06d18b6d/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a1f-73c9-ac46-c621cfda2fc2/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6159-7ba2-aa79-7ab02498d903/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6100-701e-8f76-d91311615296/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-613c-72de-8f24-8e6f4e2e8e7d/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a88-77be-ad0c-cbcfc7656385/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3aaf-72bf-90c6-1f08ee221cee/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6110-7a1c-83f3-a8c8de19dbbe/pay\": EOF"
+time="2026-05-13T14:29:21+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-616a-7214-a544-850676b4f77d/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a2d-7212-91e1-31e250304661/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-614a-7e7e-a497-76b112bd8fb8/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-61b2-7ab7-97bf-31e548fd583c/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-613c-7167-a83a-f94a761d45d1/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6127-798d-bda9-78995eabc2f9/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-614d-782b-8eaf-4c853bc9864b/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6179-7072-a6d0-c7c4bcc31b03/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a1f-768e-aef0-5b6f455a0d14/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a1f-70fb-836e-11201aa3c6b4/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-61de-798a-9a2e-1e5bd6ffd2cf/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-3a49-7155-9b63-de34779d8f7e/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-61a0-75aa-8b2c-c5a74b5597af/pay\": EOF"
+time="2026-05-13T14:29:22+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-61de-7a93-90ce-4a805303b6a3/pay\": EOF"
+
+running (0m56.0s), 500/500 VUs, 1735 complete and 0 interrupted iterations
+two_step_flow   [  93% ] 500 VUs  0m56.0s/1m0s
+
+running (0m57.0s), 500/500 VUs, 1741 complete and 0 interrupted iterations
+two_step_flow   [  95% ] 500 VUs  0m57.0s/1m0s
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6605-7873-8280-d8c90d64b253/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-68ea-7c24-bcb5-f73112e84a2b/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-68d4-725f-bcba-96d693f72bdf/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6957-7198-a8a8-67d7b8b77991/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-690f-77ff-9f98-dd7d8ebfa3ef/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-691a-7846-8d81-187396459b03/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6986-74b7-97dd-9da332dcff00/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-695e-7b92-bfff-1aee7df363c7/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-69b3-7e79-85a4-3f44140304ad/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6988-72c4-83b7-89bf9e4cc1cb/pay\": EOF"
+time="2026-05-13T14:29:23+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-69d9-7e56-a599-ce73c75d2cae/pay\": EOF"
+time="2026-05-13T14:29:24+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-69fc-7c38-8e5f-46b7a866ea13/pay\": EOF"
+time="2026-05-13T14:29:24+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6aab-78f4-889a-2f045db631a5/pay\": EOF"
+time="2026-05-13T14:29:24+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6a13-7718-ba18-2958e650b988/pay\": EOF"
+time="2026-05-13T14:29:24+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-435b-738a-9719-028f1bcbef72/pay\": EOF"
+
+running (0m58.0s), 500/500 VUs, 1763 complete and 0 interrupted iterations
+two_step_flow   [  97% ] 500 VUs  0m58.0s/1m0s
+time="2026-05-13T14:29:25+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6f0c-795d-97e9-9c662bf77ec7/pay\": EOF"
+
+running (0m59.0s), 500/500 VUs, 1766 complete and 0 interrupted iterations
+two_step_flow   [  98% ] 500 VUs  0m59.0s/1m0s
+time="2026-05-13T14:29:25+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-710e-70c8-aeee-6febd840709c/pay\": EOF"
+time="2026-05-13T14:29:25+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-7173-7010-bf43-dac3cee94b92/pay\": EOF"
+time="2026-05-13T14:29:26+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-7253-7dda-8fe8-18239a1eedba/pay\": EOF"
+
+running (1m00.0s), 500/500 VUs, 1773 complete and 0 interrupted iterations
+two_step_flow   [ 100% ] 500 VUs  1m00.0s/1m0s
+
+running (1m01.0s), 398/500 VUs, 1875 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m02.0s), 302/500 VUs, 1971 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m03.0s), 267/500 VUs, 2006 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m04.0s), 259/500 VUs, 2014 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m05.0s), 241/500 VUs, 2032 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m06.0s), 234/500 VUs, 2039 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m07.0s), 217/500 VUs, 2056 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8d76-7984-a052-0ee6123e41d6/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8cf8-7baf-bb14-7966eb3c89d6/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8e50-76de-884a-8324b23d0c05/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8d76-7999-bd7f-c9c7f20d3268/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8d76-7be9-a2c3-8430041c89c9/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-8d9d-7070-b9d5-7ea203ce11a8/pay\": EOF"
+time="2026-05-13T14:29:33+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-67b1-70b8-97fa-94779cf2358f/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-90d4-74d5-9cbb-70bde9398be3/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-68b7-7289-845e-ed97453670be/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9066-7d40-835b-894d7b723ca9/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-69b3-74ec-8bbc-de16b446f95b/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9177-71a9-baef-b842893535ec/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6a86-777a-bb12-9d31372c322c/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6a28-7d8c-a540-35e92a93fd08/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-91d1-74c4-bcd7-7eee1dd9edc6/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-69d8-72db-b0ab-264c5591d989/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6999-7e4c-b56a-1b96bee2a98f/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9179-768e-8507-9d0ca3b7fbe7/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9179-7892-b071-ca4ab337bf70/pay\": EOF"
+
+running (1m08.0s), 196/500 VUs, 2077 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9260-7625-8340-a49a851cf707/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-91d1-7530-80e4-a5d42c47b90d/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-91f9-74f8-82b0-5c552654fe86/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9241-79f6-aace-bdb9ebec5316/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-921e-7f0d-95eb-ad146de6d10e/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-91f6-7e2c-bd46-748940cb91ad/pay\": EOF"
+time="2026-05-13T14:29:34+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-6c69-75bb-98ba-eea0ee263835/pay\": EOF"
+time="2026-05-13T14:29:35+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-94cf-7830-b5c2-454f79f2278f/pay\": EOF"
+time="2026-05-13T14:29:35+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9566-7c49-9aa5-35ad6f149f18/pay\": EOF"
+
+running (1m09.0s), 176/500 VUs, 2097 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:35+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-96d4-7bb4-bd4f-fa345dc255f4/pay\": EOF"
+time="2026-05-13T14:29:35+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-96b2-7c9f-947a-a2036a20055e/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9151-70e7-a988-51dfc09abb5f/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-7238-7ba3-8304-560331fe7507/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-99b4-75cc-8fd5-14a0d385317a/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-98a2-788b-8cf4-7a46a16f2fa6/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-7312-714a-b6da-a6704b30693f/pay\": EOF"
+
+running (1m10.0s), 167/500 VUs, 2106 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9912-70ae-b90c-592ba1d9f41e/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9835-7525-87e4-a768f677bd31/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-921f-7360-8ea1-31a6f53e8c59/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-99cb-76c1-a18d-4b5da1044b7d/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-91d1-73b8-8a48-bf5c6d0d62b1/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9ad8-77e2-9352-97313b71cbd9/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-96ac-7c0b-bc50-663c4523ca42/pay\": EOF"
+time="2026-05-13T14:29:36+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-96af-7b64-be41-703311c974e7/pay\": EOF"
+time="2026-05-13T14:29:37+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-981c-7ae6-9f9e-85074d7ac3dc/pay\": EOF"
+
+running (1m11.0s), 139/500 VUs, 2134 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:37+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-a021-7473-b590-f8aa6f984bd1/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-a151-7cf0-b892-516c2ebc7be5/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-a188-7588-9ca9-7f9bb0944c04/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-714e-7b36-95e1-4b0aaf475164/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-a179-72cd-8e51-ee5a01ecf2f7/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9910-7333-bd83-a86d403f8ed8/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-a1c2-7e81-bb30-cb693c1838b2/pay\": EOF"
+
+running (1m12.0s), 132/500 VUs, 2141 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-7298-75e1-b2ce-36c24b1af8e3/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9a1f-7c2d-be4c-27eeda1c4f56/pay\": EOF"
+time="2026-05-13T14:29:38+08:00" level=warning msg="Request Failed" error="Post \"http://localhost:8094/api/v1/orders/019e2006-9ab3-7283-b6d8-db6825004fce/pay\": EOF"
+
+running (1m13.0s), 127/500 VUs, 2146 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m14.0s), 117/500 VUs, 2156 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m15.0s), 116/500 VUs, 2157 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m16.0s), 115/500 VUs, 2158 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m17.0s), 109/500 VUs, 2164 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m18.0s), 106/500 VUs, 2167 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m19.0s), 102/500 VUs, 2171 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m20.0s), 099/500 VUs, 2174 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m21.0s), 095/500 VUs, 2178 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m22.0s), 091/500 VUs, 2182 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m23.0s), 090/500 VUs, 2183 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m24.0s), 089/500 VUs, 2184 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m25.0s), 089/500 VUs, 2184 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m26.0s), 089/500 VUs, 2184 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m27.0s), 088/500 VUs, 2185 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m28.0s), 088/500 VUs, 2185 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m29.0s), 088/500 VUs, 2185 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+running (1m30.0s), 088/500 VUs, 2185 complete and 0 interrupted iterations
+two_step_flow ↓ [ 100% ] 500 VUs  1m0s
+
+
+  █ THRESHOLDS 
+
+    business_errors
+    ✗ 'rate<0.05' rate=100.00%
+
+    end_to_end_paid_duration
+    ✓ 'p(95)<30000' p(95)=0s
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 1       0.011108/s
+    checks_succeeded...: 100.00% 1 out of 1
+    checks_failed......: 0.00%   0 out of 1
+
+    ✓ event created
+
+    CUSTOM
+    accepted_bookings..............: 2273    25.247672/s
+    book_to_reserved_duration......: avg=513.5ms  min=0s      med=503ms max=1.11s    p(90)=529ms  p(95)=536ms  
+    business_errors................: 100.00% 2185 out of 2185
+    end_to_end_paid_duration.......: avg=0s       min=0s      med=0s    max=0s       p(90)=0s     p(95)=0s     
+
+    HTTP
+    http_req_duration..............: avg=140.27ms min=214µs   med=991µs max=41.67s   p(90)=3.13ms p(95)=14.61ms
+      { expected_response:true }...: avg=1.74ms   min=214µs   med=963µs max=100.57ms p(90)=2.4ms  p(95)=3.55ms 
+    http_req_failed................: 7.54%   4467 out of 59203
+    http_reqs......................: 59203   657.605763/s
+
+    EXECUTION
+    iteration_duration.............: avg=14.06s   min=294.6ms med=2.17s max=1m1s     p(90)=1m0s   p(95)=1m0s   
+    iterations.....................: 2185    24.270199/s
+    vus............................: 88      min=88            max=500
+    vus_max........................: 500     min=500           max=500
+
+    NETWORK
+    data_received..................: 29 MB   320 kB/s
+    data_sent......................: 7.5 MB  83 kB/s
+
+
+
+
+running (1m30.0s), 000/500 VUs, 2185 complete and 88 interrupted iterations
+two_step_flow ✓ [ 100% ] 500 VUs  1m0s
+time="2026-05-13T14:29:56+08:00" level=error msg="thresholds on metrics 'business_errors' have been crossed"
