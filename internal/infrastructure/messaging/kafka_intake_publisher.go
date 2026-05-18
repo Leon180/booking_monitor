@@ -52,7 +52,7 @@ var _ booking.IntakePublisher = (*IntakePublisher)(nil)
 // AllowAutoTopicCreation is enabled so the topic appears on first
 // use without manual broker setup — matches kafkaPublisher's
 // behaviour and the Stage 5 README expectations.
-func NewIntakePublisher(cfg MessagingConfig) *IntakePublisher {
+func NewIntakePublisher(cfg MessagingConfig) booking.IntakePublisher {
 	timeout := cfg.WriteTimeout
 	if timeout == 0 {
 		timeout = 5 * time.Second

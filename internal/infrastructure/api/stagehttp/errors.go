@@ -60,3 +60,19 @@ func MapBookingError(err error) (int, string) {
 		return http.StatusInternalServerError, "internal error"
 	}
 }
+
+// MapEventError maps event.Service.CreateEvent errors to HTTP status
+// codes. Mirrors the booking/errors.go mapping so Stage 5 returns
+// identical codes for the same failure modes.
+func MapEventError(err error) (int, string) {
+	switch {
+	case errors.Is(err, domain.ErrInvalidEventName),
+		errors.Is(err, domain.ErrInvalidTotalTickets),
+		errors.Is(err, domain.ErrInvalidTicketTypeName),
+		errors.Is(err, domain.ErrInvalidTicketTypePrice),
+		errors.Is(err, domain.ErrInvalidTicketTypeCurrency):
+		return http.StatusBadRequest, "invalid event parameters"
+	default:
+		return http.StatusInternalServerError, "internal error"
+	}
+}

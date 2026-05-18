@@ -99,9 +99,10 @@ func (prometheusReconMetrics) ObserveGatewayDuration(seconds float64) {
 // — both detectors live in the same `recon` subcommand process.
 func NewDriftConfig(cfg *config.Config) (recon.DriftConfig, error) {
 	c := recon.DriftConfig{
-		SweepInterval:     cfg.InventoryDrift.SweepInterval,
-		AbsoluteTolerance: cfg.InventoryDrift.AbsoluteTolerance,
-		AutoRehydrate:     cfg.InventoryDrift.AutoRehydrate,
+		SweepInterval:          cfg.InventoryDrift.SweepInterval,
+		AbsoluteTolerance:      cfg.InventoryDrift.AbsoluteTolerance,
+		AutoRehydrate:          cfg.InventoryDrift.AutoRehydrate,
+		MaxConsecutiveFailures: cfg.InventoryDrift.MaxConsecutiveFailures,
 	}
 	if err := c.Validate(); err != nil {
 		return recon.DriftConfig{}, err

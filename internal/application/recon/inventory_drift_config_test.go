@@ -18,8 +18,9 @@ func TestDriftConfigValidate(t *testing.T) {
 	t.Parallel()
 
 	valid := recon.DriftConfig{
-		SweepInterval:     60 * time.Second,
-		AbsoluteTolerance: 100,
+		SweepInterval:          60 * time.Second,
+		AbsoluteTolerance:      100,
+		MaxConsecutiveFailures: 5,
 	}
 
 	cases := []struct {
@@ -45,6 +46,14 @@ func TestDriftConfigValidate(t *testing.T) {
 		{name: "AbsoluteTolerance negative rejected",
 			mutate:  func(c *recon.DriftConfig) { c.AbsoluteTolerance = -1 },
 			wantErr: true, errFragment: "AbsoluteTolerance"},
+
+		{name: "MaxConsecutiveFailures=0 rejected",
+			mutate:  func(c *recon.DriftConfig) { c.MaxConsecutiveFailures = 0 },
+			wantErr: true, errFragment: "MaxConsecutiveFailures"},
+
+		{name: "MaxConsecutiveFailures negative rejected",
+			mutate:  func(c *recon.DriftConfig) { c.MaxConsecutiveFailures = -1 },
+			wantErr: true, errFragment: "MaxConsecutiveFailures"},
 	}
 
 	for _, tc := range cases {

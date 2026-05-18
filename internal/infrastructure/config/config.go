@@ -438,6 +438,14 @@ type InventoryDriftConfig struct {
 	// Redis qty > DB qty → cache_high, which is P0 in flash-sale context.
 	// Qty restoration is operator-gated via the startup rehydrate path only.
 	AutoRehydrate bool `yaml:"auto_rehydrate" env:"INVENTORY_DRIFT_AUTO_REHYDRATE" env-default:"false"`
+
+	// MaxConsecutiveFailures is how many consecutive Sweep errors the
+	// cmd-side runner tolerates before escalating to fx.Shutdown.
+	// Default 5: at the default 60s sweep interval this gives ~5 min
+	// of continuous failure before the pod restarts — well outside the
+	// noise band of a transient PG/Redis blip and well inside any k8s
+	// readiness window.
+	MaxConsecutiveFailures int `yaml:"max_consecutive_failures" env:"INVENTORY_DRIFT_MAX_CONSEC_FAILURES" env-default:"5"`
 }
 
 type AppConfig struct {

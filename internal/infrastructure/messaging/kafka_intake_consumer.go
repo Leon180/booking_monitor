@@ -105,6 +105,9 @@ const (
 // proactively call RevertInventory on the terminal path so the leak
 // window is sub-millisecond instead of sweep-interval-long — the drift
 // reconciler is the SAFETY NET, not the primary recovery path.
+// Compile-time assertion that *IntakeConsumer satisfies booking.IntakeConsumer.
+var _ booking.IntakeConsumer = (*IntakeConsumer)(nil)
+
 type IntakeConsumer struct {
 	reader        *kafka.Reader
 	processor     worker.MessageProcessor
@@ -130,7 +133,7 @@ func NewIntakeConsumer(
 	inventory domain.InventoryRepository,
 	metrics booking.Stage5Metrics,
 	logger *mlog.Logger,
-) *IntakeConsumer {
+) booking.IntakeConsumer {
 	scoped := logger.With(mlog.String("component", "stage5_intake_consumer"))
 
 	r := kafka.NewReader(kafka.ReaderConfig{
@@ -437,6 +440,22 @@ func shouldResetLagIntake(lastUnixNano int64, now time.Time, threshold time.Dura
 
 // Close shuts down the kafka.Reader. Mirrors IntakePublisher.Close's
 // 10s bounded-close guard so OnStop can never hang on a slow broker.
+// Ping dials the first configured broker to verify reachability. Called
+// from the fx OnStart hook with the startup context so the process fails
+// fast if the broker is unreachable — prevents HTTP traffic from arriving
+// before the consumer group is established.
+func (c *IntakeConsumer) Ping(ctx context.Context) error {
+	brokers := c.reader.Config().Brokers
+	if len(brokers) == 0 {
+		return fmt.Errorf("IntakeConsumer.Ping: no brokers configured")
+	}
+	conn, err := kafka.DialContext(ctx, "tcp", brokers[0])
+	if err != nil {
+		return fmt.Errorf("IntakeConsumer.Ping: broker %s unreachable: %w", brokers[0], err)
+	}
+	return conn.Close()
+}
+
 func (c *IntakeConsumer) Close() error {
 	done := make(chan error, 1)
 	go func() { done <- c.reader.Close() }()
