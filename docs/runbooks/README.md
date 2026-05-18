@@ -434,6 +434,54 @@ Then map the dominant label to its handler:
 
 ---
 
+## SagaMarkRedisRevertedPersistFailing
+
+**Symptom.** `increase(saga_mark_redis_reverted_errors_total[10m]) > 0 for 5m`. Severity `warning`.
+
+**What happened.** `RevertInventory` succeeded — Redis inventory is correct. But the subsequent `UPDATE saga_compensations SET redis_reverted_at = NOW()` failed on every Kafka retry. After `sagaMaxRetries=3` the message was DLQ'd. The `saga:reverted:{compensation_id}` Redis key (7-day TTL) was set by `revert.lua` and is still present.
+
+**Inventory status: correct.** This is a PG fence record gap, not an inventory emergency. The risk is narrow: if Redis crashes AND the 7-day `saga:reverted` TTL expires before `redis_reverted_at` is set in PG, a future Kafka redeliver would double-revert and produce `cache_high` by +1.
+
+**Diagnosis.**
+1. Confirm PG is healthy: `psql ... -c "SELECT 1"` should return immediately.
+2. Find affected rows:
+   ```sql
+   SELECT compensation_id, order_id, completed_at, redis_reverted_at
+   FROM saga_compensations
+   WHERE redis_reverted_at IS NULL
+   ORDER BY completed_at DESC
+   LIMIT 20;
+   ```
+3. Confirm Redis qty is already correct (revert happened):
+   ```bash
+   # Get ticket_type_id from the order
+   psql ... -Atc "SELECT ticket_type_id, quantity FROM orders WHERE id = '<order_id>'"
+   redis-cli GET "ticket_type_qty:<ticket-type-uuid>"   # should reflect the revert
+   redis-cli EXISTS "saga:reverted:<compensation_id>"   # should be 1 (key present)
+   ```
+
+**Action.**
+- **Option A (preferred — manual PG write):** If PG is healthy now, stamp the missing column directly:
+  ```sql
+  UPDATE saga_compensations
+  SET redis_reverted_at = NOW()
+  WHERE compensation_id = '<compensation_id>'
+    AND redis_reverted_at IS NULL;
+  ```
+  Repeat for each NULL row. Verify with `SELECT redis_reverted_at FROM saga_compensations WHERE compensation_id = '...'`.
+
+- **Option B — DLQ redrive:** If the original `order.failed` message is still in `order.failed.dlq` and PG is now healthy, redrive it. The compensator will enter the `wasAlreadyCompensated=true` path → `WasRedisReverted=false` → `revert.lua` no-op (EXISTS guard still present) → `MarkRedisReverted` succeeds.
+
+- **Option C — if `saga:reverted` key has already expired (> 7 days):** The EXISTS guard is gone. Before redirive, manually arm the key to prevent double-revert:
+  ```bash
+  redis-cli SET "saga:reverted:<compensation_id>" "1" EX 604800
+  ```
+  Then redrive or use Option A.
+
+**Escalation.** If `redis_reverted_at IS NULL` rows are accumulating (not just a one-off spike) and PG appears healthy, this signals a persistent write path bug — page the on-call engineer rather than manually patching rows.
+
+---
+
 ## IdempotencyCacheGetErrors
 
 **Symptom.** `idempotency_cache_get_errors_total` rate > 0 for 1m. Severity `warning`. **Page-worthy** — duplicate-charge protection is suspended for affected requests.
@@ -568,15 +616,30 @@ Redis > DB. Anomalous regardless of magnitude — only saga compensation desync 
    ```
    If non-zero, the compensator is partially succeeding (Redis revert happens before the DB transition; failure between them leaves Redis ahead).
 
-3. **Reconcile manually.** Post-D4.1 the source of truth is `event_ticket_types.available_tickets`, keyed by `ticket_type_id` (not `event_id`). Find the affected ticket type from the drift detector log (`component=inventory_drift, ticket_type_id=<uuid>`), then:
-   ```sql
-   -- Verify join first — never UPDATE without confirming the current state
-   SELECT ett.id, ett.available_tickets, ett.total_tickets,
-          (SELECT COUNT(*) FROM orders WHERE ticket_type_id = ett.id AND status IN ('confirmed','awaiting_payment')) AS live_orders
-   FROM event_ticket_types ett
-   WHERE ett.id = '<ticket-type-uuid>';
+3. **Reconcile — correct Redis, not DB.** For `cache_high`, Redis is the suspect side; DB is the source of truth. Find the affected ticket type from the drift detector log (`component=inventory_drift, ticket_type_id=<uuid>`):
+   ```bash
+   # Step 1: read current values
+   REDIS_QTY=$(redis-cli GET "ticket_type_qty:<ticket-type-uuid>")
+   DB_QTY=$(psql ... -Atc "SELECT available_tickets FROM event_ticket_types WHERE id = '<ticket-type-uuid>'")
+   DELTA=$((REDIS_QTY - DB_QTY))   # should be > 0 for cache_high
+   echo "Redis=$REDIS_QTY DB=$DB_QTY delta=$DELTA"
    ```
-   Only if Redis is confirmed ahead of DB AND the customer was charged: `UPDATE event_ticket_types SET available_tickets = <redis_qty> WHERE id = '<ticket-type-uuid>'`. **Getting this wrong creates duplicate/missing inventory — when in doubt, page the on-call engineer.**
+   ```sql
+   -- Step 2: verify live order counts before touching anything
+   -- Include both confirmed (charged) and awaiting_payment (Pattern A reserved)
+   SELECT ett.id, ett.available_tickets, ett.total_tickets,
+          SUM(CASE WHEN o.status IN ('confirmed','awaiting_payment') THEN o.quantity ELSE 0 END) AS live_reserved
+   FROM event_ticket_types ett
+   LEFT JOIN orders o ON o.ticket_type_id = ett.id
+   WHERE ett.id = '<ticket-type-uuid>'
+   GROUP BY ett.id, ett.available_tickets, ett.total_tickets;
+   -- Cross-check: total_tickets - live_reserved should equal available_tickets (DB truth)
+   ```
+   ```bash
+   # Step 3: reduce Redis to match DB (trust DB, not Redis)
+   redis-cli DECRBY "ticket_type_qty:<ticket-type-uuid>" $DELTA
+   ```
+   **Do NOT raise DB to match Redis** — that turns the suspect ghost value into permanent truth and can preserve phantom stock. Only adjust `event_ticket_types.available_tickets` upward if the `live_reserved` count from Step 2 proves DB is actually undercounting committed orders. When in doubt, freeze sales (take the event offline temporarily) and page the on-call engineer.
 
    > **`InventoryDriftCacheHigh` is critical (for: 0s)** — do not wait for the `for: 5m` soak that applies to the warning alerts. Page immediately and start diagnosis.
 
