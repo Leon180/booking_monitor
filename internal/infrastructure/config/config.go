@@ -425,6 +425,19 @@ type InventoryDriftConfig struct {
 	// always zero. Set higher only after observing sustained false
 	// positives in production at the chosen value.
 	AbsoluteTolerance int `yaml:"absolute_tolerance" env:"INVENTORY_DRIFT_ABSOLUTE_TOLERANCE" env-default:"100"`
+
+	// AutoRehydrate enables automatic SETNX restoration of cache_missing qty
+	// keys detected during a drift sweep. Disabled by default — auto-mutation
+	// in a sweep loop requires deliberate opt-in by the operator.
+	//
+	// Safe only for the cache_missing direction: SETNX is atomic at the Redis
+	// server level (redis.io/docs/latest/commands/setnx/) and preserves any
+	// live value written by a concurrent Lua deduct between detection and the
+	// SETNX call. cache_high auto-correction is intentionally NOT supported —
+	// overwriting Redis when cache > DB during an async write-behind window
+	// would lose in-flight deductions (write-behind conflation risk per the
+	// Redis consistency blog).
+	AutoRehydrate bool `yaml:"auto_rehydrate" env:"INVENTORY_DRIFT_AUTO_REHYDRATE" env-default:"false"`
 }
 
 type AppConfig struct {

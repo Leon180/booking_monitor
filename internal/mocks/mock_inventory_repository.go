@@ -102,6 +102,7 @@ func (mr *MockInventoryRepositoryMockRecorder) RevertInventory(ctx, ticketTypeID
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevertInventory", reflect.TypeOf((*MockInventoryRepository)(nil).RevertInventory), ctx, ticketTypeID, count, compensationID)
 }
 
+
 // SetTicketTypeMetadata mocks base method.
 func (m *MockInventoryRepository) SetTicketTypeMetadata(ctx context.Context, ticketType domain.TicketType) error {
 	m.ctrl.T.Helper()

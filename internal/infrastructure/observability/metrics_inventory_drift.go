@@ -93,3 +93,32 @@ var InventoryDriftSweepDurationSeconds = promauto.NewHistogram(
 		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 	},
 )
+
+// ── Auto-rehydrate counters (Gap B, enabled via INVENTORY_DRIFT_AUTO_REHYDRATE) ──
+//
+// Auto-rehydrate is metadata-only: SetTicketTypeMetadata (HSET) refreshes
+// the immutable booking snapshot key. The qty key is intentionally NOT
+// restored — SETNX from a stale DB value during the async write-behind window
+// produces cache_high (P0 in flash-sale context). Qty restoration is
+// operator-gated via startup rehydrate.
+
+// InventoryDriftAutoRehydratedTotal bumps each time SetTicketTypeMetadata
+// successfully refreshes the metadata key for a cache_missing event.
+// A rate > 0 means the metadata key was absent; operators should also
+// run startup rehydrate to restore the qty key.
+var InventoryDriftAutoRehydratedTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "inventory_drift_auto_rehydrated_total",
+		Help: "Total metadata keys refreshed by the DriftDetector auto-rehydrate path (cache_missing + AutoRehydrate=true; metadata-only, qty key not touched)",
+	},
+)
+
+// InventoryDriftAutoRehydrateErrorsTotal bumps when the SetTicketTypeMetadata
+// Redis call itself fails. Auto-rehydrate is best-effort; the cache_missing
+// detection counter is still bumped so the alert fires.
+var InventoryDriftAutoRehydrateErrorsTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "inventory_drift_auto_rehydrate_errors_total",
+		Help: "Total SetTicketTypeMetadata failures during DriftDetector auto-rehydrate (network error, pool exhaustion)",
+	},
+)

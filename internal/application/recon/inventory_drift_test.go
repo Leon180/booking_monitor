@@ -22,24 +22,28 @@ import (
 // read like `m.detected["cache_high"]` instead of polling Prometheus
 // global singletons, which keeps these tests parallel-safe.
 type recordingDriftMetrics struct {
-	driftedEvents     int
-	detected          map[string]int
-	listEventsErrors  int
-	cacheReadErrors   int
-	sweepDurations    []float64
+	driftedEvents        int
+	detected             map[string]int
+	listEventsErrors     int
+	cacheReadErrors      int
+	sweepDurations       []float64
+	autoRehydrated      int
+	autoRehydrateErrors int
 }
 
 func newRecordingDriftMetrics() *recordingDriftMetrics {
 	return &recordingDriftMetrics{detected: make(map[string]int)}
 }
 
-func (m *recordingDriftMetrics) SetDriftedEventsCount(c int)        { m.driftedEvents = c }
-func (m *recordingDriftMetrics) IncDriftDetected(direction string)  { m.detected[direction]++ }
-func (m *recordingDriftMetrics) IncListEventsErrors()               { m.listEventsErrors++ }
-func (m *recordingDriftMetrics) IncCacheReadErrors()                { m.cacheReadErrors++ }
+func (m *recordingDriftMetrics) SetDriftedEventsCount(c int)       { m.driftedEvents = c }
+func (m *recordingDriftMetrics) IncDriftDetected(direction string) { m.detected[direction]++ }
+func (m *recordingDriftMetrics) IncListEventsErrors()              { m.listEventsErrors++ }
+func (m *recordingDriftMetrics) IncCacheReadErrors()               { m.cacheReadErrors++ }
 func (m *recordingDriftMetrics) ObserveSweepDuration(s float64) {
 	m.sweepDurations = append(m.sweepDurations, s)
 }
+func (m *recordingDriftMetrics) IncAutoRehydrated()      { m.autoRehydrated++ }
+func (m *recordingDriftMetrics) IncAutoRehydrateErrors() { m.autoRehydrateErrors++ }
 
 // driftHarness bundles the mocks + recording metrics + the detector
 // itself. Tolerance defaults to 5; each test can override via the
@@ -54,6 +58,16 @@ type driftHarness struct {
 
 func newDriftHarness(t *testing.T, tolerance int) *driftHarness {
 	t.Helper()
+	return newDriftHarnessOpts(t, tolerance, false)
+}
+
+func newDriftHarnessAutoRehydrate(t *testing.T, tolerance int) *driftHarness {
+	t.Helper()
+	return newDriftHarnessOpts(t, tolerance, true)
+}
+
+func newDriftHarnessOpts(t *testing.T, tolerance int, autoRehydrate bool) *driftHarness {
+	t.Helper()
 	ctrl := gomock.NewController(t)
 	events := mocks.NewMockEventRepository(ctrl)
 	ticketType := mocks.NewMockTicketTypeRepository(ctrl)
@@ -63,6 +77,7 @@ func newDriftHarness(t *testing.T, tolerance int) *driftHarness {
 	cfg := recon.DriftConfig{
 		SweepInterval:     50 * time.Millisecond,
 		AbsoluteTolerance: tolerance,
+		AutoRehydrate:     autoRehydrate,
 	}
 	d := recon.NewInventoryDriftDetector(events, ticketType, inv, cfg, metrics, mlog.NewNop())
 	return &driftHarness{d: d, events: events, ticketType: ticketType, inventory: inv, metrics: metrics}
@@ -296,4 +311,52 @@ func TestDriftSweep_CtxCancelledAtLoopBoundary_ExitsCleanly(t *testing.T) {
 	err := h.d.Sweep(ctx)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// ── Auto-rehydrate tests (Gap B, INVENTORY_DRIFT_AUTO_REHYDRATE=true) ──────────
+//
+// Safety basis: auto-rehydrate is metadata-only. SetTicketTypeMetadata (HSET)
+// refreshes the immutable booking snapshot key (event_id, amount_cents,
+// currency). The qty key is intentionally NOT restored — SETNX from a stale
+// DB value during the async write-behind window would produce cache_high,
+// which is P0 in a flash-sale context (false 202 Accepted for non-existent
+// inventory). Qty restoration is operator-gated via startup rehydrate.
+
+func TestDriftSweep_AutoRehydrate_MetadataRefresh_Success(t *testing.T) {
+	t.Parallel()
+	h := newDriftHarnessAutoRehydrate(t, 5)
+	ctx := context.Background()
+
+	// cache_missing + AutoRehydrate=true → SetTicketTypeMetadata called (metadata HSET only).
+	e := eventWithAvail(t, 100)
+	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
+	h.expectDBQty(ctx, e, 100)
+	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(0, false, nil)
+	h.inventory.EXPECT().SetTicketTypeMetadata(ctx, gomock.Any()).Return(nil)
+
+	require.NoError(t, h.d.Sweep(ctx))
+	assert.Equal(t, 1, h.metrics.detected["cache_missing"], "cache_missing counter still bumped")
+	assert.Equal(t, 1, h.metrics.autoRehydrated, "metadata HSET succeeded → autoRehydrated++")
+	assert.Zero(t, h.metrics.autoRehydrateErrors)
+	assert.Equal(t, 1, h.metrics.driftedEvents, "event still counted as drifted (qty key was missing at detection time)")
+}
+
+func TestDriftSweep_AutoRehydrate_Error_IncrementsErrors_SweepContinues(t *testing.T) {
+	t.Parallel()
+	h := newDriftHarnessAutoRehydrate(t, 5)
+	ctx := context.Background()
+
+	// SetTicketTypeMetadata returns an error (Redis pool exhaustion etc.).
+	// Auto-rehydrate is best-effort: sweep continues, cache_missing counter
+	// is still bumped so the InventoryDriftDetected alert fires.
+	e := eventWithAvail(t, 100)
+	h.events.EXPECT().ListAvailable(ctx).Return([]domain.Event{e}, nil)
+	h.expectDBQty(ctx, e, 100)
+	h.inventory.EXPECT().GetInventory(ctx, e.ID()).Return(0, false, nil)
+	h.inventory.EXPECT().SetTicketTypeMetadata(ctx, gomock.Any()).Return(errors.New("redis pool exhausted"))
+
+	require.NoError(t, h.d.Sweep(ctx), "auto-rehydrate error must not abort the sweep")
+	assert.Equal(t, 1, h.metrics.detected["cache_missing"])
+	assert.Equal(t, 1, h.metrics.autoRehydrateErrors)
+	assert.Zero(t, h.metrics.autoRehydrated)
 }

@@ -101,6 +101,7 @@ func NewDriftConfig(cfg *config.Config) (recon.DriftConfig, error) {
 	c := recon.DriftConfig{
 		SweepInterval:     cfg.InventoryDrift.SweepInterval,
 		AbsoluteTolerance: cfg.InventoryDrift.AbsoluteTolerance,
+		AutoRehydrate:     cfg.InventoryDrift.AutoRehydrate,
 	}
 	if err := c.Validate(); err != nil {
 		return recon.DriftConfig{}, err
@@ -130,6 +131,12 @@ func (prometheusDriftMetrics) IncCacheReadErrors() {
 }
 func (prometheusDriftMetrics) ObserveSweepDuration(seconds float64) {
 	observability.InventoryDriftSweepDurationSeconds.Observe(seconds)
+}
+func (prometheusDriftMetrics) IncAutoRehydrated() {
+	observability.InventoryDriftAutoRehydratedTotal.Inc()
+}
+func (prometheusDriftMetrics) IncAutoRehydrateErrors() {
+	observability.InventoryDriftAutoRehydrateErrorsTotal.Inc()
 }
 
 // ── saga watchdog ────────────────────────────────────────────────────

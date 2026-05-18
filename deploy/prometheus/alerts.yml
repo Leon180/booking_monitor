@@ -682,55 +682,69 @@ groups:
           summary: "OutboxPendingCollector cannot query DB — outbox_pending_count is unreliable"
           description: "Per-scrape COUNT(events_outbox WHERE processed_at IS NULL) failing for 2m+. The outbox_pending_count gauge is silent or stale; OutboxPendingBacklog alert cannot fire while this is degraded. Diagnose: DB outage, missing migration 000007 partial index, query timeout. See runbook."
 
-      - alert: InventoryDriftDetected
-        # PR-D — fires when the inventory drift detector flags any
-        # event where Redis cache disagrees with the Postgres
-        # `events.available_tickets` source-of-truth beyond the
-        # configured tolerance. Three direction labels distinguish:
+      - alert: InventoryDriftCacheHigh
+        # P0 — Redis qty > DB qty. In a flash-sale context this means
+        # users can receive a false 202 Accepted for inventory that
+        # doesn't exist: Lua deduct checks Redis, which reports more
+        # stock than Postgres holds.
         #
-        #   cache_missing    — DB > 0, Redis returns 0 (rehydrate
-        #                      didn't run or was incomplete; a fresh
-        #                      Redis or post-FLUSHALL state without
-        #                      the boot-time rehydrate from PR-B)
-        #   cache_high       — Redis > DB. Anomalous regardless of
-        #                      magnitude — only saga compensation
-        #                      desync or manual SetInventory beyond
-        #                      reset baseline produces this.
-        #   cache_low_excess — Redis < DB by more than tolerance.
-        #                      Steady-state drift is positive (in-
-        #                      flight bookings between Lua deduct and
-        #                      worker DB-commit); excess means the
-        #                      worker is failing to commit OR the
-        #                      reconciler force-fail leaks inventory.
+        # Only two sources produce cache_high:
+        #   1. Saga compensation desync — double-revert wrote Redis
+        #      but Postgres row already matched. PR #114 (saga fence)
+        #      eliminated the primary double-revert path; any remaining
+        #      rate points to a fence bypass or new desync vector.
+        #   2. Manual SetInventory beyond the reset baseline.
         #
-        # In a healthy production system this counter is 0. Any
-        # sustained rate is a customer-visible failure mode (sold-out
-        # while DB shows inventory, or successful bookings without DB
-        # rows).
+        # `for: 0s` — zero soak. Any observation is anomalous; there
+        # is no "transient in-flight" explanation for Redis > DB in
+        # a correctly operating system. Page immediately.
+        expr: increase(inventory_drift_detected_total{direction="cache_high"}[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorydriftdetected"
+          summary: "CRITICAL: Redis inventory exceeds DB — false bookings possible"
+          description: "cache_high detected: Redis qty > DB qty for one or more ticket types. Users may receive 202 Accepted for non-existent inventory. Investigate immediately: check saga_compensations table for double-revert patterns, check for manual SetInventory calls beyond reset baseline. Use logs `component=inventory_drift` for affected event_id + ticket_type_id."
+
+      - alert: InventoryDriftCacheMissing
+        # PR-D — fires when the drift detector finds a ticket type
+        # where DB has inventory (available_tickets > 0) but the Redis
+        # qty key is absent. Means the boot-time rehydrate from PR-B
+        # didn't run or was incomplete (post-FLUSHALL, Redis wipe, key
+        # TTL expiry). Auto-rehydrate (INVENTORY_DRIFT_AUTO_REHYDRATE)
+        # refreshes the metadata key only — qty requires operator-gated
+        # startup rehydrate to avoid cache_high during write-behind.
         #
-        # `for: 5m` — drift detection sweeps every 60s by default.
-        # 5m gives ~5 fresh observations to discriminate "transient
-        # in-flight blip" (one busy moment crosses tolerance briefly)
-        # from "sustained corruption" (alert worth paging).
-        #
-        # `increase[5m]` matches the soak window — same rationale as
-        # ConsumerGroupRecreated above (avoids the eval-cadence /
-        # window-expiry gap that smoke-test confirmed).
-        #
-        # NO `sum()` aggregation; one alert per direction-label is
-        # the desired triage shape (different remediations per
-        # direction).
-        #
-        # See `docs/architectural_backlog.md` § "Cache-truth
-        # architecture" for the full 4-PR plan; this is PR-D.
-        expr: increase(inventory_drift_detected_total[5m]) > 0
+        # `for: 5m` — 5 sweep observations to discriminate a transient
+        # startup gap from sustained key absence.
+        expr: increase(inventory_drift_detected_total{direction="cache_missing"}[5m]) > 0
         for: 5m
         labels:
           severity: warning
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorydriftdetected"
-          summary: "Inventory drift between Redis and DB ({{ $labels.direction }})"
-          description: "Inventory drift detector flagged events with direction={{ $labels.direction }}. Investigate: (1) cache_missing → check rehydrate ran on last app start; (2) cache_high → look for saga compensator desync since last sweep; (3) cache_low_excess → check worker_consumer_lag and recon_resolved_total{outcome=\"max_age_exceeded\"} for inventory-leaking force-fails. Use logs `component=inventory_drift` for affected event_ids."
+          summary: "Inventory cache key absent with positive DB inventory"
+          description: "cache_missing: Redis qty key absent for one or more ticket types that have available_tickets > 0 in DB. Lua deduct treats missing key as sold-out — customers will see false sold-out. Remediate: re-run startup rehydrate (safe, idempotent). Use logs `component=inventory_drift` for affected event_id + ticket_type_id."
+
+      - alert: InventoryDriftCacheLowExcess
+        # PR-D — fires when Redis qty < DB qty by more than
+        # INVENTORY_DRIFT_ABSOLUTE_TOLERANCE (default 10). Steady-state
+        # drift is positive (in-flight bookings between Lua deduct and
+        # worker DB-commit); excess beyond tolerance means the worker
+        # is failing to commit OR the reconciler force-fail path leaks
+        # inventory (DEF-CRIT from Phase 2 checkpoint).
+        #
+        # `for: 5m` — same soak as cache_missing; in-flight bursts
+        # produce momentary excess but resolve within seconds.
+        expr: increase(inventory_drift_detected_total{direction="cache_low_excess"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#inventorydriftdetected"
+          summary: "Inventory cache below DB beyond tolerance"
+          description: "cache_low_excess: Redis qty is below DB qty by more than the configured tolerance for one or more ticket types. Check worker_consumer_lag for processing backlog and recon_resolved_total{outcome=\"max_age_exceeded\"} for inventory-leaking force-fails. Use logs `component=inventory_drift` for affected event_id + ticket_type_id."
 
       - alert: InventoryDriftListEventsErrors
         # PR-D follow-up — fires when the drift detector's per-sweep
