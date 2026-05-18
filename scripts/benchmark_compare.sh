@@ -45,12 +45,12 @@ echo "============================================"
 reset_state() {
     echo "[reset] Flushing Redis and resetting DB..."
     docker exec booking_redis redis-cli -a "${REDIS_PASSWORD:-smoketest_redis_local}" FLUSHALL > /dev/null 2>&1
-    # orders + order_status_history truncated together — FK with
-    # ON DELETE CASCADE rules out plain `TRUNCATE orders` (Postgres
-    # rejects without CASCADE when child tables reference the parent).
-    # Matches the Makefile reset-db target verbatim. PR #40 added the
-    # FK; this script wasn't updated until PR #43 surfaced the gap.
-    psql "$DB_URL" -q -c "TRUNCATE TABLE orders, order_status_history RESTART IDENTITY; UPDATE events SET available_tickets = total_tickets;" > /dev/null
+    # saga_compensations + orders + order_status_history truncated together.
+    # saga_compensations holds an FK to orders (migration 000016 PR-A);
+    # order_status_history likewise (PR #40). Listing all in one TRUNCATE
+    # bypasses FK checks across the set — no CASCADE needed.
+    # Matches the Makefile reset-db target verbatim.
+    psql "$DB_URL" -q -c "TRUNCATE TABLE saga_compensations, orders, order_status_history RESTART IDENTITY; UPDATE events SET available_tickets = total_tickets;" > /dev/null
     echo "[reset] Done."
 }
 

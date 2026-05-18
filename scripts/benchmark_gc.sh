@@ -41,7 +41,9 @@ echo "============================================"
 reset_state() {
     echo "[reset] Flushing Redis and resetting DB..."
     docker exec booking_redis redis-cli -a "${REDIS_PASSWORD:-smoketest_redis_local}" FLUSHALL > /dev/null 2>&1
-    psql "$MIGRATE_DB_URL" -q -c "TRUNCATE TABLE orders; UPDATE events SET available_tickets = total_tickets;" > /dev/null
+    # saga_compensations holds an FK to orders (migration 000016 PR-A);
+    # must be listed alongside orders in the same TRUNCATE statement.
+    psql "$MIGRATE_DB_URL" -q -c "TRUNCATE TABLE saga_compensations, orders; UPDATE events SET available_tickets = total_tickets;" > /dev/null
     echo "[reset] Done."
 }
 
