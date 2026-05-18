@@ -124,6 +124,7 @@ type InventoryRepository interface {
 	// (caller handles via metric bump + retry next sweep). The
 	// `(qty, found)` pair is only meaningful when `err == nil`.
 	GetInventory(ctx context.Context, ticketTypeID uuid.UUID) (qty int, found bool, err error)
+
 }
 
 // Stage5InventoryRepository extends InventoryRepository with the

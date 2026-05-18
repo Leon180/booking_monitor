@@ -379,8 +379,9 @@ func TestHandleOrderFailed_RevertInventoryError(t *testing.T) {
 }
 
 // TestHandleOrderFailed_MarkRedisReverted_Fails: RevertInventory succeeds
-// but MarkRedisReverted fails → best-effort, compensation returns nil.
-// Outcome label distinguishes this from the full-success path.
+// but MarkRedisReverted fails → error returned so Kafka retries.
+// On retry, revert.lua EXISTS guard is a no-op, MarkRedisReverted gets a
+// second chance. Outcome label is still recorded so the counter fires.
 func TestHandleOrderFailed_MarkRedisReverted_Fails(t *testing.T) {
 	t.Parallel()
 	comp, orderRepo, eventRepo, ticketTypeRepo, invRepo, uow, sagaCompRepo := compensatorHarness(t)
@@ -398,7 +399,7 @@ func TestHandleOrderFailed_MarkRedisReverted_Fails(t *testing.T) {
 	sagaCompRepo.EXPECT().MarkRedisReverted(gomock.Any(), "order:"+orderID.String()).Return(errors.New("postgres: timeout"))
 
 	err := comp.HandleOrderFailed(context.Background(), newOrderFailedPayload(t, orderID, eventID, ticketTypeID), time.Now())
-	require.NoError(t, err) // best-effort: compensation complete despite flag failure
+	require.Error(t, err) // propagates so Kafka retries; revert.lua guard prevents double-revert
 }
 
 // TestHandleOrderFailed_HappyPath: both DB and Redis sides advance
@@ -560,7 +561,7 @@ func TestHandleOrderFailed_OutcomeLabel_Exhaustive(t *testing.T) {
 			name:             "compensated_redis_mark_failed_skips_histogram",
 			wantOutcome:      "compensated_redis_mark_failed",
 			wantHistogramHit: false,
-			wantNoError:      true,
+			wantNoError:      false, // error returned → Kafka retries; revert.lua EXISTS guard prevents double-revert
 			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork, sagaCompRepo *mocks.MockSagaCompensationRepository) (uuid.UUID, uuid.UUID, uuid.UUID) {
 				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
 				failed := reconstructOrder(t, orderID, eventID, domain.OrderStatusFailed)
@@ -594,7 +595,7 @@ func TestHandleOrderFailed_OutcomeLabel_Exhaustive(t *testing.T) {
 			name:             "already_compensated_redis_mark_failed_skips_histogram",
 			wantOutcome:      "already_compensated_redis_mark_failed",
 			wantHistogramHit: false,
-			wantNoError:      true,
+			wantNoError:      false, // error returned → Kafka retries; revert.lua EXISTS guard prevents double-revert
 			setupMocks: func(t *testing.T, orderRepo *mocks.MockOrderRepository, eventRepo *mocks.MockEventRepository, ticketTypeRepo *mocks.MockTicketTypeRepository, invRepo *mocks.MockInventoryRepository, uow *mocks.MockUnitOfWork, sagaCompRepo *mocks.MockSagaCompensationRepository) (uuid.UUID, uuid.UUID, uuid.UUID) {
 				orderID, eventID, ttID := uuid.New(), uuid.New(), uuid.New()
 				already := reconstructOrder(t, orderID, eventID, domain.OrderStatusCompensated)

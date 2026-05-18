@@ -200,15 +200,43 @@ func (d *InventoryDriftDetector) checkOne(ctx context.Context, e domain.Event) c
 			tag.EventID(e.ID()), tag.Error(err))
 		return checkOutcomeSkipped
 	}
+	// Iterate ALL ticket types to find the worst outcome. Early-exit on
+	// the first non-clean would silently skip cache_high on a later TT
+	// when the first TT is cache_missing — the P0 case goes undetected.
+	worst := checkOutcomeClean
 	for _, tt := range ticketTypes {
-		outcome := d.checkTicketType(ctx, e, tt)
-		if outcome != checkOutcomeClean {
-			return outcome
+		if outcome := d.checkTicketType(ctx, e, tt); outcome > worst {
+			worst = outcome
 		}
 	}
+	return worst
+}
 
-	// Within tolerance — no metric emission, no log line.
-	return checkOutcomeClean
+// autoRehydrate refreshes the immutable metadata key (HSET via
+// SetTicketTypeMetadata) for a detected cache_missing event.
+// Called only when DriftConfig.AutoRehydrate is true. Best-effort: on Redis
+// error the sweep still continues and the cache_missing counter is already
+// bumped by the caller.
+//
+// Safety: metadata is an immutable snapshot (event_id, amount_cents, currency)
+// — HSET overwrite is always idempotent and safe. The qty key is intentionally
+// NOT restored here: SETNX from a stale DB value during an active write-behind
+// window (in-flight deductions between Lua deduct and worker DB-commit) would
+// set Redis qty = DB qty, then after the worker commits DB qty decreases, leaving
+// Redis qty > DB qty → cache_high. In a flash-sale context this is P0: a user
+// would receive a false 202 Accepted for inventory that doesn't exist. Qty
+// restoration is operator-gated via startup rehydrate only.
+func (d *InventoryDriftDetector) autoRehydrate(ctx context.Context, e domain.Event, tt domain.TicketType) {
+	if err := d.inventory.SetTicketTypeMetadata(ctx, tt); err != nil {
+		d.metrics.IncAutoRehydrateErrors()
+		d.log.Warn(ctx, "drift: auto-rehydrate metadata HSET failed",
+			tag.EventID(e.ID()), tag.TicketTypeID(tt.ID()), tag.Error(err))
+		return
+	}
+	d.metrics.IncAutoRehydrated()
+	d.log.Info(ctx, "drift: auto-rehydrated metadata key from DB snapshot",
+		tag.EventID(e.ID()), tag.TicketTypeID(tt.ID()),
+		mlog.Int("db_qty", tt.AvailableTickets()))
 }
 
 func (d *InventoryDriftDetector) checkTicketType(ctx context.Context, e domain.Event, tt domain.TicketType) checkOutcome {
@@ -234,6 +262,9 @@ func (d *InventoryDriftDetector) checkTicketType(ctx context.Context, e domain.E
 			tag.TicketTypeID(tt.ID()),
 			mlog.Int("db_qty", dbQty),
 		)
+		if d.cfg.AutoRehydrate {
+			d.autoRehydrate(ctx, e, tt)
+		}
 		return checkOutcomeDrifted
 	}
 	if drift < 0 {

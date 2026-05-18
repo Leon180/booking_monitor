@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"strconv"
 	"sync"
 	"time"
@@ -302,6 +303,7 @@ func (r *redisInventoryRepository) GetInventory(ctx context.Context, ticketTypeI
 	}
 	return val, true, nil
 }
+
 
 func (r *redisInventoryRepository) DeductInventory(
 	ctx context.Context,

@@ -425,6 +425,19 @@ type InventoryDriftConfig struct {
 	// always zero. Set higher only after observing sustained false
 	// positives in production at the chosen value.
 	AbsoluteTolerance int `yaml:"absolute_tolerance" env:"INVENTORY_DRIFT_ABSOLUTE_TOLERANCE" env-default:"100"`
+
+	// AutoRehydrate enables metadata-only refresh of cache_missing keys
+	// detected during a drift sweep. Disabled by default — auto-mutation
+	// in a sweep loop requires deliberate opt-in by the operator.
+	//
+	// When enabled, the detector calls SetTicketTypeMetadata (HSET) to
+	// refresh ticket_type_meta:{id} (the immutable booking snapshot key)
+	// for each cache_missing ticket type. The qty key ticket_type_qty:{id}
+	// is intentionally NOT touched — restoring it via SETNX from a DB value
+	// captured before in-flight Lua deductions are committed would produce
+	// Redis qty > DB qty → cache_high, which is P0 in flash-sale context.
+	// Qty restoration is operator-gated via the startup rehydrate path only.
+	AutoRehydrate bool `yaml:"auto_rehydrate" env:"INVENTORY_DRIFT_AUTO_REHYDRATE" env-default:"false"`
 }
 
 type AppConfig struct {

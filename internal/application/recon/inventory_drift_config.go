@@ -30,6 +30,19 @@ type DriftConfig struct {
 	// the steady-state in-flight-bookings buffer between Lua deduct and
 	// worker-commit. Pick from observed peak in-flight booking count.
 	AbsoluteTolerance int
+
+	// AutoRehydrate, when true, causes the detector to refresh the immutable
+	// metadata key (HSET ticket_type_meta:{id}) when a cache_missing qty key
+	// is detected. The qty key itself is intentionally NOT restored: SETNX
+	// from a stale DB value during an active write-behind window (in-flight
+	// deductions between Lua deduct and worker DB-commit) produces Redis qty >
+	// DB qty → cache_high, which is P0 in flash-sale context (false 202
+	// Accepted). The metadata snapshot (event_id, amount_cents, currency) is
+	// immutable after creation, making HSET always safe.
+	//
+	// Qty restoration is operator-gated via startup rehydrate only.
+	// Only applies to cache_missing. cache_high is never auto-corrected.
+	AutoRehydrate bool
 }
 
 // ErrInvalidDriftConfig signals a misconfigured DriftConfig. Mirrors

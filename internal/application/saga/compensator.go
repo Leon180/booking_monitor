@@ -343,12 +343,17 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%s: %w", event.OrderID, err)
 	}
 
-	// Best-effort: persist redis_reverted_at so future redeliveries can
-	// skip the Redis revert entirely (WasRedisReverted=true).
-	// Failure here is non-fatal — the compensation is complete and
-	// revert.lua's EXISTS guard still blocks double-revert on next retry.
+	// Persist redis_reverted_at so future redeliveries can skip the
+	// Redis revert via WasRedisReverted=true. NOT best-effort: failure
+	// here propagates so the Kafka consumer retries the whole message.
+	// On retry, revert.lua's EXISTS guard (7-day TTL) makes RevertInventory
+	// a no-op, then MarkRedisReverted gets a fresh attempt. This closes
+	// the double-revert gap that a best-effort nil-return left open: if we
+	// returned nil here, the PG fence would never record completion, and a
+	// redelivery after the EXISTS key expires could double-revert Redis →
+	// cache_high ghost ticket that can never sell out.
 	if err := s.sagaCompRepo.MarkRedisReverted(ctx, compensationID); err != nil {
-		s.log.Warn(ctx, "saga: MarkRedisReverted failed",
+		s.log.Warn(ctx, "saga: MarkRedisReverted failed, triggering Kafka retry",
 			tag.OrderID(event.OrderID), tag.Error(err))
 		s.metrics.IncMarkRedisRevertedError()
 		if wasAlreadyCompensated {
@@ -356,7 +361,7 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 		} else {
 			record("compensated_redis_mark_failed")
 		}
-		return nil
+		return fmt.Errorf("saga: MarkRedisReverted order_id=%s: %w", event.OrderID, err)
 	}
 
 	s.log.Info(ctx, "rollback successful", tag.OrderID(event.OrderID))

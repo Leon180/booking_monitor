@@ -38,6 +38,18 @@ type DriftMetrics interface {
 	// detection sweep — drives the "is the detector keeping up"
 	// dashboard.
 	ObserveSweepDuration(seconds float64)
+
+	// IncAutoRehydrated bumps when SetTicketTypeMetadata successfully refreshes
+	// the metadata key for a cache_missing event. Operator signal: the metadata
+	// key was absent or stale; qty restoration still requires operator-gated
+	// startup rehydrate.
+	IncAutoRehydrated()
+
+	// IncAutoRehydrateErrors bumps when the SetTicketTypeMetadata Redis call
+	// itself fails (network error, pool exhaustion). Auto-rehydrate is
+	// best-effort; the cache_missing detection counter is still bumped so the
+	// alert fires and the operator can investigate.
+	IncAutoRehydrateErrors()
 }
 
 // NopDriftMetrics is the zero-behaviour DriftMetrics. Mirrors
@@ -45,8 +57,10 @@ type DriftMetrics interface {
 // metric calls.
 type NopDriftMetrics struct{}
 
-func (NopDriftMetrics) SetDriftedEventsCount(int) {}
-func (NopDriftMetrics) IncDriftDetected(string)   {}
-func (NopDriftMetrics) IncListEventsErrors()      {}
-func (NopDriftMetrics) IncCacheReadErrors()       {}
+func (NopDriftMetrics) SetDriftedEventsCount(int)    {}
+func (NopDriftMetrics) IncDriftDetected(string)      {}
+func (NopDriftMetrics) IncListEventsErrors()         {}
+func (NopDriftMetrics) IncCacheReadErrors()          {}
 func (NopDriftMetrics) ObserveSweepDuration(float64) {}
+func (NopDriftMetrics) IncAutoRehydrated()      {}
+func (NopDriftMetrics) IncAutoRehydrateErrors() {}
