@@ -28,3 +28,7 @@ func (m *prometheusQueueMetrics) RecordDLQRoute(reason string) {
 func (m *prometheusQueueMetrics) RecordConsumerGroupRecreated() {
 	ConsumerGroupRecreatedTotal.Inc()
 }
+
+func (m *prometheusQueueMetrics) RecordPELRecoveryFailure() {
+	RedisPELRecoveryFailuresTotal.Inc()
+}

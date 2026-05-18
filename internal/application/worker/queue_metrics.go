@@ -64,16 +64,25 @@ type QueueMetrics interface {
 	// away (precise DEL instead of FLUSHALL); this metric (PR-C) makes
 	// the production-side trigger LOUD instead of silent.
 	RecordConsumerGroupRecreated()
+
+	// RecordPELRecoveryFailure increments when processPending fails at
+	// worker startup. PEL entries from a previous crash are left
+	// unrecovered; Redis inventory for those messages was already
+	// deducted but the orders were never written to DB. Non-zero rate
+	// here means inventory is drifting from DB state until the drift
+	// detector corrects it — operator investigation required.
+	RecordPELRecoveryFailure()
 }
 
 // noopQueueMetrics satisfies QueueMetrics for tests and unwired paths.
 type noopQueueMetrics struct{}
 
-func (noopQueueMetrics) RecordXAckFailure()           {}
-func (noopQueueMetrics) RecordXAddFailure(_ string)   {}
-func (noopQueueMetrics) RecordRevertFailure()         {}
-func (noopQueueMetrics) RecordDLQRoute(_ string)      {}
+func (noopQueueMetrics) RecordXAckFailure()            {}
+func (noopQueueMetrics) RecordXAddFailure(_ string)    {}
+func (noopQueueMetrics) RecordRevertFailure()          {}
+func (noopQueueMetrics) RecordDLQRoute(_ string)       {}
 func (noopQueueMetrics) RecordConsumerGroupRecreated() {}
+func (noopQueueMetrics) RecordPELRecoveryFailure()     {}
 
 // NoopQueueMetrics returns a no-op QueueMetrics implementation. Use in
 // tests that don't assert on queue-failure observability, instead of

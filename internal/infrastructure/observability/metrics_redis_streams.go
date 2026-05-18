@@ -111,3 +111,15 @@ var ConsumerGroupRecreatedTotal = promauto.NewCounter(
 		Help: "Total number of NOGROUP self-heal events on the orders:stream consumer group. MUST stay 0 in healthy production; any > 0 means messages may have been silently dropped.",
 	},
 )
+
+// RedisPELRecoveryFailuresTotal increments when processPending fails at
+// worker startup. PEL entries from a previous crash are skipped; Redis
+// inventory for those bookings was already deducted but orders were never
+// written to DB. Non-zero rate signals inventory drift until the drift
+// detector corrects it — requires operator investigation.
+var RedisPELRecoveryFailuresTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "redis_pel_recovery_failures_total",
+		Help: "Total number of startup PEL recovery failures. Non-zero means in-flight orders from a previous crash were not recovered and Redis inventory may be drifting from DB state.",
+	},
+)
