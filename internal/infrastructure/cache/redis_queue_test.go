@@ -517,6 +517,7 @@ type recordingQueueMetrics struct {
 	revertFailures         uint64
 	dlqRoutes              map[string]uint64
 	consumerGroupRecreated uint64
+	pelRecoveryFailures    uint64
 }
 
 func (r *recordingQueueMetrics) RecordXAckFailure()         { r.xackFailures++ }
@@ -535,6 +536,9 @@ func (r *recordingQueueMetrics) RecordDLQRoute(reason string) {
 }
 func (r *recordingQueueMetrics) RecordConsumerGroupRecreated() {
 	r.consumerGroupRecreated++
+}
+func (r *recordingQueueMetrics) RecordPELRecoveryFailure() {
+	r.pelRecoveryFailures++
 }
 
 // TestRedisOrderQueue_Subscribe_PersistentErrorBailout verifies that

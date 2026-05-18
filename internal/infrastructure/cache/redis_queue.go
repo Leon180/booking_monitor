@@ -154,8 +154,12 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 	// 1. Recover Pending Messages (PEL)
 	// These are messages this consumer claimed but crashed before ACKing.
 	if err := q.processPending(ctx, consumerName, handler); err != nil {
+		q.metrics.RecordPELRecoveryFailure()
 		q.logger.Error(ctx, "Failed to process pending messages during startup", tag.Error(err))
-		// We log but continue, ensuring we at least process new messages.
+		// Continue — new messages are still processed, but PEL entries
+		// from a previous crash are unrecovered. The counter above makes
+		// this observable so operators can page on it rather than rely on
+		// log scraping.
 	}
 
 	// consecutiveErrors tracks persistent XReadGroup failures so a
@@ -282,6 +286,15 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 				// exhaustion or ctx-cancel mid-backoff.
 				err, malformed := q.processWithRetry(ctx, handler, orderMsg)
 				if err != nil {
+					// ctx was cancelled mid-backoff (graceful shutdown):
+					// leave the message in PEL so the next pod recovers
+					// it via processPending. Do NOT revert inventory or
+					// write to DLQ — the message was interrupted, not
+					// exhausted. revert.lua + saga idempotency fence
+					// prevent double-compensation on redelivery.
+					if ctx.Err() != nil {
+						continue
+					}
 					// handleFailure returns false when compensation failed
 					// — leave in PEL for retry.
 					if q.handleFailure(ctx, orderMsg, msg, err) {

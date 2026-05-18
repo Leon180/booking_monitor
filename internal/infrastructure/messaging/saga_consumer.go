@@ -30,6 +30,13 @@ const (
 	// to cover a partition rebalance / consumer restart; anything older
 	// than this is stale and effectively dead-lettered.
 	sagaRetryKeyTTL = 24 * time.Hour
+
+	// sagaCommitTimeout bounds the detached-context offset commit after
+	// compensation completes. Using the caller's ctx would fail on
+	// graceful shutdown (ctx already cancelled), leaving the offset
+	// uncommitted and causing Kafka to redeliver an already-compensated
+	// message. Mirrors intakeCommitTimeout in kafka_intake_consumer.go.
+	sagaCommitTimeout = 2 * time.Second
 )
 
 // SagaConsumer consumes order.failed events from Kafka.
@@ -325,7 +332,9 @@ func (c *SagaConsumer) writeDLQ(ctx context.Context, msg kafka.Message, cause er
 }
 
 func (c *SagaConsumer) commitOrLog(ctx context.Context, msg kafka.Message) {
-	if err := c.reader.CommitMessages(ctx, msg); err != nil {
+	commitCtx, cancel := context.WithTimeout(context.Background(), sagaCommitTimeout)
+	defer cancel()
+	if err := c.reader.CommitMessages(commitCtx, msg); err != nil {
 		c.log.Error(ctx, "failed to commit offset", tag.Error(err), tag.Offset(msg.Offset))
 	}
 }
