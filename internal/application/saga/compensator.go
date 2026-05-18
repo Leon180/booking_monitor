@@ -22,6 +22,8 @@ import (
 // `step` value is one of: "getbyid", "list_ticket_type",
 // "incrementticket", "markcompensated". Mapped to the
 // `<step>_error` outcome label by `outcomeForStepError` below.
+// Steps: "getbyid", "list_ticket_type", "incrementticket",
+// "markcompensated", "record_completion".
 //
 // Wraps the underlying error so callers using `errors.Is` /
 // `errors.As` against domain sentinels still work end-to-end.
@@ -241,7 +243,10 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 			return &stepError{step: "record_completion", err: fmt.Errorf("sagaCompRepo.RecordCompletion order_id=%s: %w", event.OrderID, err)}
 		}
 		if n == 0 {
-			s.log.Warn(ctx, "saga: RecordCompletion was no-op (row pre-existed)",
+			// Anomalous: compensationID already existed on a wasAlreadyCompensated=false
+			// path. Structurally impossible under normal operation; indicates a
+			// compensationID collision or manual DB intervention.
+			s.log.Error(ctx, "saga: RecordCompletion was no-op (row pre-existed on first-time path — investigate compensationID collision)",
 				tag.OrderID(event.OrderID))
 		}
 		return nil
@@ -291,6 +296,7 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 			if err != nil {
 				s.log.Warn(ctx, "saga: WasRedisReverted failed; proceeding (revert.lua as fallback)",
 					tag.OrderID(event.OrderID), tag.Error(err))
+				s.metrics.IncWasRedisRevertedError()
 				// fail-open: revert.lua EXISTS guard is the last-resort defence.
 			} else if done {
 				record("already_compensated")

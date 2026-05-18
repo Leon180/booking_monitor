@@ -265,3 +265,14 @@ var SagaMarkRedisRevertedErrorsTotal = promauto.NewCounter(
 		Help: "Total failures to persist redis_reverted_at after successful RevertInventory.",
 	},
 )
+
+// SagaWasRedisRevertedErrorsTotal counts failures of the WasRedisReverted
+// PG check. When non-zero the compensator fell open to RevertInventory
+// guarded only by revert.lua's EXISTS key. Sustained counts during PG
+// degradation may cause redundant revert attempts on redelivery.
+var SagaWasRedisRevertedErrorsTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "saga_was_redis_reverted_errors_total",
+		Help: "Total failures of the WasRedisReverted PG idempotency check. Compensator falls open to RevertInventory; revert.lua EXISTS guard is last-resort defense.",
+	},
+)

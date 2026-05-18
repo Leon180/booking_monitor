@@ -155,3 +155,4 @@ func (nopMetricsRecorder) RecordEventProcessed(string)       {}
 func (nopMetricsRecorder) ObserveLoopDuration(time.Duration) {}
 func (nopMetricsRecorder) SetConsumerLag(time.Duration)      {}
 func (nopMetricsRecorder) IncMarkRedisRevertedError()        {}
+func (nopMetricsRecorder) IncWasRedisRevertedError()         {}

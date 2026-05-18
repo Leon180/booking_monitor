@@ -1169,10 +1169,18 @@ func (r *postgresSagaCompensationRepository) WasRedisReverted(ctx context.Contex
 // MarkRedisReverted sets redis_reverted_at = NOW(). Best-effort — caller
 // logs + meters on error but does not fail the compensation.
 func (r *postgresSagaCompensationRepository) MarkRedisReverted(ctx context.Context, compensationID string) error {
-	if _, err := r.exec.ExecContext(ctx,
+	res, err := r.exec.ExecContext(ctx,
 		"UPDATE saga_compensations SET redis_reverted_at = NOW() WHERE compensation_id = $1",
-		compensationID); err != nil {
+		compensationID)
+	if err != nil {
 		return fmt.Errorf("sagaCompRepo.MarkRedisReverted compensation_id=%s: %w", compensationID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("sagaCompRepo.MarkRedisReverted rows compensation_id=%s: %w", compensationID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("sagaCompRepo.MarkRedisReverted: no row found for compensation_id=%s", compensationID)
 	}
 	return nil
 }

@@ -107,6 +107,8 @@ func (r *recordingCompensatorMetrics) IncMarkRedisRevertedError() {
 	r.markRedisRevertErrors++
 }
 
+func (r *recordingCompensatorMetrics) IncWasRedisRevertedError() {}
+
 func (r *recordingCompensatorMetrics) Outcomes() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

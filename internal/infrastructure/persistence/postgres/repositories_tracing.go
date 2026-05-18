@@ -8,6 +8,7 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"booking_monitor/internal/domain"
@@ -509,6 +510,7 @@ func (d *sagaCompensationRepositoryTracingDecorator) RecordCompletion(ctx contex
 	n, err := d.next.RecordCompletion(ctx, compensationID, orderID)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return n, err
 }
@@ -522,6 +524,7 @@ func (d *sagaCompensationRepositoryTracingDecorator) WasRedisReverted(ctx contex
 	done, err := d.next.WasRedisReverted(ctx, compensationID)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return done, err
 }
@@ -535,6 +538,7 @@ func (d *sagaCompensationRepositoryTracingDecorator) MarkRedisReverted(ctx conte
 	err := d.next.MarkRedisReverted(ctx, compensationID)
 	if err != nil {
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 	return err
 }

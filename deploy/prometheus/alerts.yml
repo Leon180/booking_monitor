@@ -304,8 +304,6 @@ groups:
         # for sustained 5m. Success-equivalent bucket (PR-A updated):
         #   - `compensated` = full success (UoW + PG fence + Redis revert)
         #   - `already_compensated` = PG fence confirmed fully done (benign)
-        #   - `already_compensated_redis_error` = SETNX-guarded idempotent
-        #     re-drive blip; Redis state already correct from prior delivery
         #   - `already_compensated_redis_mark_failed` = wasAlreadyCompensated
         #     path; Redis revert succeeded, only MarkRedisReverted PG write
         #     failed — compensation is complete, best-effort (PR-A)
@@ -318,13 +316,16 @@ groups:
         # RevertInventory on next redeliver (caught by revert.lua's EXISTS
         # guard). The dedicated `SagaMarkRedisRevertedPersistFailing` alert
         # fires on `saga_mark_redis_reverted_errors_total` for that.
+        # NOTE: `already_compensated_redis_error` is NOT success-equivalent
+        # (PR-A semantics): PG confirmed Redis revert was needed, we tried
+        # it, and it failed — this is a real Redis inventory concern.
         # Everything else is a real error class:
         # `record_completion_error` (UoW rolled back — order stays Failed,
         # watchdog retries), `path_c_skipped` (inventory NOT reverted),
         # all *_error labels, `context_error`, `uow_infra_error`, `unknown`.
         expr: |
           (
-            sum(rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated|already_compensated_redis_error|already_compensated_redis_mark_failed|compensated_redis_mark_failed"}[5m]))
+            sum(rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated|already_compensated_redis_mark_failed|compensated_redis_mark_failed"}[5m]))
             /
             sum(rate(saga_compensator_events_processed_total[5m]))
           ) > 0.05
@@ -334,7 +335,7 @@ groups:
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorerrorrate"
           summary: "Saga compensator error rate above 5% — {{ $value | humanizePercentage }}"
-          description: "saga_compensator_events_processed_total non-success ratio averaging {{ $value | humanizePercentage }} over 5m. Run `topk(5, sum by (outcome) (rate(...{outcome!~\"compensated|already_compensated|already_compensated_redis_error|already_compensated_redis_mark_failed|compensated_redis_mark_failed\"}[5m])))` for the dominant label, then map via the runbook's per-outcome triage table. **False-positive note**: if `path_c_skipped` is dominant within ~1h of a rolling upgrade, that's expected (pre-v3 multi-ticket-type events flushing); should taper to 0 once deploy is done. **Dual-page note**: when `redis_revert_error` is dominant the critical `SagaCompensatorRedisInventoryLeak` will also fire — same root cause, different urgency."
+          description: "saga_compensator_events_processed_total non-success ratio averaging {{ $value | humanizePercentage }} over 5m. Run `topk(5, sum by (outcome) (rate(...{outcome!~\"compensated|already_compensated|already_compensated_redis_mark_failed|compensated_redis_mark_failed\"}[5m])))` for the dominant label, then map via the runbook's per-outcome triage table. **False-positive note**: if `path_c_skipped` is dominant within ~1h of a rolling upgrade, that's expected (pre-v3 multi-ticket-type events flushing); should taper to 0 once deploy is done. **Dual-page note**: when `redis_revert_error` is dominant the critical `SagaCompensatorRedisInventoryLeak` will also fire — same root cause, different urgency."
 
       - alert: SagaMarkRedisRevertedPersistFailing
         # Fires when MarkRedisReverted (UPDATE saga_compensations SET
@@ -448,7 +449,7 @@ groups:
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorredisinventoryleak"
           summary: "Saga compensator failed Redis revert on FRESH compensation — inventory leaked"
-          description: "saga_compensator_events_processed_total{outcome=\"redis_revert_error\"} incremented {{ $value }} time(s). PG was marked compensated but Redis qty was NOT restored — inventory is permanently leaked until manual revert. Operator: `XADD ticket_type_qty:<id> +<qty>` (carefully) OR run rehydrate via `booking-cli rehydrate`. Investigate Redis health (saga:reverted:order:* keys, MEMORY USAGE), DB lock contention. Distinct from `already_compensated_redis_error` (idempotent re-drive blip — usually benign, alerted separately if sustained)."
+          description: "saga_compensator_events_processed_total{outcome=\"redis_revert_error\"} incremented {{ $value }} time(s). PG was marked compensated but Redis qty was NOT restored — inventory is permanently leaked until manual revert. Operator: `XADD ticket_type_qty:<id> +<qty>` (carefully) OR run rehydrate via `booking-cli rehydrate`. Investigate Redis health (saga:reverted:order:* keys, MEMORY USAGE), DB lock contention. Distinct from `already_compensated_redis_error` (PG fence confirmed Redis revert was needed on a redelivery, the revert attempt failed — also a real inventory concern; check SagaCompensatorErrorRate for sustained rate)."
 
       - alert: SagaMaxFailedAgeExceeded
         # Fires when the watchdog flags an order older than

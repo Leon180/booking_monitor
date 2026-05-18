@@ -205,6 +205,9 @@ func (prometheusCompensatorMetrics) SetConsumerLag(d time.Duration) {
 func (prometheusCompensatorMetrics) IncMarkRedisRevertedError() {
 	observability.SagaMarkRedisRevertedErrorsTotal.Inc()
 }
+func (prometheusCompensatorMetrics) IncWasRedisRevertedError() {
+	observability.SagaWasRedisRevertedErrorsTotal.Inc()
+}
 
 // ── expiry sweeper (D6) ──────────────────────────────────────────────
 

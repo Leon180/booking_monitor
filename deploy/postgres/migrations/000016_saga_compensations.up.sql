@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS saga_compensations (
-    compensation_id   VARCHAR(64)  PRIMARY KEY,
+    compensation_id   TEXT         PRIMARY KEY,
     order_id          UUID         NOT NULL REFERENCES orders(id),
     completed_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     redis_reverted_at TIMESTAMPTZ
