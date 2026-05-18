@@ -194,7 +194,11 @@ func (c *SagaConsumer) Start(ctx context.Context, compensator saga.Compensator) 
 				return nil // Graceful shutdown
 			}
 			c.log.Error(ctx, "failed to fetch message", tag.Error(err))
-			time.Sleep(time.Second) // Backoff
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(time.Second):
+			}
 			continue
 		}
 

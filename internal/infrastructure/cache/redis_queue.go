@@ -75,6 +75,14 @@ const (
 	dlqReasonMalformedUnrecoverable   = "malformed_unrecoverable"
 )
 
+// errShutdownDuringBackoff is returned by processWithRetry when ctx is
+// cancelled during a retry backoff sleep (graceful shutdown). Using a
+// sentinel instead of ctx.Err() makes the caller's intent explicit: only
+// the backoff-cancel path should leave the message in PEL; errors that
+// propagate from the handler itself (including ctx cancellation the handler
+// observes) still fall through to handleFailure so compensation can run.
+var errShutdownDuringBackoff = errors.New("ctx cancelled during retry backoff")
+
 type redisOrderQueue struct {
 	client                   *redis.Client
 	inventoryRepo            domain.InventoryRepository
@@ -286,13 +294,14 @@ func (q *redisOrderQueue) Subscribe(ctx context.Context, handler func(ctx contex
 				// exhaustion or ctx-cancel mid-backoff.
 				err, malformed := q.processWithRetry(ctx, handler, orderMsg)
 				if err != nil {
-					// ctx was cancelled mid-backoff (graceful shutdown):
-					// leave the message in PEL so the next pod recovers
-					// it via processPending. Do NOT revert inventory or
-					// write to DLQ — the message was interrupted, not
-					// exhausted. revert.lua + saga idempotency fence
-					// prevent double-compensation on redelivery.
-					if ctx.Err() != nil {
+					// ctx was cancelled during retry backoff (graceful
+					// shutdown): leave the message in PEL so the next pod
+					// recovers it via processPending. Do NOT revert
+					// inventory or write to DLQ — the message was
+					// interrupted mid-backoff, not exhausted. Handler
+					// errors that happen to carry a ctx cancellation still
+					// fall through to handleFailure below.
+					if errors.Is(err, errShutdownDuringBackoff) {
 						continue
 					}
 					// handleFailure returns false when compensation failed
@@ -373,7 +382,7 @@ func (q *redisOrderQueue) processWithRetry(ctx context.Context, handler func(ctx
 		// Backoff (linear: attempt N waits N * RetryBaseDelay) while
 		// honoring ctx cancellation so shutdown is prompt.
 		if !q.sleepCtx(ctx, time.Duration(i+1)*q.retryBaseDelay) {
-			return ctx.Err(), false
+			return errShutdownDuringBackoff, false
 		}
 	}
 	return lastErr, false
@@ -818,6 +827,11 @@ func (q *redisOrderQueue) processPending(ctx context.Context, consumerName strin
 			// Process with Retry — see Subscribe for the malformed-bool semantics.
 			err, malformed := q.processWithRetry(ctx, handler, orderMsg)
 			if err != nil {
+				// Shutdown arrived during backoff: leave in PEL.
+				// The next pod's processPending will pick it up.
+				if errors.Is(err, errShutdownDuringBackoff) {
+					return nil
+				}
 				// handleFailure returns false when compensation failed;
 				// leaving in PEL means next cycle retries revert + DLQ.
 				if q.handleFailure(ctx, orderMsg, msg, err) {
