@@ -301,21 +301,21 @@ groups:
       # ─────────────────────────────────────────────────────────
       - alert: SagaCompensatorErrorRate
         # Fires when > 5% of compensator outcomes are non-success
-        # for sustained 5m. Success-equivalent bucket (PR-A updated):
+        # for sustained 5m. Success-equivalent bucket:
         #   - `compensated` = full success (UoW + PG fence + Redis revert)
         #   - `already_compensated` = PG fence confirmed fully done (benign)
         #   - `already_compensated_redis_mark_failed` = wasAlreadyCompensated
-        #     path; Redis revert succeeded, only MarkRedisReverted PG write
-        #     failed — compensation is complete, best-effort (PR-A)
+        #     path; Redis revert succeeded but MarkRedisReverted PG write
+        #     failed → error returned → Kafka retries; revert.lua EXISTS
+        #     guard prevents double-revert during the retry window.
         #   - `compensated_redis_mark_failed` = first-time compensation;
-        #     Redis revert succeeded, only MarkRedisReverted failed —
-        #     compensation is complete, best-effort (PR-A)
-        # Both *_redis_mark_failed labels are intentionally success-
-        # equivalent: inventory IS restored; the PG persistence of the
-        # "redis done" flag failed, which may cause a redundant
-        # RevertInventory on next redeliver (caught by revert.lua's EXISTS
-        # guard). The dedicated `SagaMarkRedisRevertedPersistFailing` alert
-        # fires on `saga_mark_redis_reverted_errors_total` for that.
+        #     Redis revert succeeded but MarkRedisReverted failed →
+        #     error returned → Kafka retries; revert.lua EXISTS guard.
+        # Both *_redis_mark_failed labels are treated as success-equivalent
+        # here to avoid dual-paging: inventory IS restored (Redis correct);
+        # the PG fence record is pending a successful Kafka retry.
+        # The dedicated `SagaMarkRedisRevertedPersistFailing` alert covers
+        # the sustained PG write failure signal separately.
         # NOTE: `already_compensated_redis_error` is NOT success-equivalent
         # (PR-A semantics): PG confirmed Redis revert was needed, we tried
         # it, and it failed — this is a real Redis inventory concern.
@@ -341,12 +341,12 @@ groups:
         # Fires when MarkRedisReverted (UPDATE saga_compensations SET
         # redis_reverted_at = NOW()) fails after a successful RevertInventory.
         # Redis inventory IS correct — revert happened. Only the PG
-        # persistence of the "redis done" flag failed. On Kafka redeliver,
-        # the compensator will re-enter the WasRedisReverted=false path
-        # and call RevertInventory again; revert.lua's EXISTS guard is
-        # the last-resort defence against double-revert in that scenario.
-        # Sustained failures indicate PG write errors or connection pool
-        # exhaustion — investigate DB health.
+        # persistence of the "redis done" flag failed. The compensator now
+        # propagates this as an error so Kafka retries the message: on
+        # redeliver, WasRedisReverted=false → RevertInventory called →
+        # revert.lua EXISTS guard (7-day TTL) makes it a no-op → fresh
+        # MarkRedisReverted attempt. Sustained failures indicate PG write
+        # errors or connection pool exhaustion — investigate DB health.
         expr: increase(saga_mark_redis_reverted_errors_total[10m]) > 0
         for: 5m
         labels:
