@@ -14,7 +14,7 @@
 
 ## 2. 系統架構
 
-> **視覺概觀**:[README top-level 系統架構圖](../README.zh-TW.md#系統架構) 跟 [Pattern A 流程 sequence diagram](../README.zh-TW.md#pattern-a-流程已隨-v050--v060-上線) 反映的是 **post-D7 當前**架構(saga consumer/compensator 在 `app` 行程內執行;`payment_worker` 已經移除)。[Stage 1→4 演進說明](../README.zh-TW.md#架構演進) 則是**刻意保留為歷史脈絡** — *那張圖裡的* Stage 4 是 v0.2.0–v0.4.0 的里程碑,**在 v0.6.0 的 D7 收窄之前**。D12 比較 harness 裡的「Stage 4」是**不同的 binary**(`cmd/booking-cli` post-D7);命名衝突的釐清請看 [`docs/d12/README.md`](d12/README.md)。本節保留 ASCII 流程跟散文是**刻意保留 A4 歷史脈絡**,讓同一條敘事在 spec 內也可達 — 哪裡是現況、哪裡是歷史,請看下方 D7 汰除標註。
+> **視覺概觀**:[README top-level 系統架構圖](../README.zh-TW.md#系統架構) 跟 [Pattern A 流程 sequence diagram](../README.zh-TW.md#pattern-a-流程已隨-v050--v060-上線) 反映的是 **post-D7 當前**架構(saga consumer/compensator 在 `app` 行程內執行;`payment_worker` 已經移除)。[Stage 1→4 演進說明](../README.zh-TW.md#架構演進) 則是**刻意保留為歷史脈絡** — *那張圖裡的* Stage 4 是 v0.2.0–v0.4.0 的里程碑,**在 v0.6.0 的 D7 收窄之前**。D12 比較 harness 裡的「Stage 4」是**不同的 binary**(`cmd/booking-cli` post-D7);命名衝突的釐清請看 [`docs/d12/README.md`](d12/README.md)。**Stage 5**(PR #113,post-v1.0.0)是大麥(Damai)風格的可靠 Kafka 收訊 — Lua deduct + `kafka.RequireAll` publish + 每行程內掛 IntakeConsumer + 同行程內 drift reconciler;它把「durability gate 的代價」量化成 intake-RPS 比 Stage 4 下降約 4.4 倍。本節保留 ASCII 流程跟散文是**刻意保留 A4 歷史脈絡**,讓同一條敘事在 spec 內也可達 — 哪裡是現況、哪裡是歷史,請看下方 D7 汰除標註。
 
 ```
 Client --> Nginx (限流: 100 req/s/IP, burst 200)

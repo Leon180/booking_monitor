@@ -1,0 +1,150 @@
+{
+    "root_group": {
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+            "setup": {
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "event created": {
+                            "name": "event created",
+                            "path": "::setup::event created",
+                            "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                            "passes": 1,
+                            "fails": 0
+                        }
+                    }
+            }
+        },
+        "checks": {},
+        "name": "",
+        "path": ""
+    },
+    "metrics": {
+        "data_received": {
+            "count": 21389384,
+            "rate": 346346.0540073814
+        },
+        "business_errors": {
+            "passes": 0,
+            "fails": 42805,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_req_failed": {
+            "passes": 932,
+            "fails": 42806,
+            "value": 0.021308701815355068
+        },
+        "http_req_duration{expected_response:true}": {
+            "max": 14961.238,
+            "p(90)": 1567.5575000000001,
+            "p(95)": 2426.838,
+            "avg": 691.6758345559002,
+            "min": 2.383,
+            "med": 389.4925
+        },
+        "iteration_duration": {
+            "min": 2.42625,
+            "med": 391.28,
+            "max": 14961.339,
+            "p(90)": 1575.5021832,
+            "p(95)": 2447.7931668,
+            "avg": 695.5392021264629
+        },
+        "http_req_duration": {
+            "avg": 695.3081079610373,
+            "min": 2.383,
+            "med": 391.128,
+            "max": 14961.238,
+            "p(90)": 1574.4685000000006,
+            "p(95)": 2446.913399999999
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 31.961,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.14526430106543517
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        },
+        "http_reqs": {
+            "rate": 708.224402824076,
+            "count": 43738
+        },
+        "accepted_bookings": {
+            "count": 42805,
+            "rate": 693.116867778238
+        },
+        "data_sent": {
+            "count": 9661271,
+            "rate": 156439.4321756039
+        },
+        "http_req_blocked": {
+            "max": 57.608,
+            "p(90)": 0.005,
+            "p(95)": 0.006,
+            "avg": 0.1512236270522025,
+            "min": 0,
+            "med": 0.001
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "http_req_waiting": {
+            "med": 391.093,
+            "max": 14961.155,
+            "p(90)": 1574.4282000000005,
+            "p(95)": 2446.8324499999994,
+            "avg": 695.2551904293817,
+            "min": 2.363
+        },
+        "http_req_receiving": {
+            "avg": 0.023824729068542827,
+            "min": 0.006,
+            "med": 0.017,
+            "max": 10.825,
+            "p(90)": 0.053,
+            "p(95)": 0.062
+        },
+        "iterations": {
+            "count": 43737,
+            "rate": 708.2082103963742
+        },
+        "vus": {
+            "value": 239,
+            "min": 239,
+            "max": 500
+        },
+        "http_req_sending": {
+            "avg": 0.0290928025972896,
+            "min": 0.001,
+            "med": 0.007,
+            "max": 18.373,
+            "p(90)": 0.025,
+            "p(95)": 0.029
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e1d81-6b93-791b-ae66-4e2b4c93c06b"
+    }
+}

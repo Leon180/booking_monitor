@@ -104,7 +104,7 @@ flowchart LR
     K4 -.-> S4[Saga]
 ```
 
-The 4-stage `cmd/booking-cli-stage{1,2,3,4}/` comparison harness (D12; see [`docs/d12/README.md`](docs/d12/README.md)) is shipped — same `internal/` packages, different fx wirings, side-by-side benchmark runs. Each stage's apples-to-apples report lives under [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/), generated via `make bench-up` + `scripts/run_4stage_comparison.sh` + `scripts/generate_comparison_md.py`.
+The 5-stage `cmd/booking-cli-stage{1,2,3,5}/` + `cmd/booking-cli` comparison harness (D12 + PR #113; see [`docs/d12/README.md`](docs/d12/README.md)) is shipped — same `internal/` packages, different fx wirings, side-by-side benchmark runs. Stage 5 is the Damai-aligned durable Kafka intake (acks=all replaces `XADD orders:stream`) — see [`internal/application/booking/service_kafka_intake.go`](internal/application/booking/service_kafka_intake.go) + [`internal/infrastructure/messaging/kafka_intake_consumer.go`](internal/infrastructure/messaging/kafka_intake_consumer.go). Each stage's apples-to-apples report lives under [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/), generated via `make bench-up` + `scripts/run_5stage_comparison.sh` + `scripts/generate_comparison_md.py`. The Stage 4 → 5 intake-only delta (~4.4× throughput cost at VUS=500) is the architectural price of replicated durability over ephemeral in-memory durability.
 
 ### Pattern A flow (shipped in v0.5.0 + v0.6.0)
 

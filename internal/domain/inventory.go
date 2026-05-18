@@ -125,3 +125,41 @@ type InventoryRepository interface {
 	// `(qty, found)` pair is only meaningful when `err == nil`.
 	GetInventory(ctx context.Context, ticketTypeID uuid.UUID) (qty int, found bool, err error)
 }
+
+// Stage5InventoryRepository extends InventoryRepository with the
+// Stage 5 Lua variant that omits the XADD step.
+//
+// Stage 5 (Damai-aligned durable intake) replaces ephemeral Redis
+// Stream with replicated Kafka as the handler→worker queue. The
+// inventory atomicity (DECRBY + condition check + amount calc) still
+// runs in Lua, but the Lua script does NOT publish to orders:stream.
+// Instead the application layer reads the result, constructs the
+// Kafka message, and publishes with acks=all. On Kafka publish
+// failure the application calls RevertInventory to re-add the
+// inventory.
+//
+// Stages 2-4 keep using InventoryRepository.DeductInventory (which
+// performs DECRBY + XADD atomically). Stage 5 binary injects the
+// extended interface and calls DeductInventoryNoStream instead. The
+// concrete `redisInventoryRepository` implements both interfaces; the
+// stage binary chooses which view to inject.
+//
+// See `docs/d12/README.md` for the per-stage architecture matrix.
+type Stage5InventoryRepository interface {
+	InventoryRepository
+
+	// DeductInventoryNoStream is the Stage 5 variant. Identical to
+	// DeductInventory's atomicity semantics — DECRBY guarded by
+	// availability + HMGET booking metadata + amount_cents
+	// computation — but skips the XADD orders:stream step.
+	//
+	// Returns the same DeductInventoryResult. The caller (Stage 5
+	// BookingService) is responsible for constructing the Kafka
+	// message and publishing it with acks=all, calling
+	// InventoryRepository.RevertInventory on publish failure.
+	DeductInventoryNoStream(
+		ctx context.Context,
+		ticketTypeID uuid.UUID,
+		count int,
+	) (DeductInventoryResult, error)
+}

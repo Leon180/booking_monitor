@@ -1,0 +1,23 @@
+═══ D12.5 4-stage comparison run conditions ═══
+captured_at_utc: 2026-05-12T18:26:16Z
+vus: 500
+duration: 60s
+
+── host ──
+Darwin MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+uptime:  2:26  up 28 days, 10:48, 2 users, load averages: 3.28 6.04 6.12
+
+── toolchain versions ──
+Docker version 29.3.1, build c2be9cc
+Docker Compose version v5.1.1
+k6 v1.6.0 (commit/devel, go1.25.7, darwin/arm64)
+psql (PostgreSQL) 14.17 (Homebrew)
+go version go1.25.10 darwin/arm64
+
+── git state ──
+branch: feat/stage5-durable-kafka-intake
+commit: cfc6b07
+dirty:  M docker-compose.comparison.yml
+ M scripts/generate_comparison_md.py
+?? docs/benchmarks/comparisons/20260513_022616_5stage_c500_d60s/
+3 changed files
