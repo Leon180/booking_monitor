@@ -1119,3 +1119,60 @@ func (r *postgresTicketTypeRepository) IncrementTicket(ctx context.Context, id u
 	}
 	return nil
 }
+
+// --- SagaCompensationRepository ---
+
+type postgresSagaCompensationRepository struct {
+	exec dbExecutor
+}
+
+func NewSagaCompensationRepository(db *sql.DB) *postgresSagaCompensationRepository {
+	return &postgresSagaCompensationRepository{exec: db}
+}
+
+func (r *postgresSagaCompensationRepository) WithTx(tx *sql.Tx) *postgresSagaCompensationRepository {
+	return &postgresSagaCompensationRepository{exec: tx}
+}
+
+// RecordCompletion inserts the compensation record atomically (ON CONFLICT DO NOTHING).
+// Returns rowsAffected so the caller can log Warn on 0 (pre-existing row — Kafka redeliver).
+func (r *postgresSagaCompensationRepository) RecordCompletion(ctx context.Context, compensationID string, orderID uuid.UUID) (int64, error) {
+	res, err := r.exec.ExecContext(ctx,
+		"INSERT INTO saga_compensations(compensation_id, order_id) VALUES ($1, $2) ON CONFLICT (compensation_id) DO NOTHING",
+		compensationID, orderID)
+	if err != nil {
+		return 0, fmt.Errorf("sagaCompRepo.RecordCompletion compensation_id=%s: %w", compensationID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sagaCompRepo.RecordCompletion rows: %w", err)
+	}
+	return n, nil
+}
+
+// WasRedisReverted returns true when redis_reverted_at IS NOT NULL.
+// Returns (false, nil) when the row is absent — treated as "pending" by the caller.
+func (r *postgresSagaCompensationRepository) WasRedisReverted(ctx context.Context, compensationID string) (bool, error) {
+	var done bool
+	err := r.exec.QueryRowContext(ctx,
+		"SELECT redis_reverted_at IS NOT NULL FROM saga_compensations WHERE compensation_id = $1",
+		compensationID).Scan(&done)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("sagaCompRepo.WasRedisReverted compensation_id=%s: %w", compensationID, err)
+	}
+	return done, nil
+}
+
+// MarkRedisReverted sets redis_reverted_at = NOW(). Best-effort — caller
+// logs + meters on error but does not fail the compensation.
+func (r *postgresSagaCompensationRepository) MarkRedisReverted(ctx context.Context, compensationID string) error {
+	if _, err := r.exec.ExecContext(ctx,
+		"UPDATE saga_compensations SET redis_reverted_at = NOW() WHERE compensation_id = $1",
+		compensationID); err != nil {
+		return fmt.Errorf("sagaCompRepo.MarkRedisReverted compensation_id=%s: %w", compensationID, err)
+	}
+	return nil
+}

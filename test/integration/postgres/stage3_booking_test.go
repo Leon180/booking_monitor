@@ -94,7 +94,8 @@ func stage3Harness(t *testing.T) *stage3HarnessHandle {
 	eventRepo := postgres.NewPostgresEventRepository(pgH.DB)
 	ttRepo := postgres.NewPostgresTicketTypeRepository(pgH.DB)
 	outboxRepo := postgres.NewPostgresOutboxRepository(pgH.DB)
-	uow := postgres.NewPostgresUnitOfWork(pgH.DB, orderRepo, eventRepo, outboxRepo, ttRepo, logger, application.NoopDBMetrics())
+	sagaCompRepo := postgres.NewSagaCompensationRepository(pgH.DB)
+	uow := postgres.NewPostgresUnitOfWork(pgH.DB, orderRepo, eventRepo, outboxRepo, ttRepo, sagaCompRepo, logger, application.NoopDBMetrics())
 
 	invRepo := cache.NewRedisInventoryRepository(redisH.Client, cfg)
 	queue := cache.NewRedisOrderQueue(redisH.Client, invRepo, logger, cfg, worker.NoopQueueMetrics(), worker.DefaultRetryPolicy())

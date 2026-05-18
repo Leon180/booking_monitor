@@ -13,10 +13,11 @@ import (
 // consistency boundary, and joining several aggregates in a single tx
 // is an application-level concession (e.g. transactional outbox).
 type Repositories struct {
-	Order      domain.OrderRepository
-	Event      domain.EventRepository
-	Outbox     domain.OutboxRepository
-	TicketType domain.TicketTypeRepository
+	Order          domain.OrderRepository
+	Event          domain.EventRepository
+	Outbox         domain.OutboxRepository
+	TicketType     domain.TicketTypeRepository
+	SagaCompletion domain.SagaCompensationRepository
 }
 
 // Test harness convention: when a unit test constructs a partial

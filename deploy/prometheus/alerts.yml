@@ -301,28 +301,30 @@ groups:
       # ─────────────────────────────────────────────────────────
       - alert: SagaCompensatorErrorRate
         # Fires when > 5% of compensator outcomes are non-success
-        # for sustained 5m. Buckets `compensated`,
-        # `already_compensated`, AND `already_compensated_redis_error`
-        # as "success-equivalent for ratio-alert purposes":
-        #   - `compensated` = full success
-        #   - `already_compensated` = Kafka redelivery hitting an
-        #     already-final order (benign by design)
-        #   - `already_compensated_redis_error` = SETNX-guarded
-        #     idempotent re-drive blip; Redis state was already
-        #     correct from a previous delivery, so the failure is
-        #     functionally a no-op. Including it in the error ratio
-        #     produces false positives during Kafka recovery bursts.
-        #     The dedicated `SagaCompensatorRedisInventoryLeak`
-        #     (critical) covers the FRESH-compensation Redis failure
-        #     case where inventory is actually leaked.
+        # for sustained 5m. Success-equivalent bucket (PR-A updated):
+        #   - `compensated` = full success (UoW + PG fence + Redis revert)
+        #   - `already_compensated` = PG fence confirmed fully done (benign)
+        #   - `already_compensated_redis_error` = SETNX-guarded idempotent
+        #     re-drive blip; Redis state already correct from prior delivery
+        #   - `already_compensated_redis_mark_failed` = wasAlreadyCompensated
+        #     path; Redis revert succeeded, only MarkRedisReverted PG write
+        #     failed — compensation is complete, best-effort (PR-A)
+        #   - `compensated_redis_mark_failed` = first-time compensation;
+        #     Redis revert succeeded, only MarkRedisReverted failed —
+        #     compensation is complete, best-effort (PR-A)
+        # Both *_redis_mark_failed labels are intentionally success-
+        # equivalent: inventory IS restored; the PG persistence of the
+        # "redis done" flag failed, which may cause a redundant
+        # RevertInventory on next redeliver (caught by revert.lua's EXISTS
+        # guard). The dedicated `SagaMarkRedisRevertedPersistFailing` alert
+        # fires on `saga_mark_redis_reverted_errors_total` for that.
         # Everything else is a real error class:
-        # `path_c_skipped` (inventory NOT reverted), all *_error
-        # labels (DB / Redis / unmarshal failures), `context_error`,
-        # `uow_infra_error`, `unknown` (classifier drift — has its
-        # own dedicated alert + runbook).
+        # `record_completion_error` (UoW rolled back — order stays Failed,
+        # watchdog retries), `path_c_skipped` (inventory NOT reverted),
+        # all *_error labels, `context_error`, `uow_infra_error`, `unknown`.
         expr: |
           (
-            sum(rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated|already_compensated_redis_error"}[5m]))
+            sum(rate(saga_compensator_events_processed_total{outcome!~"compensated|already_compensated|already_compensated_redis_error|already_compensated_redis_mark_failed|compensated_redis_mark_failed"}[5m]))
             /
             sum(rate(saga_compensator_events_processed_total[5m]))
           ) > 0.05
@@ -332,7 +334,26 @@ groups:
         annotations:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagacompensatorerrorrate"
           summary: "Saga compensator error rate above 5% — {{ $value | humanizePercentage }}"
-          description: "saga_compensator_events_processed_total non-success ratio averaging {{ $value | humanizePercentage }} over 5m. Run `topk(5, sum by (outcome) (rate(...{outcome!~\"compensated|already_compensated|already_compensated_redis_error\"}[5m])))` for the dominant label, then map via the runbook's per-outcome triage table. **False-positive note**: if `path_c_skipped` is dominant within ~1h of a rolling upgrade, that's expected (pre-v3 multi-ticket-type events flushing); should taper to 0 once deploy is done. **Dual-page note**: when `redis_revert_error` is dominant the critical `SagaCompensatorRedisInventoryLeak` will also fire — same root cause, different urgency."
+          description: "saga_compensator_events_processed_total non-success ratio averaging {{ $value | humanizePercentage }} over 5m. Run `topk(5, sum by (outcome) (rate(...{outcome!~\"compensated|already_compensated|already_compensated_redis_error|already_compensated_redis_mark_failed|compensated_redis_mark_failed\"}[5m])))` for the dominant label, then map via the runbook's per-outcome triage table. **False-positive note**: if `path_c_skipped` is dominant within ~1h of a rolling upgrade, that's expected (pre-v3 multi-ticket-type events flushing); should taper to 0 once deploy is done. **Dual-page note**: when `redis_revert_error` is dominant the critical `SagaCompensatorRedisInventoryLeak` will also fire — same root cause, different urgency."
+
+      - alert: SagaMarkRedisRevertedPersistFailing
+        # Fires when MarkRedisReverted (UPDATE saga_compensations SET
+        # redis_reverted_at = NOW()) fails after a successful RevertInventory.
+        # Redis inventory IS correct — revert happened. Only the PG
+        # persistence of the "redis done" flag failed. On Kafka redeliver,
+        # the compensator will re-enter the WasRedisReverted=false path
+        # and call RevertInventory again; revert.lua's EXISTS guard is
+        # the last-resort defence against double-revert in that scenario.
+        # Sustained failures indicate PG write errors or connection pool
+        # exhaustion — investigate DB health.
+        expr: increase(saga_mark_redis_reverted_errors_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#sagamarkredisrevertedpersistfailing"
+          summary: "Saga compensator: MarkRedisReverted PG write failing"
+          description: "saga_mark_redis_reverted_errors_total incremented {{ $value }} time(s) over 10m (sustained 5m). Redis inventory IS correct — RevertInventory succeeded. Only the redis_reverted_at column write failed. On Kafka redeliver, revert.lua EXISTS guard prevents double-revert. Root cause: PG write errors or connection pool exhaustion. Check DB health + saga_compensator_events_processed_total{outcome=~\".*redis_mark_failed\"} for context."
 
       - alert: SagaConsumerLagHigh
         # Fires when consumer lag (seconds since
