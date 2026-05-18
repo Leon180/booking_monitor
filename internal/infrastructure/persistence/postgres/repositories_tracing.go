@@ -8,6 +8,7 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"booking_monitor/internal/domain"
@@ -488,4 +489,56 @@ func (d *ticketTypeRepositoryTracingDecorator) SumAvailableByEventID(ctx context
 		span.SetAttributes(attribute.Int("sum", sum))
 	}
 	return sum, err
+}
+
+// --- SagaCompensationRepositoryTracingDecorator ---
+
+type sagaCompensationRepositoryTracingDecorator struct {
+	next domain.SagaCompensationRepository
+}
+
+func NewSagaCompensationRepositoryTracingDecorator(next domain.SagaCompensationRepository) domain.SagaCompensationRepository {
+	return &sagaCompensationRepositoryTracingDecorator{next: next}
+}
+
+func (d *sagaCompensationRepositoryTracingDecorator) RecordCompletion(ctx context.Context, compensationID string, orderID uuid.UUID) (int64, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SagaCompRecordCompletion", trace.WithAttributes(
+		attribute.String("compensation_id", compensationID),
+	))
+	defer span.End()
+
+	n, err := d.next.RecordCompletion(ctx, compensationID, orderID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return n, err
+}
+
+func (d *sagaCompensationRepositoryTracingDecorator) WasRedisReverted(ctx context.Context, compensationID string) (bool, error) {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SagaCompWasRedisReverted", trace.WithAttributes(
+		attribute.String("compensation_id", compensationID),
+	))
+	defer span.End()
+
+	done, err := d.next.WasRedisReverted(ctx, compensationID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return done, err
+}
+
+func (d *sagaCompensationRepositoryTracingDecorator) MarkRedisReverted(ctx context.Context, compensationID string) error {
+	ctx, span := otel.Tracer(tracerName).Start(ctx, "SagaCompMarkRedisReverted", trace.WithAttributes(
+		attribute.String("compensation_id", compensationID),
+	))
+	defer span.End()
+
+	err := d.next.MarkRedisReverted(ctx, compensationID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }

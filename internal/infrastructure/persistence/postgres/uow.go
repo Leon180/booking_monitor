@@ -28,6 +28,7 @@ type PostgresUnitOfWork struct {
 	eventRepo      *postgresEventRepository
 	outboxRepo     *postgresOutboxRepository
 	ticketTypeRepo *postgresTicketTypeRepository
+	sagaCompRepo   *postgresSagaCompensationRepository
 	logger         *mlog.Logger
 	metrics        application.DBMetrics
 }
@@ -38,6 +39,7 @@ func NewPostgresUnitOfWork(
 	eventRepo *postgresEventRepository,
 	outboxRepo *postgresOutboxRepository,
 	ticketTypeRepo *postgresTicketTypeRepository,
+	sagaCompRepo *postgresSagaCompensationRepository,
 	logger *mlog.Logger,
 	metrics application.DBMetrics,
 ) application.UnitOfWork {
@@ -47,6 +49,7 @@ func NewPostgresUnitOfWork(
 		eventRepo:      eventRepo,
 		outboxRepo:     outboxRepo,
 		ticketTypeRepo: ticketTypeRepo,
+		sagaCompRepo:   sagaCompRepo,
 		logger:         logger.With(mlog.String("component", "unit_of_work")),
 		metrics:        metrics,
 	}
@@ -73,10 +76,11 @@ func (u *PostgresUnitOfWork) Do(ctx context.Context, fn func(repos *application.
 	}
 
 	repos := &application.Repositories{
-		Order:      u.orderRepo.WithTx(tx),
-		Event:      u.eventRepo.WithTx(tx),
-		Outbox:     u.outboxRepo.WithTx(tx),
-		TicketType: u.ticketTypeRepo.WithTx(tx),
+		Order:          u.orderRepo.WithTx(tx),
+		Event:          u.eventRepo.WithTx(tx),
+		Outbox:         u.outboxRepo.WithTx(tx),
+		TicketType:     u.ticketTypeRepo.WithTx(tx),
+		SagaCompletion: u.sagaCompRepo.WithTx(tx),
 	}
 
 	if err := fn(repos); err != nil {

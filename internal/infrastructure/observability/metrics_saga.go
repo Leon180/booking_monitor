@@ -254,3 +254,25 @@ var SagaCompensationConsumerLagSeconds = promauto.NewGauge(
 		Help: "Saga consumer lag-since-write of the most-recently-processed message. PERFORMANCE metric, not liveness — crashed consumer leaves gauge stale; gate alerts on up==1. For multi-replica deployments, aggregate via max by (instance).",
 	},
 )
+
+// SagaMarkRedisRevertedErrorsTotal counts best-effort failures to persist
+// redis_reverted_at after a successful revert.lua call. Non-zero indicates
+// that the PG idempotency guard is partially missing its Redis-revert flag;
+// revert.lua's own EXISTS guard remains as last-resort defense-in-depth.
+var SagaMarkRedisRevertedErrorsTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "saga_mark_redis_reverted_errors_total",
+		Help: "Total failures to persist redis_reverted_at after successful RevertInventory.",
+	},
+)
+
+// SagaWasRedisRevertedErrorsTotal counts failures of the WasRedisReverted
+// PG check. When non-zero the compensator fell open to RevertInventory
+// guarded only by revert.lua's EXISTS key. Sustained counts during PG
+// degradation may cause redundant revert attempts on redelivery.
+var SagaWasRedisRevertedErrorsTotal = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "saga_was_redis_reverted_errors_total",
+		Help: "Total failures of the WasRedisReverted PG idempotency check. Compensator falls open to RevertInventory; revert.lua EXISTS guard is last-resort defense.",
+	},
+)

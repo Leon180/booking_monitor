@@ -281,12 +281,14 @@ reset-db: ## Reset database — truncate orders/events/outbox + clear Redis cach
 	# Post-PR-34 events.id is UUID, so the previous "seed event id=1"
 	# pattern is gone. Truncate everything; each test run creates a
 	# fresh event via the API.
-	# orders + order_status_history truncated together — FK with
-	# ON DELETE CASCADE rules out plain `TRUNCATE orders` (Postgres
-	# rejects without CASCADE when child tables reference the parent).
+	# saga_compensations + orders + order_status_history truncated together.
+	# saga_compensations must be listed because it holds an FK to orders
+	# (migration 000016). order_status_history likewise (PR #40 FK).
+	# Listing all three in one TRUNCATE lets Postgres bypass FK checks
+	# across the set — no CASCADE needed, order within the list is irrelevant.
 	# RESTART IDENTITY resets the BIGSERIAL on order_status_history so
 	# a fresh test run sees ids starting at 1.
-	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE TABLE orders, order_status_history RESTART IDENTITY;"
+	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE TABLE saga_compensations, orders, order_status_history RESTART IDENTITY;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE events_outbox;"
 	@docker exec booking_db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "DELETE FROM events;"
 	# Redis: precise DEL of CACHE keys ONLY — never `FLUSHALL`.

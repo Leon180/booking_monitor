@@ -70,8 +70,9 @@ func uowHarness(t *testing.T) (
 	eventRepo := postgres.NewPostgresEventRepository(h.DB)
 	outboxRepo := postgres.NewPostgresOutboxRepository(h.DB)
 	ticketTypeRepo := postgres.NewPostgresTicketTypeRepository(h.DB)
+	sagaCompRepo := postgres.NewSagaCompensationRepository(h.DB)
 	uow := postgres.NewPostgresUnitOfWork(
-		h.DB, orderRepo, eventRepo, outboxRepo, ticketTypeRepo,
+		h.DB, orderRepo, eventRepo, outboxRepo, ticketTypeRepo, sagaCompRepo,
 		mlog.NewNop(),
 		application.NoopDBMetrics(),
 	)

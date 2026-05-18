@@ -22,6 +22,8 @@ import (
 // `step` value is one of: "getbyid", "list_ticket_type",
 // "incrementticket", "markcompensated". Mapped to the
 // `<step>_error` outcome label by `outcomeForStepError` below.
+// Steps: "getbyid", "list_ticket_type", "incrementticket",
+// "markcompensated", "record_completion".
 //
 // Wraps the underlying error so callers using `errors.Is` /
 // `errors.As` against domain sentinels still work end-to-end.
@@ -58,6 +60,7 @@ type Compensator interface {
 
 type compensator struct {
 	inventoryRepo domain.InventoryRepository
+	sagaCompRepo  domain.SagaCompensationRepository // non-tx, long-lived; used outside UoW
 	uow           application.UnitOfWork
 	log           *mlog.Logger
 	metrics       CompensatorMetrics
@@ -71,21 +74,26 @@ type compensator struct {
 // resolved off the closure parameter; the Redis revert outside the
 // tx still uses the long-lived inventoryRepo.
 //
+// sagaCompRepo is the NON-TX long-lived handle used outside the UoW
+// for WasRedisReverted / MarkRedisReverted. The tx-bound clone
+// (repos.SagaCompletion inside Do) is used only for RecordCompletion.
+//
 // PR-D12.4 added the `metrics CompensatorMetrics` parameter.
 // Metrics are injected DIRECTLY (not via a decorator) because three
 // of HandleOrderFailed's return paths (compensated /
 // already_compensated / path_c_skipped) all return `nil`,
 // indistinguishable from outside. The compensator must self-record
-// its outcome before each return. Slice 2 will add the call sites;
-// this slice (1) just threads the dependency through.
+// its outcome before each return.
 func NewCompensator(
 	inventoryRepo domain.InventoryRepository,
+	sagaCompRepo domain.SagaCompensationRepository,
 	uow application.UnitOfWork,
 	logger *mlog.Logger,
 	metrics CompensatorMetrics,
 ) Compensator {
 	return &compensator{
 		inventoryRepo: inventoryRepo,
+		sagaCompRepo:  sagaCompRepo,
 		uow:           uow,
 		log:           logger.With(mlog.String("component", "saga_compensator")),
 		metrics:       metrics,
@@ -149,6 +157,10 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 		tag.TicketTypeID(event.TicketTypeID),
 		tag.Quantity(event.Quantity),
 	)
+
+	// compensationID is shared by the UoW closure (RecordCompletion)
+	// and the post-UoW Redis revert path (WasRedisReverted / MarkRedisReverted).
+	compensationID := fmt.Sprintf("order:%s", event.OrderID)
 
 	// 1. Rollback PostgreSQL Inventory & Ensure Idempotency via UoW
 	ticketTypeIDForRevert := event.TicketTypeID
@@ -222,6 +234,21 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 		if err := repos.Order.MarkCompensated(ctx, event.OrderID); err != nil {
 			return &stepError{step: "markcompensated", err: fmt.Errorf("orderRepo.MarkCompensated order_id=%s: %w", event.OrderID, err)}
 		}
+
+		// Atomically record the compensation in PG — the PG-based idempotency
+		// guard that survives Redis crashes (Seata TCC fence pattern).
+		// ON CONFLICT DO NOTHING makes this safe for Kafka redelivery.
+		n, err := repos.SagaCompletion.RecordCompletion(ctx, compensationID, event.OrderID)
+		if err != nil {
+			return &stepError{step: "record_completion", err: fmt.Errorf("sagaCompRepo.RecordCompletion order_id=%s: %w", event.OrderID, err)}
+		}
+		if n == 0 {
+			// Anomalous: compensationID already existed on a wasAlreadyCompensated=false
+			// path. Structurally impossible under normal operation; indicates a
+			// compensationID collision or manual DB intervention.
+			s.log.Error(ctx, "saga: RecordCompletion was no-op (row pre-existed on first-time path — investigate compensationID collision)",
+				tag.OrderID(event.OrderID))
+		}
 		return nil
 	})
 
@@ -253,7 +280,32 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 	// 2. Rollback Redis Inventory (Hot path). Idempotency is enforced
 	// by the Lua script via an EXISTS-then-SET guard on a compensation
 	// key (see revert.lua for the crash-safety trade-off).
-	compensationID := fmt.Sprintf("order:%s", event.OrderID)
+	//
+	// When wasAlreadyCompensated=true (Kafka redelivery after DB
+	// was already final), first check the PG record to see whether
+	// the Redis revert already completed. This guard survives Redis
+	// crashes: if the Redis key was lost, revert.lua's EXISTS check
+	// would not protect us — but the PG redis_reverted_at flag does.
+	//
+	// ⚠️ revert.lua's EXISTS check on saga:reverted:{compensationID}
+	// MUST NOT be removed — it is load-bearing defense-in-depth for
+	// the WasRedisReverted fail-open path (when PG check errors).
+	if wasAlreadyCompensated {
+		if ticketTypeIDForRevert != uuid.Nil {
+			done, err := s.sagaCompRepo.WasRedisReverted(ctx, compensationID)
+			if err != nil {
+				s.log.Warn(ctx, "saga: WasRedisReverted failed; proceeding (revert.lua as fallback)",
+					tag.OrderID(event.OrderID), tag.Error(err))
+				s.metrics.IncWasRedisRevertedError()
+				// fail-open: revert.lua EXISTS guard is the last-resort defence.
+			} else if done {
+				record("already_compensated")
+				return nil
+			}
+			// done=false: DB done, Redis revert never completed → fall through
+		}
+	}
+
 	if ticketTypeIDForRevert == uuid.Nil {
 		s.log.Warn(ctx, "skipping Redis inventory revert because ticket_type_id is unavailable",
 			tag.OrderID(event.OrderID),
@@ -289,6 +341,22 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 			record("redis_revert_error")
 		}
 		return fmt.Errorf("inventoryRepo.RevertInventory order_id=%s: %w", event.OrderID, err)
+	}
+
+	// Best-effort: persist redis_reverted_at so future redeliveries can
+	// skip the Redis revert entirely (WasRedisReverted=true).
+	// Failure here is non-fatal — the compensation is complete and
+	// revert.lua's EXISTS guard still blocks double-revert on next retry.
+	if err := s.sagaCompRepo.MarkRedisReverted(ctx, compensationID); err != nil {
+		s.log.Warn(ctx, "saga: MarkRedisReverted failed",
+			tag.OrderID(event.OrderID), tag.Error(err))
+		s.metrics.IncMarkRedisRevertedError()
+		if wasAlreadyCompensated {
+			record("already_compensated_redis_mark_failed")
+		} else {
+			record("compensated_redis_mark_failed")
+		}
+		return nil
 	}
 
 	s.log.Info(ctx, "rollback successful", tag.OrderID(event.OrderID))

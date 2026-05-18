@@ -133,6 +133,19 @@ type CompensatorMetrics interface {
 	// `max by (instance)` to aggregate. Documented in the
 	// Prometheus Help text.
 	SetConsumerLag(d time.Duration)
+
+	// IncMarkRedisRevertedError increments the best-effort failure
+	// counter for MarkRedisReverted. Non-zero indicates the PG
+	// idempotency guard is partially missing its Redis-revert flag;
+	// revert.lua's EXISTS guard remains as defense-in-depth.
+	IncMarkRedisRevertedError()
+
+	// IncWasRedisRevertedError increments when the WasRedisReverted
+	// PG check fails. The compensator falls open to RevertInventory
+	// in this case; revert.lua's EXISTS guard is the last-resort
+	// defense. Non-zero during sustained PG degradation may produce
+	// redundant revert attempts.
+	IncWasRedisRevertedError()
 }
 
 // NopCompensatorMetrics is the zero-behaviour
@@ -141,6 +154,8 @@ type CompensatorMetrics interface {
 // observability. Mirrors `NopMetrics` above.
 type NopCompensatorMetrics struct{}
 
-func (NopCompensatorMetrics) RecordEventProcessed(string) {}
+func (NopCompensatorMetrics) RecordEventProcessed(string)    {}
 func (NopCompensatorMetrics) ObserveLoopDuration(time.Duration) {}
-func (NopCompensatorMetrics) SetConsumerLag(time.Duration) {}
+func (NopCompensatorMetrics) SetConsumerLag(time.Duration)   {}
+func (NopCompensatorMetrics) IncMarkRedisRevertedError()     {}
+func (NopCompensatorMetrics) IncWasRedisRevertedError()      {}
