@@ -27,10 +27,16 @@ package observability
 //   - ReconResolvedTotal                      → metrics_recon.go
 //   - SagaWatchdogResolvedTotal,
 //     SagaCompensatorEventsTotal             → metrics_saga.go
+//   - AdminEventBus*, AdminSSE*,
+//     AdminStreamSubscriber*                 → metrics_admin_stream.go
+//   - InventoryLowAlertsTotal                → metrics_inventory_low.go
 //
 // Cross-file references work because all files share `package observability`.
 
-import "booking_monitor/internal/domain"
+import (
+	"booking_monitor/internal/application/admin"
+	"booking_monitor/internal/domain"
+)
 
 // init pre-initializes all label combinations so they appear in
 // /metrics from startup.
@@ -210,4 +216,47 @@ func init() {
 	// counters; nothing to prewarm. The two gauges (oldest_overdue +
 	// backlog_after_sweep) self-initialise to 0 on first sweep, no
 	// prewarm needed.
+
+	// Admin event streaming label prewarm (PR #121). Same rationale as
+	// saga / recon / drift: PromQL alerts need a 0-value series to
+	// evaluate against before the first event fires. The event_type
+	// label set is the 8 admin event constants from internal/
+	// application/admin/event.go — pull from there so the prewarm can't
+	// silently drift from the producer constants.
+	for _, eventType := range []string{
+		admin.EventTypeOrderCreated,
+		admin.EventTypeOrderPaid,
+		admin.EventTypeOrderFailed,
+		admin.EventTypeOrderExpired,
+		admin.EventTypeOrderCompensated,
+		admin.EventTypeSagaTriggered,
+		admin.EventTypeDLQReceived,
+		admin.EventTypeInventoryLow,
+	} {
+		AdminEventBusPublishedTotal.WithLabelValues(eventType)
+		AdminSSEMessagesSentTotal.WithLabelValues(eventType)
+	}
+	// Bus drop / xadd-failure / SSE drop labels — currently single-
+	// value, but pre-warm anyway so dashboards show "0 so far" not
+	// "no data" before the first drop fires.
+	for _, reason := range []string{"channel_full"} {
+		AdminEventBusDroppedTotal.WithLabelValues(reason)
+	}
+	for _, reason := range []string{"timeout", "conn_refused", "other"} {
+		AdminEventBusXAddFailuresTotal.WithLabelValues(reason)
+	}
+	for _, reason := range []string{"slow_consumer"} {
+		AdminSSEMessagesDroppedTotal.WithLabelValues(reason)
+	}
+	// AdminSSEClientsDropped reasons mirror Q10/Q15 design.
+	for _, reason := range []string{"slow_consumer", "write_error", "shutdown"} {
+		AdminSSEClientsDroppedTotal.WithLabelValues(reason)
+	}
+	// Unlabelled counters and gauges (AdminSSEReconnectsTotal,
+	// AdminSSEHeartbeatsSentTotal, AdminSSEEventsTruncatedTotal,
+	// AdminEventBusChannelDepth, AdminSSEActiveConnections,
+	// AdminStreamSubscriber{ConsecFailures,XReadFailuresTotal},
+	// InventoryLowAlertsTotal) self-initialise to 0 — no prewarm needed.
+	// Histograms (AdminSSE{ConnectionDuration,MessageLag}Seconds)
+	// expose all bucket labels at registration.
 }
