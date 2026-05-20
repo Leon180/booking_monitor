@@ -86,3 +86,14 @@ demo/node_modules/
 demo/dist/
 demo/.env
 demo/.env.local
+
+# Locally-built binaries (created by `go build ./cmd/...`)
+booking-cli
+booking-cli-stage1
+booking-cli-stage2
+booking-cli-stage3
+booking-cli-stage4
+booking-cli-stage5
+
+# Personal Notion exports (operator-local working files)
+docs/interview_prep_notion *.md
