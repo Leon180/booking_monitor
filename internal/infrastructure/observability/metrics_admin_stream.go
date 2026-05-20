@@ -99,23 +99,6 @@ var AdminSSEMessagesSentTotal = promauto.NewCounterVec(
 	[]string{"event_type"},
 )
 
-// AdminSSEMessagesDroppedTotal counts events dropped at the hub's
-// per-client backpressure check (slow consumer). Distinct from the
-// bus-side dropped counter — these are events that made it to Redis
-// but couldn't reach a specific client's send channel.
-//
-// Per Q10 design, this metric should usually be 0 because the hub's
-// policy is to DROP THE CLIENT (close c.send) rather than drop
-// individual messages. Non-zero values indicate a race between
-// broadcast and unregister; investigate as an edge case.
-var AdminSSEMessagesDroppedTotal = promauto.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "admin_sse_messages_dropped_total",
-		Help: "Admin SSE messages not delivered due to per-client backpressure.",
-	},
-	[]string{"reason"},
-)
-
 // AdminSSEClientsDroppedTotal counts clients forcibly disconnected by
 // the hub. Per Q10 design, a slow client whose `c.send` channel fills
 // up gets dropped (close c.send, delete from registry) rather than

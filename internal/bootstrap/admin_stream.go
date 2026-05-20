@@ -67,12 +67,13 @@ type busAdapter struct {
 	bus *cache.AdminEventBus
 }
 
-func newAdminEventBus(client redis.UniversalClient, cfg *config.Config, logger *mlog.Logger) *busAdapter {
+func newAdminEventBus(client redis.UniversalClient, logger *mlog.Logger) *busAdapter {
+	// HIGH-1 (review round 1): removed unused *config.Config param.
+	// Re-add it (and use it) when AdminStreamConfig gains tunables
+	// like ChannelCapacity / StreamMaxLen overrides — until then the
+	// `_ = cfg` smell was one missed config-thread away from a silent
+	// misconfiguration.
 	busCfg := cache.DefaultAdminEventBusConfig()
-	// Future: thread cfg.AdminStream.* overrides here when the
-	// config struct gets dedicated env vars. For now, defaults
-	// are the production setting per Q3 design.
-	_ = cfg
 	bus := cache.NewAdminEventBus(client, busCfg, logger)
 	return &busAdapter{bus: bus}
 }

@@ -3,7 +3,6 @@ package sse
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -92,7 +91,9 @@ func (s *Subscriber) Run(ctx context.Context) {
 		mlog.Duration("block_timeout", s.cfg.BlockTimeout),
 		mlog.Int("max_consec_failures", s.cfg.MaxConsecFailures))
 
-	var consecFails atomic.Int32
+	// HIGH-3 (review round 1): consecFails is read/written only by
+	// this single goroutine — atomic was misleading; use plain int32.
+	var consecFails int32
 	lastID := "$"
 
 	for {
@@ -109,7 +110,7 @@ func (s *Subscriber) Run(ctx context.Context) {
 
 		// 1. Idle timeout — XREAD BLOCK returned no events. Normal.
 		if errors.Is(err, redis.Nil) {
-			consecFails.Store(0)
+			consecFails = 0
 			observability.AdminStreamSubscriberConsecFailures.Set(0)
 			continue
 		}
@@ -121,7 +122,8 @@ func (s *Subscriber) Run(ctx context.Context) {
 
 		// 3. Real failure
 		if err != nil {
-			n := consecFails.Add(1)
+			consecFails++
+			n := consecFails
 			observability.AdminStreamSubscriberConsecFailures.Set(float64(n))
 			observability.AdminStreamSubscriberXReadFailuresTotal.Inc()
 			s.log.Error(ctx, "admin stream subscriber XREAD failed",
@@ -131,7 +133,12 @@ func (s *Subscriber) Run(ctx context.Context) {
 			if int(n) >= s.cfg.MaxConsecFailures {
 				s.log.Error(ctx, "admin stream subscriber exceeded consec-failure budget — escalating fx.Shutdown",
 					mlog.Int("consec_failures", int(n)))
-				_ = s.shutdowner.Shutdown(fx.ExitCode(1))
+				// MED-5 (review round 1): log shutdown errors so a
+				// degraded fx state doesn't go silent.
+				if shutdownErr := s.shutdowner.Shutdown(fx.ExitCode(1)); shutdownErr != nil {
+					s.log.Error(ctx, "admin stream subscriber: fx.Shutdown escalation failed",
+						tag.Error(shutdownErr))
+				}
 				return
 			}
 
@@ -149,7 +156,7 @@ func (s *Subscriber) Run(ctx context.Context) {
 		}
 
 		// 4. Happy path — got messages, broadcast each
-		consecFails.Store(0)
+		consecFails = 0
 		observability.AdminStreamSubscriberConsecFailures.Set(0)
 		for _, stream := range msgs {
 			for _, msg := range stream.Messages {

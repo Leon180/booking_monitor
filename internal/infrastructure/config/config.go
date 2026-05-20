@@ -1020,6 +1020,37 @@ func (c *Config) Validate() error {
 		))
 	}
 
+	// Admin SSE stream (PR #121).
+	//
+	// The endpoint is fail-closed when JWTSecret is empty (middleware
+	// returns 503). But in production we want startup to FAIL rather
+	// than serve 503 silently — empty secret in production is almost
+	// certainly a config bug.
+	//
+	// When the secret IS set, enforce minimum 32-byte length (HS256
+	// security floor per NIST SP 800-107). Mirrors MintAdminJWT's
+	// constructor check; without this server-side validation, an
+	// operator could ship with a weak secret that MintAdminJWT would
+	// reject but the middleware would silently accept.
+	//
+	// JWTMaxTTL > 0 is required by AdminJWTMiddleware (zero = unbounded
+	// TTL = security regression).
+	if normalizedAppEnv(c.App.Env) == "production" && c.AdminStream.JWTSecret == "" {
+		missing = append(missing, "admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET (required in production; empty = endpoint 503s)")
+	}
+	if c.AdminStream.JWTSecret != "" && len(c.AdminStream.JWTSecret) < 32 {
+		missing = append(missing, fmt.Sprintf(
+			"admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET must be at least 32 bytes (got %d); HS256 below 32 bytes is below NIST 128-bit security floor",
+			len(c.AdminStream.JWTSecret),
+		))
+	}
+	if c.AdminStream.JWTMaxTTL <= 0 {
+		missing = append(missing, fmt.Sprintf(
+			"admin_stream.jwt_max_ttl / ADMIN_STREAM_JWT_MAX_TTL (must be > 0; got %v)",
+			c.AdminStream.JWTMaxTTL,
+		))
+	}
+
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required config fields: %s", strings.Join(missing, ", "))
 	}

@@ -160,6 +160,35 @@ func TestAdminJWTMiddleware_MalformedToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+func TestAdminJWTMiddleware_RejectsShortSecret(t *testing.T) {
+	// CRIT-2 (review round 1): middleware constructed with a short
+	// secret must refuse every request with 503. Pairs with the
+	// startup-time config.Validate() check; this is the runtime
+	// defence in depth.
+	shortSecret := []byte("only-15-bytes!!") // 15 bytes < 32
+	router := newAdminJWTRouter(t, AdminJWTConfig{Secret: shortSecret})
+
+	// Even with a "valid" token signed by the short secret, the
+	// middleware should 503 because the secret itself is weak.
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, AdminClaims{
+		User:  "ops-test",
+		Scope: AdminJWTScope,
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+		},
+	}).SignedString(shortSecret)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/protected?token="+token, nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
+		"short secret must yield 503 regardless of token validity")
+	assert.Contains(t, w.Body.String(), "jwt secret missing or too short")
+}
+
 func TestMintAdminJWT_Validations(t *testing.T) {
 	t.Run("rejects short secret", func(t *testing.T) {
 		_, err := MintAdminJWT([]byte("too-short"), "ops-leon", time.Hour)

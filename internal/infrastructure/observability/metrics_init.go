@@ -245,11 +245,10 @@ func init() {
 	for _, reason := range []string{"timeout", "conn_refused", "other"} {
 		AdminEventBusXAddFailuresTotal.WithLabelValues(reason)
 	}
-	for _, reason := range []string{"slow_consumer"} {
-		AdminSSEMessagesDroppedTotal.WithLabelValues(reason)
-	}
-	// AdminSSEClientsDropped reasons mirror Q10/Q15 design.
-	for _, reason := range []string{"slow_consumer", "write_error", "shutdown"} {
+	// AdminSSEClientsDropped reasons mirror Q10/Q15 design + the
+	// post-review-round-1 hub_unavailable reason (handler refuses
+	// connections that arrive in the shutdown drain window).
+	for _, reason := range []string{"slow_consumer", "write_error", "shutdown", "hub_unavailable"} {
 		AdminSSEClientsDroppedTotal.WithLabelValues(reason)
 	}
 	// Unlabelled counters and gauges (AdminSSEReconnectsTotal,

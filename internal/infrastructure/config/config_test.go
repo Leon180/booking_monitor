@@ -76,6 +76,15 @@ func validBase() *config.Config {
 				WebhookSecret: "whsec_test_validBaseFakeSecret",
 			},
 		},
+		// PR #121: admin SSE stream. JWTMaxTTL > 0 mandatory;
+		// JWTSecret must be >= 32 bytes if set, and required in
+		// production. validBase() provides a 32-byte fake secret so
+		// production-mode tests for other fields don't trip on this
+		// guard. Dedicated tests below cover empty / short secret.
+		AdminStream: config.AdminStreamConfig{
+			JWTSecret: "validBaseFakeJWTSecret_32bytes_!!",
+			JWTMaxTTL: time.Hour,
+		},
 	}
 }
 
@@ -502,4 +511,53 @@ func TestValidate_ProductionRejectsStripeTestKey(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// PR #121 admin SSE stream validation tests. Pair with the
+// review-round-1 fix that added JWTSecret + JWTMaxTTL guards to
+// Validate().
+func TestValidate_AdminStreamRejections(t *testing.T) {
+	t.Run("zero_jwt_max_ttl_rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.AdminStream.JWTMaxTTL = 0
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin_stream.jwt_max_ttl")
+		assert.Contains(t, err.Error(), "must be > 0")
+	})
+
+	t.Run("short_jwt_secret_rejected", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.AdminStream.JWTSecret = "too-short"
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin_stream.jwt_secret")
+		assert.Contains(t, err.Error(), "at least 32 bytes")
+	})
+
+	t.Run("empty_secret_allowed_in_dev", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.AdminStream.JWTSecret = "" // empty in non-production: endpoint 503s but config valid
+
+		err := c.Validate()
+		require.NoError(t, err,
+			"empty JWT secret should be allowed in non-production (middleware 503s)")
+	})
+
+	t.Run("empty_secret_rejected_in_production", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		c.App.Env = "production"
+		c.AdminStream.JWTSecret = ""
+
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin_stream.jwt_secret")
+		assert.Contains(t, err.Error(), "required in production")
+	})
 }

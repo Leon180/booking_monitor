@@ -22,24 +22,10 @@ func newTestHub(t *testing.T) (*Hub, context.CancelFunc) {
 	return hub, cancel
 }
 
-// waitForRegister polls the hub until at least n clients are
-// registered (visible in AdminSSEActiveConnections). Used by tests
-// because Register is async — it enqueues, but the hub goroutine
-// may not have processed the enqueue yet.
-func waitForRegister(t *testing.T, expected float64) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		// Read active-connections gauge via collector
-		var got float64
-		// dto-based read is ugly; just brute-force sleep+check via tiny wait
-		return expected == expected && got >= 0 // placeholder, see retryWaitForRegister
-	}, 200*time.Millisecond, 5*time.Millisecond)
-}
-
 // drainRegister is the pragmatic way to wait for Register to be
 // processed: sleep a short window so the hub goroutine drains the
 // buffered register channel. Hub.Run is single-goroutine so even
-// a 5ms sleep is generous.
+// a 5ms sleep is generous; we use 20ms for CI margin.
 func drainRegister() {
 	time.Sleep(20 * time.Millisecond)
 }
@@ -63,7 +49,6 @@ func TestHub_RegisterReceivesBroadcast(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("client did not receive broadcast within 1s")
 	}
-	_ = waitForRegister // silence unused; helper kept for future
 }
 
 func TestHub_UnregisterClosesSendChan(t *testing.T) {

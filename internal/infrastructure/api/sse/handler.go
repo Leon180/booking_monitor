@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -102,6 +103,10 @@ func (h *Handler) BroadcastRetryHints(ctx context.Context) {
 			"retry_ms":   strconv.Itoa(delay),
 		},
 	}
+	// Best-effort broadcast: returns false if the hub is already
+	// stopping (Q15 shutdown step 3 cancels the hub ctx, may race
+	// with this step 2 retry-hint send). False is acceptable here —
+	// clients without the hint just use the SSE default 3s retry.
 	_ = h.hub.Broadcast(ctx, msg)
 }
 
@@ -117,18 +122,42 @@ func (h *Handler) HandleStream(c *gin.Context) {
 	w := c.Writer
 	ctx := c.Request.Context()
 
-	// SSE headers (Q14 layered defense: also set in nginx)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.log.Error(ctx, "admin sse: response writer is not a Flusher")
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+
+	// Register with hub BEFORE committing the 200 response (CRIT-1
+	// from review round 1). If the hub is unavailable (shutdown
+	// window between SetShuttingDown(true) and cancel(runCtx)), we
+	// must return 503 so EventSource treats this as a transient
+	// failure and applies backoff — otherwise the client would see
+	// a successful empty SSE stream and reconnect in a tight loop.
+	//
+	// Q8 subscribe-then-replay ordering: register with the hub
+	// before XRANGE replay so live events buffer into client.Send
+	// during history catch-up.
+	client := NewClient()
+	registered := h.hub.Register(ctx, client)
+	if !registered {
+		h.log.Warn(ctx, "admin sse: hub unavailable, refusing connection")
+		observability.AdminSSEClientsDroppedTotal.WithLabelValues("hub_unavailable").Inc()
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": "server draining, please retry",
+		})
+		return
+	}
+	defer h.hub.Unregister(client)
+
+	// SSE headers + commit 200 (Q14 layered defense: also set in
+	// nginx). Set AFTER successful registration so the 503 abort
+	// path above can still emit JSON.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -140,16 +169,6 @@ func (h *Handler) HandleStream(c *gin.Context) {
 	} else {
 		observability.AdminSSEReconnectsTotal.Inc()
 	}
-
-	// Register client with hub BEFORE replay (Q8: subscribe-then-replay
-	// so live events buffer into client.Send while replay runs)
-	client := NewClient()
-	registered := h.hub.Register(ctx, client)
-	if !registered {
-		h.log.Warn(ctx, "admin sse: hub unavailable, refusing connection")
-		return
-	}
-	defer h.hub.Unregister(client)
 
 	startedAt := time.Now()
 	defer func() {
@@ -206,10 +225,22 @@ func (h *Handler) replayHistory(ctx context.Context, w io.Writer, flusher http.F
 	}
 
 	if len(msgs) == 0 {
-		// Check if lastID is older than the stream's first entry —
-		// indicates trim/truncation
-		first, err := h.client.XRangeN(ctx, h.cfg.StreamKey, "-", "+", 1).Result()
-		if err == nil && len(first) > 0 && compareStreamIDs(lastID, first[0].ID) < 0 {
+		// Two possibilities: (a) lastID is up-to-date (no new events
+		// since), or (b) lastID is older than the stream's first
+		// entry (trim/truncation). Distinguish with a single XRangeN
+		// for the stream's first entry.
+		//
+		// HIGH-4 fix (review round 1): on probe error, log + counter
+		// so we don't silently miss "we should have warned the
+		// operator" cases.
+		first, probeErr := h.client.XRangeN(ctx, h.cfg.StreamKey, "-", "+", 1).Result()
+		if probeErr != nil && !errors.Is(probeErr, redis.Nil) {
+			h.log.Warn(ctx, "admin sse: truncation probe failed",
+				mlog.String("last_event_id", lastID),
+				tag.Error(probeErr))
+			return fmt.Errorf("truncation probe: %w", probeErr)
+		}
+		if len(first) > 0 && compareStreamIDs(lastID, first[0].ID) < 0 {
 			observability.AdminSSEEventsTruncatedTotal.Inc()
 			truncMsg := redis.XMessage{
 				ID: "0-0",
@@ -295,15 +326,27 @@ func compareStreamIDs(a, b string) int {
 	return 0
 }
 
+// splitStreamID parses a Redis Stream ID ("ms-seq") into its
+// numeric components. Returns (math.MaxInt64, 0) for malformed
+// input so that `compareStreamIDs(malformed, anyValidID)` returns
+// 1 (greater than), which prevents an attacker-supplied bogus
+// Last-Event-ID from falsely triggering the truncation path
+// (MED-6 fix from review round 1).
 func splitStreamID(id string) (int64, int64) {
 	for i := 0; i < len(id); i++ {
 		if id[i] == '-' {
-			ms, _ := strconv.ParseInt(id[:i], 10, 64)
-			seq, _ := strconv.ParseInt(id[i+1:], 10, 64)
+			ms, errMs := strconv.ParseInt(id[:i], 10, 64)
+			seq, errSeq := strconv.ParseInt(id[i+1:], 10, 64)
+			if errMs != nil || errSeq != nil {
+				return math.MaxInt64, 0
+			}
 			return ms, seq
 		}
 	}
-	ms, _ := strconv.ParseInt(id, 10, 64)
+	ms, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return math.MaxInt64, 0
+	}
 	return ms, 0
 }
 

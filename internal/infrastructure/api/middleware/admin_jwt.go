@@ -51,11 +51,24 @@ type AdminJWTConfig struct {
 //
 // On success, c.Set("admin_user", claims.User) so downstream
 // handlers can log the active operator.
+//
+// CRIT-2 (review round 1): if cfg.Secret is shorter than 32 bytes,
+// the middleware refuses every request with 503. HS256 below 32
+// bytes is below NIST 128-bit security floor — config.Validate()
+// also rejects this at startup, so reaching this code path means
+// either a bypass (raw &Config{} literal) or a regression.
 func AdminJWTMiddleware(cfg AdminJWTConfig) gin.HandlerFunc {
 	if cfg.MaxTTL == 0 {
 		cfg.MaxTTL = DefaultAdminJWTMaxTTL
 	}
+	secretTooWeak := len(cfg.Secret) < 32
 	return func(c *gin.Context) {
+		if secretTooWeak {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error": "admin endpoint disabled (jwt secret missing or too short)",
+			})
+			return
+		}
 		tokenStr := c.Query("token")
 		if tokenStr == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
