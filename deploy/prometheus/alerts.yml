@@ -1076,3 +1076,91 @@ groups:
           runbook_url: "https://github.com/Leon180/booking_monitor/blob/main/docs/runbooks/README.md#expirymaxageexceeded"
           summary: "Expiry sweeper transitioned a reservation past MaxAge — investigate sweeper uptime"
           description: "{{ $value }} reservation(s) aged past EXPIRY_MAX_AGE (default 24h) before being expired in the last 1h. The rows ARE now `expired` (D6 always expires; MaxAge is awareness-only) — the question is why they were stuck so long. Check sweeper uptime, deploy logs, k8s CronJob fire history."
+
+  # Admin event streaming alerts (PR #121). See
+  # docs/design/admin_event_streaming.md § Q16 for the layering
+  # rationale: these are Layer B (infrastructure observability)
+  # signals that the SSE streaming pipeline itself is healthy.
+  - name: admin_event_streaming
+    rules:
+      - alert: AdminEventBusDropping
+        expr: |
+          rate(admin_event_bus_dropped_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Admin event bus dropping events ({{ $value | humanize }}/s over 5m)"
+          description: |
+            Publisher backpressure: bus.Publish() cannot enqueue events
+            into the internal channel (capacity 10,000 by default).
+            Most likely cause: drainer goroutine cannot XADD fast enough
+            (Redis slow / down). Observability is degraded but business
+            functions are unaffected.
+
+            Check: rate(admin_event_bus_xadd_failures_total[5m]) for
+            Redis-side bottleneck; admin_event_bus_channel_depth for
+            queue saturation; saga / order-flow business metrics for
+            unrelated backpressure.
+
+      - alert: AdminStreamSubscriberConsecFailures
+        expr: |
+          admin_stream_subscriber_consec_failures > 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Admin SSE subscriber XREAD failing repeatedly ({{ $value }} consec failures)"
+          description: |
+            The per-pod admin event subscriber goroutine has failed N
+            consecutive XREAD calls. At threshold 30 (configured), the
+            pod will escalate fx.Shutdown for k8s to restart it.
+            Investigate Redis health, network connectivity, or pod-
+            local resource pressure before that happens.
+
+      - alert: AdminSSEReconnectsBursting
+        expr: |
+          rate(admin_sse_reconnects_total[1m]) > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Admin SSE reconnect rate elevated ({{ $value | humanize }}/s)"
+          description: |
+            More than 5 reconnects per second sustained for 30s. Expected
+            briefly after deploy (clients reconnect with jittered retry:
+            hint per Q15). Sustained beyond shutdown window suggests
+            network instability, LB idle-timeout misconfiguration, or
+            pod restart loop.
+
+      - alert: AdminSSEEventsTruncated
+        expr: |
+          increase(admin_sse_events_truncated_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Admin SSE clients hit stream truncation"
+          description: |
+            One or more admin clients reconnected with a Last-Event-ID
+            older than the stream's first available entry — replay is
+            impossible, client received a synthetic stream_truncated
+            event and resumed from live. Expected during high-volume
+            flash sales; during normal hours suggests network outages
+            keeping clients disconnected past the MAXLEN ~ 100000
+            retention window.
+
+      - alert: InventoryLowAlerts
+        expr: |
+          rate(inventory_low_alerts_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inventory crossed low-stock threshold"
+          description: |
+            One or more ticket_types crossed below the configured
+            low-stock threshold (default 10%). Edge-triggered — only
+            fires on the transition, not while inventory remains low.
+            Drill via the SSE event log or query the
+            event_ticket_types table for specific ticket_type_ids.
