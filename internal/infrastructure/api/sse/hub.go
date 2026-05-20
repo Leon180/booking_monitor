@@ -5,6 +5,7 @@ package sse
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -55,8 +56,28 @@ type Hub struct {
 	// can short-circuit a futile unregister send (Q15 graceful drain).
 	stopped chan struct{}
 
+	// activeClients tracks current registered client count for the
+	// observability subsystem (read by AdminSSEEstimatedMemoryBytes
+	// GaugeFunc). Mutated only by hub.Run goroutine, but exposed via
+	// atomic for safe reading from the Prometheus scrape goroutine.
+	activeClients atomic.Int64
+
+	// broadcastHighWater tracks the max observed depth of the
+	// broadcast channel since process start. Updated on broadcast
+	// dispatch; CAS-loop for last-writer-wins semantics.
+	broadcastHighWater atomic.Int64
+
 	log *mlog.Logger
 }
+
+// ActiveClients returns the current registered client count.
+// Used by observability.RegisterAdminStreamResourceGauges to expose
+// admin_sse_estimated_memory_bytes without an import cycle.
+func (h *Hub) ActiveClients() int64 { return h.activeClients.Load() }
+
+// BroadcastHighWater returns the max broadcast channel depth observed
+// since process start. Used by observability gauge callback.
+func (h *Hub) BroadcastHighWater() int64 { return h.broadcastHighWater.Load() }
 
 // NewHub constructs an unstarted Hub.
 //
@@ -149,6 +170,11 @@ func (h *Hub) Run(ctx context.Context) {
 			close(c.Send)
 		}
 		observability.AdminSSEActiveConnections.Set(0)
+		// Reset the atomic counter too — otherwise the
+		// AdminSSEEstimatedMemoryBytes GaugeFunc (which closes over
+		// ActiveClients()) keeps reporting a stale non-zero value for
+		// the remainder of the process lifetime after hub shutdown.
+		h.activeClients.Store(0)
 	}()
 
 	h.log.Info(ctx, "admin sse hub starting")
@@ -162,16 +188,31 @@ func (h *Hub) Run(ctx context.Context) {
 
 		case c := <-h.register:
 			clients[c] = struct{}{}
+			h.activeClients.Add(1)
 			observability.AdminSSEActiveConnections.Inc()
 
 		case c := <-h.unregister:
 			if _, ok := clients[c]; ok {
 				delete(clients, c)
 				close(c.Send)
+				h.activeClients.Add(-1)
 				observability.AdminSSEActiveConnections.Dec()
 			}
 
 		case msg := <-h.broadcast:
+			// Track broadcast HWM at dispatch time. len() on a
+			// buffered chan is approximate (other goroutines may
+			// add/remove concurrently) but good enough for capacity-
+			// planning visibility.
+			if d := int64(len(h.broadcast)) + 1; d > h.broadcastHighWater.Load() {
+				for {
+					old := h.broadcastHighWater.Load()
+					if d <= old || h.broadcastHighWater.CompareAndSwap(old, d) {
+						break
+					}
+				}
+			}
+
 			// Q10 backpressure: slow client → drop client + force
 			// reconnect. EventSource auto-reconnects with Last-Event-ID,
 			// Q8 XRANGE replay backfills the gap.
@@ -183,6 +224,7 @@ func (h *Hub) Run(ctx context.Context) {
 					// c.Send full → drop client
 					delete(clients, c)
 					close(c.Send)
+					h.activeClients.Add(-1)
 					observability.AdminSSEActiveConnections.Dec()
 					observability.AdminSSEClientsDroppedTotal.WithLabelValues("slow_consumer").Inc()
 					h.log.Warn(context.Background(), "admin sse hub dropped slow client",

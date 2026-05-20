@@ -269,6 +269,15 @@ func (h *Handler) replayHistory(ctx context.Context, w io.Writer, flusher http.F
 // outer handler loop already detects via ctx.Done() — surfacing
 // the per-line error here would only add noise.
 func (h *Handler) writeMessage(w io.Writer, flusher http.Flusher, msg redis.XMessage) {
+	// Per-frame write latency — climbing p99 with stable p50 means a
+	// few individual clients are TCP-throttling while the writer
+	// goroutine is healthy. Useful for distinguishing "slow client"
+	// (drop candidate) from "subsystem-wide slow" (broadcast loop wedged).
+	start := time.Now()
+	defer func() {
+		observability.AdminSSEWriteMessageDurationSeconds.Observe(time.Since(start).Seconds())
+	}()
+
 	eventType, _ := msg.Values["event_type"].(string)
 
 	// Special internal marker for graceful-shutdown retry hint
@@ -309,17 +318,17 @@ func (h *Handler) writeMessage(w io.Writer, flusher http.Flusher, msg redis.XMes
 // internal/application/admin/event.go; kept in sync via the
 // pre-warm in observability/metrics_init.go.
 var knownEventTypes = map[string]struct{}{
-	"order.created":      {},
-	"order.paid":         {},
-	"order.failed":       {},
-	"order.expired":      {},
-	"order.compensated":  {},
-	"saga.triggered":     {},
-	"dlq.received":       {},
-	"inventory.low":      {},
+	"order.created":     {},
+	"order.paid":        {},
+	"order.failed":      {},
+	"order.expired":     {},
+	"order.compensated": {},
+	"saga.triggered":    {},
+	"dlq.received":      {},
+	"inventory.low":     {},
 	// Internal markers emitted by the handler itself — these are
 	// not produced by the bus but appear in client wire frames.
-	"_retry_hint":     {},
+	"_retry_hint":      {},
 	"stream_truncated": {},
 }
 

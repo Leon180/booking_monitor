@@ -15,8 +15,16 @@ import (
 	"booking_monitor/internal/infrastructure/api/sse"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 )
+
+// avgAdminEventBytes is the assumed average size of one admin event
+// payload (UUID + event_type + RFC3339Nano timestamp + small JSON
+// data). Used by the SSE memory-estimate gauge as a multiplier; the
+// gauge is a coarse capacity-planning signal, not heap precision, so
+// a static estimate is sufficient.
+const avgAdminEventBytes int64 = 256
 
 // AdminStreamModule wires the admin event SSE stack into an fx app:
 // bus, hub, subscriber, handler, JWT middleware, and lifecycle hooks
@@ -58,7 +66,27 @@ var AdminStreamModule = fx.Module("admin_stream",
 		newAdminJWTMiddleware,
 	),
 	fx.Invoke(installAdminStreamLifecycle),
+	fx.Invoke(registerAdminStreamResourceGauges),
 )
+
+// registerAdminStreamResourceGauges installs the per-subsystem resource
+// gauges exactly once at app startup. The callbacks close over hub /
+// bus accessors (atomic reads), so this is safe to call before the
+// goroutines actually start running — the gauges will simply report 0
+// until traffic flows.
+//
+// Kept separate from installAdminStreamLifecycle because GaugeFunc
+// registration is synchronous and must happen before /metrics is
+// scraped; mixing it into OnStart would race with a fast first scrape.
+func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub) {
+	observability.RegisterAdminStreamResourceGauges(observability.AdminStreamResourceSources{
+		ActiveClients:         hub.ActiveClients,
+		ClientSendCapacity:    int64(sse.ClientSendBufferCapacity),
+		AvgMsgSize:            avgAdminEventBytes,
+		BusChannelHighWater:   bus.bus.ChannelHighWater,
+		HubBroadcastHighWater: hub.BroadcastHighWater,
+	})
+}
 
 // busAdapter holds the concrete adminEventBus pointer so fx can both
 // inject the concrete type (for lifecycle wiring) and expose the
@@ -137,10 +165,10 @@ func newAdminJWTMiddleware(cfg *config.Config) *AdminJWTHandle {
 //   - subscriber.Run(runCtx) — Redis XREAD
 //
 // OnStop orchestrates the Q15 graceful drain:
-//   1. handler.SetShuttingDown(true)
-//   2. handler.BroadcastRetryHints — jittered retry: per connected client
-//   3. cancel runCtx — signals all three goroutines
-//   4. wait for done signals, bounded by stopCtx deadline
+//  1. handler.SetShuttingDown(true)
+//  2. handler.BroadcastRetryHints — jittered retry: per connected client
+//  3. cancel runCtx — signals all three goroutines
+//  4. wait for done signals, bounded by stopCtx deadline
 func installAdminStreamLifecycle(
 	lc fx.Lifecycle,
 	bus *busAdapter,

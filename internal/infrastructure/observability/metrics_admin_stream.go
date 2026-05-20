@@ -15,6 +15,8 @@ package observability
 // the misleading `booking_*` global prefix.
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -208,3 +210,138 @@ var AdminStreamSubscriberXReadFailuresTotal = promauto.NewCounter(
 		Help: "Total XREAD failures observed by the admin event stream subscriber.",
 	},
 )
+
+// ─── Resource-level gauges (PR #122 follow-up) ──────────────────────
+//
+// Per-subsystem resource isolation: the global `go_goroutines` and
+// `go_memstats_alloc_bytes` gauges include every goroutine and every
+// allocation in the process, mixing SSE-subsystem usage with worker,
+// outbox relay, recon, etc. These admin-stream-scoped gauges isolate
+// the SSE pipeline's footprint so capacity planning and incident
+// triage can answer "is the streaming layer using more resources
+// than expected?" directly.
+//
+// Pattern: prometheus.NewGaugeFunc with a callback that reads atomic
+// counters maintained by the hub / bus. No OSS package provides this
+// (verified 2026-05-20 research) — every Go service rolls its own
+// per the canonical NewGaugeFunc pattern.
+
+// AdminSSEEstimatedMemoryBytes is a coarse estimate of the
+// memory footprint of the SSE subsystem, computed as:
+//
+//	N_clients × (8 KB goroutine stack + ClientSendBufferCapacity × avgMsgSize)
+//
+// The estimate is intentionally rough — its purpose is to flag
+// runaway growth (e.g., 100 → 10,000 clients) for capacity planning,
+// not to replace pprof for precise heap analysis. The callback reads
+// the hub's atomic active-client counter; safe to call frequently.
+var AdminSSEEstimatedMemoryBytes prometheus.GaugeFunc
+
+// AdminEventBusChannelHighWatermark records the maximum bus-channel
+// depth observed since process start. Useful for capacity planning:
+// if HWM trends upward toward the configured capacity (10000), the
+// drainer is falling behind sustained spikes and channel size or
+// drainer throughput needs review.
+var AdminEventBusChannelHighWatermark prometheus.GaugeFunc
+
+// AdminHubBroadcastHighWatermark mirrors the above for the hub's
+// broadcast channel (cap 256). If HWM > 200 in production, the hub
+// loop is being outpaced by the subscriber goroutine, suggesting
+// slow-client backpressure or hub broadcast contention.
+var AdminHubBroadcastHighWatermark prometheus.GaugeFunc
+
+// AdminSSEWriteMessageDurationSeconds is a histogram of per-frame
+// SSE write latency from `writeMessage()`. Useful for spotting slow
+// clients: if p99 climbs while p50 is fine, individual clients are
+// throttling but the writer goroutine itself is healthy.
+//
+// Buckets cover sub-millisecond writes (fast happy path) through
+// 100 ms (TCP backpressure / wire write blocking on slow client).
+var AdminSSEWriteMessageDurationSeconds = promauto.NewHistogram(
+	prometheus.HistogramOpts{
+		Name:    "admin_sse_write_message_duration_seconds",
+		Help:    "Duration of writeMessage() per SSE frame.",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5},
+	},
+)
+
+// AdminEventBusXAddDurationSeconds is a histogram of per-XADD
+// latency from the bus drainer. Useful for spotting Redis-side
+// pressure: if p99 climbs > XAddTimeout (default 2s), the drainer
+// is hitting timeouts.
+//
+// Buckets cover sub-millisecond (warm Redis, in-memory) through
+// 2 s (close to the XAddTimeout cap).
+var AdminEventBusXAddDurationSeconds = promauto.NewHistogram(
+	prometheus.HistogramOpts{
+		Name:    "admin_event_bus_xadd_duration_seconds",
+		Help:    "Duration of XADD call from the admin event bus drainer.",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2},
+	},
+)
+
+// RegisterAdminStreamResourceGauges installs the three callback
+// gauges (memory, bus HWM, hub HWM). Called once at app startup
+// from bootstrap; the callbacks close over the supplied accessor
+// functions, which read internal atomic counters maintained by the
+// hub / bus.
+//
+// Caller signature is a thin interface (just three func() int64)
+// to avoid an import cycle between observability and sse/cache
+// packages.
+type AdminStreamResourceSources struct {
+	ActiveClients         func() int64
+	ClientSendCapacity    int64
+	AvgMsgSize            int64
+	BusChannelHighWater   func() int64
+	HubBroadcastHighWater func() int64
+}
+
+// registerOnce serialises RegisterAdminStreamResourceGauges so a
+// second call is a no-op instead of a Prometheus duplicate-registration
+// panic. The fx wiring in bootstrap calls this function exactly once,
+// but tests that import the package — or future fx-module composition
+// — may inadvertently call twice; this guard turns the foot-gun into a
+// silent no-op that the second caller's accessor functions are simply
+// ignored (the first registration's accessors remain authoritative).
+var registerOnce sync.Once
+
+// RegisterAdminStreamResourceGauges wires the GaugeFunc callbacks.
+// NOT idempotent across distinct argument sets — the first call wins;
+// subsequent calls are silently dropped via sync.Once. Production
+// callers MUST call from a single bootstrap site (currently
+// internal/bootstrap/admin_stream.go's registerAdminStreamResourceGauges
+// fx.Invoke).
+//
+// The sync.Once guard exists so test code that spins up multiple fx
+// apps in one binary does not panic on the second app's gauge
+// registration.
+func RegisterAdminStreamResourceGauges(s AdminStreamResourceSources) {
+	registerOnce.Do(func() {
+		const goroutineStackBytes = 8192 // typical Go stack baseline per goroutine
+		AdminSSEEstimatedMemoryBytes = promauto.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Name: "admin_sse_estimated_memory_bytes",
+				Help: "Coarse estimate of SSE subsystem memory: active_clients × (goroutine_stack + send_buffer_bytes).",
+			},
+			func() float64 {
+				n := s.ActiveClients()
+				return float64(n * (goroutineStackBytes + s.ClientSendCapacity*s.AvgMsgSize))
+			},
+		)
+		AdminEventBusChannelHighWatermark = promauto.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Name: "admin_event_bus_channel_high_water_mark",
+				Help: "Max admin event bus channel depth observed since process start.",
+			},
+			func() float64 { return float64(s.BusChannelHighWater()) },
+		)
+		AdminHubBroadcastHighWatermark = promauto.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Name: "admin_hub_broadcast_high_water_mark",
+				Help: "Max hub broadcast channel depth observed since process start.",
+			},
+			func() float64 { return float64(s.HubBroadcastHighWater()) },
+		)
+	})
+}
