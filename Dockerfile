@@ -57,6 +57,11 @@ COPY --from=builder /app/bin/booking-cli /app/booking-cli
 # Copy config (read-only at runtime)
 COPY config/ config/
 
+# PR #121: admin war-room dashboard (static HTML served at /admin/).
+# Demo-quality assets; tiny enough to bundle into the image without
+# operational impact.
+COPY web/ web/
+
 # Drop root before the process starts. The binary and config must be
 # readable by the booking user; chown explicitly so the copy steps
 # above (which run as root) still produce files this UID can read.
