@@ -1027,28 +1027,30 @@ func (c *Config) Validate() error {
 	// than serve 503 silently — empty secret in production is almost
 	// certainly a config bug.
 	//
-	// When the secret IS set, enforce minimum 32-byte length (HS256
-	// security floor per NIST SP 800-107). Mirrors MintAdminJWT's
-	// constructor check; without this server-side validation, an
-	// operator could ship with a weak secret that MintAdminJWT would
-	// reject but the middleware would silently accept.
+	// When the secret IS set (admin stream is "enabled"), enforce:
+	//   - secret length >= 32 bytes (HS256 / NIST SP 800-107 floor)
+	//   - JWTMaxTTL > 0 (zero would be unbounded TTL — security regression)
 	//
-	// JWTMaxTTL > 0 is required by AdminJWTMiddleware (zero = unbounded
-	// TTL = security regression).
+	// When the secret is empty (admin stream is "disabled" — middleware
+	// 503s every request), JWTMaxTTL is irrelevant; relaxing the guard
+	// here avoids forcing every existing deployment to set the new env
+	// var just to keep its server starting. Review-round-2 NEW-2 fix.
 	if normalizedAppEnv(c.App.Env) == "production" && c.AdminStream.JWTSecret == "" {
 		missing = append(missing, "admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET (required in production; empty = endpoint 503s)")
 	}
-	if c.AdminStream.JWTSecret != "" && len(c.AdminStream.JWTSecret) < 32 {
-		missing = append(missing, fmt.Sprintf(
-			"admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET must be at least 32 bytes (got %d); HS256 below 32 bytes is below NIST 128-bit security floor",
-			len(c.AdminStream.JWTSecret),
-		))
-	}
-	if c.AdminStream.JWTMaxTTL <= 0 {
-		missing = append(missing, fmt.Sprintf(
-			"admin_stream.jwt_max_ttl / ADMIN_STREAM_JWT_MAX_TTL (must be > 0; got %v)",
-			c.AdminStream.JWTMaxTTL,
-		))
+	if c.AdminStream.JWTSecret != "" {
+		if len(c.AdminStream.JWTSecret) < 32 {
+			missing = append(missing, fmt.Sprintf(
+				"admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET must be at least 32 bytes (got %d); HS256 below 32 bytes is below NIST 128-bit security floor",
+				len(c.AdminStream.JWTSecret),
+			))
+		}
+		if c.AdminStream.JWTMaxTTL <= 0 {
+			missing = append(missing, fmt.Sprintf(
+				"admin_stream.jwt_max_ttl / ADMIN_STREAM_JWT_MAX_TTL (must be > 0 when JWT secret is set; got %v)",
+				c.AdminStream.JWTMaxTTL,
+			))
+		}
 	}
 
 	if len(missing) > 0 {

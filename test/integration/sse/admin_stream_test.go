@@ -230,6 +230,7 @@ func TestIntegration_E2E_JWTAuthRequired(t *testing.T) {
 	token, err := middleware.MintAdminJWT(secret, "ops-test", 30*time.Minute)
 	require.NoError(t, err)
 	resp2 := connectSSE(t, st.server.URL+"/stream?token="+token, "", 200*time.Millisecond)
+	require.NotNil(t, resp2, "auth test must receive a response within 200ms (review round 2 REG-1)")
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 }
@@ -282,7 +283,8 @@ func TestIntegration_E2E_ConcurrentClientsReceiveSameBroadcast(t *testing.T) {
 	resps := make([]*http.Response, numClients)
 	for i := 0; i < numClients; i++ {
 		resps[i] = connectSSE(t, st.server.URL+"/stream", "", 0)
-		defer resps[i].Body.Close()
+		require.NotNil(t, resps[i], "client %d must connect (review round 2 REG-2)", i)
+		defer resps[i].Body.Close() //nolint:gocritic // intentional inline defer per client
 	}
 
 	// Give all clients time to register with the hub

@@ -517,15 +517,31 @@ func TestValidate_ProductionRejectsStripeTestKey(t *testing.T) {
 // review-round-1 fix that added JWTSecret + JWTMaxTTL guards to
 // Validate().
 func TestValidate_AdminStreamRejections(t *testing.T) {
-	t.Run("zero_jwt_max_ttl_rejected", func(t *testing.T) {
+	t.Run("zero_jwt_max_ttl_rejected_when_secret_set", func(t *testing.T) {
 		t.Parallel()
 		c := validBase()
+		// validBase() sets a valid 32-byte secret. With secret set,
+		// JWTMaxTTL=0 must be rejected (review round 2 NEW-2: guard
+		// only fires when the stream is actually enabled).
 		c.AdminStream.JWTMaxTTL = 0
 
 		err := c.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "admin_stream.jwt_max_ttl")
-		assert.Contains(t, err.Error(), "must be > 0")
+		assert.Contains(t, err.Error(), "must be > 0 when JWT secret is set")
+	})
+
+	t.Run("zero_jwt_max_ttl_ignored_when_secret_empty", func(t *testing.T) {
+		t.Parallel()
+		c := validBase()
+		// With admin stream disabled (no secret), JWTMaxTTL is
+		// irrelevant — the middleware 503s every request anyway.
+		c.AdminStream.JWTSecret = ""
+		c.AdminStream.JWTMaxTTL = 0
+
+		err := c.Validate()
+		require.NoError(t, err,
+			"JWTMaxTTL=0 + empty secret should not block server startup (admin stream disabled)")
 	})
 
 	t.Run("short_jwt_secret_rejected", func(t *testing.T) {
