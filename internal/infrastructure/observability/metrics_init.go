@@ -236,6 +236,16 @@ func init() {
 		AdminEventBusPublishedTotal.WithLabelValues(eventType)
 		AdminSSEMessagesSentTotal.WithLabelValues(eventType)
 	}
+	// Round-3 review fix: pre-warm "unknown" + internal markers so
+	// alerts on attacker-injected event types fire on the first
+	// observation rather than after the first XADD writes them.
+	// The handler folds unrecognised event_type values into "unknown"
+	// (see safeEventTypeLabel in sse/handler.go) to prevent
+	// cardinality blowup; "_retry_hint" and "stream_truncated" are
+	// emitted by the handler itself for graceful-shutdown signalling.
+	for _, eventType := range []string{"unknown", "_retry_hint", "stream_truncated"} {
+		AdminSSEMessagesSentTotal.WithLabelValues(eventType)
+	}
 	// Bus drop / xadd-failure / SSE drop labels — currently single-
 	// value, but pre-warm anyway so dashboards show "0 so far" not
 	// "no data" before the first drop fires.

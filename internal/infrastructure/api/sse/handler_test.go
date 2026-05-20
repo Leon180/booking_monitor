@@ -269,3 +269,38 @@ func TestHandler_WriteMessageRetryHint(t *testing.T) {
 type noopFlusher struct{}
 
 func (n *noopFlusher) Flush() {}
+
+func TestSafeEventTypeLabel(t *testing.T) {
+	// Round-3 review fix: gate Prometheus label to known set so
+	// attacker-injected event_type values from a compromised Redis
+	// cannot blow up cardinality.
+	cases := []struct {
+		input string
+		want  string
+	}{
+		// All 8 admin event types pass through unchanged
+		{"order.created", "order.created"},
+		{"order.paid", "order.paid"},
+		{"order.failed", "order.failed"},
+		{"order.expired", "order.expired"},
+		{"order.compensated", "order.compensated"},
+		{"saga.triggered", "saga.triggered"},
+		{"dlq.received", "dlq.received"},
+		{"inventory.low", "inventory.low"},
+		// Internal handler markers also pass through
+		{"_retry_hint", "_retry_hint"},
+		{"stream_truncated", "stream_truncated"},
+		// Anything else folds to "unknown"
+		{"attacker_injected_event", "unknown"},
+		{"", "unknown"},
+		{"order.created.evil", "unknown"},
+		{"saga.triggered\x00", "unknown"},
+		{string(make([]byte, 1024)), "unknown"}, // long random bytes
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := safeEventTypeLabel(tc.input)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -288,15 +288,49 @@ func (h *Handler) writeMessage(w io.Writer, flusher http.Flusher, msg redis.XMes
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 
-	// Track per-event-type sent counter + message-lag histogram
+	// Track per-event-type sent counter + message-lag histogram.
+	// Round-3 review NEW finding: gate the label value to the
+	// known-good set so a compromised Redis (or operator-injected
+	// XADD) cannot blow up Prometheus cardinality by writing
+	// attacker-controlled `event_type` values. Unknown values are
+	// folded into "unknown" for diagnostics.
 	if eventType != "" {
-		observability.AdminSSEMessagesSentTotal.WithLabelValues(eventType).Inc()
+		observability.AdminSSEMessagesSentTotal.WithLabelValues(safeEventTypeLabel(eventType)).Inc()
 	}
 	if occurredAt, ok := msg.Values["occurred_at"].(string); ok {
 		if t, err := time.Parse(time.RFC3339Nano, occurredAt); err == nil {
 			observability.AdminSSEMessageLagSeconds.Observe(time.Since(t).Seconds())
 		}
 	}
+}
+
+// knownEventTypes is the static allow-list for the Prometheus
+// `event_type` label. Mirrors the constants in
+// internal/application/admin/event.go; kept in sync via the
+// pre-warm in observability/metrics_init.go.
+var knownEventTypes = map[string]struct{}{
+	"order.created":      {},
+	"order.paid":         {},
+	"order.failed":       {},
+	"order.expired":      {},
+	"order.compensated":  {},
+	"saga.triggered":     {},
+	"dlq.received":       {},
+	"inventory.low":      {},
+	// Internal markers emitted by the handler itself — these are
+	// not produced by the bus but appear in client wire frames.
+	"_retry_hint":     {},
+	"stream_truncated": {},
+}
+
+// safeEventTypeLabel returns the input unchanged if it's a known
+// event type, "unknown" otherwise. Prevents cardinality blowup if
+// the Redis stream contains attacker-injected event_type values.
+func safeEventTypeLabel(eventType string) string {
+	if _, ok := knownEventTypes[eventType]; ok {
+		return eventType
+	}
+	return "unknown"
 }
 
 // compareStreamIDs compares two Redis Stream IDs (format "ms-seq").

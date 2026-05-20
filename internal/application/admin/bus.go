@@ -31,6 +31,11 @@ type Bus interface {
 // stream admin events).
 type noopBus struct{}
 
+// Compile-time check that noopBus satisfies the Bus interface.
+// Mirrors the assertion for AdminEventBus in
+// internal/infrastructure/cache/admin_event_bus.go.
+var _ Bus = noopBus{}
+
 // NewNoopBus returns a Bus that discards every event.
 func NewNoopBus() Bus { return noopBus{} }
 

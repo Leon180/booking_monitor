@@ -111,7 +111,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(saga_compensator_events_total[1m]))",
+          "expr": "sum(rate(saga_compensator_events_processed_total[1m]))",
           "refId": "A"
         }
       ],
@@ -167,7 +167,7 @@
       "id": 6,
       "targets": [
         {
-          "expr": "sum(rate(saga_compensator_events_total[1m]))",
+          "expr": "sum(rate(saga_compensator_events_processed_total[1m]))",
           "legendFormat": "saga",
           "refId": "A"
         },
