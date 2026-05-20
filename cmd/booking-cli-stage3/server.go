@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
@@ -79,7 +80,8 @@ func runServer(_ *cobra.Command, _ []string) {
 				metrics worker.Metrics,
 				logger *mlog.Logger,
 			) worker.Service {
-				base := worker.NewOrderMessageProcessor(uow, logger)
+				// Stage 3 does not host the admin SSE stream — pass noop bus.
+				base := worker.NewOrderMessageProcessor(uow, admin.NewNoopBus(), logger)
 				processor := worker.NewMessageProcessorMetricsDecorator(base, metrics)
 				return worker.NewService(queue, processor, logger)
 			},

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
 	"booking_monitor/internal/log/tag"
@@ -22,6 +23,7 @@ type MessageProcessor interface {
 
 type orderMessageProcessor struct {
 	uow    application.UnitOfWork
+	bus    admin.Bus
 	logger *mlog.Logger
 }
 
@@ -29,14 +31,19 @@ type orderMessageProcessor struct {
 // Consumers should typically use the version wrapped with
 // NewMessageProcessorMetricsDecorator — see module.go wiring.
 //
+// admin.Bus is the post-commit admin event publisher (PR #121). Pass
+// admin.NewNoopBus() in tests or binaries that don't wire the SSE
+// stream (Stage 1-5 stage binaries, recon, saga-watchdog).
+//
 // All repo work happens inside uow.Do, so the per-repo dependencies
 // are accessed via the closure's `repos *Repositories` parameter
 // rather than fields on the processor struct. This keeps the tx
 // boundary explicit at the call site (no field access can accidentally
 // bypass it).
-func NewOrderMessageProcessor(uow application.UnitOfWork, logger *mlog.Logger) MessageProcessor {
+func NewOrderMessageProcessor(uow application.UnitOfWork, bus admin.Bus, logger *mlog.Logger) MessageProcessor {
 	return &orderMessageProcessor{
 		uow:    uow,
+		bus:    bus,
 		logger: logger.With(mlog.String("component", "message_processor")),
 	}
 }
@@ -74,7 +81,7 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		return err
 	}
 
-	return p.uow.Do(ctx, func(repos *application.Repositories) error {
+	if err := p.uow.Do(ctx, func(repos *application.Repositories) error {
 		// 1. Double-check inventory against the source of truth. Redis
 		// already approved via Lua deduct; DB disagreement means the
 		// Redis view is ahead of DB (compensation path will fix it).
@@ -121,6 +128,34 @@ func (p *orderMessageProcessor) Process(ctx context.Context, msg *QueuedBookingM
 		p.logger.Info(ctx, "Order processed successfully",
 			tag.MsgID(msg.MessageID), tag.OrderID(created.ID()))
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// PR #121: post-commit admin event publish (Q5 design).
+	// UoW returned nil → tx is committed → safe to publish without
+	// phantom-event risk. Publish() is non-blocking + drop-on-full
+	// so a Redis/bus issue cannot stall the booking hot path.
+	evt, err := admin.NewOrderLifecycleEvent(
+		admin.EventTypeOrderCreated,
+		admin.OrderLifecyclePayload{
+			OrderID:      newOrder.ID(),
+			UserID:       newOrder.UserID(),
+			TicketTypeID: newOrder.TicketTypeID(),
+			Quantity:     newOrder.Quantity(),
+			ToStatus:     string(domain.OrderStatusAwaitingPayment),
+		},
+	)
+	if err != nil {
+		// Building the event payload should never fail for an order
+		// that just passed UoW validation, but log if it does — a
+		// failure here is observability degradation, not a business
+		// regression, so don't propagate.
+		p.logger.Warn(ctx, "admin event build failed (non-fatal)",
+			tag.OrderID(newOrder.ID()), tag.Error(err))
+		return nil
+	}
+	p.bus.Publish(evt)
+	return nil
 }
 

@@ -66,6 +66,11 @@ services:
       - STRIPE_MAX_NETWORK_RETRIES=${STRIPE_MAX_NETWORK_RETRIES:-2}
       - STRIPE_ALLOW_TEST_KEY=${STRIPE_ALLOW_TEST_KEY:-false}
       - ENABLE_TEST_ENDPOINTS=${ENABLE_TEST_ENDPOINTS:-false}
+      # PR #121 — admin event SSE stream. Empty JWT secret = endpoint
+      # disabled (middleware 503s every request). Set in .env to
+      # enable. Token TTL cap (server-enforced) caps any mint to 1h.
+      - ADMIN_STREAM_JWT_SECRET=${ADMIN_STREAM_JWT_SECRET:-}
+      - ADMIN_STREAM_JWT_MAX_TTL=${ADMIN_STREAM_JWT_MAX_TTL:-1h}
       # D8 — CORS allow-list for the browser demo (Vite dev server on
       # localhost:5173). Empty default disables the middleware so
       # production deployments don't accidentally widen the surface.

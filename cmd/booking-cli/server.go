@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/application/outbox"
 	"booking_monitor/internal/application/payment"
@@ -29,6 +30,7 @@ import (
 	"booking_monitor/internal/infrastructure/api/booking"
 	"booking_monitor/internal/infrastructure/api/middleware"
 	"booking_monitor/internal/infrastructure/api/ops"
+	"booking_monitor/internal/infrastructure/api/sse"
 	"booking_monitor/internal/infrastructure/api/testapi"
 	"booking_monitor/internal/infrastructure/api/webhook"
 	"booking_monitor/internal/infrastructure/cache"
@@ -50,6 +52,7 @@ func runServer(_ *cobra.Command, _ []string) {
 
 	app := fx.New(
 		bootstrap.CommonModule(cfg),
+		bootstrap.AdminStreamModule,
 
 		cache.Module,
 		application.Module,
@@ -142,9 +145,10 @@ func runServer(_ *cobra.Command, _ []string) {
 				queue worker.OrderQueue,
 				uow application.UnitOfWork,
 				metrics worker.Metrics,
+				bus admin.Bus,
 				logger *mlog.Logger,
 			) worker.Service {
-				base := worker.NewOrderMessageProcessor(uow, logger)
+				base := worker.NewOrderMessageProcessor(uow, bus, logger)
 				processor := worker.NewMessageProcessorMetricsDecorator(base, metrics)
 				return worker.NewService(queue, processor, logger)
 			},
@@ -254,13 +258,15 @@ func installServer(
 	workerSvc worker.Service,
 	sagaConsumer *messaging.SagaConsumer,
 	compensator saga.Compensator,
+	sseHandler *sse.Handler,
+	adminJWT *bootstrap.AdminJWTHandle,
 ) error {
 	tp, err := initTracer()
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
 
-	engine, err := buildGinEngine(cfg, logger, handler, idempotencyRepo, healthHandler, webhookHandler, testHandler)
+	engine, err := buildGinEngine(cfg, logger, handler, idempotencyRepo, healthHandler, webhookHandler, testHandler, sseHandler, adminJWT)
 	if err != nil {
 		return fmt.Errorf("installServer: %w", err)
 	}
@@ -309,6 +315,8 @@ func buildGinEngine(
 	healthHandler *ops.HealthHandler,
 	webhookHandler *webhook.Handler,
 	testHandler *testapi.Handler,
+	sseHandler *sse.Handler,
+	adminJWT *bootstrap.AdminJWTHandle,
 ) (*gin.Engine, error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -357,6 +365,11 @@ func buildGinEngine(
 	// NOTE: the legacy POST /book route (Phase 0) was removed because it
 	// bypassed the nginx `location /api/` rate-limit zone. All callers
 	// must use /api/v1/book. Closes action-list item H9.
+
+	// Admin SSE event stream (PR #121). Per-route JWT auth via query
+	// parameter (EventSource limitation — Q12). Body-size middleware
+	// on v1 doesn't apply because SSE is GET-only.
+	v1.GET("/admin/events/stream", adminJWT.Func(), sseHandler.HandleStream)
 	return r, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/domain"
@@ -102,7 +103,7 @@ func stage3Harness(t *testing.T) *stage3HarnessHandle {
 
 	bookingSvc := booking.NewService(orderRepo, ttRepo, invRepo, cfg)
 
-	base := worker.NewOrderMessageProcessor(uow, logger)
+	base := worker.NewOrderMessageProcessor(uow, admin.NewNoopBus(), logger)
 	processor := worker.NewMessageProcessorMetricsDecorator(base, &nopWorkerMetrics{})
 	workerSvc := worker.NewService(queue, processor, logger)
 

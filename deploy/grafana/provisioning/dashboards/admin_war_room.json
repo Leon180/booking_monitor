@@ -1,0 +1,248 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Admin war-room dashboard for flash-sale operators. Composes Layer A business metrics (Prometheus) + Layer B infrastructure metrics (Prometheus) + Layer C live event timeline (SSE separately). See docs/design/admin_event_streaming.md § Q16.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 100},
+              {"color": "red", "value": 1000}
+            ]
+          },
+          "unit": "ops"
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "expr": "sum(rate(bookings_total{status=\"success\"}[1m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Bookings / sec",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 70},
+              {"color": "green", "value": 85}
+            ]
+          },
+          "unit": "percent",
+          "max": 100,
+          "min": 0
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(payment_webhook_received_total{result=\"succeeded\"}[5m])) / sum(rate(bookings_total{status=\"success\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Pay conversion % (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(saga_compensator_events_processed_total[1m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Saga events / sec",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null}
+            ]
+          }
+        }
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "expr": "admin_sse_active_connections",
+          "refId": "A"
+        }
+      ],
+      "title": "Admin SSE connections",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(bookings_total[1m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Booking outcomes (1m rate, stacked)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum(rate(saga_compensator_events_processed_total[1m]))",
+          "legendFormat": "saga",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(redis_dlq_routed_total[1m]))",
+          "legendFormat": "dlq",
+          "refId": "B"
+        }
+      ],
+      "title": "Anomaly: saga + DLQ rate (correlated)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12},
+      "id": 7,
+      "targets": [
+        {
+          "expr": "admin_event_bus_channel_depth",
+          "legendFormat": "channel_depth",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(admin_event_bus_dropped_total[5m])",
+          "legendFormat": "dropped/sec",
+          "refId": "B"
+        }
+      ],
+      "title": "Streaming health: bus depth + drop rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 12},
+      "id": 8,
+      "targets": [
+        {
+          "expr": "admin_stream_subscriber_consec_failures",
+          "legendFormat": "subscriber_consec_failures",
+          "refId": "A"
+        }
+      ],
+      "title": "Streaming health: subscriber failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "PROMETHEUS"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 12},
+      "id": 9,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(admin_sse_message_lag_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(admin_sse_message_lag_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "title": "Admin SSE message lag (p95 / p99)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["admin", "war-room", "streaming"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Admin War-Room (PR #121)",
+  "uid": "admin-war-room",
+  "version": 1,
+  "weekStart": ""
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/domain"
 	mlog "booking_monitor/internal/log"
@@ -193,7 +194,7 @@ func TestOrderMessageProcessor_Process(t *testing.T) {
 				tt.setupMocks(tt.msg, m)
 			}
 
-			p := worker.NewOrderMessageProcessor(m.uow, nopLogger)
+			p := worker.NewOrderMessageProcessor(m.uow, admin.NewNoopBus(), nopLogger)
 			err := p.Process(context.Background(), tt.msg)
 
 			if tt.expectedError != nil {

@@ -22,6 +22,17 @@ type Config struct {
 	Booking        BookingConfig        `yaml:"booking"`
 	Payment        PaymentConfig        `yaml:"payment"`
 	Expiry         ExpiryConfig         `yaml:"expiry"`
+	AdminStream    AdminStreamConfig    `yaml:"admin_stream"`
+}
+
+// AdminStreamConfig configures the admin event SSE stream (PR #121).
+// JWTSecret is required to enable the endpoint; empty value causes
+// the JWT middleware to 503 all requests (fail-closed behaviour).
+//
+// Design ref: docs/design/admin_event_streaming.md § Q12.
+type AdminStreamConfig struct {
+	JWTSecret string        `yaml:"jwt_secret" env:"ADMIN_STREAM_JWT_SECRET" env-default:""`
+	JWTMaxTTL time.Duration `yaml:"jwt_max_ttl" env:"ADMIN_STREAM_JWT_MAX_TTL" env-default:"1h"`
 }
 
 // BookingConfig holds the tunables for `BookingService.BookTicket` —
@@ -1007,6 +1018,39 @@ func (c *Config) Validate() error {
 			"inventory_drift.absolute_tolerance / INVENTORY_DRIFT_ABSOLUTE_TOLERANCE (must be >= 0; got %d)",
 			c.InventoryDrift.AbsoluteTolerance,
 		))
+	}
+
+	// Admin SSE stream (PR #121).
+	//
+	// The endpoint is fail-closed when JWTSecret is empty (middleware
+	// returns 503). But in production we want startup to FAIL rather
+	// than serve 503 silently — empty secret in production is almost
+	// certainly a config bug.
+	//
+	// When the secret IS set (admin stream is "enabled"), enforce:
+	//   - secret length >= 32 bytes (HS256 / NIST SP 800-107 floor)
+	//   - JWTMaxTTL > 0 (zero would be unbounded TTL — security regression)
+	//
+	// When the secret is empty (admin stream is "disabled" — middleware
+	// 503s every request), JWTMaxTTL is irrelevant; relaxing the guard
+	// here avoids forcing every existing deployment to set the new env
+	// var just to keep its server starting. Review-round-2 NEW-2 fix.
+	if normalizedAppEnv(c.App.Env) == "production" && c.AdminStream.JWTSecret == "" {
+		missing = append(missing, "admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET (required in production; empty = endpoint 503s)")
+	}
+	if c.AdminStream.JWTSecret != "" {
+		if len(c.AdminStream.JWTSecret) < 32 {
+			missing = append(missing, fmt.Sprintf(
+				"admin_stream.jwt_secret / ADMIN_STREAM_JWT_SECRET must be at least 32 bytes (got %d); HS256 below 32 bytes is below NIST 128-bit security floor",
+				len(c.AdminStream.JWTSecret),
+			))
+		}
+		if c.AdminStream.JWTMaxTTL <= 0 {
+			missing = append(missing, fmt.Sprintf(
+				"admin_stream.jwt_max_ttl / ADMIN_STREAM_JWT_MAX_TTL (must be > 0 when JWT secret is set; got %v)",
+				c.AdminStream.JWTMaxTTL,
+			))
+		}
 	}
 
 	if len(missing) > 0 {
