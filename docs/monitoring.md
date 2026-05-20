@@ -142,6 +142,29 @@ The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, 
 
 The codebase pre-warms expected label combinations at startup so dashboards don't show "no data" for a metric that genuinely had zero events. You'll see initial rows like `bookings_total{status="success"} 0` on a freshly-started stack. This is intentional — see [observability/metrics.go](../internal/infrastructure/observability/metrics.go) prelude.
 
+### Admin event streaming metrics (PR #121)
+
+The admin SSE event pipeline exposes its own infrastructure metrics (Layer B per [§Q16](design/admin_event_streaming.md)). These tell SRE whether the streaming pipeline itself is healthy — distinct from business metrics like `bookings_total` (Layer A).
+
+| Metric | Type | Labels | Purpose |
+|---|---|---|---|
+| `admin_event_bus_published_total` | counter | `event_type` (8 values) | Events successfully enqueued via `bus.Publish()` |
+| `admin_event_bus_dropped_total` | counter | `reason` (`channel_full`) | Events dropped at publisher backpressure |
+| `admin_event_bus_xadd_failures_total` | counter | `reason` (`timeout`/`conn_refused`/`other`) | Redis XADD failures in drainer goroutine |
+| `admin_event_bus_channel_depth` | gauge | — | Live in-memory channel depth |
+| `admin_sse_active_connections` | gauge | — | Currently connected admin clients |
+| `admin_sse_messages_sent_total` | counter | `event_type` | Events delivered to clients |
+| `admin_sse_messages_dropped_total` | counter | `reason` | Dropped at hub per-client backpressure (rare; Q10 drops the client instead) |
+| `admin_sse_clients_dropped_total` | counter | `reason` (`slow_consumer`/`write_error`/`shutdown`) | Clients forcibly disconnected |
+| `admin_sse_reconnects_total` | counter | — | Connection attempts with `Last-Event-ID` |
+| `admin_sse_heartbeats_sent_total` | counter | — | 30s comment-line heartbeats |
+| `admin_sse_events_truncated_total` | counter | — | Reconnects with `Last-Event-ID` older than MAXLEN trim |
+| `admin_sse_connection_duration_seconds` | histogram | — | Admin tab lifetime distribution |
+| `admin_sse_message_lag_seconds` | histogram | — | OccurredAt → client delivery latency |
+| `admin_stream_subscriber_consec_failures` | gauge | — | Current consecutive XREAD failure count |
+| `admin_stream_subscriber_xread_failures_total` | counter | — | Cumulative XREAD failures |
+| `inventory_low_alerts_total` | counter | — | Low-stock threshold crossings (Layer A gap filler) |
+
 ---
 
 ## 3. Prometheus UI workflow
@@ -230,6 +253,17 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 **Row: Meta — scrape health (TargetDown)**
 - Scrape target up/down — `up` per `{job, instance}` (1 = healthy, 0 = down). Pairs with the `TargetDown` alert; sustained zero means rate-based alerts depending on that job are silently inert.
 
+**Third provisioned dashboard: Admin War-Room (PR #121)**
+
+[deploy/grafana/provisioning/dashboards/admin_war_room.json](../deploy/grafana/provisioning/dashboards/admin_war_room.json) — flash-sale ops dashboard composing Layer A (business) + Layer B (streaming infra) signals per the design doc [§Q16](design/admin_event_streaming.md). Visit it at **Dashboards → Browse → Admin War-Room (PR #121)**.
+
+9-panel composition:
+- **Hero row (stat panels)**: Bookings/s, Pay conversion % (5m), Saga events/s, Admin SSE connections
+- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/duplicate/error), Saga + DLQ anomaly overlay
+- **Streaming health row (timeseries)**: Bus channel depth + drop rate, Subscriber consec failures, SSE message lag p95/p99
+
+Refresh: 30s. Default window: last 15 minutes. Live event timeline is a separate visualization layer (SSE stream → custom JS), not included in the Grafana JSON.
+
 **Second provisioned dashboard: Redis Exporter**
 
 [deploy/grafana/provisioning/dashboards/redis-exporter.json](../deploy/grafana/provisioning/dashboards/redis-exporter.json) — Grafana community dashboard `#763` (oliver006's reference dashboard, vendored locally so the stack works offline). Visit it at **Dashboards → Browse → Redis Exporter (oliver006/redis_exporter)**.
@@ -306,6 +340,11 @@ The current alert catalog:
 | `ExpiryProcessingErrors` | warning | `rate(expiry_sweep_resolved_total{outcome=~"getbyid_error\|marshal_error\|outbox_error\|transition_error"}[5m]) > 0 for 5m` — D6 per-row resolve failure rate. Distinct from `ExpiryFindErrors` ("we cannot SCAN") and from MaxAge labeling. Catches transient DB lock contention, outbox writes failing, GetByID flapping. Will retry next sweep automatically. |
 | `ExpiryFindErrors` | critical | `rate(expiry_find_expired_errors_total[5m]) > 0 for 2m` — D6 DB blind. Covers BOTH `FindExpiredReservations` AND `CountOverdueAfterCutoff` query failures. **When this fires, `expiry_oldest_overdue_age_seconds` and `expiry_backlog_after_sweep` are HELD at last-known-good** (round-3 F2 contract) — those readings may pre-date the failure. Triage Postgres health / pool / migration 000012 partial index. |
 | `ExpiryMaxAgeExceeded` | critical | `increase(expiry_max_age_total[1h]) > 0` — D6 single-event paging, **informational**. A reservation aged past `EXPIRY_MAX_AGE` (default 24h) before a sweep caught it. The row IS now `expired` (round-1 P1 contract: D6 always expires; MaxAge is awareness-only) — the question is why it was stuck so long. Check sweeper uptime, deploy logs, k8s CronJob history. Don't intervene on the row itself; the sweeper has already done its job. |
+| `AdminEventBusDropping` | warning | `rate(admin_event_bus_dropped_total[5m]) > 0 for 2m` — PR #121 admin event publisher backpressure. The bus channel (cap 10,000) is at capacity; events are being dropped at `Publish()`. Most likely cause: drainer goroutine cannot XADD fast enough (Redis slow / down). Observability degrades but business functions are unaffected. Check `rate(admin_event_bus_xadd_failures_total[5m])` for Redis-side bottleneck; `admin_event_bus_channel_depth` for queue saturation. |
+| `AdminStreamSubscriberConsecFailures` | critical | `admin_stream_subscriber_consec_failures > 10 for 1m` — PR #121 SSE subscriber goroutine failing repeatedly. Lead-time alert before the configured threshold of 30 triggers `fx.Shutdown(ExitCode(1))` (k8s pod restart). Investigate Redis health / network / pod-local resource pressure before the escalation fires. |
+| `AdminSSEReconnectsBursting` | warning | `rate(admin_sse_reconnects_total[1m]) > 5 for 30s` — Reconnect rate elevated. Expected briefly after deploy (clients reconnect with jittered `retry:` hint per § Q15). Sustained beyond shutdown window suggests network instability, LB idle-timeout misconfiguration, or pod restart loop. |
+| `AdminSSEEventsTruncated` | warning | `increase(admin_sse_events_truncated_total[10m]) > 0` — At least one client reconnected with a Last-Event-ID older than stream MAXLEN trim. Server emitted synthetic `stream_truncated` event and resumed from live. Expected during high-volume flash sales; outside flash periods suggests clients disconnected long enough to fall past the ~100k entry retention window. |
+| `InventoryLowAlerts` | warning | `rate(inventory_low_alerts_total[5m]) > 0 for 1m` — One or more ticket_types crossed below the low-stock threshold (default 10%). Edge-triggered — fires only on transition, not while inventory remains low. Drill via the SSE event log or query `event_ticket_types` for specific ticket_type_ids. |
 
 > **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `expiry_*`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,expiry-sweeper}` worker processes' default Prometheus registries. Each binary starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`recon`, `saga-watchdog`, `expiry-sweeper`). Verify with `up{job=~"recon|saga-watchdog|expiry-sweeper"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port.
 >
