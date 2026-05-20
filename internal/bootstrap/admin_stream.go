@@ -91,21 +91,24 @@ func newAdminSSEHandler(client redis.UniversalClient, hub *sse.Hub, logger *mlog
 	return sse.NewHandler(client, hub, cfg, logger)
 }
 
-// adminJWTMiddlewareCfg captures the secret/maxTTL bundle so the
-// middleware factory can be fx-provided without exposing []byte
-// directly (cleaner injection signature).
-type adminJWTMiddlewareCfg struct {
+// AdminJWTHandle wraps the gin middleware so fx can inject it as a
+// concrete type. Callers (route registration) call .Func() to mount
+// it as a per-route guard.
+type AdminJWTHandle struct {
 	gin gin.HandlerFunc
 }
 
-func newAdminJWTMiddleware(cfg *config.Config) *adminJWTMiddlewareCfg {
+// Func returns the gin.HandlerFunc for route registration.
+func (a *AdminJWTHandle) Func() gin.HandlerFunc { return a.gin }
+
+func newAdminJWTMiddleware(cfg *config.Config) *AdminJWTHandle {
 	secret := []byte(cfg.AdminStream.JWTSecret)
 	if len(secret) == 0 {
-		// fail-open in dev only — startup-time validation in the
-		// subcommand's fx.New should reject empty secret in prod.
-		// Returning a middleware that always 401s lets us register
-		// routes regardless of config state.
-		return &adminJWTMiddlewareCfg{
+		// Fail-closed: empty secret in config → middleware 503s every
+		// request. Startup-time validation in production deployments
+		// should reject this; the fallback exists so routes register
+		// cleanly in dev without requiring a secret.
+		return &AdminJWTHandle{
 			gin: func(c *gin.Context) {
 				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 					"error": "admin endpoint disabled (no JWT secret configured)",
@@ -117,18 +120,13 @@ func newAdminJWTMiddleware(cfg *config.Config) *adminJWTMiddlewareCfg {
 	if maxTTL == 0 {
 		maxTTL = middleware.DefaultAdminJWTMaxTTL
 	}
-	return &adminJWTMiddlewareCfg{
+	return &AdminJWTHandle{
 		gin: middleware.AdminJWTMiddleware(middleware.AdminJWTConfig{
 			Secret: secret,
 			MaxTTL: maxTTL,
 		}),
 	}
 }
-
-// AdminJWTHandlerFunc resolves the gin.HandlerFunc for callers that
-// want to mount admin routes. Exposed so installServer can call
-// `v1.GET("/admin/events/stream", jwt.Func(), handler.HandleStream)`.
-func (a *adminJWTMiddlewareCfg) Func() gin.HandlerFunc { return a.gin }
 
 // installAdminStreamLifecycle wires OnStart / OnStop hooks.
 //

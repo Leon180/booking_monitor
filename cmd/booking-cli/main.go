@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -83,7 +84,15 @@ func main() {
 	stressCmd.Flags().String("ticket-type-id", "", "TicketType UUID (v7) to book against — required, obtain from `ticket_types[0].id` in the POST /api/v1/events response (D4.1+)")
 	stressCmd.Flags().Int("user-range", stressDefaultUserRangeMax, "Upper bound for random user_id")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd)
+	adminTokenCmd := &cobra.Command{
+		Use:   "admin-token",
+		Short: "Mint a JWT for the admin SSE endpoint (?token=<jwt>)",
+		Run:   runAdminToken,
+	}
+	adminTokenCmd.Flags().String("user", "", "Ops user identifier (e.g., ops-leon) — required")
+	adminTokenCmd.Flags().Duration("ttl", 30*time.Minute, "Token lifetime (must be ≤ server's ADMIN_STREAM_JWT_MAX_TTL)")
+
+	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd, adminTokenCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
