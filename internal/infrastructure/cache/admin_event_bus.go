@@ -57,12 +57,12 @@ func DefaultAdminEventBusConfig() AdminEventBusConfig {
 	}
 }
 
-// adminEventBus is the Redis Streams-backed implementation of
+// AdminEventBus is the Redis Streams-backed implementation of
 // admin.Bus. Bounded-async with drop policy (OTel BatchSpanProcessor
 // pattern); single drainer goroutine.
 //
 // See docs/design/admin_event_streaming.md § Q3.
-type adminEventBus struct {
+type AdminEventBus struct {
 	client redis.UniversalClient
 	cfg    AdminEventBusConfig
 	ch     chan admin.AdminEvent
@@ -72,12 +72,12 @@ type adminEventBus struct {
 }
 
 // Compile-time check that the type satisfies admin.Bus.
-var _ admin.Bus = (*adminEventBus)(nil)
+var _ admin.Bus = (*AdminEventBus)(nil)
 
 // NewAdminEventBus constructs a Redis-backed admin event bus.
 // Caller MUST start the drainer goroutine via go bus.Run(ctx).
 // fx.Lifecycle wiring is in internal/bootstrap/admin_stream.go.
-func NewAdminEventBus(client redis.UniversalClient, cfg AdminEventBusConfig, logger *mlog.Logger) *adminEventBus {
+func NewAdminEventBus(client redis.UniversalClient, cfg AdminEventBusConfig, logger *mlog.Logger) *AdminEventBus {
 	if cfg.StreamKey == "" {
 		cfg.StreamKey = DefaultAdminStreamKey
 	}
@@ -93,7 +93,7 @@ func NewAdminEventBus(client redis.UniversalClient, cfg AdminEventBusConfig, log
 	if cfg.DrainTimeout == 0 {
 		cfg.DrainTimeout = DefaultAdminDrainTimeout
 	}
-	return &adminEventBus{
+	return &AdminEventBus{
 		client: client,
 		cfg:    cfg,
 		ch:     make(chan admin.AdminEvent, cfg.ChannelCapacity),
@@ -109,7 +109,7 @@ func NewAdminEventBus(client redis.UniversalClient, cfg AdminEventBusConfig, log
 // metric counter and Prometheus alerts.
 //
 // Safe for concurrent use.
-func (b *adminEventBus) Publish(evt admin.AdminEvent) {
+func (b *AdminEventBus) Publish(evt admin.AdminEvent) {
 	select {
 	case b.ch <- evt:
 		b.depth.Add(1)
@@ -121,7 +121,7 @@ func (b *adminEventBus) Publish(evt admin.AdminEvent) {
 
 // Done returns a channel closed when Run() exits. Used by bootstrap
 // to coordinate shutdown.
-func (b *adminEventBus) Done() <-chan struct{} { return b.done }
+func (b *AdminEventBus) Done() <-chan struct{} { return b.done }
 
 // Run is the drainer loop. Blocks until ctx is cancelled, then
 // attempts to drain remaining events with a bounded timeout before
@@ -130,7 +130,13 @@ func (b *adminEventBus) Done() <-chan struct{} { return b.done }
 // This is the only goroutine that reads from b.ch — so b.depth.Add
 // is only called from Publish (increment) and this goroutine
 // (decrement), no concurrent decrement.
-func (b *adminEventBus) Run(ctx context.Context) {
+//
+// The fast-path ctx.Err() check at loop head ensures shutdown wins
+// over channel events when both are ready (Go's select picks
+// randomly between ready cases — without this check, xadd may be
+// called with an already-cancelled ctx, which fails and skips the
+// drainOnShutdown path).
+func (b *AdminEventBus) Run(ctx context.Context) {
 	defer close(b.done)
 
 	b.log.Info(ctx, "admin event bus drainer starting",
@@ -143,6 +149,11 @@ func (b *adminEventBus) Run(ctx context.Context) {
 	defer gaugeTicker.Stop()
 
 	for {
+		// Fast-path: ctx already cancelled → go straight to drain.
+		if ctx.Err() != nil {
+			b.drainOnShutdown()
+			return
+		}
 		select {
 		case <-ctx.Done():
 			b.drainOnShutdown()
@@ -159,7 +170,7 @@ func (b *adminEventBus) Run(ctx context.Context) {
 // xadd does one XADD with the bus's configured per-call timeout.
 // Errors are logged + counted; events are NOT retried (admin
 // observability tolerates loss — PG audit is SSOT).
-func (b *adminEventBus) xadd(parent context.Context, evt admin.AdminEvent) {
+func (b *AdminEventBus) xadd(parent context.Context, evt admin.AdminEvent) {
 	ctx, cancel := context.WithTimeout(parent, b.cfg.XAddTimeout)
 	defer cancel()
 
@@ -194,7 +205,7 @@ func (b *adminEventBus) xadd(parent context.Context, evt admin.AdminEvent) {
 //
 // Stops on whichever happens first: channel empty, drain timeout.
 // Abandoned events are logged with count for postmortem.
-func (b *adminEventBus) drainOnShutdown() {
+func (b *AdminEventBus) drainOnShutdown() {
 	drainCtx, cancel := context.WithTimeout(context.Background(), b.cfg.DrainTimeout)
 	defer cancel()
 

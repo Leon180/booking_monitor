@@ -22,6 +22,17 @@ type Config struct {
 	Booking        BookingConfig        `yaml:"booking"`
 	Payment        PaymentConfig        `yaml:"payment"`
 	Expiry         ExpiryConfig         `yaml:"expiry"`
+	AdminStream    AdminStreamConfig    `yaml:"admin_stream"`
+}
+
+// AdminStreamConfig configures the admin event SSE stream (PR #121).
+// JWTSecret is required to enable the endpoint; empty value causes
+// the JWT middleware to 503 all requests (fail-closed behaviour).
+//
+// Design ref: docs/design/admin_event_streaming.md § Q12.
+type AdminStreamConfig struct {
+	JWTSecret string        `yaml:"jwt_secret" env:"ADMIN_STREAM_JWT_SECRET" env-default:""`
+	JWTMaxTTL time.Duration `yaml:"jwt_max_ttl" env:"ADMIN_STREAM_JWT_MAX_TTL" env-default:"1h"`
 }
 
 // BookingConfig holds the tunables for `BookingService.BookTicket` —

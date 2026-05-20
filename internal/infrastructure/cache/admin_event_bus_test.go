@@ -17,7 +17,7 @@ import (
 	mlog "booking_monitor/internal/log"
 )
 
-func newBusTestFixture(t *testing.T, channelCap int) (*adminEventBus, *miniredis.Miniredis, *redis.Client) {
+func newBusTestFixture(t *testing.T, channelCap int) (*AdminEventBus, *miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
