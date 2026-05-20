@@ -302,22 +302,27 @@ type AdminStreamResourceSources struct {
 // panic. The fx wiring in bootstrap calls this function exactly once,
 // but tests that import the package — or future fx-module composition
 // — may inadvertently call twice; this guard turns the foot-gun into a
-// silent no-op that the second caller's accessor functions are simply
-// ignored (the first registration's accessors remain authoritative).
+// no-op rather than a runtime panic.
 var registerOnce sync.Once
 
 // RegisterAdminStreamResourceGauges wires the GaugeFunc callbacks.
 // NOT idempotent across distinct argument sets — the first call wins;
-// subsequent calls are silently dropped via sync.Once. Production
-// callers MUST call from a single bootstrap site (currently
-// internal/bootstrap/admin_stream.go's registerAdminStreamResourceGauges
-// fx.Invoke).
+// subsequent calls are skipped via sync.Once. Returns true on the
+// first (registering) call, false on every subsequent call.
 //
-// The sync.Once guard exists so test code that spins up multiple fx
-// apps in one binary does not panic on the second app's gauge
-// registration.
-func RegisterAdminStreamResourceGauges(s AdminStreamResourceSources) {
+// Callers SHOULD check the return value and log on false so that a
+// second call (e.g., a test spinning up two AdminStreamModule fx
+// apps in one binary, or an accidental double-invoke) is observable
+// — otherwise the second instance's accessor functions are silently
+// dropped and the metrics keep reflecting the first instance only.
+//
+// Production callers MUST call from a single bootstrap site
+// (currently internal/bootstrap/admin_stream.go's
+// registerAdminStreamResourceGauges fx.Invoke).
+func RegisterAdminStreamResourceGauges(s AdminStreamResourceSources) bool {
+	registered := false
 	registerOnce.Do(func() {
+		registered = true
 		const goroutineStackBytes = 8192 // typical Go stack baseline per goroutine
 		AdminSSEEstimatedMemoryBytes = promauto.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -344,4 +349,5 @@ func RegisterAdminStreamResourceGauges(s AdminStreamResourceSources) {
 			func() float64 { return float64(s.HubBroadcastHighWater()) },
 		)
 	})
+	return registered
 }

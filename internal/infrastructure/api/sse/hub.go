@@ -169,12 +169,13 @@ func (h *Hub) Run(ctx context.Context) {
 		for c := range clients {
 			close(c.Send)
 		}
-		observability.AdminSSEActiveConnections.Set(0)
-		// Reset the atomic counter too — otherwise the
-		// AdminSSEEstimatedMemoryBytes GaugeFunc (which closes over
-		// ActiveClients()) keeps reporting a stale non-zero value for
-		// the remainder of the process lifetime after hub shutdown.
+		// Reset the atomic counter BEFORE the Prometheus gauge so a
+		// scrape that lands between these two ops sees both metrics
+		// converging downward rather than one already at zero and
+		// the other (AdminSSEEstimatedMemoryBytes, which reads
+		// ActiveClients()) still at the pre-drain value.
 		h.activeClients.Store(0)
+		observability.AdminSSEActiveConnections.Set(0)
 	}()
 
 	h.log.Info(ctx, "admin sse hub starting")

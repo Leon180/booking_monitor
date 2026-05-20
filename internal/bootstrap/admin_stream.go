@@ -78,14 +78,24 @@ var AdminStreamModule = fx.Module("admin_stream",
 // Kept separate from installAdminStreamLifecycle because GaugeFunc
 // registration is synchronous and must happen before /metrics is
 // scraped; mixing it into OnStart would race with a fast first scrape.
-func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub) {
-	observability.RegisterAdminStreamResourceGauges(observability.AdminStreamResourceSources{
+//
+// On a second call (test code spinning up two AdminStreamModule fx
+// apps in one binary, or accidental double-invoke), observability's
+// sync.Once skips re-registration and returns false; we log Warn so
+// the second instance's silently-ignored accessors are observable
+// rather than producing wrong metrics with no signal.
+func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub, logger *mlog.Logger) {
+	ok := observability.RegisterAdminStreamResourceGauges(observability.AdminStreamResourceSources{
 		ActiveClients:         hub.ActiveClients,
 		ClientSendCapacity:    int64(sse.ClientSendBufferCapacity),
 		AvgMsgSize:            avgAdminEventBytes,
 		BusChannelHighWater:   bus.bus.ChannelHighWater,
 		HubBroadcastHighWater: hub.BroadcastHighWater,
 	})
+	if !ok {
+		logger.Warn(context.Background(),
+			"admin stream resource gauges already registered; second accessor set silently dropped — metrics will reflect the first hub/bus instance only")
+	}
 }
 
 // busAdapter holds the concrete adminEventBus pointer so fx can both

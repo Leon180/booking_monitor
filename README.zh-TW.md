@@ -6,28 +6,33 @@
 
 ## 系統架構
 
-目前的 production 樣貌(Stage 4 — 演進過程見下方[架構演進](#架構演進)):
+目前的 production 樣貌(**Stage 5** — Kafka 持久收訊;演進過程見下方[架構演進](#架構演進))。Stage 4 的 Redis-stream 收訊保留為 `cmd/booking-cli-stage4/` 作 benchmark 比較,但 Stage 5 是 Damai 風格、熱路徑實際對齊的目標形狀:
 
 ```mermaid
 flowchart LR
     Client((Client)) --> Nginx[Nginx<br/>限流]
     Nginx --> API[Gin API]
-    API -->|Lua DECRBY + XADD| Redis[(Redis<br/>庫存 + stream)]
-    Redis -.->|XReadGroup| Worker
+    API -->|Lua DECRBY<br/>load-shed 閘| Redis[(Redis<br/>庫存 + 熱資料)]
+    API -->|Produce<br/>acks=all| KIntake{{Kafka<br/>order.intake}}
+    KIntake -.->|consumer group| Worker
     Worker -->|UoW: INSERT order| PG[(Postgres<br/>事實來源)]
     Client -->|POST /pay| API
     API -->|CreatePaymentIntent| Gateway[Payment<br/>Gateway]
     Gateway -.->|webhook<br/>signed| API
     API -->|UoW: MarkPaid OR<br/>MarkFailed + outbox| PG
     Sweeper[Expiry<br/>Sweeper] -->|UoW: MarkExpired<br/>+ outbox| PG
-    PG -.->|advisory-lock<br/>leader relay| Kafka{{Kafka}}
-    Kafka -.->|order.failed| Saga[Saga Consumer<br/>in-process]
+    PG -.->|advisory-lock<br/>leader relay| KOutbox{{Kafka<br/>order.failed}}
+    KOutbox -.->|order.failed| Saga[Saga Consumer<br/>in-process]
     Saga --> Redis
     Saga --> PG
+    API ==>|發布<br/>order.created、order.paid…| Bus[Admin<br/>Event Bus]
+    Bus -.->|XADD| RStream[(Redis Stream<br/>events:admin)]
+    RStream -.->|XReadGroup| Hub[SSE Hub]
+    Hub -->|EventSource<br/>SSE| Ops((Ops<br/>戰情室))
 ```
 
-> 實線箭頭 = 同步熱路徑 · 虛線箭頭 = 非同步 / event-driven
-> Cache-truth 契約見 [v0.4.0 release notes](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0):Redis 為 ephemeral、Postgres 為事實來源、漂移會被偵測並命名。
+> 實線箭頭 = 同步熱路徑 · 虛線箭頭 = 非同步 / event-driven · 粗體箭頭 = 給 ops dashboard 的 best-effort fan-out
+> Stage 5 把 Stage 4 的 ephemeral 記憶體層 durability(`XADD orders:stream`)換成 Kafka 的 replicated durability(`acks=all`) — 在 VUS=500 下大約 4.4× 的吞吐成本,但 broker 重啟 / outage 不會再丟掉飛行中的訂單。trade-off 詳見[架構演進](#架構演進)。
 
 **設計風格**:Domain-Driven Design + Clean Architecture(Modular Monolith)
 
@@ -169,6 +174,7 @@ D6 的職責是時序 — 何時讓 reservation 過期。庫存回補由 saga co
 - **領導者選舉**:以 PostgreSQL advisory lock 確保只有 1 個 OutboxRelay 實例在跑
 - **完整可觀測性**:Prometheus metrics、Grafana dashboards、Jaeger tracing、Zap logging
 - **Correlation ID**:端到端跨元件的請求追蹤
+- **Admin 事件串流(SSE)**:即時把 `order.created / order.paid / order.failed / order.expired / order.compensated / saga.triggered / dlq.received / inventory.low` 推給 ops,透過 `GET /api/v1/admin/events/stream`(WHATWG SSE 規範、用 `?token=` 帶 JWT HS256、EventSource 內建自動重連 + `Last-Event-ID` 回放)。發布端採 bounded-async drop 策略(OTel BatchSpanProcessor 模式);wire 端是 channel fan-out hub;用 Redis Streams 做可靠回放(`events:admin:stream`,MAXLEN ~ 100k)。新加的 per-subsystem 資源 gauge + HWM 把這條 pipeline 的足跡從行程級指標獨立出來。設計詳見 [`docs/design/admin_event_streaming.md`](docs/design/admin_event_streaming.md)(17 個決策的 ADR)與 [`docs/streaming.md`](docs/streaming.md)(17 個 production gotchas)。
 
 ## 先決條件
 
@@ -253,6 +259,7 @@ asciinema rec docs/demo/walkthrough.cast --overwrite \
 | GET | `/api/v1/events/:id` | **Stub** — 回 `{"message": "View event", "event_id": ...}` 並遞增 `page_views_total` 給轉換率追蹤。**不會**載入活動詳情(延後到 Phase 3 demo 才實作)。 |
 | POST | `/webhook/payment` | **D5** Pattern A — 收 payment provider 的入站 webhook(Stripe-shape envelope)。用 `PAYMENT_WEBHOOK_SECRET` 做 HMAC-SHA256 簽章驗證,依 event type 分派:`payment_intent.succeeded` → MarkPaid;`payment_intent.payment_failed` → MarkPaymentFailed + emit `order.failed`(交給 saga 補償)。對 provider 重投靠資料庫終態做冪等。掛在 engine root(**不**在 `/api/v1` 之下);驗證身份靠簽章,不靠網路。 |
 | POST | `/test/payment/confirm/:order_id` | **D5(僅測試用)** 模擬 provider 端的 webhook emit — 由 `ENABLE_TEST_ENDPOINTS` 控制(prod 預設關)。讀取 order 的 `payment_intent_id`,組出帶 `metadata.order_id` 的 Stripe-shape envelope,用同一把 webhook secret 簽名,然後 POST 到 `/webhook/payment`。整合測試與 dev demo 用來在沒有真 provider 的情況下走完整 pipeline。Query:`?outcome=succeeded\|failed`。 |
+| GET | `/api/v1/admin/events/stream` | **PR #121** Admin 事件串流(SSE)。即時推送 8 種 admin 事件。Auth:用 `?token=<jwt>` 帶 JWT HS256(EventSource 沒辦法設 header — RFC 6750 風格)。token 透過 `booking-cli admin-token --user <id> --ttl 30m` 製作。重連時帶 `Last-Event-ID` 即可從 Redis Stream 在 MAXLEN 視窗內回放。慢的 client 會被踢掉(Q10)— EventSource 會自動重連並接回。 |
 | GET | `/metrics` | Prometheus 指標 |
 | GET | `/livez` | Liveness 探針 — process 還活著就一律回 200(不依賴下游) |
 | GET | `/readyz` | Readiness 探針 — PG + Redis + Kafka 都在 1s 內回應才回 200,否則回 503 並附逐 dep 的 JSON |
