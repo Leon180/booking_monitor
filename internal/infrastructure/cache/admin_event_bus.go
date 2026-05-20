@@ -63,7 +63,7 @@ func DefaultAdminEventBusConfig() AdminEventBusConfig {
 //
 // See docs/design/admin_event_streaming.md § Q3.
 type AdminEventBus struct {
-	client redis.UniversalClient
+	client *redis.Client
 	cfg    AdminEventBusConfig
 	ch     chan admin.AdminEvent
 	log    *mlog.Logger
@@ -77,7 +77,7 @@ var _ admin.Bus = (*AdminEventBus)(nil)
 // NewAdminEventBus constructs a Redis-backed admin event bus.
 // Caller MUST start the drainer goroutine via go bus.Run(ctx).
 // fx.Lifecycle wiring is in internal/bootstrap/admin_stream.go.
-func NewAdminEventBus(client redis.UniversalClient, cfg AdminEventBusConfig, logger *mlog.Logger) *AdminEventBus {
+func NewAdminEventBus(client *redis.Client, cfg AdminEventBusConfig, logger *mlog.Logger) *AdminEventBus {
 	if cfg.StreamKey == "" {
 		cfg.StreamKey = DefaultAdminStreamKey
 	}

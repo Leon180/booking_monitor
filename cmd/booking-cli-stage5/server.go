@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/booking"
 	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/application/expiry"
@@ -100,8 +101,9 @@ func newIntakeConsumer(cfg *config.Config, p worker.MessageProcessor, inv domain
 }
 
 func newWorkerMessageProcessor(uow application.UnitOfWork, metrics worker.Metrics, logger *mlog.Logger) worker.MessageProcessor {
+	// Stage 5 does not host the admin SSE stream — pass noop bus.
 	return worker.NewMessageProcessorMetricsDecorator(
-		worker.NewOrderMessageProcessor(uow, logger),
+		worker.NewOrderMessageProcessor(uow, admin.NewNoopBus(), logger),
 		metrics,
 	)
 }

@@ -67,7 +67,7 @@ type busAdapter struct {
 	bus *cache.AdminEventBus
 }
 
-func newAdminEventBus(client redis.UniversalClient, logger *mlog.Logger) *busAdapter {
+func newAdminEventBus(client *redis.Client, logger *mlog.Logger) *busAdapter {
 	// HIGH-1 (review round 1): removed unused *config.Config param.
 	// Re-add it (and use it) when AdminStreamConfig gains tunables
 	// like ChannelCapacity / StreamMaxLen overrides — until then the
@@ -82,12 +82,12 @@ func newAdminSSEHub(logger *mlog.Logger) *sse.Hub {
 	return sse.NewHub(logger)
 }
 
-func newAdminStreamSubscriber(client redis.UniversalClient, hub *sse.Hub, shutdowner fx.Shutdowner, logger *mlog.Logger) *sse.Subscriber {
+func newAdminStreamSubscriber(client *redis.Client, hub *sse.Hub, shutdowner fx.Shutdowner, logger *mlog.Logger) *sse.Subscriber {
 	cfg := sse.DefaultSubscriberConfig(cache.DefaultAdminStreamKey)
 	return sse.NewSubscriber(client, hub, shutdowner, cfg, logger)
 }
 
-func newAdminSSEHandler(client redis.UniversalClient, hub *sse.Hub, logger *mlog.Logger) *sse.Handler {
+func newAdminSSEHandler(client *redis.Client, hub *sse.Hub, logger *mlog.Logger) *sse.Handler {
 	cfg := sse.DefaultHandlerConfig(cache.DefaultAdminStreamKey)
 	return sse.NewHandler(client, hub, cfg, logger)
 }

@@ -56,7 +56,7 @@ func DefaultHandlerConfig(streamKey string) HandlerConfig {
 // the writer loop starts consuming, history and live events
 // arrive in stream order.
 type Handler struct {
-	client redis.UniversalClient
+	client *redis.Client
 	hub    *Hub
 	cfg    HandlerConfig
 	log    *mlog.Logger
@@ -67,7 +67,7 @@ type Handler struct {
 }
 
 // NewHandler constructs the SSE handler.
-func NewHandler(client redis.UniversalClient, hub *Hub, cfg HandlerConfig, logger *mlog.Logger) *Handler {
+func NewHandler(client *redis.Client, hub *Hub, cfg HandlerConfig, logger *mlog.Logger) *Handler {
 	applyHandlerDefaults(&cfg)
 	return &Handler{
 		client: client,

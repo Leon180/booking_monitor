@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 
 	"booking_monitor/internal/application"
+	"booking_monitor/internal/application/admin"
 	"booking_monitor/internal/application/event"
 	"booking_monitor/internal/application/outbox"
 	"booking_monitor/internal/application/payment"
@@ -144,9 +145,10 @@ func runServer(_ *cobra.Command, _ []string) {
 				queue worker.OrderQueue,
 				uow application.UnitOfWork,
 				metrics worker.Metrics,
+				bus admin.Bus,
 				logger *mlog.Logger,
 			) worker.Service {
-				base := worker.NewOrderMessageProcessor(uow, logger)
+				base := worker.NewOrderMessageProcessor(uow, bus, logger)
 				processor := worker.NewMessageProcessorMetricsDecorator(base, metrics)
 				return worker.NewService(queue, processor, logger)
 			},

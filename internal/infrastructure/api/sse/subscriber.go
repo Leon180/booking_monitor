@@ -52,7 +52,7 @@ func DefaultSubscriberConfig(streamKey string) SubscriberConfig {
 // failure threshold → fx.Shutdown(ExitCode(1)) so k8s restarts the
 // pod (Q11 design).
 type Subscriber struct {
-	client     redis.UniversalClient
+	client     *redis.Client
 	hub        *Hub
 	shutdowner fx.Shutdowner
 	cfg        SubscriberConfig
@@ -63,7 +63,7 @@ type Subscriber struct {
 }
 
 // NewSubscriber constructs an unstarted Subscriber.
-func NewSubscriber(client redis.UniversalClient, hub *Hub, shutdowner fx.Shutdowner, cfg SubscriberConfig, logger *mlog.Logger) *Subscriber {
+func NewSubscriber(client *redis.Client, hub *Hub, shutdowner fx.Shutdowner, cfg SubscriberConfig, logger *mlog.Logger) *Subscriber {
 	applySubscriberDefaults(&cfg)
 	return &Subscriber{
 		client:     client,
