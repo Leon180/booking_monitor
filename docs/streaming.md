@@ -59,9 +59,11 @@
 
 **Why not UUIDv7**: Stream ID is transport-native (no mapping table needed). For an admin-only endpoint with low migration cost, this is the right trade-off. End-user-facing SSE endpoints, if added later, should use UUIDv7 from day 1.
 
-**Edge case**: Last-Event-ID older than stream's first entry → server emits synthetic `event: stream_truncated` and resumes from live tail. Client JS should display "you missed N events; resumed from live" to the operator.
+**Replay window**: bounded by `events:admin:stream` MAXLEN ~ 100,000 (see [`internal/infrastructure/cache/admin_event_bus.go`](../internal/infrastructure/cache/admin_event_bus.go) `DefaultAdminStreamMaxLen`). At the Stage 5 ceiling of ~5,500 events/s, the replay window is ~18 seconds of burst history. At idle rates it covers days-to-weeks. A client that drops for longer than the window will NOT get a full replay — see edge case below.
 
-**Metric**: `admin_sse_events_truncated_total` — non-zero during flash sales is expected.
+**Edge case**: Last-Event-ID older than stream's first entry (because of MAXLEN trim) → server emits synthetic `event: stream_truncated` and resumes from live tail. Client JS should display "you missed N events; resumed from live" to the operator.
+
+**Metric**: `admin_sse_events_truncated_total` — non-zero during flash sales is expected; sustained non-zero outside flash periods means clients are disconnecting for longer than the replay window can cover. Cross-check `admin_event_bus_published_total` rate against the implied seconds-of-history budget if this happens.
 
 ---
 
@@ -104,7 +106,7 @@
 
 **Choice**: Drop the client, not the message (see [§Q10](design/admin_event_streaming.md)).
 
-**Rationale**: Admin contract is "see all events". Silent message-drop diverges client state from server state with no recovery. Closing the connection forces EventSource auto-reconnect with `Last-Event-ID` → XRANGE replay restores full state.
+**Rationale**: Admin contract is "see all events". Silent message-drop diverges client state from server state with no recovery. Closing the connection forces EventSource auto-reconnect with `Last-Event-ID` → XRANGE replay restores full state, bounded by the MAXLEN window (see § 4 — at peak rate this is ~18 s of history; longer disconnects fall back to `stream_truncated` + resume-from-live).
 
 **Trade-off**: ~50–100ms reconnect cost vs silent state divergence. Worth it.
 
@@ -183,7 +185,7 @@ Dashboard panels reading from Prometheus are accurate; SSE timeline may miss eve
 - Each pod's subscriber XREADs the same `events:admin:stream` independently (NOT XREADGROUP — no consumer group, every pod sees every event)
 - Each pod's hub broadcasts to ITS clients
 - Client load-balanced randomly across pods → all pods see all events → all clients receive all events
-- Reconnect lands on a different pod → that pod uses Last-Event-ID to XRANGE-replay → no missed events
+- Reconnect lands on a different pod → that pod uses Last-Event-ID to XRANGE-replay → no missed events (within the MAXLEN ~ 100k replay window; § 4)
 
 **Set in k8s**: `sessionAffinity: None` on the Service. Confirmed via § Q9 + Centrifugo Redis engine pattern.
 

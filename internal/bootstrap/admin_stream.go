@@ -89,12 +89,19 @@ func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub, logger *ml
 		ActiveClients:         hub.ActiveClients,
 		ClientSendCapacity:    int64(sse.ClientSendBufferCapacity),
 		AvgMsgSize:            avgAdminEventBytes,
-		BusChannelHighWater:   bus.bus.ChannelHighWater,
+		BusChannelHighWater:   bus.ChannelHighWater,
 		HubBroadcastHighWater: hub.BroadcastHighWater,
 	})
 	if !ok {
+		// The three GaugeFunc callbacks remain bound to the FIRST
+		// caller's accessors (closure capture inside sync.Once.Do).
+		// Note: the unrelated AdminSSEActiveConnections counter is a
+		// package-level promauto.NewGauge — if multiple hub instances
+		// run concurrently in the same process (atypical; test-only),
+		// that counter reflects combined Inc/Dec from all instances,
+		// not just the first.
 		logger.Warn(context.Background(),
-			"admin stream resource gauges already registered; second accessor set silently dropped — metrics will reflect the first hub/bus instance only")
+			"admin stream resource gauges already registered; second accessor set dropped — HWM/memory gauges remain bound to the first hub/bus instance")
 	}
 }
 
@@ -104,6 +111,11 @@ func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub, logger *ml
 type busAdapter struct {
 	bus *cache.AdminEventBus
 }
+
+// ChannelHighWater exposes the underlying bus HWM accessor through the
+// adapter so callers don't have to reach through bus.bus.* — protects
+// the encapsulation boundary if the adapter is later refactored.
+func (a *busAdapter) ChannelHighWater() int64 { return a.bus.ChannelHighWater() }
 
 func newAdminEventBus(client *redis.Client, logger *mlog.Logger) *busAdapter {
 	// HIGH-1 (review round 1): removed unused *config.Config param.

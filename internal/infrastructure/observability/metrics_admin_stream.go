@@ -280,15 +280,15 @@ var AdminEventBusXAddDurationSeconds = promauto.NewHistogram(
 	},
 )
 
-// RegisterAdminStreamResourceGauges installs the three callback
-// gauges (memory, bus HWM, hub HWM). Called once at app startup
-// from bootstrap; the callbacks close over the supplied accessor
-// functions, which read internal atomic counters maintained by the
-// hub / bus.
+// AdminStreamResourceSources bundles the read-only accessors that
+// the GaugeFunc callbacks close over to expose hub / bus internal
+// counters as Prometheus metrics. Defined as a thin func-typed
+// struct (rather than an interface implemented by sse.Hub /
+// cache.AdminEventBus) to avoid an import cycle between
+// observability and the sse / cache packages.
 //
-// Caller signature is a thin interface (just three func() int64)
-// to avoid an import cycle between observability and sse/cache
-// packages.
+// Wired once at app startup from bootstrap; see
+// RegisterAdminStreamResourceGauges.
 type AdminStreamResourceSources struct {
 	ActiveClients         func() int64
 	ClientSendCapacity    int64
