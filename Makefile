@@ -118,6 +118,127 @@ demo-up: ## D10 — bring up the demo stack (CORS + test endpoints + 20s reserva
 	@echo "    --command='scripts/d10_demo_walkthrough.sh'  # record"
 	@echo "  make bench-two-step                          # k6 D9 baseline"
 
+# Stage 5 admin-dashboard demo (PR #124) — the `app` service builds
+# from cmd/booking-cli-stage5/ via the docker-compose.demo-stage5.yml
+# override; sidecar services (recon, saga_watchdog, expiry_sweeper)
+# stay on Stage 4 because the Stage 5 binary's cobra root only has
+# `server` + `admin-token` subcommands.
+#
+# The `nginx` service is included because the war-room dashboard
+# loads from http://localhost/admin/ (nginx publishes :80; the
+# `app` container only publishes :6060 for pprof).
+demo-stage5-up: ## PR #124 — bring up Stage 5 demo (Kafka-durable intake + SSE war-room dashboard at http://localhost/admin/)
+	@echo "Starting Stage 5 demo: cmd/booking-cli-stage5 → Kafka acks=all intake + admin SSE"
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml \
+	  up -d --build --force-recreate app nginx
+	@echo ""
+	@echo "Waiting for stack to be ready..."
+	@for i in $$(seq 1 60); do \
+	  if curl -sSf http://localhost/livez >/dev/null 2>&1; then \
+	    echo "Stack ready at http://localhost"; \
+	    break; \
+	  fi; \
+	  if [ $$i = 60 ]; then \
+	    echo "ERROR: app didn't pass /livez within 60s"; \
+	    exit 1; \
+	  fi; \
+	  sleep 1; \
+	done
+	@echo ""
+	@echo "Next:"
+	@echo "  make admin-token          # mint JWT (paste into dashboard)"
+	@echo "  open http://localhost/admin/   # war-room dashboard"
+	@echo "  curl -X POST http://localhost/api/v1/book ...   # trigger order.created on wire"
+
+demo-stage5-down: ## PR #124 — stop the Stage 5 demo stack (keeps volumes for re-up)
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml stop app nginx
+
+demo-stage5-logs: ## PR #124 — tail the Stage 5 app logs
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml logs -f app
+
+# Flash-sale (搶票) simulator — k6 hammers POST /book DIRECTLY against
+# app:8080 (bypassing nginx) so the visible RPS reflects Stage 5's
+# real ceiling, not nginx's 100r/s rate-limit zone.
+#
+# Defaults match the canonical 5-stage harness config (VUs=500,
+# 60s, pool=500k, intake-only) so this target is a REPRODUCTION of
+# `docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md`
+# Stage 5 row (5,139 accepted/s, p95 126.9ms). Same script
+# (k6_intake_only.js), same target, same VUs — the live numbers
+# should be within ±10% of the canonical report.
+#
+# Override at invocation if you need a faster-feedback variant:
+#   make demo-stage5-rush                                  # canonical 500 VU × 60s × 500k
+#   make demo-stage5-rush DEMO_DURATION=15s                # quick burst for demo
+#   make demo-stage5-rush DEMO_POOL=5000                   # small-pool sold-out story
+DEMO_VUS ?= 500
+DEMO_DURATION ?= 60s
+DEMO_POOL ?= 500000
+demo-stage5-rush: ## PR #124 — k6 flash-sale DIRECT to app:8080, defaults match the 5-stage canonical benchmark (VUs=500, 60s, pool=500k → ~5k accepted/s)
+	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
+	@echo "[direct] Hammering POST /api/v1/book with $(DEMO_VUS) VUs for $(DEMO_DURATION) against a pool of $(DEMO_POOL) tickets, BYPASSING nginx."
+	@echo "[direct] Reproduces docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s — expect ~5,139 accepted/s, p95 ~127ms."
+	@echo "[direct] Watch http://localhost/admin/ (SSE) + http://localhost:3000/d/admin-war-room (Grafana war-room) — both light up in real time."
+	@echo ""
+	@docker run --rm -i --network=booking_monitor_default \
+	  -e API_ORIGIN=http://app:8080 \
+	  -e VUS=$(DEMO_VUS) \
+	  -e DURATION=$(DEMO_DURATION) \
+	  -e TICKET_POOL=$(DEMO_POOL) \
+	  -v $(PWD)/scripts/k6_intake_only.js:/script.js \
+	  grafana/k6 run /script.js
+
+# Demo target #2 — go THROUGH nginx (the edge). Different story than
+# demo-stage5-rush: most requests will be rate-limited (429) by
+# nginx's `limit_req zone=api rate=100r/s burst=200 nodelay`. The
+# point is to show the SSE control plane staying responsive even
+# when the booking path is being throttled — operators keep
+# observability during an edge burst. Different k6 script
+# (`k6_demo_through_nginx.js`) because 429 is a first-class outcome
+# here, not a business error.
+#
+# Defaults: 500 VUs is well above nginx's 100 r/s + burst 200, so the
+# rate-limit hits hard and the dashboard story is visible.
+DEMO_EDGE_VUS ?= 500
+DEMO_EDGE_DURATION ?= 30s
+DEMO_EDGE_POOL ?= 500
+demo-stage5-rush-edge: ## PR #124 — k6 flash-sale through NGINX edge (rate-limited; shows SSE resilience under edge throttle). Usage: make demo-stage5-rush-edge DEMO_EDGE_VUS=500
+	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
+	@echo "[edge] Hammering POST /api/v1/book through nginx with $(DEMO_EDGE_VUS) VUs for $(DEMO_EDGE_DURATION) against a pool of $(DEMO_EDGE_POOL) tickets."
+	@echo "[edge] nginx rate-limit is 100r/s + burst 200 — most requests will 429. Watch http://localhost/admin/ — events still stream for the few that DO get through (SSE unaffected by rate-limit zone)."
+	@echo ""
+	@docker run --rm -i --network=booking_monitor_default \
+	  -e API_ORIGIN=http://nginx \
+	  -e VUS=$(DEMO_EDGE_VUS) \
+	  -e DURATION=$(DEMO_EDGE_DURATION) \
+	  -e TICKET_POOL=$(DEMO_EDGE_POOL) \
+	  -v $(PWD)/scripts/k6_demo_through_nginx.js:/script.js \
+	  grafana/k6 run /script.js
+
+# admin-token defaults — override at invocation with `make admin-token USER=ops TTL=30m`.
+# The container reads ADMIN_STREAM_JWT_SECRET from the .env file, so no -e
+# pass-through is needed here.
+USER ?= ops
+TTL ?= 30m
+admin-token: ## PR #121 — mint a JWT for the admin SSE endpoint (usage: make admin-token USER=ops TTL=30m). Prints token to stdout.
+	@docker compose exec -T app /app/booking-cli admin-token --user $(USER) --ttl $(TTL) 2>/dev/null | head -1
+
+# Grafana war-room dashboard for the demo — opens the provisioned
+# Admin War-Room dashboard in the default browser. macOS uses
+# `open`; other platforms fall back to printing the URL so the
+# operator can click it.
+#
+# Credentials come from .env (GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD).
+# The dashboard UID `admin-war-room` is baked into
+# `deploy/grafana/provisioning/dashboards/admin_war_room.json:uid`.
+GRAFANA_DASHBOARD_URL ?= http://localhost:3000/d/admin-war-room/admin-war-room-pr-23-121?refresh=5s&from=now-5m&to=now
+grafana-open: ## PR #124 — open the Admin War-Room Grafana dashboard (auto-refresh 5s, last-5-min window)
+	@echo "Grafana login: $$(grep '^GRAFANA_ADMIN_USER' .env | cut -d= -f2) / $$(grep '^GRAFANA_ADMIN_PASSWORD' .env | cut -d= -f2)"
+	@echo "Dashboard URL: $(GRAFANA_DASHBOARD_URL)"
+	@if command -v open >/dev/null 2>&1; then open '$(GRAFANA_DASHBOARD_URL)'; \
+	elif command -v xdg-open >/dev/null 2>&1; then xdg-open '$(GRAFANA_DASHBOARD_URL)'; \
+	else echo "(open / xdg-open not found — copy the URL above into your browser)"; fi
+
 benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 DURATION=60s)
 	@chmod +x scripts/benchmark_k6.sh
 	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)

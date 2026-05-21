@@ -1,0 +1,4 @@
+# HELP admin_event_bus_channel_high_water_mark Max admin event bus channel depth observed since process start.
+# TYPE admin_event_bus_channel_high_water_mark gauge
+admin_event_bus_channel_high_water_mark 7
+admin_event_bus_published_total{event_type="order.created"} 373162

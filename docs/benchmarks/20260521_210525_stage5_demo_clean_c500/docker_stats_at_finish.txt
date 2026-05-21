@@ -1,0 +1,16 @@
+NAME                     CPU %     MEM USAGE / LIMIT
+booking_nginx            0.00%     2.719MiB / 7.653GiB
+booking_app              44.79%    102.8MiB / 7.653GiB
+booking_grafana          0.02%     128.9MiB / 7.653GiB
+booking_prometheus       0.01%     102.1MiB / 7.653GiB
+booking_kafka            12.55%    1.026GiB / 7.653GiB
+booking_alertmanager     0.04%     32.33MiB / 7.653GiB
+booking_recon            0.42%     38.81MiB / 7.653GiB
+booking_redis_exporter   0.51%     22.56MiB / 7.653GiB
+booking_saga_watchdog    0.01%     31.68MiB / 7.653GiB
+booking_expiry_sweeper   0.00%     35.47MiB / 7.653GiB
+booking_jaeger           0.01%     105.2MiB / 7.653GiB
+booking_alert_logger     0.00%     35.41MiB / 7.653GiB
+booking_zookeeper        0.08%     169.4MiB / 7.653GiB
+booking_db               31.42%    184.3MiB / 7.653GiB
+booking_redis            7.41%     336.1MiB / 7.653GiB

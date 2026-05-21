@@ -22,12 +22,20 @@ func newTestHub(t *testing.T) (*Hub, context.CancelFunc) {
 	return hub, cancel
 }
 
-// drainRegister is the pragmatic way to wait for Register to be
-// processed: sleep a short window so the hub goroutine drains the
-// buffered register channel. Hub.Run is single-goroutine so even
-// a 5ms sleep is generous; we use 20ms for CI margin.
-func drainRegister() {
-	time.Sleep(20 * time.Millisecond)
+// waitForActiveClients blocks until hub.ActiveClients() observes the
+// expected count or the timeout expires. Replaces the earlier
+// time.Sleep(20ms) "drainRegister" helper, which raced on slow CI
+// runners: with both `register` and `broadcast` channels buffered,
+// Go's select picks randomly when multiple cases are ready, so the
+// broadcast could be processed before the register lands in the
+// clients map — causing the slow-consumer drop test to silently
+// miss its target. Polling the atomic counter eliminates that race.
+func waitForActiveClients(t *testing.T, hub *Hub, expected int64) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return hub.ActiveClients() == expected
+	}, 2*time.Second, 5*time.Millisecond,
+		"hub never reached %d active clients (current=%d)", expected, hub.ActiveClients())
 }
 
 func TestHub_RegisterReceivesBroadcast(t *testing.T) {
@@ -36,7 +44,7 @@ func TestHub_RegisterReceivesBroadcast(t *testing.T) {
 
 	c := NewClient()
 	require.True(t, hub.Register(context.Background(), c))
-	drainRegister()
+	waitForActiveClients(t, hub, 1)
 
 	require.True(t, hub.Broadcast(context.Background(), redis.XMessage{
 		ID:     "1-0",
@@ -57,7 +65,7 @@ func TestHub_UnregisterClosesSendChan(t *testing.T) {
 
 	c := NewClient()
 	hub.Register(context.Background(), c)
-	drainRegister()
+	waitForActiveClients(t, hub, 1)
 	hub.Unregister(c)
 
 	// Give hub time to process
@@ -74,33 +82,51 @@ func TestHub_SlowClientDroppedOnFullChannel(t *testing.T) {
 	// Build a client with cap-100 send chan and fill it without draining
 	c := NewClient()
 	hub.Register(context.Background(), c)
-	drainRegister()
+	waitForActiveClients(t, hub, 1)
 
 	// Fill the client's Send chan (cap = 100)
 	for i := 0; i < ClientSendBufferCapacity; i++ {
 		c.Send <- redis.XMessage{ID: "x-0"}
 	}
 
-	// Now broadcast — should drop the client
+	// Now broadcast — should drop the client. Crucially we do NOT
+	// drain c.Send before the hub has had a chance to attempt the
+	// non-blocking send; otherwise the drain races the hub goroutine
+	// and the cap-full → drop branch never fires (the previous
+	// version of this test polled c.Send in a tight loop right
+	// after Broadcast, which on slow CI workers raced the test ahead
+	// of the hub and made the channel empty by the time the hub
+	// tried its `case c.Send <- msg:`, turning the drop path into
+	// a successful send and a never-closed channel).
 	hub.Broadcast(context.Background(), redis.XMessage{
 		ID:     "1-0",
 		Values: map[string]any{"event_type": "test"},
 	})
 
-	// Verify Send is closed (slow client dropped)
-	require.Eventually(t, func() bool {
-		// Drain backlog first
-		for {
-			select {
-			case _, open := <-c.Send:
-				if !open {
-					return true
-				}
-			default:
-				return false
+	// Sync on the drop happening: hub.Run decrements activeClients
+	// inside the slow-consumer branch (right next to close(c.Send)).
+	// Polling that atomic counter is race-free — when it reaches 0
+	// we know the close has already executed.
+	waitForActiveClients(t, hub, 0)
+
+	// Now safe to drain + verify closed.
+	drained := 0
+	for range ClientSendBufferCapacity {
+		select {
+		case _, open := <-c.Send:
+			if !open {
+				return // closed mid-drain — also acceptable
 			}
+			drained++
+		default:
+			// channel empty before draining all buffered messages —
+			// shouldn't happen because the hub closes after the
+			// send branch fails (i.e., buffered messages remain).
 		}
-	}, 2*time.Second, 10*time.Millisecond, "slow client's Send chan should be closed")
+	}
+	// Buffered messages drained — channel must be closed now.
+	_, open := <-c.Send
+	require.False(t, open, "slow client's Send chan should be closed (drained %d msgs)", drained)
 }
 
 func TestHub_MultipleClientsAllReceive(t *testing.T) {
@@ -113,7 +139,7 @@ func TestHub_MultipleClientsAllReceive(t *testing.T) {
 		clients[i] = NewClient()
 		hub.Register(context.Background(), clients[i])
 	}
-	drainRegister()
+	waitForActiveClients(t, hub, numClients)
 
 	hub.Broadcast(context.Background(), redis.XMessage{
 		ID:     "1-0",

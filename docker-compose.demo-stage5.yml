@@ -1,0 +1,31 @@
+version: '3.8'
+
+# Demo override that flips the `app` service to the Stage 5 binary
+# (Kafka-durable intake) for end-to-end demos of the war-room
+# dashboard against the Damai-aligned hot path.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml up -d app
+#
+# Only the `app` service is overridden — recon / saga_watchdog /
+# expiry_sweeper continue building from the default `./cmd/booking-cli`
+# target because Stage 5's binary doesn't have those subcommands
+# (Stage 5 runs its drift detector + expiry sweeper inline as
+# goroutines inside the server process).
+#
+# After `up -d app` (or full compose up), the war-room dashboard is at
+# http://localhost/admin/ — mint a JWT via:
+#
+#   docker compose exec -T app /app/booking-cli admin-token --user demo --ttl 30m
+#
+# Note: the in-image binary path stays `/app/booking-cli` regardless
+# of BUILD_TARGET (Dockerfile builds with `-o /app/bin/booking-cli` for
+# both Stage 4 and Stage 5 sources). Only the COMPILED SOURCE differs
+# — so the `command:` line in docker-compose.yml stays unchanged.
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        BUILD_TARGET: ./cmd/booking-cli-stage5
