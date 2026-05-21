@@ -15,8 +15,16 @@ import (
 	"booking_monitor/internal/infrastructure/api/sse"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
+	"booking_monitor/internal/infrastructure/observability"
 	mlog "booking_monitor/internal/log"
 )
+
+// avgAdminEventBytes is the assumed average size of one admin event
+// payload (UUID + event_type + RFC3339Nano timestamp + small JSON
+// data). Used by the SSE memory-estimate gauge as a multiplier; the
+// gauge is a coarse capacity-planning signal, not heap precision, so
+// a static estimate is sufficient.
+const avgAdminEventBytes int64 = 256
 
 // AdminStreamModule wires the admin event SSE stack into an fx app:
 // bus, hub, subscriber, handler, JWT middleware, and lifecycle hooks
@@ -58,7 +66,44 @@ var AdminStreamModule = fx.Module("admin_stream",
 		newAdminJWTMiddleware,
 	),
 	fx.Invoke(installAdminStreamLifecycle),
+	fx.Invoke(registerAdminStreamResourceGauges),
 )
+
+// registerAdminStreamResourceGauges installs the per-subsystem resource
+// gauges exactly once at app startup. The callbacks close over hub /
+// bus accessors (atomic reads), so this is safe to call before the
+// goroutines actually start running — the gauges will simply report 0
+// until traffic flows.
+//
+// Kept separate from installAdminStreamLifecycle because GaugeFunc
+// registration is synchronous and must happen before /metrics is
+// scraped; mixing it into OnStart would race with a fast first scrape.
+//
+// On a second call (test code spinning up two AdminStreamModule fx
+// apps in one binary, or accidental double-invoke), observability's
+// sync.Once skips re-registration and returns false; we log Warn so
+// the second instance's silently-ignored accessors are observable
+// rather than producing wrong metrics with no signal.
+func registerAdminStreamResourceGauges(bus *busAdapter, hub *sse.Hub, logger *mlog.Logger) {
+	ok := observability.RegisterAdminStreamResourceGauges(observability.AdminStreamResourceSources{
+		ActiveClients:         hub.ActiveClients,
+		ClientSendCapacity:    int64(sse.ClientSendBufferCapacity),
+		AvgMsgSize:            avgAdminEventBytes,
+		BusChannelHighWater:   bus.ChannelHighWater,
+		HubBroadcastHighWater: hub.BroadcastHighWater,
+	})
+	if !ok {
+		// The three GaugeFunc callbacks remain bound to the FIRST
+		// caller's accessors (closure capture inside sync.Once.Do).
+		// Note: the unrelated AdminSSEActiveConnections counter is a
+		// package-level promauto.NewGauge — if multiple hub instances
+		// run concurrently in the same process (atypical; test-only),
+		// that counter reflects combined Inc/Dec from all instances,
+		// not just the first.
+		logger.Warn(context.Background(),
+			"admin stream resource gauges already registered; second accessor set dropped — HWM/memory gauges remain bound to the first hub/bus instance")
+	}
+}
 
 // busAdapter holds the concrete adminEventBus pointer so fx can both
 // inject the concrete type (for lifecycle wiring) and expose the
@@ -66,6 +111,11 @@ var AdminStreamModule = fx.Module("admin_stream",
 type busAdapter struct {
 	bus *cache.AdminEventBus
 }
+
+// ChannelHighWater exposes the underlying bus HWM accessor through the
+// adapter so callers don't have to reach through bus.bus.* — protects
+// the encapsulation boundary if the adapter is later refactored.
+func (a *busAdapter) ChannelHighWater() int64 { return a.bus.ChannelHighWater() }
 
 func newAdminEventBus(client *redis.Client, logger *mlog.Logger) *busAdapter {
 	// HIGH-1 (review round 1): removed unused *config.Config param.
@@ -137,10 +187,10 @@ func newAdminJWTMiddleware(cfg *config.Config) *AdminJWTHandle {
 //   - subscriber.Run(runCtx) — Redis XREAD
 //
 // OnStop orchestrates the Q15 graceful drain:
-//   1. handler.SetShuttingDown(true)
-//   2. handler.BroadcastRetryHints — jittered retry: per connected client
-//   3. cancel runCtx — signals all three goroutines
-//   4. wait for done signals, bounded by stopCtx deadline
+//  1. handler.SetShuttingDown(true)
+//  2. handler.BroadcastRetryHints — jittered retry: per connected client
+//  3. cancel runCtx — signals all three goroutines
+//  4. wait for done signals, bounded by stopCtx deadline
 func installAdminStreamLifecycle(
 	lc fx.Lifecycle,
 	bus *busAdapter,

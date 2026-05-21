@@ -163,6 +163,11 @@ Admin SSE 事件管線暴露自己的基礎設施指標(Layer B,見 [§Q16](desi
 | `admin_sse_message_lag_seconds` | histogram | — | OccurredAt → 客戶端送達 的延遲 |
 | `admin_stream_subscriber_consec_failures` | gauge | — | 目前連續 XREAD 失敗次數 |
 | `admin_stream_subscriber_xread_failures_total` | counter | — | 累計 XREAD 失敗次數 |
+| `admin_sse_estimated_memory_bytes` | gauge (callback) | — | SSE 子系統的記憶體估算:N_clients × (8 KB stack + 100 格 send buffer × 平均 ~256 B/訊息)。把 SSE 的足跡從行程級的 `go_memstats_alloc_bytes` 中獨立出來。 |
+| `admin_event_bus_channel_high_water_mark` | gauge (callback) | — | 自行程啟動以來 bus channel 觀察到的最大深度。容量規劃信號 — HWM 若往 10,000 上限靠近,代表 drainer 持續跟不上尖峰。 |
+| `admin_hub_broadcast_high_water_mark` | gauge (callback) | — | 自行程啟動以來 hub broadcast channel 觀察到的最大深度。HWM > 200 代表 hub loop 被 subscriber 拉開(慢客戶端背壓或 broadcast 競爭)。 |
+| `admin_sse_write_message_duration_seconds` | histogram | — | 每幀 SSE 寫入延遲。p99 升高但 p50 正常 ⇒ 少數客戶端在 TCP 層被節流;整條分佈一起升高 ⇒ writer goroutine 卡住。 |
+| `admin_event_bus_xadd_duration_seconds` | histogram | — | bus drainer 每次 XADD 的延遲。p99 逼近 2 秒的 `XAddTimeout` 代表 Redis 側有壓力。 |
 | `inventory_low_alerts_total` | counter | — | 低庫存閾值穿越次數(補 Layer A 缺口) |
 
 ---
