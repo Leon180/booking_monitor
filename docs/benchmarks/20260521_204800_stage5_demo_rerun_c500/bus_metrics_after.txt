@@ -1,0 +1,17 @@
+# HELP admin_event_bus_channel_high_water_mark Max admin event bus channel depth observed since process start.
+# TYPE admin_event_bus_channel_high_water_mark gauge
+admin_event_bus_channel_high_water_mark 5
+admin_event_bus_published_total{event_type="order.created"} 221262
+admin_event_bus_xadd_failures_total{reason="conn_refused"} 0
+admin_event_bus_xadd_failures_total{reason="other"} 0
+admin_event_bus_xadd_failures_total{reason="timeout"} 0
+# HELP admin_sse_active_connections Currently connected admin SSE clients.
+# TYPE admin_sse_active_connections gauge
+admin_sse_active_connections 0
+# HELP admin_sse_clients_dropped_total Admin SSE clients disconnected by the hub.
+# TYPE admin_sse_clients_dropped_total counter
+admin_sse_clients_dropped_total{reason="hub_unavailable"} 0
+admin_sse_clients_dropped_total{reason="shutdown"} 0
+admin_sse_clients_dropped_total{reason="slow_consumer"} 0
+admin_sse_clients_dropped_total{reason="write_error"} 0
+admin_sse_messages_sent_total{event_type="order.created"} 0
