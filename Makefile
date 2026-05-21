@@ -172,10 +172,10 @@ demo-stage5-logs: ## PR #124 — tail the Stage 5 app logs
 DEMO_VUS ?= 50
 DEMO_DURATION ?= 30s
 DEMO_POOL ?= 500
-demo-stage5-rush: ## PR #124 — k6 flash-sale 搶票 simulator (usage: make demo-stage5-rush DEMO_VUS=50 DEMO_DURATION=30s DEMO_POOL=500)
+demo-stage5-rush: ## PR #124 — k6 flash-sale 搶票 simulator, DIRECT to app:8080 bypassing nginx (usage: make demo-stage5-rush DEMO_VUS=50 DEMO_DURATION=30s DEMO_POOL=500)
 	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
-	@echo "Hammering POST /api/v1/book with $(DEMO_VUS) VUs for $(DEMO_DURATION) against a pool of $(DEMO_POOL) tickets."
-	@echo "Watch the dashboard at http://localhost/admin/ — order.created should stream live until pool is sold out."
+	@echo "[direct] Hammering POST /api/v1/book with $(DEMO_VUS) VUs for $(DEMO_DURATION) against a pool of $(DEMO_POOL) tickets, BYPASSING nginx."
+	@echo "[direct] Watch http://localhost/admin/ — order.created streams at the Stage-5 ceiling rate (no edge throttle)."
 	@echo ""
 	@docker run --rm -i --network=booking_monitor_default \
 	  -e API_ORIGIN=http://app:8080 \
@@ -183,6 +183,33 @@ demo-stage5-rush: ## PR #124 — k6 flash-sale 搶票 simulator (usage: make dem
 	  -e DURATION=$(DEMO_DURATION) \
 	  -e TICKET_POOL=$(DEMO_POOL) \
 	  -v $(PWD)/scripts/k6_intake_only.js:/script.js \
+	  grafana/k6 run /script.js
+
+# Demo target #2 — go THROUGH nginx (the edge). Different story than
+# demo-stage5-rush: most requests will be rate-limited (429) by
+# nginx's `limit_req zone=api rate=100r/s burst=200 nodelay`. The
+# point is to show the SSE control plane staying responsive even
+# when the booking path is being throttled — operators keep
+# observability during an edge burst. Different k6 script
+# (`k6_demo_through_nginx.js`) because 429 is a first-class outcome
+# here, not a business error.
+#
+# Defaults: 500 VUs is well above nginx's 100 r/s + burst 200, so the
+# rate-limit hits hard and the dashboard story is visible.
+DEMO_EDGE_VUS ?= 500
+DEMO_EDGE_DURATION ?= 30s
+DEMO_EDGE_POOL ?= 500
+demo-stage5-rush-edge: ## PR #124 — k6 flash-sale through NGINX edge (rate-limited; shows SSE resilience under edge throttle). Usage: make demo-stage5-rush-edge DEMO_EDGE_VUS=500
+	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
+	@echo "[edge] Hammering POST /api/v1/book through nginx with $(DEMO_EDGE_VUS) VUs for $(DEMO_EDGE_DURATION) against a pool of $(DEMO_EDGE_POOL) tickets."
+	@echo "[edge] nginx rate-limit is 100r/s + burst 200 — most requests will 429. Watch http://localhost/admin/ — events still stream for the few that DO get through (SSE unaffected by rate-limit zone)."
+	@echo ""
+	@docker run --rm -i --network=booking_monitor_default \
+	  -e API_ORIGIN=http://nginx \
+	  -e VUS=$(DEMO_EDGE_VUS) \
+	  -e DURATION=$(DEMO_EDGE_DURATION) \
+	  -e TICKET_POOL=$(DEMO_EDGE_POOL) \
+	  -v $(PWD)/scripts/k6_demo_through_nginx.js:/script.js \
 	  grafana/k6 run /script.js
 
 # admin-token defaults — override at invocation with `make admin-token USER=ops TTL=30m`.
