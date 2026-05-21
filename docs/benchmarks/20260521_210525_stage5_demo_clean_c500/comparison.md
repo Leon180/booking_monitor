@@ -72,91 +72,116 @@ Difference attributable entirely to resource competition: the
 re-run boots only Stage 5. Same k6 script, same VUs, same pool, same
 target — reproducibility holds.
 
-## 🚨 Anomaly: accepted_bookings > total_tickets (REPRODUCED, not state residue)
+## ✅ "Anomaly" investigated and explained — system behaviour is correct
+
+### Initial observation
 
 | Layer | Count |
 |---|---|
 | k6 `accepted_bookings` (HTTP 202s) | **503,785** |
 | Redis qty final value (`ticket_type_qty:019e4aa4-...`) | 104,374 |
 | Net Redis deducts (500,000 − 104,374) | **395,626** |
-| Bus published (60s after drain) | 373,162 (still draining at capture; see note) |
-| PG orders (60s after drain) | 373,242 (still draining) |
-| **Δ between accepted and Redis deducts** | **+108,159 (k6 saw 108k more 202s than Redis actually deducted)** |
+| **Δ between accepted and Redis deducts** | **+108,159** |
 
-This means the service returned HTTP 202 for ~108k requests that did
-NOT durably decrement Redis. The 503,785 over 500,000 pool size that
-the previous report flagged is real and reproducible from clean state.
+At first glance: service returned 202 for 108k requests that didn't
+durably decrement Redis. Sounds like a bug.
 
-### Small-scale isolation: NOT triggered at low concurrency
+### Investigation: ruled out and confirmed candidates
 
-Immediately after the 60s canonical run, an isolated `make reset-db &&
-make demo-stage5-rush DEMO_VUS=5 DEMO_DURATION=3s DEMO_POOL=100` run
-showed:
+| Candidate | Method | Result |
+|---|---|---|
+| State pollution from earlier session runs | `make reset-db` + app restart → counters at 0 before run | ❌ Reproduces from clean state, NOT pollution |
+| Saga compensator INCRBY | `admin_event_bus_published_total{order.failed,order.expired,order.compensated,saga.triggered}` all = 0 | ❌ Saga never fired during 60s intake-only test |
+| Drift detector auto-rehydrate | `inventory_drift_auto_rehydrated_total = 0` | ❌ Not the cause |
+| Lua deduct bug under concurrency | Small-scale test (5 VU × 3s × pool 100): accepted=100, Redis=0 (matches exactly) | ❌ Lua is correct in isolation |
+| Stage 5 service revert path failures | `stage5_intake_revert_failures_total = 0` | ❌ Reverts succeeded when they ran |
+| **k6 user_id collisions hitting worker DB UNIQUE constraint** | Read app logs, count `Duplicate purchase blocked` warnings | **✅ EXACTLY 108,159 occurrences — matches Δ to the unit** |
 
-| Metric | Value |
-|---|---|
-| accepted_bookings | 100 |
-| Redis qty after | 0 |
-| Match? | **Exact — 100 deducted, 100 accepted** |
+### Root cause
 
-So Lua deduct logic is correct in isolation. The anomaly is a
-high-concurrency race that only manifests above some VU / publish-rate
-threshold.
+[`scripts/k6_intake_only.js:97`](../../../scripts/k6_intake_only.js#L97)
+generates the booking `user_id` as `randInt(1, 1_000_000)`. With 500k
+booking iterations against a 1M user_id pool, the
+[birthday paradox](https://en.wikipedia.org/wiki/Birthday_problem)
+predicts roughly **106,500 duplicate user_id collisions**:
 
-### NOT the saga compensator
+```
+Expected dupes ≈ N − M × (1 − e^(−N/M))
+              = 500,000 − 1,000,000 × (1 − e^(−0.5))
+              ≈ 106,531
+```
 
-User asked: could saga compensation be calling INCRBY during the test?
+Observed: **108,159** (within 1.5 % of theoretical prediction).
 
-Answer: no. `order.failed` is produced only by:
-- `POST /webhook/payment` with failure outcome (no payment in this test)
-- Expiry sweeper at `reserved_until <= NOW()` (default 15-min window;
-  60s test never triggers it)
+The PG `orders` table has a UNIQUE constraint on `(user_id, event_id)`
+preventing the same user from booking the same event twice. When the
+Stage 5 worker INSERTs a duplicate row, PG raises a unique-violation,
+the worker classifies it as a **terminal error** and calls
+`RevertInventory` (INCRBY) to release the ticket back into the pool
+for someone else.
 
-`stage5_intake_revert_failures_total = 0` rules out failed reverts.
-`inventory_drift_auto_rehydrated_total = 0` rules out drift detector
-side-effects.
+App log evidence (exactly 108,159 occurrences each in the 60s window):
 
-### Candidate root causes (ranked by suspicion)
+```
+{"level":"warn", "caller":"worker/message_processor.go:111",
+ "msg":"Duplicate purchase blocked by DB constraint", ...}
+{"level":"warn", "caller":"messaging/kafka_intake_consumer.go:306",
+ "msg":"stage5 intake terminal error; inventory reverted",
+ "error":"user already bought ticket", ...}
+```
 
-1. **`SetTicketTypeMetadata` repair path race** (most plausible).
-   Inside [`deductWithMetadataRepair`](../../../internal/application/booking/service_kafka_intake.go#L228-L267)
-   the cold-fill repair calls `SetTicketTypeMetadata(ctx, tt)` and
-   retries the deduct. Under high concurrency, multiple repair paths
-   could be in flight, and although `SetTicketTypeMetadata` only HSETs
-   the meta key, the surrounding Go logic may have a window where the
-   service returns success without a corresponding net DECRBY.
-   Worth a code-review with a concurrency lens.
+All three numbers match exactly: **108,159 duplicate blocks =
+108,159 worker reverts = +108,159 Δ between accepted and Redis
+deducts**.
 
-2. **Stage 5 publisher timeout path returning 202** (less likely).
-   `WriteTimeout: 5s` on the kafka.Writer. If a publish times out at
-   the application level after the broker actually committed, the
-   service calls `RevertInventory` and returns 5xx — k6 should see
-   5xx, NOT 202. Unless there's an error-handling path that
-   swallows the error and returns nil. Worth grep-ing
-   service_kafka_intake.go for any path where Lua DECRBY succeeds but
-   the service returns nil despite a publish issue.
+### Hypothesis verification: unique user_id makes the Δ vanish
 
-3. **k6 client-side double-counting** (least likely). k6 doesn't
-   retry by default and the script counts 202 in exactly one branch.
-   Would only happen if HTTP keepalive caused some response framing
-   weirdness. Unlikely.
+Patched the k6 script to generate guaranteed-unique `user_id`
+(`__VU * 10_000_000 + __ITER + 1`), reset, re-ran (20s subset):
 
-### Why this doesn't block the demo
+| Metric | Random user_id (canonical script) | Unique user_id (patched script) |
+|---|---|---|
+| accepted_bookings | 503,785 (over 60s) | 194,250 (over 20s) |
+| Net Redis deducts | 395,626 | **194,250** |
+| Δ | **+108,159** | **0** |
+| Duplicate-block log lines | 108,159 | **0** |
 
-- The headline (8,395 accepted/s, p95 62ms) is well within the
-  benchmark direction.
-- 0.76 % over-accept is small enough that no client would notice
-  during a 60s burst; the worker still drains everything Kafka
-  durably received, so eventual consistency holds.
-- For a flash-sale system this would matter at sub-percent-precision
-  margins (e.g., 500k tickets sold but only 500,000 paid means a
-  $X-per-ticket overage refund problem) — but that's a downstream
-  cleanup story, not a demo-blocker.
-- Worth an independent investigation PR. The interview narrative
-  can honestly say: "I ran a clean benchmark, found a sub-percent
-  over-accept anomaly that doesn't appear at small scale, isolated
-  it to a high-concurrency race in the Stage 5 service-level repair
-  path, and have a follow-up PR scoped for the fix."
+With unique user_ids the Δ went to **exactly 0**. The k6 script was
+restored to its canonical state afterwards.
+
+### What this benchmark actually demonstrated
+
+Stage 5 implements **two-stage admission control**, both gates are
+working correctly:
+
+| Gate | Where | Catches | On rejection |
+|---|---|---|---|
+| 1. Inventory (Lua) | API hot path | Pool exhausted | 409 Conflict, no Redis deduct |
+| 2. Per-user uniqueness (DB UNIQUE) | Worker INSERT path | Same user booking the same event twice | Worker reverts inventory (returns ticket to pool) |
+
+Gate 1 is fast (sub-ms, no DB touch). Gate 2 is the authoritative
+source-of-truth check that catches what Gate 1 cannot — the
+per-user invariant. The interaction is:
+
+- Gate 1 passes → service returns 202 → user thinks booking succeeded
+- Gate 2 catches duplicate → worker reverts inventory + writes nothing to PG
+- Polling `GET /api/v1/orders/:id` would eventually return 404 for the
+  duplicate — that's how the client learns the booking didn't land
+
+For a real-world flash-sale this UX could be improved (catch the
+duplicate at API layer via an idempotency-key + per-user-event index,
+so the duplicate user sees an immediate 409 instead of a delayed 404).
+But the **inventory invariant is correctly preserved** — every ticket
+sold to a unique user is durably persisted; every duplicate is bounced
+back into the pool for someone else.
+
+### Why this is a better debugging story than "clean benchmark, no issues"
+
+The investigation walked through six candidates, ruled out five with
+specific metrics or isolation tests, and landed on the right cause
+with both birthday-paradox math AND empirical verification (running
+with unique user_ids → Δ exactly 0). This kind of methodical narrowing
+is what interview panels value over a clean number with no friction.
 
 ## Architecture finding: intake rate >> worker consume rate (same as previous report, replayed cleanly)
 
