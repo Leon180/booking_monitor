@@ -6,7 +6,7 @@ A high-concurrency ticket booking system simulation designed for flash sale scen
 
 ## Architecture
 
-Current production shape (**Stage 5** — Kafka-durable intake; see [Architecture Evolution](#architecture-evolution) below for how we got here). The Stage 4 Redis-stream intake remains shipped as `cmd/booking-cli-stage4/` for benchmark comparison, but Stage 5 is the Damai-aligned target the hot path is built around:
+**Production-recommended target shape: Stage 5 (Kafka-durable intake)** — Damai-aligned. The default `docker-compose up` currently wires `cmd/booking-cli/` (which IS the Stage 4 implementation; see `Dockerfile:23` comment), with `cmd/booking-cli-stage4/` and `cmd/booking-cli-stage5/` as explicit-name builds for the comparison harness. Stage 5 is the target both because it eliminates a known full-flow stability cliff at 500 VUs (Stage 4's outbox relay collapses at t≈43s — see [5-stage benchmark BP-2](docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md)) AND because `acks=all` replicated durability replaces the ephemeral `XADD orders:stream`:
 
 ```mermaid
 flowchart LR
@@ -32,7 +32,7 @@ flowchart LR
 ```
 
 > Solid arrows = synchronous hot path · dashed arrows = async / event-driven · bold arrows = best-effort fan-out to ops dashboards
-> Stage 5 trades Stage 4's ephemeral in-memory durability (`XADD orders:stream`) for Kafka's replicated durability (`acks=all`) — ~4.4× throughput cost at VUS=500, but a broker outage no longer loses in-flight orders. See [Architecture Evolution](#architecture-evolution) for the trade-off.
+> Stage 5 trades Stage 4's ephemeral in-memory durability (`XADD orders:stream`) for Kafka's replicated durability (`acks=all`). Verified cost on the 5-stage harness (VUS=500, intake-only): −38% accepted/s (8,378 → 5,139) and +5.7× p95 latency (16.9ms → 97.1ms). In exchange Stage 5 (a) survives the BP-2 outbox-relay collapse Stage 4 hits at t≈43s under full-flow, and (b) no longer loses in-flight orders on broker outage. See [Architecture Evolution](#architecture-evolution) for the trade-off and the [BP-2 report](docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md) for the stability finding.
 
 > Solid arrows = synchronous hot path · dashed arrows = async / event-driven
 > See [v0.4.0 release notes](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) for the cache-truth contract: Redis ephemeral, Postgres source-of-truth, drift detected and named.
@@ -112,7 +112,7 @@ flowchart LR
     K4 -.-> S4[Saga]
 ```
 
-The 5-stage `cmd/booking-cli-stage{1,2,3,5}/` + `cmd/booking-cli` comparison harness (D12 + PR #113; see [`docs/d12/README.md`](docs/d12/README.md)) is shipped — same `internal/` packages, different fx wirings, side-by-side benchmark runs. Stage 5 is the Damai-aligned durable Kafka intake (acks=all replaces `XADD orders:stream`) — see [`internal/application/booking/service_kafka_intake.go`](internal/application/booking/service_kafka_intake.go) + [`internal/infrastructure/messaging/kafka_intake_consumer.go`](internal/infrastructure/messaging/kafka_intake_consumer.go). Each stage's apples-to-apples report lives under [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/), generated via `make bench-up` + `scripts/run_5stage_comparison.sh` + `scripts/generate_comparison_md.py`. The Stage 4 → 5 intake-only delta (~4.4× throughput cost at VUS=500) is the architectural price of replicated durability over ephemeral in-memory durability.
+The 5-stage `cmd/booking-cli-stage{1,2,3,5}/` + `cmd/booking-cli` comparison harness (D12 + PR #113; see [`docs/d12/README.md`](docs/d12/README.md)) is shipped — same `internal/` packages, different fx wirings, side-by-side benchmark runs. Stage 5 is the Damai-aligned durable Kafka intake (acks=all replaces `XADD orders:stream`) — see [`internal/application/booking/service_kafka_intake.go`](internal/application/booking/service_kafka_intake.go) + [`internal/infrastructure/messaging/kafka_intake_consumer.go`](internal/infrastructure/messaging/kafka_intake_consumer.go). Each stage's apples-to-apples report lives under [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/), generated via `make bench-up` + `scripts/run_5stage_comparison.sh` + `scripts/generate_comparison_md.py`. The Stage 4 → 5 intake-only delta from the canonical harness (VUS=500, 60s, 500k pool) is **−38% accepted/s (8,378 → 5,139) and +5.7× p95 latency** — the architectural price of replicated durability over ephemeral in-memory durability, plus the BP-2 stability fix on the full-flow path.
 
 ### Pattern A flow (shipped in v0.5.0 + v0.6.0)
 

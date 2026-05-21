@@ -6,7 +6,7 @@
 
 ## 系統架構
 
-目前的 production 樣貌(**Stage 5** — Kafka 持久收訊;演進過程見下方[架構演進](#架構演進))。Stage 4 的 Redis-stream 收訊保留為 `cmd/booking-cli-stage4/` 作 benchmark 比較,但 Stage 5 是 Damai 風格、熱路徑實際對齊的目標形狀:
+**production 推薦目標架構:Stage 5(Kafka 持久收訊)** — Damai 風格對齊。預設 `docker-compose up` 目前是接 `cmd/booking-cli/`(這就是 Stage 4 的實作,見 `Dockerfile:23` 註解),而 `cmd/booking-cli-stage4/` 跟 `cmd/booking-cli-stage5/` 則是 comparison harness 用的明確命名版本。Stage 5 之所以是目標,有兩個理由:一是它修掉了 Stage 4 在 500 VU full-flow 下的穩定性懸崖(Stage 4 的 outbox relay 在 t≈43s 會崩潰 — 見 [5-stage benchmark BP-2](docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md));二是 `acks=all` replicated durability 取代了原本 ephemeral 的 `XADD orders:stream`:
 
 ```mermaid
 flowchart LR
@@ -32,7 +32,7 @@ flowchart LR
 ```
 
 > 實線箭頭 = 同步熱路徑 · 虛線箭頭 = 非同步 / event-driven · 粗體箭頭 = 給 ops dashboard 的 best-effort fan-out
-> Stage 5 把 Stage 4 的 ephemeral 記憶體層 durability(`XADD orders:stream`)換成 Kafka 的 replicated durability(`acks=all`) — 在 VUS=500 下大約 4.4× 的吞吐成本,但 broker 重啟 / outage 不會再丟掉飛行中的訂單。trade-off 詳見[架構演進](#架構演進)。
+> Stage 5 把 Stage 4 的 ephemeral 記憶體層 durability(`XADD orders:stream`)換成 Kafka 的 replicated durability(`acks=all`)。5-stage harness 上實測代價(VUS=500、intake-only):accepted/s −38%(8,378 → 5,139)、p95 +5.7×(16.9ms → 97.1ms)。換來的是(a) Stage 4 在 full-flow 下會在 t≈43s 撞上的 BP-2 outbox-relay 崩潰,Stage 5 不會出現,以及(b) broker outage 不會再丟掉飛行中的訂單。trade-off 詳見[架構演進](#架構演進);穩定性問題詳見 [BP-2 報告](docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md)。
 
 **設計風格**:Domain-Driven Design + Clean Architecture(Modular Monolith)
 
@@ -109,7 +109,7 @@ flowchart LR
     K4 -.-> S4[Saga]
 ```
 
-五個 stage 的 `cmd/booking-cli-stage{1,2,3,5}/` + `cmd/booking-cli` 比較 harness(D12 + PR #113;細節見 [`docs/d12/README.md`](docs/d12/README.md))已上線 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。Stage 5 是大麥(Damai)風格的可靠 Kafka 收訊(acks=all 取代 `XADD orders:stream`),見 [`internal/application/booking/service_kafka_intake.go`](internal/application/booking/service_kafka_intake.go) + [`internal/infrastructure/messaging/kafka_intake_consumer.go`](internal/infrastructure/messaging/kafka_intake_consumer.go)。每次 apples-to-apples 比較報告都放在 [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/),透過 `make bench-up` + `scripts/run_5stage_comparison.sh` + `scripts/generate_comparison_md.py` 產生。Stage 4 → 5 在 intake-only 場景下的差距(VUS=500 約 4.4 倍 throughput 下降)就是「用記憶體層 ephemeral durability 換成 replicated durability」這個架構選擇的代價。
+五個 stage 的 `cmd/booking-cli-stage{1,2,3,5}/` + `cmd/booking-cli` 比較 harness(D12 + PR #113;細節見 [`docs/d12/README.md`](docs/d12/README.md))已上線 — 同一份 `internal/` 程式碼、不同 fx 接線、平行跑 benchmark 並排比較。Stage 5 是大麥(Damai)風格的可靠 Kafka 收訊(acks=all 取代 `XADD orders:stream`),見 [`internal/application/booking/service_kafka_intake.go`](internal/application/booking/service_kafka_intake.go) + [`internal/infrastructure/messaging/kafka_intake_consumer.go`](internal/infrastructure/messaging/kafka_intake_consumer.go)。每次 apples-to-apples 比較報告都放在 [`docs/benchmarks/comparisons/`](docs/benchmarks/comparisons/),透過 `make bench-up` + `scripts/run_5stage_comparison.sh` + `scripts/generate_comparison_md.py` 產生。Stage 4 → 5 在 intake-only 場景下,canonical harness 上的實測差距(VUS=500、60s、500k pool):**accepted/s −38%(8,378 → 5,139)、p95 +5.7×** — 這就是「用記憶體層 ephemeral durability 換成 replicated durability」的架構代價,外加 full-flow 那條路徑上的 BP-2 穩定性修正。
 
 ### Pattern A 流程(已隨 v0.5.0 + v0.6.0 上線)
 
