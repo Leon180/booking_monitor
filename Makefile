@@ -156,6 +156,35 @@ demo-stage5-down: ## PR #124 — stop the Stage 5 demo stack (keeps volumes for 
 demo-stage5-logs: ## PR #124 — tail the Stage 5 app logs
 	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml logs -f app
 
+# Flash-sale (搶票) simulator — k6 hammers POST /book directly against
+# app:8080 (bypassing nginx so we don't trip its 100 r/s rate-limit
+# while watching the dashboard). The setup() step creates a fresh
+# event with DEMO_POOL tickets, then DEMO_VUS workers race to book
+# until the pool is depleted or DEMO_DURATION elapses — whichever
+# comes first. Defaults are tuned for a 30-second visible-on-dashboard
+# story: pool runs out mid-window so you can see the 202 → 409
+# fast-path transition live on /admin/.
+#
+# Override at invocation, e.g.:
+#   make demo-stage5-rush                                  # 50 VU × 30s × 500 tickets
+#   make demo-stage5-rush DEMO_VUS=200 DEMO_DURATION=60s   # heavier
+#   make demo-stage5-rush DEMO_POOL=10000                  # bigger pool
+DEMO_VUS ?= 50
+DEMO_DURATION ?= 30s
+DEMO_POOL ?= 500
+demo-stage5-rush: ## PR #124 — k6 flash-sale 搶票 simulator (usage: make demo-stage5-rush DEMO_VUS=50 DEMO_DURATION=30s DEMO_POOL=500)
+	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
+	@echo "Hammering POST /api/v1/book with $(DEMO_VUS) VUs for $(DEMO_DURATION) against a pool of $(DEMO_POOL) tickets."
+	@echo "Watch the dashboard at http://localhost/admin/ — order.created should stream live until pool is sold out."
+	@echo ""
+	@docker run --rm -i --network=booking_monitor_default \
+	  -e API_ORIGIN=http://app:8080 \
+	  -e VUS=$(DEMO_VUS) \
+	  -e DURATION=$(DEMO_DURATION) \
+	  -e TICKET_POOL=$(DEMO_POOL) \
+	  -v $(PWD)/scripts/k6_intake_only.js:/script.js \
+	  grafana/k6 run /script.js
+
 # admin-token defaults — override at invocation with `make admin-token USER=ops TTL=30m`.
 # The container reads ADMIN_STREAM_JWT_SECRET from the .env file, so no -e
 # pass-through is needed here.
