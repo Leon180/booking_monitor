@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -67,7 +68,19 @@ func main() {
 		Run:   runServer,
 	}
 
-	rootCmd.AddCommand(serverCmd)
+	// admin-token mirrors cmd/booking-cli/main.go's subcommand so the
+	// Stage 5 demo binary can mint its own JWTs without needing the
+	// Stage 4 binary inside the same image. Same `MintAdminJWT` helper
+	// + same flag surface — see admin_token.go.
+	adminTokenCmd := &cobra.Command{
+		Use:   "admin-token",
+		Short: "Mint a JWT for the admin SSE endpoint (?token=<jwt>)",
+		Run:   runAdminToken,
+	}
+	adminTokenCmd.Flags().String("user", "", "Ops user identifier (e.g., ops-leon) — required")
+	adminTokenCmd.Flags().Duration("ttl", 30*time.Minute, "Token lifetime (must be ≤ server's ADMIN_STREAM_JWT_MAX_TTL)")
+
+	rootCmd.AddCommand(serverCmd, adminTokenCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

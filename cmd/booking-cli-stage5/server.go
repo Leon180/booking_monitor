@@ -26,6 +26,7 @@ import (
 	"booking_monitor/internal/application/worker"
 	"booking_monitor/internal/bootstrap"
 	"booking_monitor/internal/domain"
+	"booking_monitor/internal/infrastructure/api/sse"
 	"booking_monitor/internal/infrastructure/api/stagehttp"
 	"booking_monitor/internal/infrastructure/cache"
 	"booking_monitor/internal/infrastructure/config"
@@ -45,6 +46,13 @@ func runServer(_ *cobra.Command, _ []string) {
 	fx.New(
 		bootstrap.CommonModule(cfg),
 		cache.BaseModule,
+
+		// Admin SSE event stream — wires bus + hub + subscriber + handler
+		// + JWT middleware + lifecycle hooks. The bus is fx-injected into
+		// the worker.MessageProcessor below so post-commit order.created
+		// events fan-out to the war-room dashboard. PR #121's infrastructure
+		// reused; Stage 5 binary previously stubbed this with NoopBus.
+		bootstrap.AdminStreamModule,
 
 		// One *redisInventoryRepository instance satisfies both interfaces
 		// (DeductInventoryNoStream is on Stage5InventoryRepository only).
@@ -100,10 +108,13 @@ func newIntakeConsumer(cfg *config.Config, p worker.MessageProcessor, inv domain
 	return messaging.NewIntakeConsumer(&cfg.Kafka, p, inv, m, logger)
 }
 
-func newWorkerMessageProcessor(uow application.UnitOfWork, metrics worker.Metrics, logger *mlog.Logger) worker.MessageProcessor {
-	// Stage 5 does not host the admin SSE stream — pass noop bus.
+func newWorkerMessageProcessor(uow application.UnitOfWork, bus admin.Bus, metrics worker.Metrics, logger *mlog.Logger) worker.MessageProcessor {
+	// Stage 5 now hosts the admin SSE stream (PR #121 infrastructure
+	// reused via bootstrap.AdminStreamModule). The fx-injected bus
+	// is the same one the SSE handler reads from — order.created
+	// events emitted from this processor land on /admin/events/stream.
 	return worker.NewMessageProcessorMetricsDecorator(
-		worker.NewOrderMessageProcessor(uow, admin.NewNoopBus(), logger),
+		worker.NewOrderMessageProcessor(uow, bus, logger),
 		metrics,
 	)
 }
@@ -149,6 +160,8 @@ func installServer(
 	intakePublisher booking.IntakePublisher,
 	intakeConsumer booking.IntakeConsumer,
 	driftDetector *recon.InventoryDriftDetector,
+	sseHandler *sse.Handler,
+	adminJWT *bootstrap.AdminJWTHandle,
 	logger *mlog.Logger,
 ) {
 	gin.SetMode(gin.ReleaseMode)
@@ -165,6 +178,16 @@ func installServer(
 	v1.GET("/orders/:id", stagehttp.HandleGetOrder(bookingService))
 	v1.POST("/orders/:id/pay", stagehttp.HandlePayIntent(db, "pi_stage5_"))
 	v1.POST("/events", stagehttp.HandleCreateEvent(eventService))
+
+	// Admin SSE event stream — PR #121 infrastructure reused for the
+	// Stage 5 demo binary. Per-route JWT auth via ?token= query
+	// (EventSource limitation). The handler returns 503 once
+	// AdminStreamModule's OnStop sets shuttingDown — coordinated with
+	// the booking lifecycle via the same fx graph.
+	v1.GET("/admin/events/stream", adminJWT.Func(), sseHandler.HandleStream)
+	// War-room dashboard — vanilla JS + EventSource. Operator pastes
+	// JWT (mint via `booking-cli admin-token`) before connecting.
+	router.StaticFile("/admin/", "./web/admin/events.html")
 
 	router.POST("/test/payment/confirm/:id", stagehttp.HandleTestConfirm(db, compensator))
 
@@ -232,7 +255,24 @@ func installServer(
 			return nil
 		},
 		OnStop: func(stopCtx context.Context) error {
-			// 1. HTTP graceful close FIRST — drain in-flight requests
+			// 0. SSE drain hints BEFORE srv.Shutdown. fx hooks run
+			//    OnStop in LIFO order, so without this explicit call
+			//    AdminStreamModule's OnStop (which is responsible for
+			//    these hints in production) would only fire AFTER
+			//    srv.Shutdown has already killed every SSE connection
+			//    — making the jittered-retry-hint design dead code.
+			//    Calling here unblocks the Q15 graceful-drain story
+			//    for the Stage 5 demo binary; the same hook in
+			//    AdminStreamModule.OnStop is a no-op on second call
+			//    (handler.shuttingDown is atomic + idempotent;
+			//    BroadcastRetryHints to an empty hub returns false
+			//    without side effects).
+			sseHandler.SetShuttingDown(true)
+			retryCtx, retryCancel := context.WithTimeout(stopCtx, 100*time.Millisecond)
+			sseHandler.BroadcastRetryHints(retryCtx)
+			retryCancel()
+
+			// 1. HTTP graceful close — drain in-flight requests
 			//    before signalling background goroutines so no new
 			//    Kafka publishes can arrive after the consumer stops.
 			//    5s sub-budget keeps HTTP bounded even when fx's stop
