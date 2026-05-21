@@ -118,6 +118,52 @@ demo-up: ## D10 — bring up the demo stack (CORS + test endpoints + 20s reserva
 	@echo "    --command='scripts/d10_demo_walkthrough.sh'  # record"
 	@echo "  make bench-two-step                          # k6 D9 baseline"
 
+# Stage 5 admin-dashboard demo (PR #124) — the `app` service builds
+# from cmd/booking-cli-stage5/ via the docker-compose.demo-stage5.yml
+# override; sidecar services (recon, saga_watchdog, expiry_sweeper)
+# stay on Stage 4 because the Stage 5 binary's cobra root only has
+# `server` + `admin-token` subcommands.
+#
+# The `nginx` service is included because the war-room dashboard
+# loads from http://localhost/admin/ (nginx publishes :80; the
+# `app` container only publishes :6060 for pprof).
+demo-stage5-up: ## PR #124 — bring up Stage 5 demo (Kafka-durable intake + SSE war-room dashboard at http://localhost/admin/)
+	@echo "Starting Stage 5 demo: cmd/booking-cli-stage5 → Kafka acks=all intake + admin SSE"
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml \
+	  up -d --build --force-recreate app nginx
+	@echo ""
+	@echo "Waiting for stack to be ready..."
+	@for i in $$(seq 1 60); do \
+	  if curl -sSf http://localhost/livez >/dev/null 2>&1; then \
+	    echo "Stack ready at http://localhost"; \
+	    break; \
+	  fi; \
+	  if [ $$i = 60 ]; then \
+	    echo "ERROR: app didn't pass /livez within 60s"; \
+	    exit 1; \
+	  fi; \
+	  sleep 1; \
+	done
+	@echo ""
+	@echo "Next:"
+	@echo "  make admin-token          # mint JWT (paste into dashboard)"
+	@echo "  open http://localhost/admin/   # war-room dashboard"
+	@echo "  curl -X POST http://localhost/api/v1/book ...   # trigger order.created on wire"
+
+demo-stage5-down: ## PR #124 — stop the Stage 5 demo stack (keeps volumes for re-up)
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml stop app nginx
+
+demo-stage5-logs: ## PR #124 — tail the Stage 5 app logs
+	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml logs -f app
+
+# admin-token defaults — override at invocation with `make admin-token USER=ops TTL=30m`.
+# The container reads ADMIN_STREAM_JWT_SECRET from the .env file, so no -e
+# pass-through is needed here.
+USER ?= ops
+TTL ?= 30m
+admin-token: ## PR #121 — mint a JWT for the admin SSE endpoint (usage: make admin-token USER=ops TTL=30m). Prints token to stdout.
+	@docker compose exec -T app /app/booking-cli admin-token --user $(USER) --ttl $(TTL) 2>/dev/null | head -1
+
 benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 DURATION=60s)
 	@chmod +x scripts/benchmark_k6.sh
 	@./scripts/benchmark_k6.sh $(VUS) $(DURATION)
