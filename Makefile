@@ -156,26 +156,29 @@ demo-stage5-down: ## PR #124 — stop the Stage 5 demo stack (keeps volumes for 
 demo-stage5-logs: ## PR #124 — tail the Stage 5 app logs
 	@docker compose -f docker-compose.yml -f docker-compose.demo-stage5.yml logs -f app
 
-# Flash-sale (搶票) simulator — k6 hammers POST /book directly against
-# app:8080 (bypassing nginx so we don't trip its 100 r/s rate-limit
-# while watching the dashboard). The setup() step creates a fresh
-# event with DEMO_POOL tickets, then DEMO_VUS workers race to book
-# until the pool is depleted or DEMO_DURATION elapses — whichever
-# comes first. Defaults are tuned for a 30-second visible-on-dashboard
-# story: pool runs out mid-window so you can see the 202 → 409
-# fast-path transition live on /admin/.
+# Flash-sale (搶票) simulator — k6 hammers POST /book DIRECTLY against
+# app:8080 (bypassing nginx) so the visible RPS reflects Stage 5's
+# real ceiling, not nginx's 100r/s rate-limit zone.
 #
-# Override at invocation, e.g.:
-#   make demo-stage5-rush                                  # 50 VU × 30s × 500 tickets
-#   make demo-stage5-rush DEMO_VUS=200 DEMO_DURATION=60s   # heavier
-#   make demo-stage5-rush DEMO_POOL=10000                  # bigger pool
-DEMO_VUS ?= 50
-DEMO_DURATION ?= 30s
-DEMO_POOL ?= 500
-demo-stage5-rush: ## PR #124 — k6 flash-sale 搶票 simulator, DIRECT to app:8080 bypassing nginx (usage: make demo-stage5-rush DEMO_VUS=50 DEMO_DURATION=30s DEMO_POOL=500)
+# Defaults match the canonical 5-stage harness config (VUs=500,
+# 60s, pool=500k, intake-only) so this target is a REPRODUCTION of
+# `docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s/comparison.md`
+# Stage 5 row (5,139 accepted/s, p95 126.9ms). Same script
+# (k6_intake_only.js), same target, same VUs — the live numbers
+# should be within ±10% of the canonical report.
+#
+# Override at invocation if you need a faster-feedback variant:
+#   make demo-stage5-rush                                  # canonical 500 VU × 60s × 500k
+#   make demo-stage5-rush DEMO_DURATION=15s                # quick burst for demo
+#   make demo-stage5-rush DEMO_POOL=5000                   # small-pool sold-out story
+DEMO_VUS ?= 500
+DEMO_DURATION ?= 60s
+DEMO_POOL ?= 500000
+demo-stage5-rush: ## PR #124 — k6 flash-sale DIRECT to app:8080, defaults match the 5-stage canonical benchmark (VUs=500, 60s, pool=500k → ~5k accepted/s)
 	@echo "Pre-flight: 'make demo-stage5-up' must have completed before running this."
 	@echo "[direct] Hammering POST /api/v1/book with $(DEMO_VUS) VUs for $(DEMO_DURATION) against a pool of $(DEMO_POOL) tickets, BYPASSING nginx."
-	@echo "[direct] Watch http://localhost/admin/ — order.created streams at the Stage-5 ceiling rate (no edge throttle)."
+	@echo "[direct] Reproduces docs/benchmarks/comparisons/20260513_141854_5stage_c500_d60s — expect ~5,139 accepted/s, p95 ~127ms."
+	@echo "[direct] Watch http://localhost/admin/ (SSE) + http://localhost:3000/d/admin-war-room (Grafana war-room) — both light up in real time."
 	@echo ""
 	@docker run --rm -i --network=booking_monitor_default \
 	  -e API_ORIGIN=http://app:8080 \
@@ -219,6 +222,22 @@ USER ?= ops
 TTL ?= 30m
 admin-token: ## PR #121 — mint a JWT for the admin SSE endpoint (usage: make admin-token USER=ops TTL=30m). Prints token to stdout.
 	@docker compose exec -T app /app/booking-cli admin-token --user $(USER) --ttl $(TTL) 2>/dev/null | head -1
+
+# Grafana war-room dashboard for the demo — opens the provisioned
+# Admin War-Room dashboard in the default browser. macOS uses
+# `open`; other platforms fall back to printing the URL so the
+# operator can click it.
+#
+# Credentials come from .env (GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD).
+# The dashboard UID `admin-war-room` is baked into
+# `deploy/grafana/provisioning/dashboards/admin_war_room.json:uid`.
+GRAFANA_DASHBOARD_URL ?= http://localhost:3000/d/admin-war-room/admin-war-room-pr-23-121?refresh=5s&from=now-5m&to=now
+grafana-open: ## PR #124 — open the Admin War-Room Grafana dashboard (auto-refresh 5s, last-5-min window)
+	@echo "Grafana login: $$(grep '^GRAFANA_ADMIN_USER' .env | cut -d= -f2) / $$(grep '^GRAFANA_ADMIN_PASSWORD' .env | cut -d= -f2)"
+	@echo "Dashboard URL: $(GRAFANA_DASHBOARD_URL)"
+	@if command -v open >/dev/null 2>&1; then open '$(GRAFANA_DASHBOARD_URL)'; \
+	elif command -v xdg-open >/dev/null 2>&1; then xdg-open '$(GRAFANA_DASHBOARD_URL)'; \
+	else echo "(open / xdg-open not found — copy the URL above into your browser)"; fi
 
 benchmark: ## Run full benchmark with recording (usage: make benchmark VUS=1000 DURATION=60s)
 	@chmod +x scripts/benchmark_k6.sh
