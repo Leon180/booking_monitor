@@ -370,6 +370,12 @@ func buildGinEngine(
 	// parameter (EventSource limitation — Q12). Body-size middleware
 	// on v1 doesn't apply because SSE is GET-only.
 	v1.GET("/admin/events/stream", adminJWT.Func(), sseHandler.HandleStream)
+
+	// Admin war-room dashboard — vanilla JS + EventSource. Static
+	// HTML at /admin/. Demo-quality (PR #121 follow-up): the page
+	// asks the operator to paste a JWT (minted via `booking-cli
+	// admin-token`) before connecting to the SSE endpoint.
+	r.StaticFile("/admin/", "./web/admin/events.html")
 	return r, nil
 }
 

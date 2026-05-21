@@ -163,6 +163,11 @@ The admin SSE event pipeline exposes its own infrastructure metrics (Layer B per
 | `admin_sse_message_lag_seconds` | histogram | — | OccurredAt → client delivery latency |
 | `admin_stream_subscriber_consec_failures` | gauge | — | Current consecutive XREAD failure count |
 | `admin_stream_subscriber_xread_failures_total` | counter | — | Cumulative XREAD failures |
+| `admin_sse_estimated_memory_bytes` | gauge (callback) | — | SSE-subsystem RAM estimate: N_clients × (8 KB stack + 100-slot send buffer × ~256 B avg msg). Isolates SSE footprint from process-wide `go_memstats_alloc_bytes`. |
+| `admin_event_bus_channel_high_water_mark` | gauge (callback) | — | Max bus-channel depth since process start. Capacity-planning signal — if HWM trends toward the 10,000 cap, drainer is falling behind sustained spikes. |
+| `admin_hub_broadcast_high_water_mark` | gauge (callback) | — | Max hub broadcast-channel depth since process start. HWM > 200 means hub loop being outpaced by subscriber (slow-client backpressure or broadcast contention). |
+| `admin_sse_write_message_duration_seconds` | histogram | — | Per-frame SSE write latency. p99 climbing while p50 is fine ⇒ a few clients are TCP-throttling; whole-distribution climbing ⇒ writer goroutine wedged. |
+| `admin_event_bus_xadd_duration_seconds` | histogram | — | Per-XADD latency from the bus drainer. p99 approaching the 2 s `XAddTimeout` indicates Redis-side pressure. |
 | `inventory_low_alerts_total` | counter | — | Low-stock threshold crossings (Layer A gap filler) |
 
 ---

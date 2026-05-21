@@ -87,13 +87,13 @@ demo/dist/
 demo/.env
 demo/.env.local
 
-# Locally-built binaries (created by `go build ./cmd/...`)
-booking-cli
-booking-cli-stage1
-booking-cli-stage2
-booking-cli-stage3
-booking-cli-stage4
-booking-cli-stage5
+# Locally-built binaries (created by `go build ./cmd/...`).
+# Anchored to repo root so cmd/booking-cli/ source directory stays
+# tracked. Without the leading slash, these patterns hide every file
+# under cmd/booking-cli/ — the trap line 53 already warns about.
+# (PR #121 hit this bug. Fixed in follow-up commit.)
+/booking-cli-stage4
+/booking-cli-stage5
 
 # Personal Notion exports (operator-local working files)
 docs/interview_prep_notion *.md

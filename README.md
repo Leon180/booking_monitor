@@ -6,25 +6,33 @@ A high-concurrency ticket booking system simulation designed for flash sale scen
 
 ## Architecture
 
-Current production shape (Stage 4 — see [Architecture Evolution](#architecture-evolution) below for how we got here):
+Current production shape (**Stage 5** — Kafka-durable intake; see [Architecture Evolution](#architecture-evolution) below for how we got here). The Stage 4 Redis-stream intake remains shipped as `cmd/booking-cli-stage4/` for benchmark comparison, but Stage 5 is the Damai-aligned target the hot path is built around:
 
 ```mermaid
 flowchart LR
     Client((Client)) --> Nginx[Nginx<br/>rate limit]
     Nginx --> API[Gin API]
-    API -->|Lua DECRBY + XADD| Redis[(Redis<br/>inventory + stream)]
-    Redis -.->|XReadGroup| Worker
+    API -->|Lua DECRBY<br/>load-shed gate| Redis[(Redis<br/>inventory + hot meta)]
+    API -->|Produce<br/>acks=all| KIntake{{Kafka<br/>order.intake}}
+    KIntake -.->|consumer group| Worker
     Worker -->|UoW: INSERT order| PG[(Postgres<br/>source of truth)]
     Client -->|POST /pay| API
     API -->|CreatePaymentIntent| Gateway[Payment<br/>Gateway]
     Gateway -.->|webhook<br/>signed| API
     API -->|UoW: MarkPaid OR<br/>MarkFailed + outbox| PG
     Sweeper[Expiry<br/>Sweeper] -->|UoW: MarkExpired<br/>+ outbox| PG
-    PG -.->|advisory-lock<br/>leadered relay| Kafka{{Kafka}}
-    Kafka -.->|order.failed| Saga[Saga Consumer<br/>in-process]
+    PG -.->|advisory-lock<br/>leadered relay| KOutbox{{Kafka<br/>order.failed}}
+    KOutbox -.->|order.failed| Saga[Saga Consumer<br/>in-process]
     Saga --> Redis
     Saga --> PG
+    API ==>|publish<br/>order.created, order.paid, ...| Bus[Admin<br/>Event Bus]
+    Bus -.->|XADD| RStream[(Redis Stream<br/>events:admin)]
+    RStream -.->|XReadGroup| Hub[SSE Hub]
+    Hub -->|EventSource<br/>SSE| Ops((Ops<br/>war room))
 ```
+
+> Solid arrows = synchronous hot path · dashed arrows = async / event-driven · bold arrows = best-effort fan-out to ops dashboards
+> Stage 5 trades Stage 4's ephemeral in-memory durability (`XADD orders:stream`) for Kafka's replicated durability (`acks=all`) — ~4.4× throughput cost at VUS=500, but a broker outage no longer loses in-flight orders. See [Architecture Evolution](#architecture-evolution) for the trade-off.
 
 > Solid arrows = synchronous hot path · dashed arrows = async / event-driven
 > See [v0.4.0 release notes](https://github.com/Leon180/booking_monitor/releases/tag/v0.4.0) for the cache-truth contract: Redis ephemeral, Postgres source-of-truth, drift detected and named.
@@ -169,6 +177,7 @@ D6's job is timing — when does the row expire. The saga compensator owns inven
 - **Leader Election**: PostgreSQL advisory locks for single OutboxRelay instance
 - **Full Observability**: Prometheus metrics, Grafana dashboards, Jaeger tracing, Zap logging
 - **Correlation IDs**: End-to-end request tracking across all components
+- **Admin Event Stream (SSE)**: Real-time `order.created / order.paid / order.failed / order.expired / order.compensated / saga.triggered / dlq.received / inventory.low` events streamed to ops via `GET /api/v1/admin/events/stream` (WHATWG SSE, JWT HS256 auth via `?token=`, EventSource auto-reconnect with `Last-Event-ID` replay). Bounded-async drop policy (OTel BatchSpanProcessor pattern) on the publisher; channel-based fan-out hub on the wire side; durable replay via Redis Streams (`events:admin:stream`, MAXLEN ~ 100k). Per-subsystem resource gauges + HWM tracking expose the pipeline's footprint separately from process-wide aggregates. See [`docs/design/admin_event_streaming.md`](docs/design/admin_event_streaming.md) (17-decision ADR) + [`docs/streaming.md`](docs/streaming.md) (17 production gotchas).
 
 ## Prerequisites
 
@@ -253,6 +262,7 @@ For the architectural rationale (§5 forward recovery / §4 backward recovery; D
 | GET | `/api/v1/events/:id` | **Stub** — returns `{"message": "View event", "event_id": ...}` + bumps `page_views_total` for conversion tracking. Does NOT load event details (deferred to Phase 3 demo). |
 | POST | `/webhook/payment` | **D5** Pattern A — inbound payment-provider webhook (Stripe-shape envelope). Verifies HMAC-SHA256 signature against `PAYMENT_WEBHOOK_SECRET`, dispatches on event type: `payment_intent.succeeded` → MarkPaid; `payment_intent.payment_failed` → MarkPaymentFailed + emit `order.failed` (saga compensation). Idempotent on duplicate provider redelivery via DB terminal status. Mounted at the engine root (NOT under `/api/v1`); auth is the signature, not network. |
 | POST | `/test/payment/confirm/:order_id` | **D5 (test-only)** Mock provider's webhook emit — gated by `ENABLE_TEST_ENDPOINTS` (off by default in prod). Reads the order's `payment_intent_id`, builds a Stripe-shape envelope with `metadata.order_id`, signs it with the same webhook secret, and POSTs to `/webhook/payment`. Used by integration tests + dev demos to drive the full pipeline without a real provider. Query: `?outcome=succeeded\|failed`. |
+| GET | `/api/v1/admin/events/stream` | **PR #121** Admin event stream (SSE). Streams the 8 admin event types in real time. Auth: JWT HS256 via `?token=<jwt>` query (EventSource cannot set headers — RFC 6750-style). Mint a token via `booking-cli admin-token --user <id> --ttl 30m`. Reconnect with `Last-Event-ID` for replay from Redis Stream within the MAXLEN window. Slow clients get dropped (Q10) — EventSource auto-reconnects and resumes. |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/livez` | Liveness probe — always 200 if process is up (no downstream deps) |
 | GET | `/readyz` | Readiness probe — 200 only if PG + Redis + Kafka all answer within 1s; 503 + per-dep JSON otherwise |

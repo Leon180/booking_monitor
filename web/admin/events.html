@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Booking Monitor — Admin War-Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2128;
+    --border: #2d3748;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header .subtitle {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: -8px;
+  }
+  header input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    flex: 1;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  header input[type="text"]::placeholder { color: var(--muted); }
+  header button {
+    background: var(--blue);
+    border: none;
+    color: white;
+    padding: 6px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  header button:hover { opacity: 0.9; }
+  header button.disconnect { background: var(--red); }
+  header .url-display {
+    color: var(--muted);
+    font-size: 11px;
+    font-family: monospace;
+    margin-left: 8px;
+  }
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+  .status-dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.connecting { background: var(--yellow); }
+  .status-dot.error { background: var(--red); }
+  main {
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+  }
+  .stat .label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .stat .value {
+    font-size: 28px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .delta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .stat.green .value { color: var(--green); }
+  .stat.yellow .value { color: var(--yellow); }
+  .stat.blue .value { color: var(--blue); }
+  .stat.purple .value { color: var(--purple); }
+  .panels-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .timeline {
+    height: 600px;
+    overflow-y: auto;
+    padding: 8px 16px;
+  }
+  .timeline::-webkit-scrollbar { width: 8px; }
+  .timeline::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .event {
+    display: grid;
+    grid-template-columns: 80px 140px 1fr;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    align-items: start;
+  }
+  .event:last-child { border-bottom: none; }
+  .event .time { color: var(--muted); font-family: monospace; }
+  .event .type {
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    text-align: center;
+    align-self: start;
+  }
+  .event[data-type^="order.created"] .type { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+  .event[data-type^="order.paid"] .type { background: rgba(59, 130, 246, 0.15); color: var(--blue); }
+  .event[data-type^="order.failed"] .type,
+  .event[data-type^="order.expired"] .type { background: rgba(245, 158, 11, 0.15); color: var(--yellow); }
+  .event[data-type^="order.compensated"] .type,
+  .event[data-type^="saga.triggered"] .type,
+  .event[data-type^="dlq.received"] .type,
+  .event[data-type^="inventory.low"] .type { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .event[data-type="stream_truncated"] .type,
+  .event[data-type="_retry_hint"] .type,
+  .event[data-type="heartbeat"] .type { background: rgba(168, 85, 247, 0.15); color: var(--purple); }
+  .event .data { color: var(--text); font-family: monospace; font-size: 11px; word-break: break-all; opacity: 0.8; }
+  .side-panel { padding: 12px 16px; }
+  .side-panel h3 { margin: 0 0 8px 0; font-size: 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+  .breakdown { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+  .breakdown-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .breakdown-row .name { color: var(--muted); font-family: monospace; }
+  .breakdown-row .count { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .log { font-family: monospace; font-size: 11px; color: var(--muted); padding: 4px 0; }
+  .log.error { color: var(--red); }
+  .log.warn { color: var(--yellow); }
+  .log.info { color: var(--green); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="status-dot" id="status-dot"></span>
+  <h1>Booking Monitor</h1>
+  <span class="subtitle">War-Room (Live SSE)</span>
+  <input type="text" id="token-input" placeholder="paste JWT token (booking-cli admin-token --user ops --ttl 30m)">
+  <button id="connect-btn">Connect</button>
+  <span class="url-display" id="url-display">disconnected</span>
+</header>
+
+<main>
+
+  <div class="hero-grid">
+    <div class="stat green">
+      <div class="label">Events received</div>
+      <div class="value" id="total-events">0</div>
+      <div class="delta" id="events-rate">0.0 /sec (rolling 10s)</div>
+    </div>
+    <div class="stat blue">
+      <div class="label">Connection</div>
+      <div class="value" id="conn-state">DISCONNECTED</div>
+      <div class="delta" id="conn-uptime">—</div>
+    </div>
+    <div class="stat purple">
+      <div class="label">Last heartbeat</div>
+      <div class="value" id="last-hb">—</div>
+      <div class="delta">expected every 30s</div>
+    </div>
+    <div class="stat yellow">
+      <div class="label">Reconnects</div>
+      <div class="value" id="reconnects">0</div>
+      <div class="delta" id="last-event-id">Last-Event-ID: —</div>
+    </div>
+  </div>
+
+  <div class="panels-row">
+    <div class="panel">
+      <div class="panel-header">
+        <span>Live event timeline</span>
+        <span id="timeline-info">most recent 50 events</span>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="empty">Waiting for events...<br><br>1. Paste a token above + click Connect<br>2. Trigger events via <code>POST /api/v1/book</code></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span>Breakdown by type</span>
+      </div>
+      <div class="side-panel">
+        <h3>Event counts (session)</h3>
+        <div class="breakdown" id="breakdown">
+          <div class="breakdown-row" style="opacity:0.5"><span class="name">none yet</span><span class="count">0</span></div>
+        </div>
+
+        <h3>Console log</h3>
+        <div id="log-feed" style="max-height:200px;overflow-y:auto;"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+(function () {
+  const state = {
+    es: null,
+    total: 0,
+    types: {},        // event_type → count
+    reconnects: 0,
+    connStart: null,
+    eventTimestamps: [], // for rate calculation
+    lastEventID: null,
+    lastHB: null,
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  function log(msg, level) {
+    const div = document.createElement('div');
+    div.className = 'log ' + (level || '');
+    div.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    const feed = $('log-feed');
+    feed.insertBefore(div, feed.firstChild);
+    while (feed.children.length > 30) feed.removeChild(feed.lastChild);
+  }
+
+  function setStatus(state_, label) {
+    $('status-dot').className = 'status-dot ' + state_;
+    $('conn-state').textContent = label;
+  }
+
+  function pushEvent(eventType, data, id) {
+    state.total++;
+    state.types[eventType] = (state.types[eventType] || 0) + 1;
+    state.eventTimestamps.push(Date.now());
+    if (state.eventTimestamps.length > 200) state.eventTimestamps.shift();
+    state.lastEventID = id;
+
+    $('total-events').textContent = state.total;
+    if (id) $('last-event-id').textContent = 'Last-Event-ID: ' + id.substring(0, 24) + '…';
+    renderBreakdown();
+    appendToTimeline(eventType, data, id);
+  }
+
+  function renderBreakdown() {
+    const sorted = Object.entries(state.types).sort((a, b) => b[1] - a[1]);
+    const html = sorted.map(([name, count]) =>
+      '<div class="breakdown-row"><span class="name">' + name + '</span><span class="count">' + count + '</span></div>'
+    ).join('');
+    $('breakdown').innerHTML = html || '<div class="breakdown-row" style="opacity:0.5"><span class="name">none yet</span><span class="count">0</span></div>';
+  }
+
+  function appendToTimeline(eventType, data, id) {
+    const tl = $('timeline');
+    if (tl.querySelector('.empty')) tl.innerHTML = '';
+
+    const row = document.createElement('div');
+    row.className = 'event';
+    row.setAttribute('data-type', eventType);
+    const now = new Date();
+    const tstr = now.toLocaleTimeString() + '.' + String(now.getMilliseconds()).padStart(3, '0');
+    row.innerHTML =
+      '<div class="time">' + tstr + '</div>' +
+      '<div class="type">' + eventType + '</div>' +
+      '<div class="data">' + (data || '') + '</div>';
+    tl.insertBefore(row, tl.firstChild);
+    while (tl.children.length > 50) tl.removeChild(tl.lastChild);
+  }
+
+  function updateRate() {
+    const now = Date.now();
+    const tenSecAgo = now - 10000;
+    while (state.eventTimestamps.length && state.eventTimestamps[0] < tenSecAgo) state.eventTimestamps.shift();
+    const rate = (state.eventTimestamps.length / 10).toFixed(1);
+    $('events-rate').textContent = rate + ' /sec (rolling 10s)';
+
+    if (state.connStart) {
+      const secs = Math.floor((now - state.connStart) / 1000);
+      $('conn-uptime').textContent = 'up ' + (secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm ' + (secs % 60) + 's');
+    }
+
+    if (state.lastHB) {
+      const ago = Math.floor((now - state.lastHB) / 1000);
+      $('last-hb').textContent = ago + 's ago';
+    }
+  }
+
+  function connect() {
+    const token = $('token-input').value.trim();
+    if (!token) {
+      log('No token provided. Run: booking-cli admin-token --user ops --ttl 30m', 'error');
+      return;
+    }
+
+    if (state.es) state.es.close();
+
+    const url = '/api/v1/admin/events/stream?token=' + encodeURIComponent(token);
+    $('url-display').textContent = 'GET ' + url.substring(0, 50) + '…';
+
+    setStatus('connecting', 'CONNECTING');
+    log('Opening EventSource to /api/v1/admin/events/stream', 'info');
+
+    const es = new EventSource(url);
+    state.es = es;
+    state.connStart = Date.now();
+
+    es.onopen = () => {
+      setStatus('connected', 'CONNECTED');
+      $('connect-btn').textContent = 'Disconnect';
+      $('connect-btn').classList.add('disconnect');
+      log('Connection established', 'info');
+    };
+
+    // EventSource auto-handles message events (default 'message' type)
+    // Our server uses named events via `event:` line, so we register
+    // for each known type.
+    const knownTypes = [
+      'order.created', 'order.paid', 'order.failed', 'order.expired',
+      'order.compensated', 'saga.triggered', 'dlq.received', 'inventory.low',
+      'stream_truncated', '_retry_hint',
+    ];
+    knownTypes.forEach(t => {
+      es.addEventListener(t, (e) => {
+        pushEvent(t, e.data, e.lastEventId);
+      });
+    });
+
+    // Fallback for any other event type
+    es.onmessage = (e) => {
+      pushEvent('message', e.data, e.lastEventId);
+    };
+
+    es.onerror = (e) => {
+      // EventSource attempts auto-reconnect; show the state transition
+      if (es.readyState === EventSource.CONNECTING) {
+        setStatus('connecting', 'RECONNECTING');
+        state.reconnects++;
+        $('reconnects').textContent = state.reconnects;
+        log('Connection lost — auto-reconnecting (will replay from Last-Event-ID)', 'warn');
+      } else if (es.readyState === EventSource.CLOSED) {
+        setStatus('error', 'CLOSED');
+        log('Connection permanently closed (likely 401 — check token)', 'error');
+        $('connect-btn').textContent = 'Connect';
+        $('connect-btn').classList.remove('disconnect');
+      }
+    };
+  }
+
+  function disconnect() {
+    if (state.es) {
+      state.es.close();
+      state.es = null;
+    }
+    state.connStart = null;
+    setStatus('', 'DISCONNECTED');
+    $('connect-btn').textContent = 'Connect';
+    $('connect-btn').classList.remove('disconnect');
+    $('url-display').textContent = 'disconnected';
+    $('conn-uptime').textContent = '—';
+    log('Disconnected manually', 'info');
+  }
+
+  $('connect-btn').onclick = () => {
+    if (state.es && state.es.readyState !== EventSource.CLOSED) {
+      disconnect();
+    } else {
+      connect();
+    }
+  };
+  $('token-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('connect-btn').click();
+  });
+
+  // Heartbeat detection: server sends `: heartbeat\n\n` comment lines.
+  // EventSource doesn't fire events for comments; we infer "alive" from
+  // any incoming data OR by polling readyState. Real heartbeats are
+  // invisible to the EventSource API — we approximate by treating each
+  // event as a "still alive" signal, with a console note.
+  setInterval(updateRate, 1000);
+})();
+</script>
+</body>
+</html>

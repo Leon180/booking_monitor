@@ -63,13 +63,19 @@ func DefaultAdminEventBusConfig() AdminEventBusConfig {
 //
 // See docs/design/admin_event_streaming.md § Q3.
 type AdminEventBus struct {
-	client *redis.Client
-	cfg    AdminEventBusConfig
-	ch     chan admin.AdminEvent
-	log    *mlog.Logger
-	depth  atomic.Int64
-	done   chan struct{} // closed when Run() returns
+	client    *redis.Client
+	cfg       AdminEventBusConfig
+	ch        chan admin.AdminEvent
+	log       *mlog.Logger
+	depth     atomic.Int64
+	highWater atomic.Int64  // max channel depth observed since startup
+	done      chan struct{} // closed when Run() returns
 }
+
+// ChannelHighWater returns the max channel depth observed since
+// process start. Used by observability.RegisterAdminStreamResource
+// Gauges to expose the metric without an import cycle.
+func (b *AdminEventBus) ChannelHighWater() int64 { return b.highWater.Load() }
 
 // Compile-time check that the type satisfies admin.Bus.
 var _ admin.Bus = (*AdminEventBus)(nil)
@@ -112,7 +118,16 @@ func NewAdminEventBus(client *redis.Client, cfg AdminEventBusConfig, logger *mlo
 func (b *AdminEventBus) Publish(evt admin.AdminEvent) {
 	select {
 	case b.ch <- evt:
-		b.depth.Add(1)
+		d := b.depth.Add(1)
+		// Compare-and-swap loop to track HWM without locking. Last
+		// writer wins if multiple goroutines race; either way the
+		// observed max is the at-the-moment max.
+		for {
+			old := b.highWater.Load()
+			if d <= old || b.highWater.CompareAndSwap(old, d) {
+				break
+			}
+		}
 		observability.AdminEventBusPublishedTotal.WithLabelValues(evt.EventType).Inc()
 	default:
 		observability.AdminEventBusDroppedTotal.WithLabelValues("channel_full").Inc()
@@ -173,6 +188,11 @@ func (b *AdminEventBus) Run(ctx context.Context) {
 func (b *AdminEventBus) xadd(parent context.Context, evt admin.AdminEvent) {
 	ctx, cancel := context.WithTimeout(parent, b.cfg.XAddTimeout)
 	defer cancel()
+
+	start := time.Now()
+	defer func() {
+		observability.AdminEventBusXAddDurationSeconds.Observe(time.Since(start).Seconds())
+	}()
 
 	err := b.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: b.cfg.StreamKey,
