@@ -70,8 +70,8 @@ variable "secret_names" {
   type        = list(string)
   default = [
     "stripe-api-key",
-    "stripe-webhook-secret",   # current canonical name (D4.2+)
-    "payment-webhook-secret",  # legacy fallback (kept during D5 → D4.2 cutover; see CLAUDE.md)
+    "stripe-webhook-secret",  # current canonical name (D4.2+)
+    "payment-webhook-secret", # legacy fallback (kept during D5 → D4.2 cutover; see CLAUDE.md)
     "database-url",
     "redis-password",
     "grafana-admin-password",
