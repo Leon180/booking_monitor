@@ -24,9 +24,14 @@ locals {
 }
 
 resource "google_project_service" "apis" {
-  for_each                   = toset(local.required_apis)
-  project                    = local.project_id
-  service                    = each.value
-  disable_dependent_services = false
-  disable_on_destroy         = false
+  for_each = toset(local.required_apis)
+
+  project = local.project_id
+  service = each.value
+
+  # `disable_dependent_services = false` is the provider default; omitted
+  # to reduce noise. Explicit `disable_on_destroy = false` IS load-bearing
+  # — the provider default for that one is true, which forces a 30-day
+  # cooldown on re-enable. False keeps `terraform destroy` cycles cheap.
+  disable_on_destroy = false
 }

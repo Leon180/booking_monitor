@@ -77,10 +77,21 @@ The migration is a 1-line `compute.tf` change (image swap) plus rewriting `cloud
 
 ## Pinning strategy
 
-| Layer | Pin shape | Why |
-| --- | --- | --- |
-| Terraform CLI | `required_version = ">= 1.11.0"` (floor only) | HashiCorp supports each GA for 2y; ceiling pins make dev/CI skew worse. `.terraform.lock.hcl` (committed) records exact resolved versions. |
-| Terraform providers | `~> 7.0` (`>= 7.0, < 8.0`) | Pin major to prevent breaking schema changes; let minor + patch float for security fixes. |
-| Docker Engine | `5:28.*` via apt preferences + `apt-mark hold` | Pin major (no surprise 29.x breaking format changes); 28.x patches still flow in via security updates if Docker's repo backports them. |
-| OS image | `debian-cloud/debian-12` (family) | Family tag pins the Debian 12 series; individual GCE image versions float forward as Google publishes patched ones. Don't use `:latest`. |
-| cloudflared | `latest` (PR 1 bootstrap convenience) | **Not production-grade.** PR 4 replaces with a pinned version + signed verification + systemd unit. Do not run prod traffic through PR 1's cloudflared. |
+| Layer | Pin shape | Why | Post-apply verification |
+| --- | --- | --- | --- |
+| Terraform CLI | `required_version = ">= 1.11.0"` (floor only) | HashiCorp supports each GA for 2y; ceiling pins make dev/CI skew worse. `.terraform.lock.hcl` (committed) records exact resolved versions. | `terraform version` |
+| Terraform providers | `~> 7.0` (`>= 7.0, < 8.0`) | Pin major to prevent breaking schema changes; let minor + patch float for security fixes. | `terraform providers lock` |
+| Docker Engine | `5:28.*` via apt preferences + `apt-mark hold` | Pin major (no surprise 29.x breaking format changes); 28.x patches still flow in via security updates if Docker's repo backports them. | `apt-cache policy docker-ce` (priority 1001 line); `apt-mark showhold` includes `docker-ce` |
+| OS image | `debian-cloud/debian-12` (family) | Family tag pins the Debian 12 series; individual GCE image versions float forward as Google publishes patched ones. Don't use `:latest`. | (visible in console; not a runtime check) |
+| cloudflared | `latest` (PR 1 bootstrap convenience) | **Not production-grade.** PR 4 replaces with a pinned version + signed verification + systemd unit. Do not run prod traffic through PR 1's cloudflared. | n/a — covered in PR 4 |
+
+The runbook's [Step 7](../../docs/runbooks/gcp_bootstrap.md#step-7--ssh-to-the-vm-via-iap--smoke-test-hardening) has the actual command-by-command smoke test.
+
+## WIF design — immutable IDs over names
+
+The trust relationship in [`workload_identity.tf`](workload_identity.tf) binds on **immutable GitHub numeric IDs**, not mutable repo/owner names. Two practical consequences:
+
+- A repo rename (`booking_monitor` → `flash-sale`) or owner transfer does NOT break CI auth, and does NOT silently re-route trust to a renamed entity.
+- `terraform.tfvars` requires `github_owner_id` + `github_repo_id` in addition to the human-readable names. Look up via `gh api /users/<owner> --jq .id` + `gh api /repos/<owner>/<repo> --jq .id` (one-time).
+
+The deploy SA is gated via a CEL-derived `attribute.deploy_eligible` mapped attribute (`yes` if the ref is `refs/heads/main` OR starts with `refs/tags/v`), bound via `principalSet://...attribute.deploy_eligible/yes`. The earlier draft attempted to bind on `attribute.ref/refs/tags/v` directly thinking it was prefix-matched; **`principalSet` URIs are exact-equality on the attribute value, verified in the hashicorp/google provider docs**. Without this fix, every tagged release deploy would silently fail to impersonate.

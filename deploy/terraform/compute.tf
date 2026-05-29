@@ -75,10 +75,12 @@ resource "google_compute_instance" "booking_app" {
 
   service_account {
     email = google_service_account.app_runtime.email
-    # cloud-platform is over-broad in principle, but actual access is
-    # gated by IAM bindings (Secret Manager + Logging only). Without
-    # cloud-platform scope, even an IAM-allowed call from the SA is
-    # rejected by the scope filter — confusing for operators.
+    # `cloud-platform` is the umbrella scope. Modern Google SDKs work
+    # with narrower scopes against the metadata server, but in practice
+    # the operational gain of narrowing is small (actual access is still
+    # gated by IAM bindings on the SA: Secret Manager + Logging only)
+    # and the cost of narrowing is operator confusion when a new GCP
+    # API gets added later. Keep cloud-platform; trust IAM as the gate.
     scopes = ["cloud-platform"]
   }
 
@@ -96,6 +98,16 @@ resource "google_compute_instance" "booking_app" {
 
   # Always-Free tier requires `automatic_restart=true` + non-preemptible.
 
+  lifecycle {
+    # `metadata_startup_script` reads bootstrap.sh at plan time; ANY
+    # edit to that script triggers VM destroy+recreate on next apply.
+    # That's almost never desired — bootstrap.sh is idempotent and a
+    # `gcloud compute instances reset booking-app` re-runs the existing
+    # script without disturbing state. Ignore here; document the manual
+    # re-run procedure in the runbook.
+    ignore_changes = [metadata_startup_script]
+  }
+
   depends_on = [
     google_project_service.apis,
     google_service_account.app_runtime,
@@ -109,6 +121,16 @@ resource "google_compute_instance" "booking_app" {
 # IAP's source IPs. With this firewall + no other SSH rule, port 22 is
 # unreachable from the public internet — you must SSH via
 # `gcloud compute ssh --tunnel-through-iap`.
+#
+# The previous design ALSO declared a `deny_all_inbound` rule at
+# priority 65534 thinking it added defense-in-depth. Verified via
+# google_compute_firewall provider docs (MCP query, doc 12373468):
+# "Lower value of priority implies higher precedence". 65534 is the
+# LOWEST precedence — the IAP allow rule (default priority 1000) wins,
+# making the deny rule decoration not defense. GCP VPC's implicit
+# default-deny on undefined inbound already covers everything we want
+# to deny. Dropped to avoid teaching the next reader a false-confidence
+# pattern.
 resource "google_compute_firewall" "iap_ssh" {
   project = local.project_id
   name    = "allow-iap-ssh"
@@ -121,20 +143,4 @@ resource "google_compute_firewall" "iap_ssh" {
 
   source_ranges = ["35.235.240.0/20"]
   target_tags   = ["ssh"]
-}
-
-# Explicitly DENY all other inbound (defense-in-depth; default VPC
-# already has implicit deny but stating it makes intent reviewable).
-resource "google_compute_firewall" "deny_all_inbound" {
-  project = local.project_id
-  name    = "deny-all-inbound"
-  network = "default"
-  priority = 65534 # just above the lowest allow
-
-  deny {
-    protocol = "all"
-  }
-
-  direction     = "INGRESS"
-  source_ranges = ["0.0.0.0/0"]
 }

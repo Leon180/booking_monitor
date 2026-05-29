@@ -5,7 +5,7 @@ terraform {
   # of "Terraform owns containers, humans own values" (see secret_manager.tf);
   # staying current gives PR 5 (deploy workflow) the cleaner option.
   #
-  # Ceiling intentionally not set — HashiCorp supports each GA release
+  # No upper-major ceiling here — HashiCorp supports each GA release
   # for 2 years; pinning a ceiling just makes dev/CI version skew worse.
   # The `.terraform.lock.hcl` (committed) records the actual resolved
   # version at apply time for reproducibility.

@@ -28,7 +28,7 @@ output "ci_deploy_sa_email" {
 # ----- Used by PR 3 (registry URL for `docker push`) -----
 
 output "artifact_registry_url" {
-  description = "Base URL for the Artifact Registry repo. Tag images as ${this}/<image>:<tag>."
+  description = "Base URL for the Artifact Registry repo. Tag images as <this-value>/<image>:<tag> when pushing from CI."
   value       = "${google_artifact_registry_repository.booking.location}-docker.pkg.dev/${local.project_id}/${google_artifact_registry_repository.booking.repository_id}"
 }
 

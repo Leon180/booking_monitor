@@ -6,10 +6,23 @@
 # GCP project to deploy into. If create_project=false, must already exist.
 project_id = "booking-monitor-prod"
 
-# GitHub owner + repo. Used in WIF trust to scope which repository's
-# workflows are allowed to impersonate the CI service accounts.
+# GitHub owner + repo NAMES — informational only, displayed in outputs
+# and used as human-readable hints. NOT used in WIF trust (see below).
 github_owner = "Leon180"
 github_repo  = "booking_monitor"
+
+# GitHub owner + repo IDS — IMMUTABLE numeric identifiers. THESE drive
+# the WIF trust relationship so that an owner/repo rename or transfer
+# does not silently change which workflows can impersonate the CI
+# service accounts.
+#
+# Look up via gh CLI (one-time, paste the output here as strings):
+#   gh api /users/Leon180                  --jq .id
+#   gh api /repos/Leon180/booking_monitor  --jq .id
+#
+# Or via REST API: https://api.github.com/users/<owner>
+github_owner_id = "00000000" # replace with `gh api /users/<owner> --jq .id` output
+github_repo_id  = "00000000" # replace with `gh api /repos/<owner>/<repo> --jq .id` output
 
 # ----- Optional -----
 

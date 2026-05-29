@@ -27,22 +27,51 @@ variable "region" {
 }
 
 variable "github_owner" {
-  description = "GitHub owner (user or org) of the repo. Used in WIF attribute_condition as the first filter — only OIDC tokens issued for repos under this owner will be accepted by the pool."
+  description = "GitHub owner (user or org) name. Used in informational outputs + tfvars file as a human reference. NOT used in WIF trust — the immutable github_owner_id is used instead so owner renames don't silently change trust."
   type        = string
+}
+
+variable "github_owner_id" {
+  description = "IMMUTABLE numeric owner id from GitHub (e.g. `gh api /users/<owner> --jq .id`). Used as the WIF attribute_condition gate. Surviving an owner rename / transfer requires using id, not name, per GitHub Actions security guidance 2024+."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must be a numeric string (the immutable GitHub user/org id)."
+  }
 }
 
 variable "github_repo" {
-  description = "GitHub repo name. Used in WIF IAM bindings to scope which repo's workflows can impersonate each SA."
+  description = "GitHub repo name. Informational only — see github_repo_id."
   type        = string
 }
 
+variable "github_repo_id" {
+  description = "IMMUTABLE numeric repo id from GitHub (e.g. `gh api /repos/<owner>/<repo> --jq .id`). Used in the readonly SA's principalSet binding. Surviving a repo rename / transfer requires using id, not name."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repo_id))
+    error_message = "github_repo_id must be a numeric string (the immutable GitHub repo id)."
+  }
+}
+
 variable "secret_names" {
-  description = "List of Secret Manager secret IDs to create as empty containers. Values are populated out-of-band (see runbook Step 4) so they never land in Terraform state."
+  description = <<-EOT
+    List of Secret Manager secret IDs to create as empty containers. Values are populated
+    out-of-band (see runbook Step 4) so they never land in Terraform state.
+
+    Note on `stripe-webhook-secret` + `payment-webhook-secret`: both coexist intentionally
+    during the D5 → D4.2 cutover (CLAUDE.md). `payment-webhook-secret` is the legacy name;
+    `stripe-webhook-secret` is the new one. The app reads `STRIPE_WEBHOOK_SECRET` first
+    and falls back to `PAYMENT_WEBHOOK_SECRET` if unset. Removing either before all
+    deployment envs are migrated breaks the fallback chain.
+  EOT
   type        = list(string)
   default = [
     "stripe-api-key",
-    "stripe-webhook-secret",
-    "payment-webhook-secret",
+    "stripe-webhook-secret",   # current canonical name (D4.2+)
+    "payment-webhook-secret",  # legacy fallback (kept during D5 → D4.2 cutover; see CLAUDE.md)
     "database-url",
     "redis-password",
     "grafana-admin-password",
