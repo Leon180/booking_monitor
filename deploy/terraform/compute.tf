@@ -28,8 +28,19 @@ resource "google_compute_instance" "booking_app" {
 
   boot_disk {
     initialize_params {
-      # Pin to a major + minor (debian-12). Don't use :latest — that's
-      # an implicit "redeploy when Debian moves the tag" landmine.
+      # Debian 12 + hardening layered on via cloud-init/bootstrap.sh.
+      # The production-grade alternative is Container-Optimized OS (COS),
+      # Google's minimal locked-down container host. We defer the COS
+      # migration to PR 8 (k8s plan) since GKE nodes run COS by default
+      # — bundling that migration with the k8s move means we learn one
+      # OS-level abstraction at a time.
+      #
+      # When ready to switch: change image to "cos-cloud/cos-stable" and
+      # rewrite cloud-init/bootstrap.sh as a COS cloud-config YAML (no apt;
+      # all customisation via systemd units + Docker images).
+      #
+      # Don't use :latest — that's an implicit "redeploy when the tag moves"
+      # landmine. debian-12 stays on the Bookworm series across patches.
       image = "debian-cloud/debian-12"
       size  = 30
       type  = "pd-standard"

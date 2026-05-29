@@ -59,5 +59,28 @@ Targeting **$0 / month** within the GCP Always-Free tier. Watchpoints:
 - **No public ingress except via Cloudflare Tunnel** (added in PR 4). VM's external IP is unreachable from the public internet for HTTP.
 - **SSH via IAP only**: `35.235.240.0/20` source filter; OS Login for IAM-managed authn.
 - **Shielded VM**: secure boot + vTPM + integrity monitoring enabled.
+- **Docker version-pinned + held**: `5:28.*` via apt preferences + `apt-mark hold`. 29.x can't sneak in via unattended-upgrades.
+- **Security-only auto-updates**: `unattended-upgrades` configured for Debian-Security origins only; Docker explicitly blocklisted (we own its lifecycle).
+- **Time + audit**: `chrony` (NTP, for log correlation and TLS validity) + `auditd` (OS audit log).
 
 See [`docs/runbooks/gcp_bootstrap.md`](../../docs/runbooks/gcp_bootstrap.md) for the threat model walkthrough.
+
+## Future migration: Container-Optimized OS (COS)
+
+The production-grade host for a container-only workload on GCP is [Container-Optimized OS (COS)](https://cloud.google.com/container-optimized-os/docs/concepts/features-and-benefits), not Debian. COS is what GKE nodes run by default and has smaller attack surface, weekly auto-patching, and locked-down kernel. NIST's container guidance similarly recommends container-specific OS over general-purpose OS for production.
+
+We intentionally chose Debian 12 + hardening for now because:
+1. Debian's `apt` is more debuggable and pedagogical when learning the host layer.
+2. The COS migration is most valuable bundled with the k8s migration (PR 8) — by then GKE nodes will already be COS, so learning one OS-level abstraction at a time keeps the change-set understandable.
+
+The migration is a 1-line `compute.tf` change (image swap) plus rewriting `cloud-init/bootstrap.sh` as a COS [cloud-config](https://cloud.google.com/container-optimized-os/docs/how-to/create-configure-instance) (no apt; customisation via systemd units + Docker images). Tracked in PR 8.
+
+## Pinning strategy
+
+| Layer | Pin shape | Why |
+| --- | --- | --- |
+| Terraform CLI | `required_version = ">= 1.11.0"` (floor only) | HashiCorp supports each GA for 2y; ceiling pins make dev/CI skew worse. `.terraform.lock.hcl` (committed) records exact resolved versions. |
+| Terraform providers | `~> 7.0` (`>= 7.0, < 8.0`) | Pin major to prevent breaking schema changes; let minor + patch float for security fixes. |
+| Docker Engine | `5:28.*` via apt preferences + `apt-mark hold` | Pin major (no surprise 29.x breaking format changes); 28.x patches still flow in via security updates if Docker's repo backports them. |
+| OS image | `debian-cloud/debian-12` (family) | Family tag pins the Debian 12 series; individual GCE image versions float forward as Google publishes patched ones. Don't use `:latest`. |
+| cloudflared | `latest` (PR 1 bootstrap convenience) | **Not production-grade.** PR 4 replaces with a pinned version + signed verification + systemd unit. Do not run prod traffic through PR 1's cloudflared. |
