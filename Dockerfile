@@ -33,6 +33,10 @@ ARG RUNNER_BASE=gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd
 # ============================================================================
 # Stage 1: Builder
 # ============================================================================
+# hadolint ignore=DL3006
+# Rationale: GO_BASE includes a sha256 digest pin (strongest possible "tag");
+# hadolint doesn't resolve ARG values so it can't see the pin and warns
+# DL3006 (untagged image). False positive — suppress inline.
 FROM ${GO_BASE} AS builder
 
 WORKDIR /app
@@ -86,6 +90,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ============================================================================
 # Stage 2: Runner (distroless)
 # ============================================================================
+# hadolint ignore=DL3006
+# Same rationale as builder stage — RUNNER_BASE includes a sha256 digest.
 FROM ${RUNNER_BASE} AS runner
 
 # ARGs must be re-declared in this stage to be available for LABEL substitution.
