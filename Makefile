@@ -312,6 +312,45 @@ docker-version-check: ## PR 2 — verify the running binary reports the build-ti
 	docker run --rm $(DOCKER_IMAGE) --version 2>&1 || true
 	@echo "Note: --version output depends on cmd/booking-cli; if absent, check /metrics for app_info{...} once running."
 
+# ----- PR 3: supply-chain verification (post-release, consumed by PR 5 deploy gate) -----
+
+# Defaults: verify the image at sha-<short-sha-of-HEAD>. Override
+# IMAGE for a specific tag, or DIGEST for the canonical sha256 form.
+VERIFY_IMAGE ?= $(shell echo "$(GCP_ARTIFACT_REGISTRY)/booking-monitor:sha-$(shell git rev-parse --short=7 HEAD)" )
+VERIFY_IDENTITY_REGEX ?= ^https://github\.com/Leon180/booking_monitor/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$
+VERIFY_OIDC_ISSUER ?= https://token.actions.githubusercontent.com
+
+verify-image: ## PR 3 — verify SLSA L3 provenance + SBOM attestation on an image (usage: make verify-image VERIFY_IMAGE=<ref>).
+	@command -v cosign >/dev/null || (echo "Install cosign: brew install cosign  OR  go install github.com/sigstore/cosign/v2/cmd/cosign@latest"; exit 1)
+	@echo "Verifying SLSA L3 build provenance..."
+	cosign verify-attestation \
+	  --type slsaprovenance1 \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  "$(VERIFY_IMAGE)" > /dev/null
+	@echo "✓ SLSA provenance verified"
+	@echo ""
+	@echo "Verifying SBOM attestation..."
+	cosign verify-attestation \
+	  --type spdxjson \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  "$(VERIFY_IMAGE)" > /dev/null
+	@echo "✓ SBOM attestation verified"
+	@echo ""
+	@echo "All attestations attached to image:"
+	@cosign tree "$(VERIFY_IMAGE)"
+
+verify-image-sbom: ## PR 3 — extract + print the SBOM predicate as readable JSON.
+	@command -v cosign >/dev/null || (echo "Install cosign first"; exit 1)
+	@command -v jq >/dev/null || (echo "Install jq"; exit 1)
+	cosign verify-attestation \
+	  --type spdxjson \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  --output text \
+	  "$(VERIFY_IMAGE)" | jq -r '.payload' | base64 -d | jq '.predicate'
+
 # D12.5 — comparison harness control surface (originally 4-stage; PR #113
 # extended to 5 stages). The compose file `docker-compose.comparison.yml`
 # brings up bench-isolated Postgres + Redis + Kafka + 5 stage binaries on
