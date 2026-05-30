@@ -288,10 +288,14 @@ docker-build: ## PR 2 — build the production image with OCI labels + ldflags i
 	  -t $(DOCKER_IMAGE) .
 
 docker-lint: ## PR 2 — run hadolint against the Dockerfile (requires hadolint or Docker).
+	@# Both invocations pick up .hadolint.yaml at the repo root for the
+	@# shared ignore-list (DL3018 etc.). Docker-run version must mount
+	@# cwd so hadolint can see the config file (stdin-redirect via `<`
+	@# would skip the working-directory config lookup).
 	@if command -v hadolint >/dev/null; then \
 	  hadolint Dockerfile; \
 	else \
-	  docker run --rm -i hadolint/hadolint < Dockerfile; \
+	  docker run --rm -v "$(PWD):/work" -w /work hadolint/hadolint hadolint Dockerfile; \
 	fi
 
 docker-inspect: ## PR 2 — inspect OCI labels + ENTRYPOINT of the built image.

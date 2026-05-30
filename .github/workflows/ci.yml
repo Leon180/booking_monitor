@@ -189,14 +189,13 @@ jobs:
         # COPY without --chown in distroless, etc.). Conservative ruleset:
         # we don't fail on info-level warnings yet, only error-level.
         # Tighten via `failure-threshold: warning` once the baseline is clean.
+        #
+        # Ignore rules configured in .hadolint.yaml at repo root so local
+        # `make docker-lint` and this CI step share one source of truth.
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
           failure-threshold: error
-          # Ignore DL3018 (apk add without version pin) — Alpine package
-          # pinning churns weekly; not worth the noise vs the protection.
-          # Re-evaluate when base images move to distroless across stages.
-          ignore: DL3018
 
   build:
     name: docker build
