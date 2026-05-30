@@ -97,6 +97,16 @@ gcloud storage buckets update "gs://${PROJECT_ID}-tfstate" \
   --versioning
 ```
 
+**Verify the bucket is hardened correctly:**
+
+```bash
+gcloud storage buckets describe "gs://${PROJECT_ID}-tfstate" \
+  --format='value(versioning_enabled,public_access_prevention,uniform_bucket_level_access)'
+# Expected: True	enforced	True
+```
+
+Note: `gcloud storage buckets describe` uses **flat snake_case** field paths (`versioning_enabled`, `public_access_prevention`), NOT nested camelCase (`versioning.enabled`, `iamConfiguration.publicAccessPrevention`) — the latter is the older `gsutil ls -L` format and silently prints empty for missing paths under `gcloud storage`.
+
 **Why versioning**: a corrupt or mis-applied state can be rolled back by listing object versions and copying the previous one to current. Saves you from "lost a day of state edits" scenarios.
 
 ---
