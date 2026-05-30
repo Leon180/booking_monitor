@@ -9,6 +9,38 @@ End-to-end walkthrough of the supply-chain-hardened publish pipeline introduced 
 
 ## One-time setup
 
+### Step 0 — Prerequisites
+
+Confirm these BEFORE Step 1; skipping any causes Step 1 to fail in confusing ways.
+
+```bash
+# 1. gcloud authenticated AND ADC set (both required — Terraform uses ADC,
+#    gcloud CLI uses regular login)
+gcloud auth login
+gcloud auth application-default login
+
+# 2. Account has roles/resourcemanager.projectCreator on the billing
+#    account/org. Personal accounts have this by default; org-managed
+#    accounts may need admin to grant.
+
+# 3. Billing account active + has a payment method
+gcloud beta billing accounts list
+
+# 4. Project + state bucket already created (see docs/runbooks/gcp_bootstrap.md
+#    Steps 1+2). `make init` below CANNOT bootstrap its own backend.
+gcloud projects describe booking-monitor-sandbox    # expect: ACTIVE
+gcloud storage buckets describe gs://booking-monitor-sandbox-tfstate \
+  --format='value(versioning_enabled)'              # expect: True
+
+# 5. terraform >= 1.11 installed
+terraform version
+
+# 6. deploy/terraform/terraform.tfvars filled in, INCLUDING
+#    github_owner_id + github_repo_id (numeric — see gcp_bootstrap.md Step 1.5)
+```
+
+If any of these fail, fix that first. The rest of this runbook assumes them.
+
 ### Step 1 — Apply PR 1's Terraform to your GCP sandbox project
 
 The release pipeline pushes to Artifact Registry + impersonates `sa-ci-deploy` via Workload Identity Federation. Both are provisioned by PR 1's Terraform but not yet applied to any project. Apply now.
@@ -82,11 +114,20 @@ export GCP_ARTIFACT_REGISTRY=$(cd deploy/terraform && terraform output -raw arti
 make verify-image VERIFY_IMAGE=${GCP_ARTIFACT_REGISTRY}/booking-monitor:v0.0.0-rc1
 ```
 
-If both attestations verify, the release pipeline is wired correctly. Delete the test tag (it's still tracked in AR — cleanup with `gcloud artifacts docker tags delete ...`):
+If both attestations verify, the release pipeline is wired correctly. Cleanup — three places to delete (git tag locally, git tag remote, AR tags). **Do not skip the AR cleanup** — leaving `:latest` pointing to a dry-run image means PR 5's first deploy will deploy the dry-run, not whatever real release you push next.
 
 ```bash
+# Git tag (local + remote)
 git tag -d v0.0.0-rc1
 git push origin :refs/tags/v0.0.0-rc1
+
+# Artifact Registry tags (delete ALL three the workflow created)
+gcloud artifacts docker tags delete \
+  "${GCP_ARTIFACT_REGISTRY}/booking-monitor:v0.0.0-rc1" --quiet
+gcloud artifacts docker tags delete \
+  "${GCP_ARTIFACT_REGISTRY}/booking-monitor:latest" --quiet
+# `:sha-<short>` is fine to leave — it's traceable to a specific commit,
+# and the AR cleanup policy (keep last 10 versions) will reap it eventually.
 ```
 
 ## Day-to-day usage

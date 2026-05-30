@@ -314,13 +314,17 @@ docker-version-check: ## PR 2 — verify the running binary reports the build-ti
 
 # ----- PR 3: supply-chain verification (post-release, consumed by PR 5 deploy gate) -----
 
-# Defaults: verify the image at sha-<short-sha-of-HEAD>. Override
-# IMAGE for a specific tag, or DIGEST for the canonical sha256 form.
-VERIFY_IMAGE ?= $(shell echo "$(GCP_ARTIFACT_REGISTRY)/booking-monitor:sha-$(shell git rev-parse --short=7 HEAD)" )
+# NO default for VERIFY_IMAGE — caller must pass it explicitly.
+# Previous draft constructed `<registry>/.../booking-monitor:sha-$(git rev-parse --short HEAD)`
+# from local git HEAD; that mismatches the registry tag if the operator
+# rebased/amended after pushing. Force explicit so failures are loud
+# and obvious. (3-agent PR 3 review caught this.)
+VERIFY_IMAGE ?=
 VERIFY_IDENTITY_REGEX ?= ^https://github\.com/Leon180/booking_monitor/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$
 VERIFY_OIDC_ISSUER ?= https://token.actions.githubusercontent.com
 
 verify-image: ## PR 3 — verify SLSA L3 provenance + SBOM attestation on an image (usage: make verify-image VERIFY_IMAGE=<ref>).
+	@test -n "$(VERIFY_IMAGE)" || (echo "ERROR: VERIFY_IMAGE not set. Usage: make verify-image VERIFY_IMAGE=<registry>/booking-monitor:<tag-or-digest>"; exit 1)
 	@command -v cosign >/dev/null || (echo "Install cosign: brew install cosign  OR  go install github.com/sigstore/cosign/v2/cmd/cosign@latest"; exit 1)
 	@echo "Verifying SLSA L3 build provenance..."
 	cosign verify-attestation \
@@ -342,6 +346,7 @@ verify-image: ## PR 3 — verify SLSA L3 provenance + SBOM attestation on an ima
 	@cosign tree "$(VERIFY_IMAGE)"
 
 verify-image-sbom: ## PR 3 — extract + print the SBOM predicate as readable JSON.
+	@test -n "$(VERIFY_IMAGE)" || (echo "ERROR: VERIFY_IMAGE not set. Usage: make verify-image-sbom VERIFY_IMAGE=<ref>"; exit 1)
 	@command -v cosign >/dev/null || (echo "Install cosign first"; exit 1)
 	@command -v jq >/dev/null || (echo "Install jq"; exit 1)
 	cosign verify-attestation \

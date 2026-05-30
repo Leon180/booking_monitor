@@ -44,13 +44,21 @@ on:
         required: false
         default: ''
 
-# Disable concurrent releases on the same ref — pushing/signing the
-# same image from concurrent runs would race. Tag pushes are
-# inherently serialized (one tag = one ref); main pushes can stack
-# but we want them queued, not cancelled, so finished publishes are
-# attested.
+# Concurrency grouped by COMMIT SHA, not ref. Rationale (per agent A
+# review): GitHub Actions concurrency `cancel-in-progress: false` does
+# NOT serialize all queued runs — the default `queue: single` means
+# only ONE pending run is held; intermediate pushes cancel the held
+# pending. With `group: refs/heads/main`, 5 rapid main pushes would
+# leave only runs 1 and 5 executed (2/3/4 cancelled while pending).
+# Breaks "every commit gets attested" guarantee.
+#
+# Per-SHA grouping makes each commit its own concurrency group —
+# every commit runs to completion independently. The only race is
+# concurrent tag-mutating pushes (`:main`, `:latest`) which the OCI
+# registry handles atomically; later push wins, which is acceptable
+# because the per-digest attestation is what we verify against in PR 5.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.sha }}
   cancel-in-progress: false
 
 # Default minimal permissions. Per-job overrides expand explicitly
@@ -116,6 +124,12 @@ jobs:
           # Tag list — always include sha-prefixed for traceability.
           # Tags get :v* + :latest; main pushes get :main + :sha-<short>.
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          # Export short_sha as a step output so subsequent steps (Trivy
+          # in particular) reference the SAME tag the build step produced.
+          # Earlier version used ${{ github.sha }} (40-char) for Trivy's
+          # image-ref but :sha-<short> (7-char) for the build tag — mismatch
+          # silently broke the gate. Caught in 3-agent review.
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           {
             echo "tags<<EOF"
             echo "${IMAGE}:sha-${SHORT_SHA}"
@@ -152,17 +166,22 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.commit_sha }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
             VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
 
       - name: Trivy CVE scan — gate publish on HIGH/CRITICAL
         # `--exit-code 1` fails CI if any HIGH or CRITICAL CVE is found.
         # `--ignore-unfixed` excludes vulns without a known fix (so we
         # don't block on noise that we can't action against). Adjust
         # threshold by env var if needed.
-        uses: aquasecurity/trivy-action@0.28.0
+        #
+        # image-ref MUST use the same tag the build step produced
+        # (sha-<7-char>), NOT the full 40-char sha. Otherwise Trivy
+        # falls through to a remote pull of a non-existent tag and
+        # the gate silently no-ops.
+        uses: aquasecurity/trivy-action@0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ steps.meta.outputs.commit_sha }}
+          image-ref: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
           format: table
           severity: HIGH,CRITICAL
           exit-code: '1'
@@ -184,7 +203,7 @@ jobs:
             COMMIT_SHA=${{ steps.meta.outputs.commit_sha }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
             VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha
+          cache-from: type=gha,scope=release
           provenance: false
           # provenance: false here — the build-push-action's built-in
           # BuildKit provenance is a different, lower-SLSA-level thing
@@ -203,7 +222,11 @@ jobs:
       contents: read
       id-token: write # OIDC for Sigstore (cosign) + GCP WIF
       attestations: write # Required by actions/attest-build-provenance
-      packages: write # Required even when not pushing to GHCR
+      # NOTE: `packages: write` removed — it's only required when the
+      # subject image is in GHCR. Our subject lives in GCP Artifact
+      # Registry (auth via WIF in the previous step), so attestation
+      # write happens through GCP creds, not GH packages. Cleared by
+      # PR 3 review.
     steps:
       - uses: actions/checkout@v4
 
@@ -245,15 +268,19 @@ jobs:
       # driven and most tools accept both in 2026. We use SPDX for OCI
       # registry + cosign integration ergonomics.
       # -----------------------------------------------------------------------
-      - name: Install Syft + Cosign
+      - name: Install Syft
+        # Pin BOTH the install script (via release tag) AND the installed
+        # binary version (positional argument). Earlier draft used `main`
+        # branch script + latest-implied binary; reviewer flagged this as
+        # an unsigned supply-chain link in an otherwise signed pipeline.
+        env:
+          SYFT_VERSION: v1.44.0
         run: |
-          # Syft: install latest via official script (signed via cosign)
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
+            | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
           syft --version
 
-          # Cosign: install via official action for version pin
-      - uses: sigstore/cosign-installer@v3.7.0
+      - uses: sigstore/cosign-installer@v4.1.2
 
       - name: Generate SBOM (SPDX-JSON)
         run: |
@@ -278,26 +305,39 @@ jobs:
       # Catches misconfiguration before the release is declared good.
       # -----------------------------------------------------------------------
       - name: Verify SLSA + SBOM attestations (smoke test)
-        # The certificate-identity-regexp must match the OIDC subject
-        # GitHub stamped onto the signing cert. For actions/attest-*
-        # this is `<repo>/.github/workflows/release.yml@<ref>` —
-        # we accept either main branch or v-tag refs.
+        # certificate-identity-regexp MUST anchor on `release.yml@refs/...`
+        # — not just `<repo>/`. An unanchored repo-prefix would also
+        # accept any other workflow in the repo (e.g. a future `evil.yml`
+        # on a feature branch with id-token: write). Anchor explicitly
+        # to release.yml + main branch OR version tag. SAME regex shape
+        # as Makefile `VERIFY_IDENTITY_REGEX` — single source of trust.
+        #
+        # `--insecure-ignore-tlog` is intentional for THIS smoke test:
+        # Rekor inclusion proof propagation can take seconds-to-minutes,
+        # and we just published the attestation seconds ago. Falling
+        # back to Fulcio cert + signature validation is acceptable
+        # because we're verifying a signature we JUST created. The
+        # operator's `make verify-image` runs later (DOES require
+        # Rekor inclusion) — that's the real trust gate.
         run: |
           IMAGE="${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"
+          IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$"
 
           echo "=== Verify SLSA build provenance ==="
           cosign verify-attestation \
             --type slsaprovenance1 \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --insecure-ignore-tlog \
             "$IMAGE" > /dev/null
           echo "✓ SLSA provenance attestation verified"
 
           echo "=== Verify SBOM attestation ==="
           cosign verify-attestation \
             --type spdxjson \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --insecure-ignore-tlog \
             "$IMAGE" > /dev/null
           echo "✓ SBOM attestation verified"
 
