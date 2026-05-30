@@ -1,10 +1,22 @@
 provider "google" {
-  project = local.project_id
+  # NOTE: use `var.project_id` here, not `local.project_id`.
+  # `local.project_id` resolves through either `google_project.main` or
+  # `data.google_project.existing`, both of which run THROUGH this same
+  # provider — that creates a graph cycle (provider → local → resource →
+  # provider). `terraform validate` rejects with `Error: Cycle: ...`.
+  #
+  # `project` here is only the provider's DEFAULT project. Every resource
+  # in this module ALSO sets `project = local.project_id` explicitly, which
+  # overrides the default and creates the right "wait for project to exist"
+  # ordering. Per provider docs: "If another project is specified on a
+  # resource, it will take precedence."
+  project = var.project_id
   region  = var.region
 }
 
 provider "google-beta" {
-  project = local.project_id
+  # Same rationale as `google` provider above — break the cycle.
+  project = var.project_id
   region  = var.region
 }
 
