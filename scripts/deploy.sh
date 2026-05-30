@@ -83,9 +83,28 @@ echo "  ✓ SBOM attestation verified"
 # 1. Capture current-deployed image (for rollback)
 # ============================================================================
 echo "===> [1/6] Capturing currently-deployed image (for rollback if smoke fails)"
+# Read from the RUNNING CONTAINER (booking_app), NOT by image-tag lookup.
+# Earlier draft used `docker inspect booking-monitor` which resolves to
+# :latest — never matches our digest-only deploys → rollback always
+# exited "none". Caught in 3-agent review.
+#
+# Resolve container's image ID → then look up that image's RepoDigests[0].
+# Handles single + multi-tag images (we deliberately read just the FIRST
+# digest; `tr -d '[]'` on `{{.RepoDigests}}` would have left a space-
+# separated string that `docker pull` rejects with "invalid reference").
+# shellcheck disable=SC2016
+# Single quotes are intentional: $(docker inspect ...) must execute on
+# the VM (inside the gcloud ssh --command body), NOT locally.
 PREVIOUS_DIGEST=$(gcloud compute ssh "$VM_NAME" \
   --zone="$ZONE" --tunnel-through-iap --quiet \
-  --command="docker inspect ${IMAGE_NAME} --format='{{.RepoDigests}}' 2>/dev/null | tr -d '[]' || echo none" 2>/dev/null || echo "none")
+  --command='IMG_ID=$(docker inspect booking_app --format="{{.Image}}" 2>/dev/null) && \
+             docker inspect "$IMG_ID" --format="{{index .RepoDigests 0}}" 2>/dev/null || echo none' \
+  2>/dev/null || echo "none")
+# Trim + normalize empty / Go-template "<no value>" to "none".
+PREVIOUS_DIGEST=$(echo "$PREVIOUS_DIGEST" | tr -d '[:space:]')
+case "$PREVIOUS_DIGEST" in
+  ""|"<no"|*"no"*"value"*) PREVIOUS_DIGEST="none" ;;
+esac
 echo "  current: ${PREVIOUS_DIGEST}"
 
 # ============================================================================
@@ -94,12 +113,26 @@ echo "  current: ${PREVIOUS_DIGEST}"
 echo "===> [2/6] Syncing repo on VM to deployed commit"
 
 # Determine the source git commit from the image OCI label.
+#
+# Earlier draft used `--format='value(image_summary.labels)'` + `grep -oP`.
+# Two problems caught in 3-agent review:
+#   (1) gcloud emits labels as a Python-dict-repr string, NOT key=value
+#       lines — grep would never match.
+#   (2) BSD grep on macOS lacks `-P` (PCRE) — operators on macOS would
+#       hit "invalid option" before getting to (1).
+# Both go away with gcloud's structured field path:
+#   `--format='value(image_summary.labels.org_opencontainers_image_revision)'`
+# gcloud flattens dots → underscores in nested map keys.
 DEPLOYED_COMMIT=$(gcloud artifacts docker images describe "$IMAGE_REF" \
-  --format='value(image_summary.labels)' 2>/dev/null | \
-  grep -oP 'org\.opencontainers\.image\.revision=\K[a-f0-9]+' | head -1) || true
+  --format='value(image_summary.labels.org_opencontainers_image_revision)' \
+  2>/dev/null) || true
+DEPLOYED_COMMIT=$(echo "$DEPLOYED_COMMIT" | tr -d '[:space:]')
 
 if [ -z "${DEPLOYED_COMMIT:-}" ]; then
-  echo "  ✗ could not extract commit SHA from image labels; check Dockerfile OCI labels (PR 2)"
+  echo "  ✗ could not extract commit SHA from image label 'org.opencontainers.image.revision'."
+  echo "    Possible causes:"
+  echo "      - Image was built before PR 2 (no OCI labels)"
+  echo "      - gcloud projection format changed (run: gcloud artifacts docker images describe $IMAGE_REF --format=json | jq '.image_summary.labels')"
   exit 4
 fi
 echo "  deploying commit: ${DEPLOYED_COMMIT}"
@@ -128,15 +161,27 @@ gcloud compute ssh "$VM_NAME" \
 # ============================================================================
 echo "===> [4/6] Running schema migrations"
 # Uses migrate/migrate:v4.19.1 (PR 4 fact-check verified current stable).
-# Mounts migrations dir read-only; sources DATABASE_URL from synced .env.
-# Idempotent: re-running on up-to-date schema is a no-op (exit 0).
+# Mounts migrations dir read-only.
+#
+# 3-agent review CRIT: earlier draft used `set -a && source .env` to load
+# secrets — but `source` is shell evaluation. A secret value containing
+# \$(cmd) or backticks would execute as root on the VM. Realistic
+# threat: DB passwords routinely contain \$, future automation could
+# write arbitrary values to Secret Manager.
+#
+# Fix: pass .env to the migrate CONTAINER via `--env-file`, which uses
+# docker-compose's dotenv parser (no shell eval). migrate reads
+# DATABASE_URL from container env automatically (no -database flag
+# needed when env is set). Forward-only convention — never run `down`.
 gcloud compute ssh "$VM_NAME" \
   --zone="$ZONE" --tunnel-through-iap --quiet \
-  --command="cd ${VM_PROJECT_DIR} && set -a && source .env && set +a && \
+  --command="cd ${VM_PROJECT_DIR} && \
     docker run --rm --network=host \
+      --env-file ${VM_PROJECT_DIR}/.env \
+      --entrypoint sh \
       -v ${VM_PROJECT_DIR}/deploy/postgres/migrations:/migrations:ro \
       migrate/migrate:v4.19.1 \
-      -path /migrations -database \"\$DATABASE_URL\" up"
+      -c 'migrate -path /migrations -database \"\$DATABASE_URL\" up'"
 echo "  ✓ migrations applied"
 
 # ============================================================================

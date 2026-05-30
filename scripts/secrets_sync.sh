@@ -23,8 +23,16 @@
 
 set -euo pipefail
 
-# Where the env file lands. Owned by root, readable by docker daemon group
-# only — keeps secrets off the public Docker layer.
+# Where the env file lands.
+#
+# Ownership: root:docker (mode 640). 3-agent PR 4 review caught the
+# earlier 600-root-owned design — `docker compose` runs as the operator's
+# OS Login user (NOT root). With 600 the compose process can't read .env
+# → docker-compose.yml `${VAR:?}` checks fail at startup with confusing
+# "env var missing" errors. Granting `docker` group read access (every
+# user that can run `docker` commands is in this group) lets compose
+# read .env while keeping non-docker users locked out. Root is the
+# ONLY writer (this script always runs via `sudo bash`).
 ENV_FILE="${ENV_FILE:-/opt/booking-monitor/.env}"
 ENV_FILE_TMP="${ENV_FILE}.tmp.$$"
 
@@ -110,9 +118,21 @@ for secret_id in "${SECRETS[@]}"; do
   echo "  ✓ ${env_name} (${#value} bytes)"
 done
 
-# ---- 2. Atomic swap ----
+# ---- 2. Atomic swap + finalize ownership ----
+# Set ownership BEFORE the mv so the live file is never world-readable
+# between mv and chown (race window).
+chown root:docker "$ENV_FILE_TMP" 2>/dev/null || {
+  # `docker` group missing? Fall back to root-only — better to fail
+  # loud at the next step than silently 644 the secrets.
+  echo "WARN: 'docker' group not found on this host. Falling back to root:root 600."
+  echo "       compose-as-operator will fail to read .env. Investigate why docker isn't installed."
+  chown root:root "$ENV_FILE_TMP"
+  chmod 600 "$ENV_FILE_TMP"
+  mv "$ENV_FILE_TMP" "$ENV_FILE"
+  exit 5
+}
+chmod 640 "$ENV_FILE_TMP"
 mv "$ENV_FILE_TMP" "$ENV_FILE"
-chmod 600 "$ENV_FILE"
 
 echo ""
 echo "✓ Wrote ${#SECRETS[@]} secrets to $ENV_FILE"

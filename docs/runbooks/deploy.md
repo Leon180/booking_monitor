@@ -53,12 +53,24 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="user:$USER_EMAIL" \
   --role="roles/iap.tunnelResourceAccessor"
 
+# OS Login on the project (PR 1's compute.tf sets enable-oslogin=TRUE)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="user:$USER_EMAIL" \
+  --role="roles/compute.osLogin"
+
+# Read Artifact Registry (deploy.sh step 0 calls `gcloud artifacts docker images describe`)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="user:$USER_EMAIL" \
+  --role="roles/artifactregistry.reader"
+
 # Permission to impersonate the deploy SA (for AR pull + Secret Manager read)
 gcloud iam service-accounts add-iam-policy-binding \
   "sa-ci-deploy@$PROJECT_ID.iam.gserviceaccount.com" \
   --member="user:$USER_EMAIL" \
   --role="roles/iam.serviceAccountTokenCreator"
 ```
+
+> Note: `roles/artifactregistry.reader` and `roles/compute.osLogin` were missed in PR 4 v1 — caught in 3-agent review. Without them, first deploy fails at step 0 with a confusing `PERMISSION_DENIED` on `artifacts docker images describe`.
 
 ### 3. Cloudflare Tunnel set up on the VM
 
@@ -68,6 +80,8 @@ See [`cloudflare_tunnel.md`](cloudflare_tunnel.md) for the one-time setup. The d
 
 - PR 1: `make apply` in `deploy/terraform/` to provision GCP infra.
 - PR 3: push a `v*.*.*` tag to trigger `.github/workflows/release.yml` and produce at least one signed image in Artifact Registry. See [`release_pipeline.md`](release_pipeline.md) Step 4.
+
+> **Heads-up**: if you followed `release_pipeline.md`'s **dry-run cleanup** (it tells you to `gcloud artifacts docker tags delete v0.0.0-rc1` after testing), there is **no signed image left in AR** — push a fresh tag (e.g. `v0.0.1`) before running `make deploy`, or the cosign-verify step in `deploy.sh` step 0 will fail with "image not found in registry".
 
 ## Day-to-day usage
 
@@ -213,8 +227,10 @@ Rare — usually migrations land with their code. But if you need to:
 
 ```bash
 gcloud compute ssh booking-app --zone=us-central1-a --tunnel-through-iap \
-  --command="cd /opt/booking-monitor && set -a && source .env && set +a && docker run --rm --network=host -v /opt/booking-monitor/deploy/postgres/migrations:/migrations:ro migrate/migrate:v4.19.1 -path /migrations -database \"\$DATABASE_URL\" up"
+  --command="cd /opt/booking-monitor && docker run --rm --network=host --env-file /opt/booking-monitor/.env --entrypoint sh -v /opt/booking-monitor/deploy/postgres/migrations:/migrations:ro migrate/migrate:v4.19.1 -c 'migrate -path /migrations -database \"\$DATABASE_URL\" up'"
 ```
+
+> **Why `--env-file` not `source .env`**: `source` is shell evaluation — a secret value containing `$(cmd)` or backticks would execute as root on the VM. `--env-file` uses docker-compose's dotenv parser (literal, no shell eval). The `sh -c '...'` inside the container then shell-expands `$DATABASE_URL` safely (variable interpolation, not value re-parse). Caught in 3-agent PR 4 review.
 
 ### Inspect what's running
 

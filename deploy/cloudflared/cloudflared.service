@@ -18,10 +18,18 @@ Description=Cloudflare Tunnel for booking_monitor
 After=network-online.target
 Wants=network-online.target
 
+# StartLimit* MUST live in [Unit] (systemd v229+); placement under
+# [Service] is silently ignored on stricter builds, defeating the
+# rate-limit. Caught in 3-agent PR 4 review.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
-# Run as `cloudflared` user. Group `cloudflared` reads
-# /etc/cloudflared/config.yml + credentials JSON.
+# Run as `cloudflared` user — created by PR 1 cloud-init/bootstrap.sh
+# alongside the cloudflared binary install. If you're installing this
+# unit manually on a VM where the user wasn't pre-created, run first:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
 User=cloudflared
 Group=cloudflared
 
@@ -34,12 +42,11 @@ Group=cloudflared
 ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
 
 # Restart on failure but with a backoff cap. 10s between attempts; if
-# the tunnel really won't start (cert revoked, config invalid), 5
-# failures in 5min triggers a wider alert via Cloud Logging in PR 7.
+# the tunnel really won't start (cert revoked, config invalid), the
+# StartLimit* directives in [Unit] cap restarts at 5 in 5min then
+# triggers a wider alert via Cloud Logging in PR 7.
 Restart=on-failure
 RestartSec=10
-StartLimitInterval=300
-StartLimitBurst=5
 
 # Security hardening — `cloudflared` doesn't need most of the world.
 NoNewPrivileges=true

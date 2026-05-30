@@ -384,7 +384,7 @@ secrets-sync: ## PR 4 — refresh /opt/booking-monitor/.env on the VM from Secre
 	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
 	  --command='sudo bash /opt/booking-monitor/scripts/secrets_sync.sh'
 	@echo ""
-	@echo "Note: app needs `docker compose restart app` to pick up new env values."
+	@printf 'Note: app needs %sdocker compose restart app%s to pick up new env values.\n' "'" "'"
 
 vm-ssh: ## PR 4 — SSH into the deploy VM via IAP tunnel.
 	gcloud compute ssh $(DEPLOY_VM) \
