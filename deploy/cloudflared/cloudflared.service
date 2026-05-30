@@ -1,0 +1,67 @@
+# systemd unit for Cloudflare Tunnel daemon (locally-managed config).
+#
+# Install ONCE per VM via `cloudflared service install` OR by manually
+# copying to /etc/systemd/system/cloudflared.service.
+#
+# Assumes:
+#   /etc/cloudflared/config.yml             — copied from config.yml.example
+#   /etc/cloudflared/<UUID>.json            — tunnel credentials from
+#                                              `cloudflared tunnel create` on
+#                                              operator machine
+#   /usr/local/bin/cloudflared              — installed by PR 1's
+#                                              cloud-init/bootstrap.sh
+#
+# Logs land in journalctl: `journalctl -u cloudflared -f`
+
+[Unit]
+Description=Cloudflare Tunnel for booking_monitor
+After=network-online.target
+Wants=network-online.target
+
+# StartLimit* MUST live in [Unit] (systemd v229+); placement under
+# [Service] is silently ignored on stricter builds, defeating the
+# rate-limit. Caught in 3-agent PR 4 review.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Run as `cloudflared` user — created by PR 1 cloud-init/bootstrap.sh
+# alongside the cloudflared binary install. If you're installing this
+# unit manually on a VM where the user wasn't pre-created, run first:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+User=cloudflared
+Group=cloudflared
+
+# `tunnel run` reads /etc/cloudflared/config.yml. The `--no-autoupdate`
+# flag is critical — autoupdate downloads a fresh binary at runtime,
+# violating the apt-pin discipline established in PR 1's bootstrap.sh.
+# Bump cloudflared deliberately via apt (PR 4 keeps the binary on the
+# host filesystem; future PR could move to running cloudflared as
+# a container if you want stricter version control).
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
+
+# Restart on failure but with a backoff cap. 10s between attempts; if
+# the tunnel really won't start (cert revoked, config invalid), the
+# StartLimit* directives in [Unit] cap restarts at 5 in 5min then
+# triggers a wider alert via Cloud Logging in PR 7.
+Restart=on-failure
+RestartSec=10
+
+# Security hardening — `cloudflared` doesn't need most of the world.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadOnlyPaths=/etc/cloudflared
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

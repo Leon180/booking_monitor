@@ -159,7 +159,17 @@ if [ ! -x /usr/local/bin/cloudflared ]; then
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
   chmod +x /usr/local/bin/cloudflared
 fi
+
+# Create the cloudflared system user + group BEFORE PR 4's systemd unit
+# expects them. `--system` skips home dir, no shell, idempotent (errors
+# silenced if user already exists from a prior cloud-init re-run).
+# 3-agent PR 4 review caught: without this, systemd refused to start
+# with "Failed to determine user credentials: No such process".
+if ! id -u cloudflared >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin cloudflared
+fi
 mkdir -p /etc/cloudflared
+chown -R cloudflared:cloudflared /etc/cloudflared
 
 # --------------------------------------------------------------------
 # 6. Host firewall — defense-in-depth on top of GCP firewall.
