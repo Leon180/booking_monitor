@@ -19,27 +19,26 @@ See [variables.tf](variables.tf) for inputs, [outputs.tf](outputs.tf) for handof
 
 ## Quick start
 
-Full instructions: [`docs/runbooks/gcp_bootstrap.md`](../../docs/runbooks/gcp_bootstrap.md).
+Full instructions: [`docs/runbooks/gcp_bootstrap.md`](../../docs/runbooks/gcp_bootstrap.md). The [`Makefile`](Makefile) wraps the common commands:
 
 ```bash
+make help            # list all available targets
+
+# 1. Edit your config
 cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars
+$EDITOR terraform.tfvars   # fill in project_id, github_owner_id, github_repo_id, etc.
 
-# Bootstrap state bucket (manual, one-time)
-gsutil mb -l us-central1 -b on gs://${PROJECT_ID}-tfstate
-gsutil versioning set on gs://${PROJECT_ID}-tfstate
+# 2. Pre-commit verification (no GCS needed — works offline)
+make verify
 
-# Init + apply
-terraform init -backend-config="bucket=${PROJECT_ID}-tfstate"
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
+# 3. (Real apply) Bootstrap state bucket once, then init+plan+apply
+gcloud storage buckets create gs://$(make -s -n init | head -1 | sed -E 's/.*bucket=([^"]+).*/\1/') \
+  --location=us-central1 --uniform-bucket-level-access --public-access-prevention
+make init
+make plan
+make apply
 
-# Populate secret values
-for s in stripe-api-key stripe-webhook-secret payment-webhook-secret \
-         database-url redis-password grafana-admin-password; do
-  read -srp "$s: " v && echo
-  echo -n "$v" | gcloud secrets versions add "$s" --data-file=-
-done
+# 4. Populate secret values (see runbook Step 4 for the full loop)
 ```
 
 ## Cost ceiling
@@ -77,15 +76,17 @@ The migration is a 1-line `compute.tf` change (image swap) plus rewriting `cloud
 
 ## Pinning strategy
 
-| Layer | Pin shape | Why | Post-apply verification |
+| Layer | Pin shape | Why | Verification |
 | --- | --- | --- | --- |
-| Terraform CLI | `required_version = ">= 1.11.0"` (floor only) | HashiCorp supports each GA for 2y; ceiling pins make dev/CI skew worse. `.terraform.lock.hcl` (committed) records exact resolved versions. | `terraform version` |
-| Terraform providers | `~> 7.0` (`>= 7.0, < 8.0`) | Pin major to prevent breaking schema changes; let minor + patch float for security fixes. | `terraform providers lock` |
-| Docker Engine | `5:28.*` via apt preferences + `apt-mark hold` | Pin major (no surprise 29.x breaking format changes); 28.x patches still flow in via security updates if Docker's repo backports them. | `apt-cache policy docker-ce` (priority 1001 line); `apt-mark showhold` includes `docker-ce` |
+| Terraform CLI | `required_version = ">= 1.11.0"` (floor only) | HashiCorp supports each GA for 2y; ceiling pins make dev/CI skew worse. `.terraform.lock.hcl` (committed) records exact resolved versions. | `make verify` |
+| Terraform providers | `~> 7.0` (`>= 7.0, < 8.0`) | Pin major to prevent breaking schema changes; let minor + patch float for security fixes. | `make verify` |
+| Docker Engine | `5:28.*` via apt preferences + `apt-mark hold` | Pin major (no surprise 29.x breaking format changes); 28.x patches still flow in via security updates if Docker's repo backports them. | on-VM `apt-cache policy docker-ce`; runbook Step 7 |
 | OS image | `debian-cloud/debian-12` (family) | Family tag pins the Debian 12 series; individual GCE image versions float forward as Google publishes patched ones. Don't use `:latest`. | (visible in console; not a runtime check) |
 | cloudflared | `latest` (PR 1 bootstrap convenience) | **Not production-grade.** PR 4 replaces with a pinned version + signed verification + systemd unit. Do not run prod traffic through PR 1's cloudflared. | n/a — covered in PR 4 |
 
-The runbook's [Step 7](../../docs/runbooks/gcp_bootstrap.md#step-7--ssh-to-the-vm-via-iap--smoke-test-hardening) has the actual command-by-command smoke test.
+**Pre-commit verification**: `cd deploy/terraform && make verify` (codified in [`Makefile`](Makefile)). Runs `terraform fmt -recursive -diff`, `terraform init -backend=false`, `terraform validate`. Mandatory before every commit per the `iac-verify` skill.
+
+**Post-apply (on the VM)**: runbook [Step 7](../../docs/runbooks/gcp_bootstrap.md#step-7--ssh-to-the-vm-via-iap--smoke-test-hardening) has the full command-by-command checklist.
 
 ## WIF design — immutable IDs over names
 

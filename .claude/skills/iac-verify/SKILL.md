@@ -65,23 +65,36 @@ The three URI schemes that look interchangeable but are NOT:
 
 Quick checks before commit:
 
+### MANDATORY pre-commit (one command)
+
 ```bash
-# Validate Terraform syntax
-terraform fmt -check -recursive
-terraform validate
+cd deploy/terraform && make verify
+```
 
-# Show actual provider docs for a resource
-# (run via Terraform MCP from Claude Code; example invocation:)
-# resolveProviderDocID provider=google resource=google_iam_workload_identity_pool_provider
+This single target runs:
+- `terraform fmt -recursive -diff` (writes + shows fmt drift)
+- `terraform init -backend=false -upgrade=false` (provider plugins; no GCS needed)
+- `terraform validate` (full graph + schema check)
 
-# Verify WIF binding after apply
+Schema-level MCP queries (`resolveProviderDocID` / `getProviderDocs`) do
+NOT catch graph cycles. The `provider <-> local.project_id` cycle that
+broke PR 1 was only surfaced by `terraform validate`. The `make verify`
+target makes that an unskippable step.
+
+If `make verify` fails: do NOT commit. Read the actual Terraform error
+output, query the relevant resource via Terraform MCP, fix, re-run.
+
+### Post-apply on-VM smoke tests
+
+Schema-correct does NOT equal "runtime-correct". After apply, verify
+each hardening claim. See `docs/runbooks/gcp_bootstrap.md` § Step 7
+for the canonical checklist. Spot examples:
+
+```bash
 gcloud iam service-accounts get-iam-policy <SA_EMAIL> --format=json | jq
-
-# Verify Docker apt pin took effect (Debian VM hosts)
 apt-cache policy docker-ce | head -10
-
-# Verify unattended-upgrades pattern matches actual archive
-unattended-upgrades --dry-run -d 2>&1 | grep -E "Allowed origins|Pkgs that look|Adjusting"
+apt-mark showhold | grep docker-ce
+sudo unattended-upgrades --dry-run -d 2>&1 | grep -E "Allowed origins|origin=Debian"
 ```
 
 ## Anti-patterns to refuse
