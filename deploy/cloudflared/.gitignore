@@ -1,0 +1,7 @@
+# Tunnel credentials JSON (per-operator-per-VM secret — NEVER commit).
+*.json
+
+# Real config (UUID + hostname filled in). Only config.yml.example
+# is committed; the operator copies + customizes locally and pushes
+# to the VM via the runbook.
+config.yml

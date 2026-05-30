@@ -1,0 +1,60 @@
+# systemd unit for Cloudflare Tunnel daemon (locally-managed config).
+#
+# Install ONCE per VM via `cloudflared service install` OR by manually
+# copying to /etc/systemd/system/cloudflared.service.
+#
+# Assumes:
+#   /etc/cloudflared/config.yml             — copied from config.yml.example
+#   /etc/cloudflared/<UUID>.json            — tunnel credentials from
+#                                              `cloudflared tunnel create` on
+#                                              operator machine
+#   /usr/local/bin/cloudflared              — installed by PR 1's
+#                                              cloud-init/bootstrap.sh
+#
+# Logs land in journalctl: `journalctl -u cloudflared -f`
+
+[Unit]
+Description=Cloudflare Tunnel for booking_monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as `cloudflared` user. Group `cloudflared` reads
+# /etc/cloudflared/config.yml + credentials JSON.
+User=cloudflared
+Group=cloudflared
+
+# `tunnel run` reads /etc/cloudflared/config.yml. The `--no-autoupdate`
+# flag is critical — autoupdate downloads a fresh binary at runtime,
+# violating the apt-pin discipline established in PR 1's bootstrap.sh.
+# Bump cloudflared deliberately via apt (PR 4 keeps the binary on the
+# host filesystem; future PR could move to running cloudflared as
+# a container if you want stricter version control).
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
+
+# Restart on failure but with a backoff cap. 10s between attempts; if
+# the tunnel really won't start (cert revoked, config invalid), 5
+# failures in 5min triggers a wider alert via Cloud Logging in PR 7.
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Security hardening — `cloudflared` doesn't need most of the world.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadOnlyPaths=/etc/cloudflared
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

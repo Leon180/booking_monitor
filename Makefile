@@ -356,6 +356,50 @@ verify-image-sbom: ## PR 3 — extract + print the SBOM predicate as readable JS
 	  --output text \
 	  "$(VERIFY_IMAGE)" | jq -r '.payload' | base64 -d | jq '.predicate'
 
+# Declare PR 4 targets phony — `deploy` collides with the `deploy/`
+# directory name and Make would otherwise short-circuit as "already
+# up to date". `.PHONY` forces the recipe to run every invocation.
+.PHONY: deploy secrets-sync vm-ssh vm-logs vm-status
+
+# ----- PR 4: operator-driven deploy + secrets sync to GCP VM -----
+#
+# All targets here SSH to the VM via gcloud IAP tunnel — no port 22 ever
+# opens publicly. The scripts they call (deploy.sh / secrets_sync.sh)
+# encapsulate the full chain (cosign verify, repo sync, migrate, compose
+# up --wait, smoke, rollback). PR 5 will wrap this same logic in a
+# GH Actions workflow via google-github-actions/ssh-compute@v2.
+
+DEPLOY_PROJECT_ID  ?= booking-monitor-sandbox
+DEPLOY_ZONE        ?= us-central1-a
+DEPLOY_VM          ?= booking-app
+IMAGE_TAG          ?=
+
+deploy: ## PR 4 — deploy a signed image to the VM (usage: make deploy IMAGE_TAG=v1.0.0).
+	@test -n "$(IMAGE_TAG)" || (echo "ERROR: IMAGE_TAG not set. Usage: make deploy IMAGE_TAG=v1.0.0  OR  IMAGE_TAG=main  OR  IMAGE_TAG=sha-abc1234"; exit 1)
+	PROJECT_ID=$(DEPLOY_PROJECT_ID) ZONE=$(DEPLOY_ZONE) VM_NAME=$(DEPLOY_VM) \
+	  bash scripts/deploy.sh $(IMAGE_TAG)
+
+secrets-sync: ## PR 4 — refresh /opt/booking-monitor/.env on the VM from Secret Manager (without a full deploy).
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='sudo bash /opt/booking-monitor/scripts/secrets_sync.sh'
+	@echo ""
+	@echo "Note: app needs `docker compose restart app` to pick up new env values."
+
+vm-ssh: ## PR 4 — SSH into the deploy VM via IAP tunnel.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap
+
+vm-logs: ## PR 4 — tail the booking-app container logs on the VM.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='cd /opt/booking-monitor && docker compose logs --tail=200 -f app'
+
+vm-status: ## PR 4 — show what's currently deployed on the VM.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='cd /opt/booking-monitor && docker compose ps && echo "---" && docker inspect booking-monitor --format="image: {{.Config.Image}}{{println}}digest: {{.RepoDigests}}{{println}}commit: {{index .Config.Labels \"org.opencontainers.image.revision\"}}"'
+
 # D12.5 — comparison harness control surface (originally 4-stage; PR #113
 # extended to 5 stages). The compose file `docker-compose.comparison.yml`
 # brings up bench-isolated Postgres + Redis + Kafka + 5 stage binaries on
