@@ -176,29 +176,107 @@ jobs:
         run: |
           go test -tags=integration -race -timeout 9m ./test/integration/...
 
+  hadolint:
+    name: hadolint (Dockerfile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run hadolint
+        # PR 2 — lint the Dockerfile for common antipatterns (unpinned base
+        # image, root user in final stage, `apt-get install` without cleanup,
+        # COPY without --chown in distroless, etc.). Conservative ruleset:
+        # we don't fail on info-level warnings yet, only error-level.
+        # Tighten via `failure-threshold: warning` once the baseline is clean.
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+          # Ignore DL3018 (apk add without version pin) — Alpine package
+          # pinning churns weekly; not worth the noise vs the protection.
+          # Re-evaluate when base images move to distroless across stages.
+          ignore: DL3018
+
   build:
     name: docker build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Skip docker build until hadolint passes — saves CI minutes on
+    # PRs that break the Dockerfile syntactically.
+    needs: hadolint
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Compute build identity
+        id: ident
+        # PR 2 — inject canonical build-args so the resulting image
+        # carries correct OCI labels + ldflags-injected binary version.
+        # github.sha is the head commit; for tagged releases this will
+        # match the tag's commit. github.run_id added as a tiebreaker
+        # for non-tagged builds (so two builds at the same commit can
+        # still be distinguished).
+        run: |
+          echo "commit_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # Use ref_name for tags (v1.2.3), or short SHA + run_id for branches.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(echo ${{ github.sha }} | cut -c1-7)-r${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build (no push)
         # Build the multi-stage Dockerfile end-to-end. We don't push
         # anywhere — pushing belongs in a separate release workflow
-        # gated on tags. Failure here means the image stage is broken,
-        # which our local `make build` would not have caught.
+        # gated on tags (PR 3). Failure here means the image stage is
+        # broken, which our local `make build` would not have caught.
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
+          build-args: |
+            COMMIT_SHA=${{ steps.ident.outputs.commit_sha }}
+            BUILD_DATE=${{ steps.ident.outputs.build_date }}
+            VERSION=${{ steps.ident.outputs.version }}
           # GHA cache backend: fast incremental rebuilds across CI runs
           # without polluting any container registry.
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Single-arch (amd64) for now — multi-arch adds 2-3× build
           # time and we don't ship images yet. Add arm64 when the
-          # release workflow lands.
+          # release workflow lands (PR 3).
+          # Load the image into the runner so the next step can inspect.
+          load: true
+          tags: booking-monitor:ci-${{ github.run_id }}
+
+      - name: Verify image hardening
+        # PR 2 — assert the built image actually has the labels + user
+        # we documented. Catches future Dockerfile edits that silently
+        # break OCI labels (e.g. LABEL directive moved to a stage that
+        # gets discarded by multi-stage build).
+        run: |
+          IMAGE="booking-monitor:ci-${{ github.run_id }}"
+          echo "=== OCI labels ==="
+          docker inspect "$IMAGE" --format='{{json .Config.Labels}}' | jq .
+          echo "=== Runtime config ==="
+          docker inspect "$IMAGE" --format='USER={{.Config.User}} ENTRYPOINT={{.Config.Entrypoint}}'
+          # Fail if any required label is missing.
+          for lbl in source revision created version title; do
+            val=$(docker inspect "$IMAGE" --format="{{index .Config.Labels \"org.opencontainers.image.${lbl}\"}}")
+            if [ -z "$val" ] || [ "$val" = "<no value>" ]; then
+              echo "❌ Missing required OCI label: org.opencontainers.image.${lbl}"
+              exit 1
+            fi
+            echo "✓ org.opencontainers.image.${lbl} = $val"
+          done
+          # Fail if running as root.
+          user=$(docker inspect "$IMAGE" --format='{{.Config.User}}')
+          if [ "$user" = "" ] || [ "$user" = "0" ] || [ "$user" = "root" ] || [ "$user" = "0:0" ]; then
+            echo "❌ Image runs as root (Config.User='$user')"
+            exit 1
+          fi
+          echo "✓ Image runs as non-root: $user"
