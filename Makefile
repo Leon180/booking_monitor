@@ -270,6 +270,48 @@ docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@docker-compose up -d app
 	@echo "App restarted in Docker."
 
+# ----- PR 2: Production-grade image build + lint -----
+# `docker-build` wraps `docker build` with the canonical build-arg set
+# so OCI labels + ldflags version injection happen consistently between
+# local + CI. The Dockerfile pins base images to SHA digest; do NOT
+# add `--pull` here (would re-resolve tags + break reproducibility).
+DOCKER_IMAGE ?= booking-monitor:dev
+DOCKER_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+DOCKER_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+DOCKER_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+docker-build: ## PR 2 — build the production image with OCI labels + ldflags injection (DOCKER_IMAGE=tag).
+	docker build \
+	  --build-arg COMMIT_SHA=$(DOCKER_COMMIT_SHA) \
+	  --build-arg BUILD_DATE=$(DOCKER_BUILD_DATE) \
+	  --build-arg VERSION=$(DOCKER_VERSION) \
+	  -t $(DOCKER_IMAGE) .
+
+docker-lint: ## PR 2 — run hadolint against the Dockerfile (requires hadolint or Docker).
+	@# Both invocations pick up .hadolint.yaml at the repo root for the
+	@# shared ignore-list (DL3018 etc.). Docker-run version must mount
+	@# cwd so hadolint can see the config file (stdin-redirect via `<`
+	@# would skip the working-directory config lookup).
+	@if command -v hadolint >/dev/null; then \
+	  hadolint Dockerfile; \
+	else \
+	  docker run --rm -v "$(PWD):/work" -w /work hadolint/hadolint hadolint Dockerfile; \
+	fi
+
+docker-inspect: ## PR 2 — inspect OCI labels + ENTRYPOINT of the built image.
+	@docker inspect $(DOCKER_IMAGE) \
+	  --format='{{json .Config.Labels}}' | jq .
+	@docker inspect $(DOCKER_IMAGE) \
+	  --format='ENTRYPOINT: {{.Config.Entrypoint}}{{"\n"}}CMD: {{.Config.Cmd}}{{"\n"}}USER: {{.Config.User}}'
+
+docker-dive: ## PR 2 — interactive layer browser for the built image (requires `dive`).
+	@command -v dive >/dev/null || (echo "Install: brew install dive  OR  go install github.com/wagoodman/dive@latest"; exit 1)
+	dive $(DOCKER_IMAGE)
+
+docker-version-check: ## PR 2 — verify the running binary reports the build-time commit + version.
+	docker run --rm $(DOCKER_IMAGE) --version 2>&1 || true
+	@echo "Note: --version output depends on cmd/booking-cli; if absent, check /metrics for app_info{...} once running."
+
 # D12.5 — comparison harness control surface (originally 4-stage; PR #113
 # extended to 5 stages). The compose file `docker-compose.comparison.yml`
 # brings up bench-isolated Postgres + Redis + Kafka + 5 stage binaries on

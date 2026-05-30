@@ -92,7 +92,7 @@ func main() {
 	adminTokenCmd.Flags().String("user", "", "Ops user identifier (e.g., ops-leon) — required")
 	adminTokenCmd.Flags().Duration("ttl", 30*time.Minute, "Token lifetime (must be ≤ server's ADMIN_STREAM_JWT_MAX_TTL)")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd, adminTokenCmd)
+	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd, adminTokenCmd, newVersionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

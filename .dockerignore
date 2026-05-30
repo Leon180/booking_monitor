@@ -1,35 +1,58 @@
-# Version Control
+# Build context exclusions. Keeping context small speeds up `docker build`
+# AND prevents accidental inclusion of secrets / dev-only files in image
+# layers. Anything Docker doesn't need to read SHOULD be excluded here.
+
+# ----- Version control -----
 .git
 .gitignore
+.gitattributes
 
-# Build Artifacts
+# ----- Build artifacts (rebuilt inside image) -----
 bin/
 booking-cli
 *.out
 *.test
-
-# Dependencies
-vendor/
-
-# Environment Variables
-.env
-.env.*
-
-# Logs and Reports
-*.log
-docs/benchmarks/
 coverage.out
+*.log
 
-# IDE/Editor
+# ----- Dependencies (re-fetched inside image; vendored dir not needed) -----
+vendor/
+node_modules/
+web/node_modules/
+
+# ----- Local dev / IDE config -----
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# MacOS
 .DS_Store
 
-# Docker
-docker-compose.yml
+# ----- Environment + secrets (NEVER bake into image) -----
+.env
+.env.*
+*.tfvars
+!terraform.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+*.pem
+*.key
+*-credentials.json
+
+# ----- Infrastructure / CI / docs not used at runtime -----
+.github/
+.claude/
+deploy/
+docs/
+scripts/
+
+# ----- Personal / portfolio scratch (root-level) -----
+interview_*
+demo_*
+
+# ----- Docker / Makefile (avoid recursive rebuild on container edit) -----
+docker-compose*.yml
 Dockerfile
+Dockerfile.*
+.dockerignore
 Makefile
