@@ -5,10 +5,8 @@
   "include-component-in-tag": false,
   "bootstrap-sha": "32c78e4e6157ee6755d6a16ebc469c160a5dacd6",
   "pull-request-title-pattern": "chore(release): release ${version}",
-  "pull-request-header": "🤖 Release PR opened by release-please. Merge this PR to publish ${version}.",
   "separate-pull-requests": false,
   "draft": false,
-  "prerelease": false,
   "changelog-sections": [
     { "type": "feat", "section": "Features", "hidden": false },
     { "type": "fix", "section": "Bug Fixes", "hidden": false },

@@ -1,0 +1,80 @@
+# Conventional Commits enforcement on PR titles — PR 6 of 8.
+#
+# Without this, release-please (also added in PR 6) silently bins
+# non-conformant PR titles under "Other" in the CHANGELOG and skips
+# the version bump, leaving operators puzzled why a `feat` PR didn't
+# trigger a MINOR release. This action blocks merge until the PR title
+# parses as Conventional Commits.
+#
+# Squash-merge only: the PR title becomes the squashed commit on main.
+# If we ever switch to merge-commits or rebase-merges, EVERY commit
+# would need to be Conventional — re-evaluate enforcement then.
+#
+# Action: amannn/action-semantic-pull-request@v5. Industry standard
+# for this enforcement layer (verified against editorconfig-checker,
+# external-secrets, cosign — all release-please users that adopted it).
+# Go projects use this GH Action instead of husky/commitlint because
+# the Node-tooling dependency is a smell in Go repos.
+
+name: PR title — Conventional Commits
+
+on:
+  pull_request:
+    # Re-check on these events; opened+edited covers title creation/edit,
+    # synchronize covers head-branch updates (in case future enforcement
+    # extends to commit messages).
+    types: [opened, edited, synchronize, reopened]
+
+# Same-PR concurrency: cancel superseded checks when the PR title
+# is edited multiple times in quick succession.
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read # ONLY need to read PR title; no writes
+
+jobs:
+  validate:
+    name: validate PR title
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Match release-please-config.json's changelog-sections types.
+          # Single source of truth for "what's a valid type" lives in
+          # the release-please config; this list must stay in sync.
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            revert
+            docs
+            style
+            chore
+            test
+            build
+            ci
+          # Subject (after `type[scope]:`) requires a non-empty,
+          # lower-case-or-mixed-case message. Sentence case + period
+          # at end are NOT blocked — too strict for our prose style.
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            PR title's subject (the part after `type:` or `type(scope):`)
+            must NOT start with an uppercase letter. Examples that fail:
+              feat(api): Add /events endpoint    ← "Add" capital
+              fix: PR title with sentence case   ← "PR" capital
+            Examples that pass:
+              feat(api): add /events endpoint
+              fix: prevent saga goroutine leak
+              chore(deps): bump golangci-lint to v2.5.0
+          # Require a scope OR no-scope — both accepted. Don't lock
+          # to a fixed scope list; team norms are still settling.
+          requireScope: false
+          # Don't validate single commits (squash-merge means we only
+          # care about the title).
+          validateSingleCommit: false

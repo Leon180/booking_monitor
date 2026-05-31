@@ -132,40 +132,81 @@ jobs:
         uses: sigstore/cosign-installer@v4.1.2
 
       # ------------------------------------------------------------------
+      # 2.5. Create GitHub Deployment (in_progress) EARLY — before
+      # digest/verify steps. MAJOR-M1 fix (review round 1): the
+      # previous order created the Deployment record AFTER all
+      # verification + just before deploy.sh. If digest lookup or
+      # attestation verify failed, no Deployment record existed, so
+      # the `if: failure()` step at the end skipped its update —
+      # leaving DORA-dashboard ingestion blind to the failure.
+      # Creating the record early makes every deploy attempt visible,
+      # including those that fail before reaching the VM.
+      # ------------------------------------------------------------------
+      - name: Create GitHub Deployment (in_progress)
+        id: gh_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # CRIT-C3 fix (PR 5 round 1): jq pipes JSON via --input - so
+        # `required_contexts: []` is a real empty array, not the
+        # string "[]". Empty array intentional — the job-level
+        # `environment: production` gates required reviewers / tag
+        # restrictions in the GH UI.
+        run: |
+          DEPLOYMENT_ID=$(jq -n \
+              --arg ref '${{ github.sha }}' \
+              --arg env 'production' \
+              --arg desc 'Deploy ${{ steps.tag.outputs.value }} (digest pending verification)' \
+              '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: [], production_environment: true}' \
+            | gh api -X POST "/repos/${{ github.repository }}/deployments" \
+                --input - --jq '.id')
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "✗ failed to create GitHub Deployment"
+            exit 3
+          fi
+          echo "id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          gh api -X POST "/repos/${{ github.repository }}/deployments/${DEPLOYMENT_ID}/statuses" \
+            -f state=in_progress \
+            -f description='Verifying image attestations' \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
+          echo "✓ Created deployment ${DEPLOYMENT_ID}"
+
+      # ------------------------------------------------------------------
       # 3. Resolve tag → immutable digest. Deploy by digest (not tag)
       # to avoid tag-mutation races; the same digest is what every
       # verifier checks against.
       # ------------------------------------------------------------------
       - name: Resolve image digest
         id: digest
-        # PR 6 added retry-with-backoff: this workflow + release.yml
-        # both trigger on `push: tags: ['v*']` and race. If deploy.yml
-        # starts before release.yml's image push finishes, the registry
-        # lookup 404s. release-please-tagged builds typically take
-        # 2-3 min in release.yml; 18 attempts × 10s = 3 min covers
-        # the 99th percentile. After that, the image really isn't
-        # there and we fail loud.
+        # PR 6 retry-with-backoff: this workflow + release.yml race
+        # on the same `push: tags: ['v*']` event. release.yml has
+        # TWO sequential jobs (build → attest); typical wall-clock
+        # 4-7 min (Trivy DB pull on cold runs can hit 7 min). 36
+        # attempts × 10s = 6 min covers P99 image-availability.
         #
-        # Industry-standard pattern per fact-check (Grafana, Cosign,
-        # HashiCorp providers): explicit polling beats `workflow_run`
-        # chaining, which has 3-40 min latency variance in production.
+        # CRIT-C1 fix (review round 1): the original 3-min budget
+        # was too tight — release.yml's BUILD job alone is 3-5 min;
+        # bump to 6 min to absorb tail-latency.
+        #
+        # NOTE: this step only waits for the IMAGE to be pushed.
+        # The ATTESTATION lands later in release.yml's attest job.
+        # Steps 4a/4b below have their own retry loops for that.
         run: |
           IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.value }}"
           DIGEST=""
-          for attempt in $(seq 1 18); do
+          for attempt in $(seq 1 36); do
             DIGEST=$(gcloud artifacts docker images describe "$IMAGE_REF" \
               --format='value(image_summary.digest)' 2>/dev/null) || DIGEST=""
             if [ -n "$DIGEST" ]; then
               echo "✓ ${IMAGE_REF} found at attempt ${attempt}"
               break
             fi
-            if [ "$attempt" = "18" ]; then
-              echo "✗ image not found in registry after 18 attempts (~3 min): $IMAGE_REF"
+            if [ "$attempt" = "36" ]; then
+              echo "✗ image not found in registry after 36 attempts (~6 min): $IMAGE_REF"
               echo "  Likely cause: release.yml (build+sign) failed or is taking unusually long."
               echo "  Check: gh run list --workflow=release.yml --limit=1"
               exit 2
             fi
-            echo "  attempt ${attempt}: image not yet published, retry in 10s..."
+            echo "  attempt ${attempt}/36: image not yet published, retry in 10s..."
             sleep 10
           done
           {
@@ -185,12 +226,33 @@ jobs:
       - name: Verify SLSA provenance (gh attestation verify)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # CRIT-C2 fix (review round 1): release.yml's attest job runs
+        # AFTER its build job, so the image is queryable (step 3 above
+        # succeeds) BEFORE the SLSA attestation is attached. Without a
+        # retry here, deploy.yml's first run after a release-please
+        # tag push fails with "no attestations found". 18 × 10s = 3 min
+        # is enough — GitHub's attestation store becomes queryable
+        # within seconds of `actions/attest-build-provenance` returning,
+        # so this loop only absorbs the gap between build job complete
+        # and attest job complete (1-2 min).
         run: |
-          gh attestation verify \
-            "oci://${{ steps.digest.outputs.by_digest }}" \
-            --repo "${{ github.repository }}" \
-            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml"
-          echo "✓ SLSA provenance verified via GitHub attestation store"
+          for attempt in $(seq 1 18); do
+            if gh attestation verify \
+                "oci://${{ steps.digest.outputs.by_digest }}" \
+                --repo "${{ github.repository }}" \
+                --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" 2>/tmp/att.err; then
+              echo "✓ SLSA provenance verified via GitHub attestation store (attempt ${attempt})"
+              break
+            fi
+            if [ "$attempt" = "18" ]; then
+              echo "✗ gh attestation verify failed after 18 attempts (~3 min)"
+              echo "  Last error:"
+              sed 's/^/    /' /tmp/att.err
+              exit 6
+            fi
+            echo "  attempt ${attempt}/18: attestation not yet queryable, retry in 10s..."
+            sleep 10
+          done
 
       # ------------------------------------------------------------------
       # 4b. Cross-check: cosign verify against the same Fulcio identity.
@@ -198,62 +260,49 @@ jobs:
       # tampered attestation store OR a tampered registry.
       # ------------------------------------------------------------------
       - name: Verify image signature (cosign cross-check)
-        # CRIT-C2 fix (review round 1): tighten `tags/v.*` to
+        # PR 5 review round 1 (CRIT-C2): tightened `tags/v.*` to
         # `tags/v[0-9][^/]*` so the regex rejects tag names containing
-        # `/`. Git allows slashes in tag refs (`v1.0.0/hotfix`), and the
-        # original `.*` would have accepted an attestation signed for
-        # such a maliciously-named tag. The `[0-9]` after `v` further
-        # narrows to standard semver shape (`v` immediately followed by
-        # a digit).
+        # `/` (git allows slashes in tag refs like `v1.0.0/hotfix`).
+        #
+        # PR 6 review round 1 (CRIT-C2 again, different race): cosign
+        # verify checks Rekor inclusion-proof by default. Rekor
+        # propagation after signing is 30s-2min. Retry-with-backoff
+        # absorbs that gap. 18 × 10s = 3 min, identical budget to the
+        # gh attestation verify step above (both wait on the same
+        # attest job's signing completion + Rekor publish).
         run: |
           IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][^/]*)$"
-          cosign verify \
-            --certificate-identity-regexp "$IDENTITY_REGEX" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ steps.digest.outputs.by_digest }}" > /dev/null
-          echo "✓ Image signature verified via cosign"
+          for attempt in $(seq 1 18); do
+            if cosign verify \
+                --certificate-identity-regexp "$IDENTITY_REGEX" \
+                --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                "${{ steps.digest.outputs.by_digest }}" > /dev/null 2>/tmp/cosign.err; then
+              echo "✓ Image signature verified via cosign (attempt ${attempt})"
+              break
+            fi
+            if [ "$attempt" = "18" ]; then
+              echo "✗ cosign verify failed after 18 attempts (~3 min)"
+              echo "  Last error:"
+              sed 's/^/    /' /tmp/cosign.err
+              exit 7
+            fi
+            echo "  attempt ${attempt}/18: signature/Rekor not yet ready, retry in 10s..."
+            sleep 10
+          done
 
       # ------------------------------------------------------------------
-      # 5. Create GitHub Deployment (state=in_progress).
-      # GitHub's Deployments API is the modern DORA-ready event log.
-      # PR 7's dashboard will read these via the same API. The id
-      # is captured so we can post a terminal status (success/failure)
-      # at the end of the job.
+      # 5. Update Deployment status — verification complete, deploying.
+      # (The Deployment record itself was created in step 2.5 — see
+      # MAJOR-M1 rationale there.)
       # ------------------------------------------------------------------
-      - name: Create GitHub Deployment (in_progress)
-        id: gh_deployment
+      - name: Update Deployment — verification complete
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # CRIT-C3 fix (review round 1): the previous `gh api -F
-        # 'required_contexts=[]'` sent the LITERAL STRING `"[]"`, not
-        # an empty JSON array — `gh api -F` only auto-types
-        # true/false/integer/null, anything else is a string. GitHub's
-        # Deployments API rejects with 422 `required_contexts is not an
-        # array`. Fix: pipe a JSON object via `--input -`, which uses
-        # the request body verbatim. Empty `required_contexts` here is
-        # deliberate — the workflow IS the gate (job-level `environment:
-        # production` enforces required reviewers + branch protection
-        # in the GH UI). If required STATUS-check contexts get added to
-        # the production environment later, replace `[]` with the
-        # check names (e.g. `["test (race)", "lint (golangci-lint)"]`).
         run: |
-          DEPLOYMENT_ID=$(jq -n \
-              --arg ref '${{ github.sha }}' \
-              --arg env 'production' \
-              --arg desc 'Release ${{ steps.tag.outputs.value }} (${{ steps.digest.outputs.digest }})' \
-              '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: [], production_environment: true}' \
-            | gh api -X POST "/repos/${{ github.repository }}/deployments" \
-                --input - --jq '.id')
-          if [ -z "$DEPLOYMENT_ID" ]; then
-            echo "✗ failed to create GitHub Deployment"
-            exit 3
-          fi
-          echo "id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
-          gh api -X POST "/repos/${{ github.repository }}/deployments/${DEPLOYMENT_ID}/statuses" \
+          gh api -X POST "/repos/${{ github.repository }}/deployments/${{ steps.gh_deployment.outputs.id }}/statuses" \
             -f state=in_progress \
-            -f description='Running deploy.sh on VM' \
+            -f description='Image verified (${{ steps.digest.outputs.digest }}); running deploy.sh on VM' \
             -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
-          echo "✓ Created deployment ${DEPLOYMENT_ID}"
 
       # ------------------------------------------------------------------
       # 6. Run the deploy script. Same script PR 4 ships for operators

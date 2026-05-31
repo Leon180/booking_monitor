@@ -30,11 +30,15 @@ on:
   # mid-release-PR, wanted a fresh proposal after a fixup landed).
   workflow_dispatch:
 
-# Cancel superseded release-please runs on rapid pushes — the bot
-# is idempotent so the latest run's PR state is authoritative.
+# Cancel superseded release-please runs on rapid pushes. release-please
+# is read-then-write over main's full history; the latest run subsumes
+# any earlier in-flight scan. Cancelling mid-run is safe (no partial
+# state — the bot fully recomputes the release PR each run). Switching
+# from cancel-in-progress: false to true (review round 1, MAJOR-M2)
+# eliminates the "missing status on rapidly-superseded commit" noise.
 concurrency:
   group: release-please-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -47,7 +51,10 @@ jobs:
     permissions:
       contents: write # create tags + push CHANGELOG/manifest commits
       pull-requests: write # open / update the release PR
-      issues: write # release-please can comment on linked issues
+      # `issues: write` was in v1; removed per review (MAJOR-M3): we
+      # don't configure issue-link-template / update-issue-on-release,
+      # so the bot never writes to issues. Drop = principle of least
+      # privilege; smaller OIDC blast radius.
     steps:
       # Pin by minor tag — v5.x is the major track that started in
       # April 2026 (Node runtime bump 20→24). Pinning to `@v5` (not
