@@ -179,7 +179,7 @@ jobs:
         # (sha-<7-char>), NOT the full 40-char sha. Otherwise Trivy
         # falls through to a remote pull of a non-existent tag and
         # the gate silently no-ops.
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
           format: table
