@@ -80,11 +80,14 @@ jobs:
     permissions:
       contents: read
       id-token: write # WIF auth + sigstore OIDC
-      # MINOR m1 fix (review round 1): `attestations: read` is not a
-      # token permission scope honored for GITHUB_TOKEN — `gh attestation
-      # verify` works with `contents: read` + the standard GH token.
-      # Removed to avoid misleading reviewers into thinking it gates
-      # access.
+      # `attestations: read` is REQUIRED for `gh attestation verify`.
+      # PR 5 review round 1 incorrectly removed this thinking it
+      # wasn't honored — first end-to-end run on v1.3.0 tag failed
+      # with "the provided token was denied access to the requested
+      # resource". Restored. See
+      # https://docs.github.com/en/actions/security-for-github-actions/
+      # security-guides/automatic-token-authentication
+      attestations: read
       deployments: write # GitHub Deployments API
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
