@@ -1,0 +1,332 @@
+# GitHub Actions deploy workflow — PR 5 of the 8-PR CI/CD roadmap.
+#
+# Triggers a deploy of a signed image to the GCE VM via IAP tunnel SSH.
+# Auth uses Workload Identity Federation (PR 1) — no long-lived
+# credentials in this workflow.
+#
+# Verification chain (defense in depth):
+#   1. `gh attestation verify` — canonical GitHub-native verifier
+#      for `actions/attest-build-provenance@v4` attestations
+#      (https://docs.github.com/actions/security-for-github-actions/
+#      using-artifact-attestations).
+#   2. `cosign verify` — cross-checks the image signature against
+#      the same identity-regex enforced in PR 3's release.yml smoke
+#      test + PR 4's deploy.sh. Both paths must agree.
+#   3. `scripts/deploy.sh` itself re-runs `cosign verify-attestation`
+#      before touching the VM — duplicated by design (different
+#      threat models: CI-side catches "image was never signed";
+#      deploy.sh catches "I'm being invoked with a forged digest").
+#
+# Deploy markers go to GitHub Deployments API (native, free, gives
+# repo "Deployments" tab + audit trail). PR 7 (DORA dashboard) will
+# pull from this. We deliberately do NOT use Prometheus Pushgateway
+# (Prometheus docs explicitly warn against using it as an event log)
+# or Grafana annotations (niche pattern, <5% production usage).
+#
+# Concurrency `cancel-in-progress: false` queues at most one
+# pending deploy. Rapid tag pushes (v1.0.1 → v1.0.2 → v1.0.3 while
+# v1.0.1 is mid-deploy) will deploy v1.0.3 directly; v1.0.2 is
+# dropped from the queue. SAFE for our golang-migrate forward-only
+# model — v1.0.3 includes v1.0.2's migrations. Document loud
+# rationale here so a reviewer doesn't "fix" it by switching to
+# `cancel-in-progress: true`.
+
+name: Deploy
+
+on:
+  # Tag-triggered: the canonical "ship to prod" decision. NOT
+  # `push: branches: [main]` — that conflates "merged" with
+  # "deployed" and breaks the audit story.
+  push:
+    tags: ["v*"]
+  # Manual hotfix lane — explicit image_tag input so the operator
+  # can deploy a previously-built digest without re-tagging.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. v1.0.0, sha-abc1234)"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# CRIT-C1 fix (review round 1): deploy.sh reads `$GCP_ARTIFACT_REGISTRY`
+# (not `$REGISTRY`). The workflow MUST export the same name, otherwise
+# deploy.sh silently falls back to its hardcoded default which may not
+# match the actual AR repo (region / repo-id drift between operator and
+# CI). Both names exposed: REGISTRY for in-workflow shell + GCP_ARTIFACT_
+# REGISTRY for the deploy.sh subshell.
+env:
+  GCP_ARTIFACT_REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
+  REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
+  IMAGE_NAME: booking-monitor
+
+jobs:
+  deploy:
+    name: deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `environment: production` gates the job on GH branch protection
+    # rules + optional required reviewers (set this up in the repo
+    # settings). Also surfaces in the Deployments tab UI.
+    environment:
+      name: production
+      url: https://${{ vars.PUBLIC_HOST }}/
+    permissions:
+      contents: read
+      id-token: write # WIF auth + sigstore OIDC
+      # MINOR m1 fix (review round 1): `attestations: read` is not a
+      # token permission scope honored for GITHUB_TOKEN — `gh attestation
+      # verify` works with `contents: read` + the standard GH token.
+      # Removed to avoid misleading reviewers into thinking it gates
+      # access.
+      deployments: write # GitHub Deployments API
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. Resolve which tag we're deploying.
+      # ------------------------------------------------------------------
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          # Sanity-check: tag must be non-empty and match SemVer (incl.
+          # pre-release + build metadata per semver.org) OR sha-<hex>
+          # pattern. MAJOR I1 fix (review round 1): the previous regex
+          # rejected `v1.0.0-rc1` / `v1.0.0+build.5`, which PR 3's
+          # release.yml DOES produce for dry-runs. Standard semver shape
+          # per https://semver.org §10.
+          if ! echo "$TAG" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?|sha-[a-f0-9]{7,40})$'; then
+            echo "✗ tag '$TAG' doesn't match v<semver>[-prerelease][+build] or sha-<hex7-40>"
+            exit 1
+          fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved deploy tag: $TAG"
+
+      # ------------------------------------------------------------------
+      # 2. Auth to GCP via WIF. Same pattern as release.yml — repo
+      # variables `GCP_WORKLOAD_IDENTITY_PROVIDER` + `GCP_CI_DEPLOY_SA`
+      # are set by PR 1's terraform.
+      # ------------------------------------------------------------------
+      - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_DEPLOY_SA }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
+      # ------------------------------------------------------------------
+      # 3. Resolve tag → immutable digest. Deploy by digest (not tag)
+      # to avoid tag-mutation races; the same digest is what every
+      # verifier checks against.
+      # ------------------------------------------------------------------
+      - name: Resolve image digest
+        id: digest
+        run: |
+          IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.value }}"
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE_REF" \
+            --format='value(image_summary.digest)' 2>/dev/null) || {
+              echo "✗ image not found in registry: $IMAGE_REF"
+              exit 2
+          }
+          {
+            echo "ref=$IMAGE_REF"
+            echo "digest=$DIGEST"
+            echo "by_digest=${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          } >> "$GITHUB_OUTPUT"
+          echo "✓ ${IMAGE_REF} → ${DIGEST}"
+
+      # ------------------------------------------------------------------
+      # 4a. Canonical verifier: gh attestation verify.
+      # `actions/attest-build-provenance@v4` stores attestations in
+      # GitHub's native store. `--signer-workflow` pins the producer
+      # workflow so a malicious push to `evil.yml` (with id-token:write)
+      # in the same repo can't forge a valid attestation.
+      # ------------------------------------------------------------------
+      - name: Verify SLSA provenance (gh attestation verify)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh attestation verify \
+            "oci://${{ steps.digest.outputs.by_digest }}" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/release.yml"
+          echo "✓ SLSA provenance verified via GitHub attestation store"
+
+      # ------------------------------------------------------------------
+      # 4b. Cross-check: cosign verify against the same Fulcio identity.
+      # Both verifiers must agree. If they diverge, abort — likely a
+      # tampered attestation store OR a tampered registry.
+      # ------------------------------------------------------------------
+      - name: Verify image signature (cosign cross-check)
+        # CRIT-C2 fix (review round 1): tighten `tags/v.*` to
+        # `tags/v[0-9][^/]*` so the regex rejects tag names containing
+        # `/`. Git allows slashes in tag refs (`v1.0.0/hotfix`), and the
+        # original `.*` would have accepted an attestation signed for
+        # such a maliciously-named tag. The `[0-9]` after `v` further
+        # narrows to standard semver shape (`v` immediately followed by
+        # a digit).
+        run: |
+          IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][^/]*)$"
+          cosign verify \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ steps.digest.outputs.by_digest }}" > /dev/null
+          echo "✓ Image signature verified via cosign"
+
+      # ------------------------------------------------------------------
+      # 5. Create GitHub Deployment (state=in_progress).
+      # GitHub's Deployments API is the modern DORA-ready event log.
+      # PR 7's dashboard will read these via the same API. The id
+      # is captured so we can post a terminal status (success/failure)
+      # at the end of the job.
+      # ------------------------------------------------------------------
+      - name: Create GitHub Deployment (in_progress)
+        id: gh_deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # CRIT-C3 fix (review round 1): the previous `gh api -F
+        # 'required_contexts=[]'` sent the LITERAL STRING `"[]"`, not
+        # an empty JSON array — `gh api -F` only auto-types
+        # true/false/integer/null, anything else is a string. GitHub's
+        # Deployments API rejects with 422 `required_contexts is not an
+        # array`. Fix: pipe a JSON object via `--input -`, which uses
+        # the request body verbatim. Empty `required_contexts` here is
+        # deliberate — the workflow IS the gate (job-level `environment:
+        # production` enforces required reviewers + branch protection
+        # in the GH UI). If required STATUS-check contexts get added to
+        # the production environment later, replace `[]` with the
+        # check names (e.g. `["test (race)", "lint (golangci-lint)"]`).
+        run: |
+          DEPLOYMENT_ID=$(jq -n \
+              --arg ref '${{ github.sha }}' \
+              --arg env 'production' \
+              --arg desc 'Release ${{ steps.tag.outputs.value }} (${{ steps.digest.outputs.digest }})' \
+              '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: [], production_environment: true}' \
+            | gh api -X POST "/repos/${{ github.repository }}/deployments" \
+                --input - --jq '.id')
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "✗ failed to create GitHub Deployment"
+            exit 3
+          fi
+          echo "id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+          gh api -X POST "/repos/${{ github.repository }}/deployments/${DEPLOYMENT_ID}/statuses" \
+            -f state=in_progress \
+            -f description='Running deploy.sh on VM' \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
+          echo "✓ Created deployment ${DEPLOYMENT_ID}"
+
+      # ------------------------------------------------------------------
+      # 6. Run the deploy script. Same script PR 4 ships for operators
+      # — we reuse it verbatim so CI + manual deploys stay identical.
+      # Env vars override deploy.sh's defaults to point at the actual
+      # project / zone / VM.
+      # ------------------------------------------------------------------
+      - name: Run deploy.sh
+        # MAJOR M2/I3 fix (review round 1): forward EVERY env var
+        # deploy.sh reads (not just PROJECT_ID/ZONE/VM_NAME). Without
+        # this, a fork or alt-deployment uses the script's hardcoded
+        # defaults (`/opt/booking-monitor`, Leon180's repo URL), silently
+        # diverging operator-mode and CI-mode behavior. Repo variables
+        # with `vars.*` fallback so callers don't need to set every one.
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          ZONE: ${{ vars.GCP_VM_ZONE }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          # GCP_ARTIFACT_REGISTRY already exported workflow-wide above.
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VM_PROJECT_DIR: ${{ vars.VM_PROJECT_DIR }}
+          REPO_URL: ${{ vars.REPO_URL }}
+        run: bash scripts/deploy.sh "${{ steps.tag.outputs.value }}"
+
+      # ------------------------------------------------------------------
+      # 7. External smoke test through Cloudflare Tunnel.
+      # CRITICAL: this hits the PUBLIC FQDN, not localhost on the VM.
+      # Catches cloudflared misconfig / tunnel cred / DNS issues that
+      # VM-local probes would miss.
+      # Retry with backoff because cloudflared can need a few seconds
+      # to bind the new container's healthcheck endpoint after restart.
+      # ------------------------------------------------------------------
+      - name: External smoke test (Cloudflare Tunnel → nginx → app)
+        # MAJOR I5 + m3 fix (review round 1):
+        #   * bump retry window 60s → 120s to match deploy.sh's
+        #     `docker compose up --wait --wait-timeout 120` — Kafka can
+        #     take ~30s to be consumer-ready after compose-up, PG ~10s
+        #     cold start, app waits on both via /readyz.
+        #   * on probe failure print the response body + HTTP status
+        #     (/readyz returns per-dep JSON, exactly the diagnostic
+        #     a runbook reader wants visible in the run log) instead
+        #     of swallowing it with `2>/dev/null`.
+        run: |
+          HOST="${{ vars.PUBLIC_HOST }}"
+          if [ -z "$HOST" ]; then
+            echo "✗ PUBLIC_HOST repo variable not set"
+            exit 4
+          fi
+          for attempt in $(seq 1 60); do
+            HTTP_STATUS=$(curl -sS --max-time 5 -o /tmp/readyz.body -w '%{http_code}' \
+                          "https://${HOST}/readyz" || echo 000)
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✓ /readyz returned 200 (attempt ${attempt})"
+              break
+            fi
+            if [ "$attempt" = "60" ]; then
+              echo "✗ /readyz never returned 200 after 60 attempts (~120s)"
+              echo "  last HTTP status: $HTTP_STATUS"
+              echo "  last response body:"
+              sed 's/^/    /' /tmp/readyz.body
+              exit 5
+            fi
+            sleep 2
+          done
+          # Sanity-print /livez too — distinct probe semantics
+          curl -fsS --max-time 5 "https://${HOST}/livez" > /dev/null
+          echo "✓ /livez returned 200"
+
+      # ------------------------------------------------------------------
+      # 8a. Mark deployment success.
+      # ------------------------------------------------------------------
+      - name: Mark deployment success
+        if: success() && steps.gh_deployment.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "/repos/${{ github.repository }}/deployments/${{ steps.gh_deployment.outputs.id }}/statuses" \
+            -f state=success \
+            -f description="Deployed ${{ steps.tag.outputs.value }} (${{ steps.digest.outputs.digest }})" \
+            -f environment_url="https://${{ vars.PUBLIC_HOST }}/" \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
+          echo "✓ Marked deployment ${{ steps.gh_deployment.outputs.id }} success"
+
+      # ------------------------------------------------------------------
+      # 8b. Mark deployment failure (any failure in steps 6/7).
+      # `if: failure()` runs only when an earlier step failed; combined
+      # with the id guard so we don't post-status to a non-existent
+      # deployment (e.g. if step 5 itself failed).
+      # ------------------------------------------------------------------
+      - name: Mark deployment failure
+        if: failure() && steps.gh_deployment.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "/repos/${{ github.repository }}/deployments/${{ steps.gh_deployment.outputs.id }}/statuses" \
+            -f state=failure \
+            -f description="Deploy failed — see workflow logs" \
+            -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
+          echo "✓ Marked deployment ${{ steps.gh_deployment.outputs.id }} failure"

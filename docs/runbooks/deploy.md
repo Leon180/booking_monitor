@@ -53,10 +53,16 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="user:$USER_EMAIL" \
   --role="roles/iap.tunnelResourceAccessor"
 
-# OS Login on the project (PR 1's compute.tf sets enable-oslogin=TRUE)
+# OS Login + sudo on the project (PR 1's compute.tf sets enable-oslogin=TRUE)
+# `osAdminLogin` (sudo) NOT `osLogin` (no sudo) — deploy.sh's docker
+# commands run as the OS Login user, who is NOT in the docker group
+# (cloud-init doesn't gpasswd ephemeral OS Login users). Without sudo,
+# `docker pull` fails with "permission denied on /var/run/docker.sock"
+# at step 5. See deploy/terraform/workload_identity.tf for the same
+# rationale applied to the CI SA.
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="user:$USER_EMAIL" \
-  --role="roles/compute.osLogin"
+  --role="roles/compute.osAdminLogin"
 
 # Read Artifact Registry (deploy.sh step 0 calls `gcloud artifacts docker images describe`)
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -70,7 +76,7 @@ gcloud iam service-accounts add-iam-policy-binding \
   --role="roles/iam.serviceAccountTokenCreator"
 ```
 
-> Note: `roles/artifactregistry.reader` and `roles/compute.osLogin` were missed in PR 4 v1 — caught in 3-agent review. Without them, first deploy fails at step 0 with a confusing `PERMISSION_DENIED` on `artifacts docker images describe`.
+> Note: PR 4 v1 missed `roles/artifactregistry.reader` and `roles/compute.osLogin`. PR 5 upgraded `osLogin` → `osAdminLogin` because deploy.sh's docker commands need passwordless sudo (OS Login users aren't in the `docker` group). Without `osAdminLogin`, step 5 fails with "permission denied on `/var/run/docker.sock`".
 
 ### 3. Cloudflare Tunnel set up on the VM
 
@@ -267,11 +273,84 @@ gcloud compute ssh booking-app --zone=us-central1-a --tunnel-through-iap \
 | Secret value compromised at fetch time | Logs print secret name + byte count, NOT value. `/opt/booking-monitor/.env` is mode 600 owned by root. Docker reads via `env_file:` — values never appear in image layers. |
 | Migration breaks something irreversibly | Forward-only convention + we run migrations BEFORE pulling new image. If migration fails, old container with old schema keeps running. (Caveat: if migration succeeds but introduces a schema-breaking change for the OLD code, you've created an outage that rollback can't fix. Write migrations to be backward-compatible with the previous release.) |
 | New image health-checks pass but app is broken in subtle ways | Out of scope for this deploy script — that's what observability (PR 7) catches. |
-| Deploy script itself compromised | Yes, fully. `deploy.sh` runs on operator machine, can be tampered with. PR 5 wraps this in `google-github-actions/ssh-compute@v2` for the CI-driven path, where the script lives in a GH-managed isolated runner. |
+| Deploy script itself compromised | Operator path: `deploy.sh` runs on the operator machine; tampering possible if the operator's box is compromised. CI path (PR 5, [.github/workflows/deploy.yml](../../.github/workflows/deploy.yml)): the same script lives in a GH-managed ephemeral runner. Only `main` push + version tags can impersonate the deploy SA (PR 1 WIF trust policy), and the runner is destroyed after every job. |
 
-## What's deferred (PR 5+)
+## CI-driven deploy (PR 5)
 
-- **CI-triggered deploy**: PR 5 wires this into `.github/workflows/deploy.yml` using `google-github-actions/ssh-compute@v2`. Operator no longer SSHes; deploys happen on tag push.
+The same `deploy.sh` runs in two modes:
+
+| Mode | Runs from | Auth | Used by |
+| --- | --- | --- | --- |
+| **Operator** | Your laptop | `gcloud auth` ADC + osAdminLogin role | Bootstrap, manual hotfixes pre-CI, breakglass |
+| **CI** ([.github/workflows/deploy.yml](../../.github/workflows/deploy.yml)) | GH-hosted ubuntu-latest runner | WIF OIDC → impersonate `sa-ci-deploy` (ephemeral 1h token) | Every `v*` tag push + `workflow_dispatch` hotfix |
+
+### Required GitHub repo variables
+
+The CI workflow needs these set in **Settings → Secrets and variables → Actions → Variables**:
+
+| Variable | Example value | Source |
+| --- | --- | --- |
+| `GCP_ARTIFACT_REGISTRY` | `us-central1-docker.pkg.dev/booking-monitor-sandbox/booking` | `terraform output artifact_registry_url` |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/123456789/locations/global/workloadIdentityPools/github-pool/providers/github-provider` | `terraform output workload_identity_provider` |
+| `GCP_CI_DEPLOY_SA` | `sa-ci-deploy@booking-monitor-sandbox.iam.gserviceaccount.com` | `terraform output ci_deploy_sa_email` |
+| `GCP_PROJECT_ID` | `booking-monitor-sandbox` | Your project ID |
+| `GCP_VM_ZONE` | `us-central1-a` | `terraform output vm_zone` |
+| `GCP_VM_NAME` | `booking-app` | `terraform output vm_name` |
+| `PUBLIC_HOST` | `booking.example.com` | Cloudflare DNS for the tunnel target |
+| `VM_PROJECT_DIR` (optional) | `/opt/booking-monitor` | Override if VM uses non-default path |
+| `REPO_URL` (optional) | `https://github.com/Leon180/booking_monitor.git` | Override for forks |
+
+Set via gcloud + gh CLI in one shot after PR 1's terraform apply:
+
+```bash
+cd deploy/terraform
+gh variable set GCP_ARTIFACT_REGISTRY        --body "$(terraform output -raw artifact_registry_url)"
+gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --body "$(terraform output -raw workload_identity_provider)"
+gh variable set GCP_CI_DEPLOY_SA              --body "$(terraform output -raw ci_deploy_sa_email)"
+gh variable set GCP_PROJECT_ID                --body "$(terraform output -raw project_id)"
+gh variable set GCP_VM_ZONE                   --body "$(terraform output -raw vm_zone)"
+gh variable set GCP_VM_NAME                   --body "$(terraform output -raw vm_name)"
+# Cloudflare hostname is NOT a terraform output — set after `cloudflared.service` is up
+gh variable set PUBLIC_HOST --body "booking.your-domain.example.com"
+```
+
+### Required: configure the `production` GitHub Environment
+
+The deploy workflow has `environment: production` at the job level. GitHub's Environment-protection settings are what gate manual-dispatch hotfixes — without them, anyone with `Write` on the repo can deploy any image digest. This is **not** an automatic side effect of the workflow; you must configure it once in the GH UI.
+
+1. Repo **Settings → Environments → New environment** → name it `production` exactly.
+2. Under **Deployment branches and tags**:
+   - Switch from "All branches" to "Selected branches and tags"
+   - Add rule: `v*` (matches `v1.0.0`, `v1.2.3-rc1`, etc.)
+   - Optionally also add: `main` (for `workflow_dispatch` hotfixes by digest)
+3. Under **Required reviewers**: add at least one reviewer (yourself + a teammate, or a security/SRE group). Without this, `workflow_dispatch` deploys execute immediately with no human approval gate.
+4. Under **Wait timer**: optional, sets a delay between approval and actual deploy. Useful for production change windows.
+
+Without these settings, the workflow still runs — it just isn't gated. If you're trying out the pipeline solo, that's fine. If you're shipping for real, the GH Environment is the auditable approval boundary.
+
+### Triggering a deploy
+
+- **Normal**: push a `v*` tag (e.g. `git tag v1.0.1 && git push --tags`). The workflow auto-runs after `release.yml` finishes producing the signed image.
+- **Hotfix**: GitHub UI → Actions → Deploy → "Run workflow" → fill `image_tag` (e.g. `v1.0.0` to redeploy, or `sha-abc1234` to deploy a previously-built non-tag digest). Subject to `production` environment's required-reviewer gate.
+
+### Verifying a deploy ran
+
+- GitHub UI: **Deployments** tab on the repo home page shows every deploy with state + commit SHA + log link.
+- Programmatic: `gh api /repos/Leon180/booking_monitor/deployments?environment=production | jq '.[0]'`
+- PR 7's DORA dashboard reads this same API.
+
+### Concurrency behaviour
+
+The workflow uses `concurrency: group: deploy-production, cancel-in-progress: false`. This means:
+
+- One deploy at a time.
+- A second tag pushed mid-deploy queues behind the active one.
+- A **third** tag pushed pushes the second out of the queue — only the most-recent queued tag actually deploys.
+
+This is safe for our `golang-migrate` forward-only model: `v1.0.3` includes all `v1.0.2`'s migrations + code. Releases skipped this way still satisfy "every released change reaches prod" — they just batch. Document tag-skipped behaviour in release notes ("v1.0.3 includes v1.0.2 changes").
+
+## What's deferred (PR 6+)
+
 - **Blue-green / canary**: docker-compose has no native support; will be a PR 8 (k8s migration) item.
-- **Deploy markers in Prometheus**: PR 7 (DORA dashboard) adds annotations on the existing Grafana boards.
-- **Cosign `--insecure-ignore-tlog` gotcha**: PR 3's release.yml smoke test uses this flag to dodge Rekor inclusion-proof propagation race. The operator-side `deploy.sh` does NOT — Rekor lookup is the real trust gate.
+- **DORA dashboard**: PR 7 reads GitHub Deployments API + adds Grafana annotations.
+- **Cosign `--insecure-ignore-tlog` gotcha**: PR 3's release.yml smoke test uses this flag to dodge Rekor inclusion-proof propagation race. Neither the operator path nor the CI path uses it — Rekor lookup is the real trust gate post-publish.

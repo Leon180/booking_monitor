@@ -191,7 +191,7 @@ CVE-2026-XXXXX
 
 ## Threat model — gaps (covered by later PRs)
 
-- Image signing identity verification at deploy time → PR 5 (CD workflow `cosign verify` gate)
+- ~~Image signing identity verification at deploy time~~ → **closed by PR 5** ([.github/workflows/deploy.yml](../../.github/workflows/deploy.yml)) — verifies via both `gh attestation verify` (canonical GitHub-native path) AND `cosign verify` (cross-check) before SSH-ing into the VM. See [`deploy.md` § CI-driven deploy](deploy.md#ci-driven-deploy-pr-5).
 - Cosign signature replication to mirror for offline verify → not planned
 - Trivy ignore-file rot detection (entries that should have been removed) → not planned; manual review
 
