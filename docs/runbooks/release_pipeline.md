@@ -140,6 +140,104 @@ Every push to `main` automatically:
 
 Every push of a `v*.*.*` tag adds `:<version>` + `:latest` tags (in addition to the sha tag).
 
+## Cutting a release with release-please (PR 6)
+
+Why release-please vs hand-tagging: release-please derives the next SemVer from commit history (no human guessing PATCH vs MINOR vs MAJOR), keeps CHANGELOG in lockstep, and creates the GH Release in one merge. The author of every PR signals intent via the PR title (`feat:` / `fix:` / `BREAKING CHANGE:`); the bot composes the release.
+
+Day-to-day, you don't manually tag. Workflow:
+
+1. **Write PRs with [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) titles.** Squash-merge means only the PR title becomes the commit on `main`, so only the title needs to parse. [.github/workflows/pr-title-check.yml](../../.github/workflows/pr-title-check.yml) blocks merge on non-conformant titles via `amannn/action-semantic-pull-request@v5`.
+
+   Bump mapping:
+   - `feat(api): add /events search endpoint` → **MINOR** (new functionality, backward-compat)
+   - `fix(sse): prevent goroutine leak on client disconnect` → **PATCH** (bug fix)
+   - `perf(worker): batch Redis pipeline reads` → **PATCH** + appears under "Performance" CHANGELOG section
+   - `refactor(api): split bookings handler` → **PATCH** + appears under "Refactoring"
+   - `revert(api): revert /events search endpoint` → **PATCH** + appears under "Reverts"
+   - **MAJOR** has two equivalent triggers, EITHER is sufficient (not both required):
+     - `feat(api)!: remove POST /book legacy endpoint` (the `!` after the scope)
+     - OR a `BREAKING CHANGE: callers of /book get 410 Gone` footer in the body
+   - `chore(deps): bump golangci-lint to v2.5.0` → no bump, hidden from CHANGELOG
+   - `docs(monitoring): add SSE alert recipe` → no bump, hidden
+
+   What counts as breaking is a real engineering call: env var rename = breaking (operator setup changes), Docker base image bump = chore, metric label change = NOT breaking (old scrapers still work, new label is ignored), removing an HTTP endpoint = breaking.
+
+2. **The release-please bot opens or updates a release PR after every push to main.** Title is `chore(release): release vX.Y.Z`, body shows the proposed CHANGELOG diff. The PR stays open and accumulates commits until you merge it.
+
+3. **When you're ready to ship, review + merge the release PR.** release-please then:
+   - Squashes the release PR onto `main` (the CHANGELOG.md + `.release-please-manifest.json` updates)
+   - Creates the `vX.Y.Z` git tag pointing at the merge commit
+   - Creates a GitHub Release with the CHANGELOG body
+
+4. **The tag push fires release.yml + deploy.yml in parallel.** Both watch `push: tags: ['v*']`:
+   - `release.yml` builds + signs + pushes the image to AR + attests provenance + SBOM (~4-7 min total: build job 3-5 min, attest job 1-2 min)
+   - `deploy.yml` resolves the digest + verifies attestation + deploys to the VM. Has three retry-with-backoff loops (digest lookup ×36 = 6 min, gh attestation verify ×18 = 3 min, cosign verify ×18 = 3 min) to absorb race-with-release.yml.
+
+   This parallel-fan-out + explicit-polling pattern is what real production teams use (verified against [Grafana release-build.yml](https://github.com/grafana/grafana/blob/main/.github/workflows/release-build.yml), [Cosign github-oidc.yaml](https://github.com/sigstore/cosign/blob/main/.github/workflows/github-oidc.yaml), HashiCorp providers). `workflow_run` chaining has 3-40 min latency variance and is actively avoided.
+
+5. **Verify the release worked.** Quick smoke after the workflow runs go green:
+
+   ```bash
+   gh release view v1.2.0                                       # CHANGELOG body rendered
+   gh run list --workflow=release.yml --limit 1                 # build/sign green
+   gh run list --workflow=deploy.yml --limit 1                  # deploy green
+   gh api /repos/Leon180/booking_monitor/deployments?environment=production --jq '.[0].statuses_url' | xargs gh api | jq '.[0].state'  # → "success"
+   make verify-image VERIFY_IMAGE=$(gh api /repos/Leon180/booking_monitor/releases/tags/v1.2.0 --jq '.body' | grep -oP 'digest: \K[^ ]+' | head -1)
+   curl -fsS "https://${PUBLIC_HOST}/livez" && curl -fsS "https://${PUBLIC_HOST}/readyz"
+   ```
+
+### Helping yourself write Conventional titles
+
+- **VSCode**: install the "Conventional Commits" extension (vivaxy) for guided PR title composition
+- **GH Action**: [.github/workflows/pr-title-check.yml](../../.github/workflows/pr-title-check.yml) blocks merge on non-conformant titles
+- **Reference**: keep the bump-mapping table above bookmarked while learning the conventions
+
+### What if the release PR is wrong?
+
+- **Wrong version**: edit `.release-please-manifest.json` on the release PR branch (the bot's branch is `release-please--branches--main`). Push the edit; bot reconciles on next push.
+- **Wrong CHANGELOG entry on the bot's branch**: directly edit `CHANGELOG.md` on the release PR branch. The bot preserves edits to its OWN branch between runs. (It does NOT preserve edits made to `main` directly — only its branch.)
+- **Don't want to release yet**: leave the PR open. It accumulates further commits until you're ready.
+- **Want a different commit to be the bump trigger**: not directly supported; close the PR + push a commit with the right Conventional type, bot opens a fresh PR.
+
+### Pre-release tags (`v1.0.0-rc1`)
+
+Manually edit `.release-please-manifest.json` on the release PR branch to `"1.0.0-rc1"`. The bot tags it that way on merge. `deploy.yml`'s tag regex accepts SemVer pre-release + build metadata (`v1.0.0-rc1`, `v1.0.0+build.5`).
+
+### `[Unreleased]` section gotcha
+
+Our `CHANGELOG.md` keeps an `## [Unreleased]` section at the top (per [Keep a Changelog](https://keepachangelog.com/) convention) listing post-v1.1.0 deferred items. **release-please does NOT understand the `[Unreleased]` convention**. After every release-please run, the new `## [X.Y.Z]` entry is prepended above the existing content, pushing `[Unreleased]` DOWN below the new release entry. This inverts the Keep-a-Changelog ordering.
+
+**Operator action required after every release PR merge**: manually edit `CHANGELOG.md` on `main` to move the `[Unreleased]` section back to the top, above the new `[X.Y.Z]` entry. This is a 30-second edit, but it's necessary or the changelog progressively decays.
+
+Long-term alternatives (not adopted yet, tracked here):
+- Drop `[Unreleased]` from CHANGELOG entirely, track post-release items as GH Issues with a `deferred` label
+- Use release-please's [sentinel-comment pattern](https://github.com/googleapis/release-please/blob/main/docs/customizing.md) to anchor where entries get inserted
+
+### Release-please limitation: GITHUB_TOKEN can't trigger sibling workflows
+
+When the release PR merge tags `v1.2.0`, the **tag push event** is created by `${{ secrets.GITHUB_TOKEN }}`. Per [GitHub Actions docs](https://docs.github.com/en/actions/concepts/security/github_token): *"events triggered by the GITHUB_TOKEN will not create a new workflow run."* This is a token-identity restriction (any event from the GH-Actions token is silently dropped from sibling-workflow triggering). So `release.yml` + `deploy.yml` won't auto-fire on the bot's tag push.
+
+Three workarounds, in order of how well they scale:
+
+1. **GitHub App installation token** (recommended in 2026) — install a GH App with `contents: write` + `pull-requests: write` + `actions: write`, use `actions/create-github-app-token@v1` to mint a short-lived token in the workflow, pass that as `token:` to release-please-action. No 90-day rotation, auditable, scoped. Setup is one-time + ~10 lines of YAML. [GH Apps docs](https://docs.github.com/en/apps).
+
+2. **Personal Access Token (PAT)** — fine-grained PAT scoped to this repo, with `contents: write` + `pull-requests: write` + `workflows: write`. Stored as `RELEASE_PLEASE_PAT` secret. Rotate every 90 days (calendar entry recommended). Quicker setup than a GH App, higher long-term cost.
+
+3. **Operator manual tag re-push** — for the period before GH App / PAT is provisioned. After the release PR merges (and tags v1.2.0 silently), the operator runs:
+   ```bash
+   git fetch --tags
+   git push origin v1.2.0    # re-pushes the same tag; authenticated as YOU, not the bot
+   ```
+   **Do NOT use `--force` / `--force-with-lease`** — the tag already points at the right commit, no force needed. This is a workaround until #1 or #2 is set up, not a long-term pattern.
+
+### v1.1.0 retroactive tag (one-time setup migration — DO NOT REPEAT)
+
+PR 6 setup tagged `v1.1.0` retroactively at PR #118's merge commit (`32c78e4`) because the CHANGELOG had documented this release but the git tag was missed at close-out. The manifest entry `{".":"1.1.0"}` is what anchors release-please's "starting point"; `bootstrap-sha` is a fallback for projects without a manifest entry (verifiable via [release-please's manifest-releaser docs](https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md)).
+
+**This was a one-time bootstrap migration. Future versions MUST be tagged exclusively by the release-please bot — never run `git tag -a v*` by hand again.** Hand-tagging breaks the bot's accounting and produces tag/CHANGELOG drift like the one we just spent PR 6 cleaning up.
+
+First release-please run will propose `v1.2.0` (because there are `feat:` commits in PRs #132-#137) or `v1.1.1` (if only `fix:` commits parse since v1.1.0). The bot logs unparseable commit subjects and continues — non-Conventional historical commits don't break the run, they just don't contribute to bump computation.
+
 ## Verify any image — `make verify-image`
 
 ```bash
