@@ -1,0 +1,100 @@
+# booking_monitor Go application Deployment.
+#
+# Resource requests: 0.5 vCPU + 512Mi RAM. Per GKE Autopilot pricing
+# (us-central1, 2026-06): (0.5 × $0.0445 + 0.5 × $0.0049) × 730h ≈
+# $19.65/month for one replica.
+#
+# Probes mirror the docker-compose healthcheck. /livez is always 200
+# if the process is up; /readyz is 200 only if PG + Redis + Kafka all
+# answer. Same semantics as PR 1-5 VM deploys.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-monitor
+  namespace: booking-monitor
+  labels:
+    app.kubernetes.io/name: booking-monitor
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: booking-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: booking-monitor
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: booking-monitor
+      containers:
+        - name: app
+          # REPLACE <REGION>-docker.pkg.dev/<PROJECT_ID>/<REPO>/booking-monitor:<TAG>
+          # with the actual image URI. ArgoCD ApplicationSet will pin
+          # this to the latest release-please tag in a future PR.
+          image: <REGION>-docker.pkg.dev/<PROJECT_ID>/booking/booking-monitor:v1.3.1
+          imagePullPolicy: IfNotPresent
+          command: ["/app/booking-cli", "server"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              # Autopilot enforces `requests == limits` for QoS class
+              # Guaranteed. Keeping them equal also makes pricing
+              # predictable.
+              cpu: 500m
+              memory: 512Mi
+          # Env from a ConfigMap (non-secret) + secret volumes (CSI).
+          # Secrets are mounted at /var/secrets/ — see secrets-csi.yaml.
+          envFrom:
+            - configMapRef:
+                name: booking-monitor-config
+          env:
+            # Read secret values from the CSI mount points.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: booking-monitor-secrets-synced
+                  key: database-url
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: booking-monitor-secrets-synced
+                  key: redis-password
+            - name: PAYMENT_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: booking-monitor-secrets-synced
+                  key: payment-webhook-secret
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /var/secrets
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: booking-monitor-secrets
