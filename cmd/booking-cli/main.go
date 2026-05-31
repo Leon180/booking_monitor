@@ -92,7 +92,24 @@ func main() {
 	adminTokenCmd.Flags().String("user", "", "Ops user identifier (e.g., ops-leon) — required")
 	adminTokenCmd.Flags().Duration("ttl", 30*time.Minute, "Token lifetime (must be ≤ server's ADMIN_STREAM_JWT_MAX_TTL)")
 
-	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd, adminTokenCmd, newVersionCmd())
+	doraCmd := &cobra.Command{
+		Use:   "dora",
+		Short: "Generate the DORA metrics report (docs/dora.md) from GitHub APIs",
+		Long: `Pulls deployments + releases + commits from the GitHub REST API,
+computes the 5 DORA metrics (Deployment Frequency, Lead Time for Changes,
+Failed Deployment Recovery Time, Change Failure Rate, Deployment Rework
+Rate), and writes the rendered markdown to --output.
+
+Driven by .github/workflows/dora.yml on daily cron + commit-back-to-repo.
+Locally: GITHUB_TOKEN=$(gh auth token) booking-cli dora --dry-run`,
+		Run: runDora,
+	}
+	doraCmd.Flags().String("output", "docs/dora.md", "Path to write the markdown report")
+	doraCmd.Flags().Int("days", 90, "Rolling window in days")
+	doraCmd.Flags().String("repo", "Leon180/booking_monitor", "GitHub repo in owner/name form")
+	doraCmd.Flags().Bool("dry-run", false, "Print report to stdout instead of writing the file")
+
+	rootCmd.AddCommand(serverCmd, stressCmd, reconCmd, sagaWatchdogCmd, expirySweeperCmd, adminTokenCmd, doraCmd, newVersionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
