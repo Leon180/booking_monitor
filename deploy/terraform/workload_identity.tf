@@ -161,23 +161,47 @@ resource "google_project_iam_member" "ci_deploy_iap_tunnel" {
 # OS Login creates a fresh Linux user dynamically on first SSH; that
 # user is NOT in the `docker` group on the VM, so `docker pull` and
 # `docker compose up` in deploy.sh would fail with "permission denied
-# on /var/run/docker.sock". Three honest paths exist:
+# on /var/run/docker.sock". Honest paths considered:
 #   (a) osAdminLogin → `sudo docker ...` works directly        ← chosen
 #   (b) osLogin + cloud-init PAM hook to auto-add new OS Login
 #       users to `docker` group  (niche, hard to test)
 #   (c) Docker rootless mode      (broad refactor, breaks PR 1+2)
+#   (d) osLogin + /etc/sudoers.d/booking-deploy allowlist pinning the
+#       SA to a closed set of binaries (docker, git, bash secrets_sync)
+#       — TIGHTER than (a) for least-privilege; deferred for PR-scope
+#       management (deploy.sh uses ~6 distinct sudo command shapes
+#       today, all would need pinning + drift discipline).
 # The trust boundary that matters is the WIF trust policy: only
 # `attribute.deploy_eligible/yes` (main push or tag) can impersonate
 # this SA. Linux sudo on the VM is downstream of that gate, so
-# granting it here doesn't expand the threat model meaningfully.
+# granting it here doesn't expand the threat model meaningfully —
+# *for the startup / portfolio-project tier we're targeting*. Regulated
+# / audit-bound shops should prefer (d) or move to GKE entirely so
+# this whole class of role disappears.
 #
-# This pattern (CD agent with sudo via osAdminLogin) is the standard
-# choice in production GCP + GHA + VM deploys because OS Login users
-# are ephemeral and group membership cannot be statically configured.
 # If we ever pivot to k8s (PR 8), this role goes away — the CD agent
 # would auth to the cluster API instead of SSHing into a Linux box.
 resource "google_project_iam_member" "ci_deploy_os_admin_login" {
   project = local.project_id
   role    = "roles/compute.osAdminLogin"
   member  = "serviceAccount:${google_service_account.ci_deploy.email}"
+}
+
+# CRIT-C4 (review round 1, terraform agent): the deploy SA SSHs into a
+# VM that runs as `sa-app-runtime`. `gcloud compute ssh` to a VM with
+# an attached service account requires `iam.serviceAccounts.actAs` on
+# THAT runtime SA — the SSH operation is treated as "starting a process
+# as the VM's SA identity" (the Google Guest Agent uses actAs to drop
+# privileges to the runtime SA's context for OS Login user lookups).
+# Without it, first deploy fails with
+#   PERMISSION_DENIED: ... does not have actAs permission on
+#   sa-app-runtime@<project>.iam.gserviceaccount.com
+#
+# `_iam_member` (non-authoritative) so this composes with any other
+# actAs grants made later (operator user impersonating, k8s WI when
+# we eventually pivot). Matches the project convention.
+resource "google_service_account_iam_member" "ci_deploy_actas_app_runtime" {
+  service_account_id = google_service_account.app_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.ci_deploy.email}"
 }

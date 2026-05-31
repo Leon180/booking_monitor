@@ -297,6 +297,8 @@ The CI workflow needs these set in **Settings → Secrets and variables → Acti
 | `GCP_VM_ZONE` | `us-central1-a` | `terraform output vm_zone` |
 | `GCP_VM_NAME` | `booking-app` | `terraform output vm_name` |
 | `PUBLIC_HOST` | `booking.example.com` | Cloudflare DNS for the tunnel target |
+| `VM_PROJECT_DIR` (optional) | `/opt/booking-monitor` | Override if VM uses non-default path |
+| `REPO_URL` (optional) | `https://github.com/Leon180/booking_monitor.git` | Override for forks |
 
 Set via gcloud + gh CLI in one shot after PR 1's terraform apply:
 
@@ -312,10 +314,24 @@ gh variable set GCP_VM_NAME                   --body "$(terraform output -raw vm
 gh variable set PUBLIC_HOST --body "booking.your-domain.example.com"
 ```
 
+### Required: configure the `production` GitHub Environment
+
+The deploy workflow has `environment: production` at the job level. GitHub's Environment-protection settings are what gate manual-dispatch hotfixes — without them, anyone with `Write` on the repo can deploy any image digest. This is **not** an automatic side effect of the workflow; you must configure it once in the GH UI.
+
+1. Repo **Settings → Environments → New environment** → name it `production` exactly.
+2. Under **Deployment branches and tags**:
+   - Switch from "All branches" to "Selected branches and tags"
+   - Add rule: `v*` (matches `v1.0.0`, `v1.2.3-rc1`, etc.)
+   - Optionally also add: `main` (for `workflow_dispatch` hotfixes by digest)
+3. Under **Required reviewers**: add at least one reviewer (yourself + a teammate, or a security/SRE group). Without this, `workflow_dispatch` deploys execute immediately with no human approval gate.
+4. Under **Wait timer**: optional, sets a delay between approval and actual deploy. Useful for production change windows.
+
+Without these settings, the workflow still runs — it just isn't gated. If you're trying out the pipeline solo, that's fine. If you're shipping for real, the GH Environment is the auditable approval boundary.
+
 ### Triggering a deploy
 
 - **Normal**: push a `v*` tag (e.g. `git tag v1.0.1 && git push --tags`). The workflow auto-runs after `release.yml` finishes producing the signed image.
-- **Hotfix**: GitHub UI → Actions → Deploy → "Run workflow" → fill `image_tag` (e.g. `v1.0.0` to redeploy, or `sha-abc1234` to deploy a previously-built non-tag digest).
+- **Hotfix**: GitHub UI → Actions → Deploy → "Run workflow" → fill `image_tag` (e.g. `v1.0.0` to redeploy, or `sha-abc1234` to deploy a previously-built non-tag digest). Subject to `production` environment's required-reviewer gate.
 
 ### Verifying a deploy ran
 

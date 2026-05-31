@@ -55,7 +55,14 @@ concurrency:
 permissions:
   contents: read
 
+# CRIT-C1 fix (review round 1): deploy.sh reads `$GCP_ARTIFACT_REGISTRY`
+# (not `$REGISTRY`). The workflow MUST export the same name, otherwise
+# deploy.sh silently falls back to its hardcoded default which may not
+# match the actual AR repo (region / repo-id drift between operator and
+# CI). Both names exposed: REGISTRY for in-workflow shell + GCP_ARTIFACT_
+# REGISTRY for the deploy.sh subshell.
 env:
+  GCP_ARTIFACT_REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
   REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
   IMAGE_NAME: booking-monitor
 
@@ -73,7 +80,11 @@ jobs:
     permissions:
       contents: read
       id-token: write # WIF auth + sigstore OIDC
-      attestations: read # gh attestation verify
+      # MINOR m1 fix (review round 1): `attestations: read` is not a
+      # token permission scope honored for GITHUB_TOKEN — `gh attestation
+      # verify` works with `contents: read` + the standard GH token.
+      # Removed to avoid misleading reviewers into thinking it gates
+      # access.
       deployments: write # GitHub Deployments API
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
@@ -92,10 +103,14 @@ jobs:
           else
             TAG="${GITHUB_REF#refs/tags/}"
           fi
-          # Sanity-check: tag must be non-empty and match semver-ish
-          # OR sha-* pattern. Same shape PR 3's release.yml enforces.
-          if ! echo "$TAG" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+|sha-[a-f0-9]{7,40})$'; then
-            echo "✗ tag '$TAG' doesn't match v<semver> or sha-<hex>"
+          # Sanity-check: tag must be non-empty and match SemVer (incl.
+          # pre-release + build metadata per semver.org) OR sha-<hex>
+          # pattern. MAJOR I1 fix (review round 1): the previous regex
+          # rejected `v1.0.0-rc1` / `v1.0.0+build.5`, which PR 3's
+          # release.yml DOES produce for dry-runs. Standard semver shape
+          # per https://semver.org §10.
+          if ! echo "$TAG" | grep -qE '^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?|sha-[a-f0-9]{7,40})$'; then
+            echo "✗ tag '$TAG' doesn't match v<semver>[-prerelease][+build] or sha-<hex7-40>"
             exit 1
           fi
           echo "value=$TAG" >> "$GITHUB_OUTPUT"
@@ -160,8 +175,15 @@ jobs:
       # tampered attestation store OR a tampered registry.
       # ------------------------------------------------------------------
       - name: Verify image signature (cosign cross-check)
+        # CRIT-C2 fix (review round 1): tighten `tags/v.*` to
+        # `tags/v[0-9][^/]*` so the regex rejects tag names containing
+        # `/`. Git allows slashes in tag refs (`v1.0.0/hotfix`), and the
+        # original `.*` would have accepted an attestation signed for
+        # such a maliciously-named tag. The `[0-9]` after `v` further
+        # narrows to standard semver shape (`v` immediately followed by
+        # a digit).
         run: |
-          IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$"
+          IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][^/]*)$"
           cosign verify \
             --certificate-identity-regexp "$IDENTITY_REGEX" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
@@ -179,15 +201,26 @@ jobs:
         id: gh_deployment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # CRIT-C3 fix (review round 1): the previous `gh api -F
+        # 'required_contexts=[]'` sent the LITERAL STRING `"[]"`, not
+        # an empty JSON array — `gh api -F` only auto-types
+        # true/false/integer/null, anything else is a string. GitHub's
+        # Deployments API rejects with 422 `required_contexts is not an
+        # array`. Fix: pipe a JSON object via `--input -`, which uses
+        # the request body verbatim. Empty `required_contexts` here is
+        # deliberate — the workflow IS the gate (job-level `environment:
+        # production` enforces required reviewers + branch protection
+        # in the GH UI). If required STATUS-check contexts get added to
+        # the production environment later, replace `[]` with the
+        # check names (e.g. `["test (race)", "lint (golangci-lint)"]`).
         run: |
-          DEPLOYMENT_ID=$(gh api -X POST "/repos/${{ github.repository }}/deployments" \
-            -f ref='${{ github.sha }}' \
-            -f environment='production' \
-            -f description="Release ${{ steps.tag.outputs.value }} (${{ steps.digest.outputs.digest }})" \
-            -F auto_merge=false \
-            -F 'required_contexts=[]' \
-            -F production_environment=true \
-            --jq '.id')
+          DEPLOYMENT_ID=$(jq -n \
+              --arg ref '${{ github.sha }}' \
+              --arg env 'production' \
+              --arg desc 'Release ${{ steps.tag.outputs.value }} (${{ steps.digest.outputs.digest }})' \
+              '{ref: $ref, environment: $env, description: $desc, auto_merge: false, required_contexts: [], production_environment: true}' \
+            | gh api -X POST "/repos/${{ github.repository }}/deployments" \
+                --input - --jq '.id')
           if [ -z "$DEPLOYMENT_ID" ]; then
             echo "✗ failed to create GitHub Deployment"
             exit 3
@@ -206,10 +239,20 @@ jobs:
       # project / zone / VM.
       # ------------------------------------------------------------------
       - name: Run deploy.sh
+        # MAJOR M2/I3 fix (review round 1): forward EVERY env var
+        # deploy.sh reads (not just PROJECT_ID/ZONE/VM_NAME). Without
+        # this, a fork or alt-deployment uses the script's hardcoded
+        # defaults (`/opt/booking-monitor`, Leon180's repo URL), silently
+        # diverging operator-mode and CI-mode behavior. Repo variables
+        # with `vars.*` fallback so callers don't need to set every one.
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           ZONE: ${{ vars.GCP_VM_ZONE }}
           VM_NAME: ${{ vars.GCP_VM_NAME }}
+          # GCP_ARTIFACT_REGISTRY already exported workflow-wide above.
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VM_PROJECT_DIR: ${{ vars.VM_PROJECT_DIR }}
+          REPO_URL: ${{ vars.REPO_URL }}
         run: bash scripts/deploy.sh "${{ steps.tag.outputs.value }}"
 
       # ------------------------------------------------------------------
@@ -221,19 +264,33 @@ jobs:
       # to bind the new container's healthcheck endpoint after restart.
       # ------------------------------------------------------------------
       - name: External smoke test (Cloudflare Tunnel → nginx → app)
+        # MAJOR I5 + m3 fix (review round 1):
+        #   * bump retry window 60s → 120s to match deploy.sh's
+        #     `docker compose up --wait --wait-timeout 120` — Kafka can
+        #     take ~30s to be consumer-ready after compose-up, PG ~10s
+        #     cold start, app waits on both via /readyz.
+        #   * on probe failure print the response body + HTTP status
+        #     (/readyz returns per-dep JSON, exactly the diagnostic
+        #     a runbook reader wants visible in the run log) instead
+        #     of swallowing it with `2>/dev/null`.
         run: |
           HOST="${{ vars.PUBLIC_HOST }}"
           if [ -z "$HOST" ]; then
             echo "✗ PUBLIC_HOST repo variable not set"
             exit 4
           fi
-          for attempt in $(seq 1 30); do
-            if curl -fsS --max-time 5 "https://${HOST}/readyz" > /dev/null 2>&1; then
+          for attempt in $(seq 1 60); do
+            HTTP_STATUS=$(curl -sS --max-time 5 -o /tmp/readyz.body -w '%{http_code}' \
+                          "https://${HOST}/readyz" || echo 000)
+            if [ "$HTTP_STATUS" = "200" ]; then
               echo "✓ /readyz returned 200 (attempt ${attempt})"
               break
             fi
-            if [ "$attempt" = "30" ]; then
-              echo "✗ /readyz never returned 200 after 30 attempts (~60s)"
+            if [ "$attempt" = "60" ]; then
+              echo "✗ /readyz never returned 200 after 60 attempts (~120s)"
+              echo "  last HTTP status: $HTTP_STATUS"
+              echo "  last response body:"
+              sed 's/^/    /' /tmp/readyz.body
               exit 5
             fi
             sleep 2

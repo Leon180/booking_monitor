@@ -41,8 +41,14 @@ fi
 
 IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-# Identity regex for cosign verify — matches PR 3's Makefile.
-COSIGN_IDENTITY_REGEX='^https://github\.com/Leon180/booking_monitor/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$'
+# Identity regex for cosign verify — matches PR 3's Makefile shape.
+# CRIT-C2 fix (PR 5 review round 1): `tags/v.*` → `tags/v[0-9][^/]*`
+# rejects tag names containing `/` (git allows them, e.g. `v1.0.0/hot`)
+# and requires the post-`v` char to be a digit (standard semver shape).
+# Keep the {owner}/{repo} hardcoded for now — extracting from `git remote
+# get-url origin` would make this drift-safe across rename/transfer but
+# costs us PR-scope creep. Tracked: M4 in review report.
+COSIGN_IDENTITY_REGEX='^https://github\.com/Leon180/booking_monitor/\.github/workflows/release\.yml@refs/(heads/main|tags/v[0-9][^/]*)$'
 COSIGN_ISSUER='https://token.actions.githubusercontent.com'
 
 # ============================================================================
@@ -201,9 +207,8 @@ echo "===> [5/6] Pulling ${IMAGE_BY_DIGEST} + rolling compose stack"
 gcloud compute ssh "$VM_NAME" \
   --zone="$ZONE" --tunnel-through-iap --quiet \
   --command="cd ${VM_PROJECT_DIR} && \
-    export BOOKING_IMAGE='${IMAGE_BY_DIGEST}' && \
-    sudo -E docker pull '${IMAGE_BY_DIGEST}' && \
-    sudo -E docker compose up -d --wait --wait-timeout 120"
+    sudo docker pull '${IMAGE_BY_DIGEST}' && \
+    sudo BOOKING_IMAGE='${IMAGE_BY_DIGEST}' docker compose up -d --wait --wait-timeout 120"
 echo "  ✓ compose stack up"
 
 # ============================================================================
@@ -232,9 +237,8 @@ if [ "$SMOKE_OK" = false ]; then
   gcloud compute ssh "$VM_NAME" \
     --zone="$ZONE" --tunnel-through-iap --quiet \
     --command="cd ${VM_PROJECT_DIR} && \
-      export BOOKING_IMAGE='${PREVIOUS_DIGEST}' && \
-      sudo -E docker pull '${PREVIOUS_DIGEST}' && \
-      sudo -E docker compose up -d --wait --wait-timeout 120"
+      sudo docker pull '${PREVIOUS_DIGEST}' && \
+      sudo BOOKING_IMAGE='${PREVIOUS_DIGEST}' docker compose up -d --wait --wait-timeout 120"
   echo "  ✓ rolled back. Investigate logs: \`gcloud compute ssh ${VM_NAME} --tunnel-through-iap -- sudo docker compose logs app\`"
   exit 6
 fi
