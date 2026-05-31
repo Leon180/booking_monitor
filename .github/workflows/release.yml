@@ -119,8 +119,6 @@ jobs:
         # between local build and push, breaking reproducibility.
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-
           # Tag list — always include sha-prefixed for traceability.
           # Tags get :v* + :latest; main pushes get :main + :sha-<short>.
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
@@ -129,7 +127,10 @@ jobs:
           # Earlier version used ${{ github.sha }} (40-char) for Trivy's
           # image-ref but :sha-<short> (7-char) for the build tag — mismatch
           # silently broke the gate. Caught in 3-agent review.
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=${IMAGE}"
+            echo "short_sha=${SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "tags<<EOF"
             echo "${IMAGE}:sha-${SHORT_SHA}"
@@ -143,13 +144,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           # Build identity for OCI labels + ldflags injection.
-          echo "commit_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            VERSION="${{ github.ref_name }}"
           else
-            echo "version=main-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            VERSION="main-${SHORT_SHA}"
           fi
+          {
+            echo "commit_sha=${{ github.sha }}"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build image (no push — Trivy gate next)
         id: build
@@ -232,16 +236,37 @@ jobs:
 
       - name: Authenticate to GCP (WIF)
         # Need GCP auth again — attestations push to AR alongside image.
+        # `id: auth` exposes outputs.access_token for the docker login
+        # step below (attest-build-provenance uses oras, not BuildKit).
+        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_CI_DEPLOY_SA }}
+          token_format: access_token
 
-      - name: Configure docker for Artifact Registry
+      - name: Login to Artifact Registry (for attest oras client)
+        # `actions/attest-build-provenance@v4.1.0` with `push-to-registry:
+        # true` uses `oras` (OCI Registry As Storage client) under the
+        # hood. `oras` does NOT honor docker credential helpers
+        # (the `gcloud auth configure-docker` mechanism that the BUILD
+        # job uses successfully via BuildKit). oras requires an explicit
+        # `auths` entry in `~/.docker/config.json`, which is exactly
+        # what `docker login` writes.
+        #
+        # First end-to-end run after go-live failed at the attest step
+        # with "No credentials found for registry us-central1-
+        # docker.pkg.dev" — diagnosed by Agent 2 in PR #138's review
+        # (predicted as MAYBE-M1). Replaced gcloud-configure-docker
+        # with docker login here; the build job keeps the gcloud path
+        # because docker/build-push-action@v6 + BuildKit DO honor
+        # credHelpers (so build push works as-is).
         run: |
-          gcloud auth configure-docker \
-            "$(echo '${{ env.REGISTRY }}' | cut -d'/' -f1)" \
-            --quiet
+          AR_HOST="$(echo '${{ env.REGISTRY }}' | cut -d'/' -f1)"
+          echo "${{ steps.auth.outputs.access_token }}" \
+            | docker login "${AR_HOST}" \
+              -u oauth2accesstoken \
+              --password-stdin
 
       # -----------------------------------------------------------------------
       # SLSA L3 BUILD PROVENANCE
