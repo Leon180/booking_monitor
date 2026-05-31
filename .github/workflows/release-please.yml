@@ -49,13 +49,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: write # create tags + push CHANGELOG/manifest commits
-      pull-requests: write # open / update the release PR
-      # `issues: write` was in v1; removed per review (MAJOR-M3): we
-      # don't configure issue-link-template / update-issue-on-release,
-      # so the bot never writes to issues. Drop = principle of least
-      # privilege; smaller OIDC blast radius.
+      # PR 8 of CI/CD roadmap switched release-please to a GitHub App
+      # token (minted JIT below). Even with the App handling the actual
+      # API calls, the workflow itself still needs an OIDC token to
+      # exchange with the App's installation endpoint — hence
+      # `id-token: write`. The `contents` + `pull-requests` perms below
+      # are now nominal (the App's installation token, not the
+      # workflow's GITHUB_TOKEN, is what release-please uses for
+      # writes) but kept declared for clarity to reviewers.
+      id-token: write
+      contents: write
+      pull-requests: write
     steps:
+      # Mint a short-lived (~1 hour) GitHub App installation token.
+      # Why: a tag push event created by `GITHUB_TOKEN` is dropped by
+      # GitHub's anti-loop protection and never reaches sibling
+      # workflows. So when release-please bot tagged v1.2.0 using
+      # GITHUB_TOKEN, release.yml + deploy.yml never fired. Switching
+      # the token source to a GitHub App installation token bypasses
+      # that restriction: tag pushes from the App DO fan-trigger
+      # downstream workflows.
+      #
+      # Setup (one-time, see docs/runbooks/release_pipeline.md):
+      #   1. Create GitHub App (contents + pull-requests + issues = write)
+      #   2. Install on this repo
+      #   3. Store RELEASE_PLEASE_APP_ID + RELEASE_PLEASE_APP_PRIVATE_KEY
+      #      as repo secrets
+      #
+      # Pinned to @v3 (major-tag float) — v3.x started April 2026; any
+      # v4 release would be a breaking change we update deliberately.
+      - name: Mint GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
       # Pin by minor tag — v5.x is the major track that started in
       # April 2026 (Node runtime bump 20→24). Pinning to `@v5` (not
       # `@v5.0.0`) opts into safe patch updates within the major; if
@@ -68,9 +97,9 @@ jobs:
           # uses, no second YAML to maintain.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # `${{ secrets.GITHUB_TOKEN }}` is sufficient for repo-scoped
-          # operations (open PR, push commits to release-please-- branch,
-          # create tags). NOT sufficient for triggering OTHER workflows
-          # from the release PR merge — see the note in
-          # `docs/runbooks/release_pipeline.md` § Release-please limit.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Use the App's installation token (NOT GITHUB_TOKEN). This
+          # is the line that fixes the GITHUB_TOKEN-can't-trigger-
+          # sibling-workflows problem documented in earlier release
+          # cycles. Every tag created via this token DOES fan-trigger
+          # release.yml + deploy.yml on `push: tags: ['v*']`.
+          token: ${{ steps.app_token.outputs.token }}

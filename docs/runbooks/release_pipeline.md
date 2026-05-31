@@ -252,20 +252,55 @@ After this, the next push to `main` runs release-please cleanly — the `untagge
 
 
 
-When the release PR merge tags `v1.2.0`, the **tag push event** is created by `${{ secrets.GITHUB_TOKEN }}`. Per [GitHub Actions docs](https://docs.github.com/en/actions/concepts/security/github_token): *"events triggered by the GITHUB_TOKEN will not create a new workflow run."* This is a token-identity restriction (any event from the GH-Actions token is silently dropped from sibling-workflow triggering). So `release.yml` + `deploy.yml` won't auto-fire on the bot's tag push.
+When the release PR merge tags `v1.2.0`, the **tag push event** is created by whichever token release-please-action uses. Per [GitHub Actions docs](https://docs.github.com/en/actions/concepts/security/github_token): *"events triggered by the `GITHUB_TOKEN` will not create a new workflow run."* If we pass `GITHUB_TOKEN` to release-please-action, the bot's tag push gets silently dropped from sibling-workflow triggering — `release.yml` + `deploy.yml` won't auto-fire.
 
-Three workarounds, in order of how well they scale:
+**Resolved in PR #143**: we pass a **GitHub App installation token** to release-please-action instead. Tag push events from a GH App DO trigger sibling workflows.
 
-1. **GitHub App installation token** (recommended in 2026) — install a GH App with `contents: write` + `pull-requests: write` + `actions: write`, use `actions/create-github-app-token@v1` to mint a short-lived token in the workflow, pass that as `token:` to release-please-action. No 90-day rotation, auditable, scoped. Setup is one-time + ~10 lines of YAML. [GH Apps docs](https://docs.github.com/en/apps).
+### GitHub App setup (one-time, already done)
 
-2. **Personal Access Token (PAT)** — fine-grained PAT scoped to this repo, with `contents: write` + `pull-requests: write` + `workflows: write`. Stored as `RELEASE_PLEASE_PAT` secret. Rotate every 90 days (calendar entry recommended). Quicker setup than a GH App, higher long-term cost.
+For reference, here's how the App was set up:
 
-3. **Operator manual tag re-push** — for the period before GH App / PAT is provisioned. After the release PR merges (and tags v1.2.0 silently), the operator runs:
+1. **Create the App** at https://github.com/settings/apps/new
+   - Name: `booking-monitor-release-bot` (any unique name)
+   - Webhook → Active: unchecked
+   - Repository permissions (everything else `No access`):
+     - Contents: Read and write
+     - Pull requests: Read and write
+     - Issues: Read and write
+   - Where can this app be installed: "Only on this account"
+
+2. **Capture credentials**:
+   - **App ID**: visible at the top of the app's settings page
+   - **Private key**: scroll down → Generate a private key → downloads a `.pem` file
+
+3. **Install the app** on this repo (App settings → Install App → select `booking_monitor`)
+
+4. **Store as repo secrets**:
    ```bash
-   git fetch --tags
-   git push origin v1.2.0    # re-pushes the same tag; authenticated as YOU, not the bot
+   gh secret set RELEASE_PLEASE_APP_ID --body "<app-id-from-step-2>"
+   gh secret set RELEASE_PLEASE_APP_PRIVATE_KEY < /path/to/booking-monitor-release-bot.private-key.pem
    ```
-   **Do NOT use `--force` / `--force-with-lease`** — the tag already points at the right commit, no force needed. This is a workaround until #1 or #2 is set up, not a long-term pattern.
+
+5. **The workflow** ([.github/workflows/release-please.yml](../../.github/workflows/release-please.yml)) mints a JIT token via `actions/create-github-app-token@v3` and passes it to release-please-action.
+
+> **2026-05-15 heads-up — GitHub App token format change**
+>
+> GitHub announced ([changelog](https://github.blog/changelog/2026-05-15-github-app-installation-tokens-per-request-override-header/)) that installation tokens will move from the classic short opaque format to a stateless JWT with `ghs_` prefix (~520 chars, two dots). Our setup is unaffected: `actions/create-github-app-token@v3` forwards whatever GitHub returns without length assumptions, and release-please-action uses modern Octokit which treats tokens as opaque. The `@v3` major-tag pin auto-receives any compatibility patch the action maintainer ships before the default flips.
+>
+> If our workflow ever starts failing with "invalid token" errors after a GitHub API change announcement, bump the create-github-app-token pin to the latest `v3.x` (or `v4` if released) — that's where the fix would land.
+
+### Fallback workarounds (if the App breaks)
+
+If the App's secrets get rotated/lost and need to be re-provisioned, the workflow will fail until secrets are reset. In that emergency window:
+
+- **Operator manual tag re-push**:
+  ```bash
+  git fetch --tags
+  git push origin v1.2.0    # re-pushes the same tag; authenticated as YOU, not the bot
+  ```
+  **Do NOT use `--force` / `--force-with-lease`** — the tag already points at the right commit, no force needed. Cheap emergency-only path; re-provision the App secrets ASAP.
+
+- **PAT alternative** — fine-grained PAT scoped to this repo with `contents: write` + `pull-requests: write` + `workflows: write`. Quicker to provision than re-creating the App but expires every 90 days. Acceptable as a temporary substitute, not as a permanent replacement.
 
 ### v1.1.0 retroactive tag (one-time setup migration — DO NOT REPEAT)
 
