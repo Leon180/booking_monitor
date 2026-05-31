@@ -4,6 +4,13 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
+## [1.3.0](https://github.com/Leon180/booking_monitor/compare/v1.2.0...v1.3.0) (2026-05-31)
+
+
+### Features
+
+* **dora:** 5-metric DORA dashboard via Go CLI + daily cron (PR 7/8) ([#144](https://github.com/Leon180/booking_monitor/issues/144)) ([7e152c7](https://github.com/Leon180/booking_monitor/commit/7e152c788b02cc3d4192f095c4a12b93c044de39))
+
 ## [1.2.0](https://github.com/Leon180/booking_monitor/compare/v1.1.0...v1.2.0) (2026-05-31)
 
 
