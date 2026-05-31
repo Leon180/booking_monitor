@@ -283,6 +283,12 @@ For reference, here's how the App was set up:
 
 5. **The workflow** ([.github/workflows/release-please.yml](../../.github/workflows/release-please.yml)) mints a JIT token via `actions/create-github-app-token@v3` and passes it to release-please-action.
 
+> **2026-05-15 heads-up — GitHub App token format change**
+>
+> GitHub announced ([changelog](https://github.blog/changelog/2026-05-15-github-app-installation-tokens-per-request-override-header/)) that installation tokens will move from the classic short opaque format to a stateless JWT with `ghs_` prefix (~520 chars, two dots). Our setup is unaffected: `actions/create-github-app-token@v3` forwards whatever GitHub returns without length assumptions, and release-please-action uses modern Octokit which treats tokens as opaque. The `@v3` major-tag pin auto-receives any compatibility patch the action maintainer ships before the default flips.
+>
+> If our workflow ever starts failing with "invalid token" errors after a GitHub API change announcement, bump the create-github-app-token pin to the latest `v3.x` (or `v4` if released) — that's where the fix would land.
+
 ### Fallback workarounds (if the App breaks)
 
 If the App's secrets get rotated/lost and need to be re-provisioned, the workflow will fail until secrets are reset. In that emergency window:
