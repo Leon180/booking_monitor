@@ -148,3 +148,36 @@ resource "google_project_iam_member" "ci_deploy_iap_tunnel" {
   role    = "roles/iap.tunnelResourceAccessor"
   member  = "serviceAccount:${google_service_account.ci_deploy.email}"
 }
+
+# `roles/compute.osAdminLogin` lets the SA log into the VM via OS Login
+# AND grants passwordless sudo. Without this, `gcloud compute ssh
+# --tunnel-through-iap` from the deploy workflow returns
+# `PERMISSION_DENIED: ... user is not in the sudoers file`. Added in
+# PR 5 — IAP role alone is necessary but not sufficient for SSH; OS
+# Login completes the pair (IAP opens the tunnel, OS Login authorizes
+# the Linux session inside it).
+#
+# Why osAdminLogin (sudo) not the lower osLogin (no sudo):
+# OS Login creates a fresh Linux user dynamically on first SSH; that
+# user is NOT in the `docker` group on the VM, so `docker pull` and
+# `docker compose up` in deploy.sh would fail with "permission denied
+# on /var/run/docker.sock". Three honest paths exist:
+#   (a) osAdminLogin → `sudo docker ...` works directly        ← chosen
+#   (b) osLogin + cloud-init PAM hook to auto-add new OS Login
+#       users to `docker` group  (niche, hard to test)
+#   (c) Docker rootless mode      (broad refactor, breaks PR 1+2)
+# The trust boundary that matters is the WIF trust policy: only
+# `attribute.deploy_eligible/yes` (main push or tag) can impersonate
+# this SA. Linux sudo on the VM is downstream of that gate, so
+# granting it here doesn't expand the threat model meaningfully.
+#
+# This pattern (CD agent with sudo via osAdminLogin) is the standard
+# choice in production GCP + GHA + VM deploys because OS Login users
+# are ephemeral and group membership cannot be statically configured.
+# If we ever pivot to k8s (PR 8), this role goes away — the CD agent
+# would auth to the cluster API instead of SSHing into a Linux box.
+resource "google_project_iam_member" "ci_deploy_os_admin_login" {
+  project = local.project_id
+  role    = "roles/compute.osAdminLogin"
+  member  = "serviceAccount:${google_service_account.ci_deploy.email}"
+}
