@@ -138,13 +138,36 @@ jobs:
       # ------------------------------------------------------------------
       - name: Resolve image digest
         id: digest
+        # PR 6 added retry-with-backoff: this workflow + release.yml
+        # both trigger on `push: tags: ['v*']` and race. If deploy.yml
+        # starts before release.yml's image push finishes, the registry
+        # lookup 404s. release-please-tagged builds typically take
+        # 2-3 min in release.yml; 18 attempts × 10s = 3 min covers
+        # the 99th percentile. After that, the image really isn't
+        # there and we fail loud.
+        #
+        # Industry-standard pattern per fact-check (Grafana, Cosign,
+        # HashiCorp providers): explicit polling beats `workflow_run`
+        # chaining, which has 3-40 min latency variance in production.
         run: |
           IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.value }}"
-          DIGEST=$(gcloud artifacts docker images describe "$IMAGE_REF" \
-            --format='value(image_summary.digest)' 2>/dev/null) || {
-              echo "✗ image not found in registry: $IMAGE_REF"
+          DIGEST=""
+          for attempt in $(seq 1 18); do
+            DIGEST=$(gcloud artifacts docker images describe "$IMAGE_REF" \
+              --format='value(image_summary.digest)' 2>/dev/null) || DIGEST=""
+            if [ -n "$DIGEST" ]; then
+              echo "✓ ${IMAGE_REF} found at attempt ${attempt}"
+              break
+            fi
+            if [ "$attempt" = "18" ]; then
+              echo "✗ image not found in registry after 18 attempts (~3 min): $IMAGE_REF"
+              echo "  Likely cause: release.yml (build+sign) failed or is taking unusually long."
+              echo "  Check: gh run list --workflow=release.yml --limit=1"
               exit 2
-          }
+            fi
+            echo "  attempt ${attempt}: image not yet published, retry in 10s..."
+            sleep 10
+          done
           {
             echo "ref=$IMAGE_REF"
             echo "digest=$DIGEST"

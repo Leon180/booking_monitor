@@ -140,6 +140,56 @@ Every push to `main` automatically:
 
 Every push of a `v*.*.*` tag adds `:<version>` + `:latest` tags (in addition to the sha tag).
 
+## Cutting a release with release-please (PR 6)
+
+Day-to-day, you don't manually tag. The release-please bot watches `main` for [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) and maintains a continuously-updated release PR. Workflow:
+
+1. **Write PRs with Conventional titles.** Squash-merge means only the PR title becomes the commit on `main`, so only the title needs to parse. Examples:
+   - `feat(api): add /events search endpoint` → MINOR bump
+   - `fix(sse): prevent goroutine leak on client disconnect` → PATCH bump
+   - `feat(api)!: remove POST /book legacy endpoint` (with `BREAKING CHANGE:` in body) → MAJOR bump
+   - `chore(deps): bump golangci-lint to v2.5.0` → no bump (appears in CHANGELOG under hidden "Other")
+
+   Mapping spec: `feat` / `fix` / `perf` / `refactor` / `revert` → visible CHANGELOG sections. `docs` / `style` / `chore` / `test` / `build` / `ci` → hidden. See [release-please-config.json](../../release-please-config.json) `changelog-sections` for the exact list.
+
+2. **release-please bot opens or updates a release PR after every push to main.** Title is `chore(release): release vX.Y.Z`, body shows the proposed CHANGELOG diff. The PR stays open and accumulates commits until you merge it. You can comment / push / re-evaluate.
+
+3. **When you're ready to ship, review + merge the release PR.** release-please then:
+   - Squashes the release PR onto `main` (the CHANGELOG.md + `.release-please-manifest.json` updates)
+   - Creates the `vX.Y.Z` git tag pointing at the merge commit
+   - Creates a GitHub Release with the CHANGELOG body
+
+4. **The tag push fires release.yml + deploy.yml in parallel.** Both watch `push: tags: ['v*']`:
+   - `release.yml` builds + signs + pushes the image to AR (~2-3 min)
+   - `deploy.yml` resolves the digest + verifies attestation + deploys to the VM
+   
+   deploy.yml has [retry-with-backoff on the digest lookup](../../.github/workflows/deploy.yml) — 18 attempts × 10s = 3 min — to absorb the race against release.yml's build. This is the *real-team* pattern (Grafana, Cosign, HashiCorp providers all use it); `workflow_run` chaining has 3-40 min latency variance in production and is actively avoided.
+
+### What if the release PR is wrong?
+
+- **Wrong version**: edit `.release-please-manifest.json` on the release PR branch (the bot's branch is `release-please--branches--main`). Push the edit; bot reconciles on next push.
+- **Wrong CHANGELOG entry**: directly edit `CHANGELOG.md` on the release PR branch. Bot preserves manual edits between runs.
+- **Don't want to release yet**: leave the PR open. It accumulates further commits until you're ready.
+- **Want a different commit to be the bump trigger**: not directly supported; close the PR + push a commit with the right Conventional type, bot opens a fresh PR.
+
+### Pre-release tags (`v1.0.0-rc1`)
+
+release-please supports them via the `prerelease-label` config or manually editing the manifest to `1.0.0-rc1`. PR 5's `deploy.yml` tag regex was sized to accept SemVer pre-release + build metadata (`v1.0.0-rc1`, `v1.0.0+build.5`).
+
+### Release-please limitation: GITHUB_TOKEN can't trigger sibling workflows
+
+A subtle gotcha: when the release PR merge tags `v1.2.0`, the **tag push event** is created by `${{ secrets.GITHUB_TOKEN }}`. GitHub deliberately blocks tokens from triggering OTHER workflow runs (anti-loop protection). So `release.yml` + `deploy.yml` won't auto-fire on the bot's tag push.
+
+Two ways to work around it:
+- **Use a PAT (Personal Access Token) with `repo` + `workflow` scopes** stored as a repo secret (e.g. `RELEASE_PLEASE_PAT`) and pass it as the `token:` input to release-please-action. PAT-triggered pushes DO fire sibling workflows. Trade-off: PAT is long-lived; rotate every 90 days. (Recommended for our case.)
+- **Use a GitHub App** with `actions: write` permission. Bigger setup; only justified for orgs with many repos.
+
+If you push `v1.2.0` manually via `git tag v1.2.0 && git push --tags` (operator override path), workflows fire normally — `git push` is authenticated as YOU, not the GH bot. So while-we-haven't-set-up-PAT, the release PR merge tags it, then you `git pull --tags && git push --tags --force-with-lease` to re-trigger sibling workflows. Hack, but it works.
+
+### v1.1.0 anchor caveat
+
+We tagged `v1.1.0` retroactively at PR #118's merge commit (`32c78e4`) during PR 6 setup. The CHANGELOG had documented this release but the tag was missed at close-out. release-please's `bootstrap-sha` is pinned to that commit so the bot doesn't try to regenerate pre-v1.1.0 history. First release-please run will propose `v1.2.0` (because there are `feat:` commits since v1.1.0) or `v1.1.1` (if only `fix:` commits).
+
 ## Verify any image — `make verify-image`
 
 ```bash
