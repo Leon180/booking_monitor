@@ -213,7 +213,44 @@ Long-term alternatives (not adopted yet, tracked here):
 - Drop `[Unreleased]` from CHANGELOG entirely, track post-release items as GH Issues with a `deferred` label
 - Use release-please's [sentinel-comment pattern](https://github.com/googleapis/release-please/blob/main/docs/customizing.md) to anchor where entries get inserted
 
-### Release-please limitation: GITHUB_TOKEN can't trigger sibling workflows
+### Recovery: stuck `untagged release PR` state
+
+If release-please's workflow log shows:
+
+```
+⚠ There are untagged, merged release PRs outstanding - aborting
+```
+
+it means the bot's release PR was merged but the corresponding `vX.Y.Z` tag was never created. The bot refuses to act until the state is reconciled. Every subsequent push will abort the same way until the tag exists.
+
+Three causes seen in practice:
+- The release PR was squash-merged (the bot may have lost track of its labels — though our v5 config + labels should usually survive squash)
+- `pull-request-title-pattern` in `release-please-config.json` didn't match the actual title format the bot opened the PR with (post-PR #142 fix: we no longer customize the pattern; library default is the only source of truth, eliminating this class of bug)
+- The bot's GITHUB_TOKEN doesn't have `contents: write` (verify: `gh api /repos/$OWNER/$REPO/actions/permissions/workflow`)
+
+**Recovery (one-time, operator runs from laptop):**
+
+```bash
+# 1. Identify the release PR (it'll be CLOSED + MERGED, title 'chore: release main' or similar)
+gh pr list --state merged --search "is:pr in:title 'chore: release'" --limit 1
+
+# 2. Find the merge commit + the version the PR was for
+MERGE_SHA=$(gh pr view <number> --json mergeCommit --jq '.mergeCommit.oid')
+VERSION=$(jq -r '."."' .release-please-manifest.json)   # what main currently claims is "released"
+
+# 3. Create the release manually. Operator-authenticated git push triggers
+#    release.yml + deploy.yml; bot-authenticated pushes do not.
+gh release create "v${VERSION}" \
+  --target "${MERGE_SHA}" \
+  --title "v${VERSION}" \
+  --notes "$(gh pr view <number> --json body --jq '.body')"
+```
+
+After this, the next push to `main` runs release-please cleanly — the `untagged outstanding` abort is gone because v1.2.0 now exists in both manifest AND git. Subsequent release PRs will propose v1.2.1 / v1.3.0 etc. normally.
+
+**Don't use `git tag` for this.** `gh release create` is preferred because it creates the tag AND the GitHub Release in one atomic step. Bare `git tag` leaves the GH Release missing, which is its own confusing state.
+
+
 
 When the release PR merge tags `v1.2.0`, the **tag push event** is created by `${{ secrets.GITHUB_TOKEN }}`. Per [GitHub Actions docs](https://docs.github.com/en/actions/concepts/security/github_token): *"events triggered by the GITHUB_TOKEN will not create a new workflow run."* This is a token-identity restriction (any event from the GH-Actions token is silently dropped from sibling-workflow triggering). So `release.yml` + `deploy.yml` won't auto-fire on the bot's tag push.
 

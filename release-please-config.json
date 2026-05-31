@@ -4,7 +4,6 @@
   "include-v-in-tag": true,
   "include-component-in-tag": false,
   "bootstrap-sha": "32c78e4e6157ee6755d6a16ebc469c160a5dacd6",
-  "pull-request-title-pattern": "chore(release): release ${version}",
   "separate-pull-requests": false,
   "draft": false,
   "changelog-sections": [
