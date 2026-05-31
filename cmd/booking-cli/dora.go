@@ -50,7 +50,12 @@ func runDora(cmd *cobra.Command, _ []string) {
 		fmt.Print(report)
 		return
 	}
-	if err := os.WriteFile(output, []byte(report), 0o644); err != nil {
+	// gosec G306: world-readable 0o644 would let any unprivileged
+	// process on the CI runner read the file before it's committed.
+	// 0o600 is gosec's recommended ceiling. The file is committed to
+	// a public repo immediately after, so this restriction is purely
+	// transit-time defense — but the lint rule is correct.
+	if err := os.WriteFile(output, []byte(report), 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "DORA: write %s: %v\n", output, err)
 		os.Exit(4)
 	}
