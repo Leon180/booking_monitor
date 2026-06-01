@@ -154,18 +154,23 @@ for secret_id in "${SECRETS[@]}"; do
   # `|` as delimiter (URL slashes don't need escaping).
   # NOTE: we replace the WHOLE line's value to defend against secrets
   # that contain the placeholder text itself.
-  if ! grep -q "^${env_name}=" "$ENV_FILE_TMP"; then
-    echo "  ✗ template missing line for ${env_name}; check deploy/.env.vm.template"
+  # Global token replacement (not line-anchored on env_name). This
+  # handles the case where the same secret is referenced by MULTIPLE
+  # env vars in the template — e.g. MIGRATE_DB_URL reuses
+  # PLACEHOLDER_DATABASE_URL_FROM_SECRET_MANAGER so it picks up the same
+  # value as DATABASE_URL. Line-anchored replace would leave the second
+  # placeholder dangling and the sanity check would fail.
+  placeholder="PLACEHOLDER_${env_name}_FROM_SECRET_MANAGER"
+  if ! grep -q "$placeholder" "$ENV_FILE_TMP"; then
+    echo "  ✗ template has no $placeholder; check deploy/.env.vm.template"
     rm -f "$ENV_FILE_TMP"
     exit 8
   fi
-  # Escape backslashes + double quotes for the final value
-  quoted=$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  sed -i.bak "s|^${env_name}=.*|${env_name}=\"${quoted}\"|" "$ENV_FILE_TMP"
+  # `escaped_value` already escapes the sed delimiter `|`, backslashes,
+  # and ampersand-replacement-of-match. Global token replace.
+  sed -i.bak "s|${placeholder}|${escaped_value}|g" "$ENV_FILE_TMP"
   rm -f "${ENV_FILE_TMP}.bak"
-  echo "  ✓ ${env_name} (${#value} bytes)"
-  # Avoid unused-var warning from shellcheck
-  : "$escaped_value" "$placeholder"
+  echo "  ✓ ${env_name} (${#value} bytes; $(grep -c "^${env_name}\|^MIGRATE_${env_name}\|MIGRATE_DB_URL" "$ENV_FILE_TMP" 2>/dev/null || echo "1") line(s) updated)"
 done
 
 # Sanity check: no PLACEHOLDER_* tokens should remain (any left means a
