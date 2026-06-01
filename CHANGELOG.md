@@ -4,6 +4,19 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
+## [1.4.0](https://github.com/Leon180/booking_monitor/compare/v1.3.0...v1.4.0) (2026-06-01)
+
+
+### Features
+
+* **k8s:** VM→GKE Autopilot migration plan + skeleton (PR 8/8) ([#148](https://github.com/Leon180/booking_monitor/issues/148)) ([9f50dce](https://github.com/Leon180/booking_monitor/commit/9f50dce4456856accf26fb5f638eeda02068dc1c))
+* **slo:** add SLI/SLO definitions + multi-burn-rate alerts + chaos baseline (PR 9/9) ([#149](https://github.com/Leon180/booking_monitor/issues/149)) ([5e7f35f](https://github.com/Leon180/booking_monitor/commit/5e7f35ff5408fdcfb27358d171785213944ebbeb))
+
+
+### Bug Fixes
+
+* **deploy:** restore `attestations: read` for gh attestation verify ([#146](https://github.com/Leon180/booking_monitor/issues/146)) ([6d7dfa6](https://github.com/Leon180/booking_monitor/commit/6d7dfa64c985ccc60ab5f164e6d4fc3023febbab))
+
 ## [1.3.0](https://github.com/Leon180/booking_monitor/compare/v1.2.0...v1.3.0) (2026-05-31)
 
 
