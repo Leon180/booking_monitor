@@ -96,6 +96,41 @@ jobs:
       - uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
+      # 0. Soft-skip guard: if PUBLIC_HOST repo variable is unset, the
+      # CD pipeline isn't fully configured (tunnel + DNS missing). Mark
+      # this run as skipped-with-explanation instead of failing red.
+      #
+      # Architectural finding (2026-06-01 deep-dive): e2-micro Always-
+      # Free tier (1 GB RAM) can't fit the full compose stack (~1.5 GB
+      # committed: kafka + zookeeper + jaeger + postgres + redis + app +
+      # 3 sweeper sidecars). Validated empirically — booking_kafka /
+      # booking_app / booking_nginx never started; VM OOM-thrashed.
+      # See docs/runbooks/deploy.md § Tier ceiling.
+      #
+      # Until the tier constraint is resolved (resize to e2-small ~$13/
+      # mo OR migrate to GKE Autopilot per docs/k8s-migration-plan.md),
+      # deploy.yml stays in soft-skip mode. The architecture is wired;
+      # only the live target is missing.
+      - name: Check CD configuration
+        id: cd_guard
+        run: |
+          if [ -z "${{ vars.PUBLIC_HOST }}" ]; then
+            echo "::notice title=CD soft-skip::PUBLIC_HOST repo variable is unset — CD configuration incomplete. See docs/runbooks/cd_completion_checklist.md. This run will exit cleanly without attempting deploy."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Soft-skip notice (PUBLIC_HOST unset)
+        if: steps.cd_guard.outputs.skip == 'true'
+        run: |
+          echo "✓ CD pipeline architecture is wired but live target is not configured."
+          echo ""
+          echo "To complete CD setup, see docs/runbooks/cd_completion_checklist.md."
+          echo "Once PUBLIC_HOST is set as a repo variable, subsequent tag pushes"
+          echo "will run the full chain (verify attestations + ssh-deploy + smoke)."
+
+      # ------------------------------------------------------------------
       # 1. Resolve which tag we're deploying.
       # ------------------------------------------------------------------
       - name: Resolve image tag
@@ -125,6 +160,7 @@ jobs:
       # are set by PR 1's terraform.
       # ------------------------------------------------------------------
       - name: Authenticate to GCP (Workload Identity Federation)
+        if: steps.cd_guard.outputs.skip != 'true'
         id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -132,6 +168,7 @@ jobs:
           service_account: ${{ vars.GCP_CI_DEPLOY_SA }}
 
       - name: Install cosign
+        if: steps.cd_guard.outputs.skip != 'true'
         uses: sigstore/cosign-installer@v4.1.2
 
       # ------------------------------------------------------------------
@@ -146,6 +183,7 @@ jobs:
       # including those that fail before reaching the VM.
       # ------------------------------------------------------------------
       - name: Create GitHub Deployment (in_progress)
+        if: steps.cd_guard.outputs.skip != 'true'
         id: gh_deployment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -179,6 +217,7 @@ jobs:
       # verifier checks against.
       # ------------------------------------------------------------------
       - name: Resolve image digest
+        if: steps.cd_guard.outputs.skip != 'true'
         id: digest
         # PR 6 retry-with-backoff: this workflow + release.yml race
         # on the same `push: tags: ['v*']` event. release.yml has
@@ -227,6 +266,7 @@ jobs:
       # in the same repo can't forge a valid attestation.
       # ------------------------------------------------------------------
       - name: Verify SLSA provenance (gh attestation verify)
+        if: steps.cd_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # CRIT-C2 fix (review round 1): release.yml's attest job runs
@@ -263,6 +303,7 @@ jobs:
       # tampered attestation store OR a tampered registry.
       # ------------------------------------------------------------------
       - name: Verify image signature (cosign cross-check)
+        if: steps.cd_guard.outputs.skip != 'true'
         # PR 5 review round 1 (CRIT-C2): tightened `tags/v.*` to
         # `tags/v[0-9][^/]*` so the regex rejects tag names containing
         # `/` (git allows slashes in tag refs like `v1.0.0/hotfix`).
@@ -299,6 +340,7 @@ jobs:
       # MAJOR-M1 rationale there.)
       # ------------------------------------------------------------------
       - name: Update Deployment — verification complete
+        if: steps.cd_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -314,6 +356,7 @@ jobs:
       # project / zone / VM.
       # ------------------------------------------------------------------
       - name: Run deploy.sh
+        if: steps.cd_guard.outputs.skip != 'true'
         # MAJOR M2/I3 fix (review round 1): forward EVERY env var
         # deploy.sh reads (not just PROJECT_ID/ZONE/VM_NAME). Without
         # this, a fork or alt-deployment uses the script's hardcoded
@@ -339,6 +382,7 @@ jobs:
       # to bind the new container's healthcheck endpoint after restart.
       # ------------------------------------------------------------------
       - name: External smoke test (Cloudflare Tunnel → nginx → app)
+        if: steps.cd_guard.outputs.skip != 'true'
         # MAJOR I5 + m3 fix (review round 1):
         #   * bump retry window 60s → 120s to match deploy.sh's
         #     `docker compose up --wait --wait-timeout 120` — Kafka can
@@ -378,7 +422,7 @@ jobs:
       # 8a. Mark deployment success.
       # ------------------------------------------------------------------
       - name: Mark deployment success
-        if: success() && steps.gh_deployment.outputs.id != ''
+        if: success() && steps.cd_guard.outputs.skip != 'true' && steps.gh_deployment.outputs.id != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

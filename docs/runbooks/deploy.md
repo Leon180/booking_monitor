@@ -349,8 +349,47 @@ The workflow uses `concurrency: group: deploy-production, cancel-in-progress: fa
 
 This is safe for our `golang-migrate` forward-only model: `v1.0.3` includes all `v1.0.2`'s migrations + code. Releases skipped this way still satisfy "every released change reaches prod" — they just batch. Document tag-skipped behaviour in release notes ("v1.0.3 includes v1.0.2 changes").
 
+## Tier ceiling — e2-micro can't fit the compose stack (2026-06-01 deep-dive finding)
+
+Empirically verified: the booking_monitor `docker-compose.yml` stack (8 services: postgres + redis + kafka + zookeeper + jaeger + nginx + app + recon/saga/expiry sweepers) **does not fit on a single e2-micro Always-Free VM (1 GB RAM)**.
+
+What we observed during the first-deploy validation session:
+- Image pulls from Artifact Registry succeed cleanly
+- `secrets_sync.sh` populates `.env` correctly (after PR #150's template+overlay fix)
+- `docker compose up -d` starts the lightweight services first (postgres, redis, jaeger, alert_logger, redis_exporter, sweeper sidecars)
+- **Kafka + zookeeper never reach a healthy state** — JVM startup competes with everything else for memory
+- After ~5 minutes, OOM killer fires; `booking_app` / `booking_kafka` / `booking_nginx` never enter `docker ps`; `cloudflared` (the tunnel) gets killed; SSH becomes unresponsive (sshd evicted)
+
+Approximate per-service RAM budget on this stack:
+
+| Service | RAM |
+|---|---|
+| kafka (JVM) | 600–800 MB |
+| zookeeper (JVM) | 200 MB |
+| jaeger | 200 MB |
+| postgres | 100 MB |
+| app (Go binary) | 50–100 MB |
+| recon / saga_watchdog / expiry_sweeper × 3 | ~30 MB each |
+| redis | 30 MB |
+| nginx | 10 MB |
+| alert_logger | 10 MB |
+| **Committed** | **~1.3–1.5 GB** |
+| **e2-micro usable** | **~0.6 GB (1 GB total minus OS overhead)** |
+
+**Implications**:
+- The PRs 1–7 CI/CD chain (build, sign, push, attest, deploy.yml workflow) is **architecturally complete** but lacks a viable live target on Always-Free tier.
+- `deploy.yml` is in soft-skip mode (PR #151): when `PUBLIC_HOST` repo variable is empty, the workflow exits cleanly with a notice instead of failing red. The architecture is wired; only the live target is missing.
+
+**Two paths to a working live deploy**:
+
+1. **Resize the VM to e2-small** (`gcloud compute instances set-machine-type booking-app --machine-type=e2-small`) — 2 GB RAM, fits the stack. Loses Always-Free; costs ~$13/month while running.
+2. **Migrate to GKE Autopilot per [docs/k8s-migration-plan.md](../k8s-migration-plan.md)** — node-managed, $0/month cluster fee (Google's free credit covers it), ~$20/month for the application pod. The "correct" answer; PR 8 already planned this.
+
+See [docs/runbooks/cd_completion_checklist.md](cd_completion_checklist.md) for the exact steps to complete CD setup once a tier decision is made.
+
 ## What's deferred (PR 6+)
 
 - **Blue-green / canary**: docker-compose has no native support; will be a PR 8 (k8s migration) item.
 - **DORA dashboard**: PR 7 reads GitHub Deployments API + adds Grafana annotations.
 - **Cosign `--insecure-ignore-tlog` gotcha**: PR 3's release.yml smoke test uses this flag to dodge Rekor inclusion-proof propagation race. Neither the operator path nor the CI path uses it — Rekor lookup is the real trust gate post-publish.
+- **Live deploy validation**: blocked by the tier ceiling above. Pick option 1 or 2 to unblock.
