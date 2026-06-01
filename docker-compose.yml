@@ -11,7 +11,7 @@ services:
     image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_app
-    command: [ "/app/booking-cli", "server" ]
+    command: [ "server" ]
     ports:
       - "6060:6060"   # pprof (only active when ENABLE_PPROF=true)
     # `unless-stopped` so a hung container caught by the HEALTHCHECK
@@ -119,7 +119,7 @@ services:
     image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_recon
-    command: [ "/app/booking-cli", "recon" ]
+    command: [ "recon" ]
     restart: unless-stopped
     depends_on:
       - postgres
@@ -167,7 +167,7 @@ services:
     image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_saga_watchdog
-    command: [ "/app/booking-cli", "saga-watchdog" ]
+    command: [ "saga-watchdog" ]
     restart: unless-stopped
     depends_on:
       - postgres
@@ -225,7 +225,7 @@ services:
     image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_expiry_sweeper
-    command: [ "/app/booking-cli", "expiry-sweeper" ]
+    command: [ "expiry-sweeper" ]
     restart: unless-stopped
     depends_on:
       - postgres
