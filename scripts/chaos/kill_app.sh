@@ -11,7 +11,10 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-booking_app}"
-HEALTH_URL="${HEALTH_URL:-http://localhost:8080/readyz}"
+# Probe via nginx (port 80), NOT app:8080 directly — the compose `app`
+# service only publishes :6060 (pprof). External health-checks must go
+# through nginx, matching the production reachability path.
+HEALTH_URL="${HEALTH_URL:-http://localhost/readyz}"
 RECOVERY_TARGET="${RECOVERY_TARGET:-30}" # seconds
 
 printf '\033[1mScenario A — Kill app\033[0m\n'
@@ -32,8 +35,15 @@ read -rp "Type INJECT to proceed: " confirm
 [[ "$confirm" == "INJECT" ]] || { echo "aborted"; exit 1; }
 
 T0=$(date -u +%s)
-echo "t=0 ($(date -u +%H:%M:%SZ)): killing $CONTAINER"
-docker kill "$CONTAINER"
+# `docker restart --timeout=0` instead of `docker kill`:
+#   docker treats `docker kill` as an explicit-user-stop, so
+#   `restart: unless-stopped` does NOT auto-restart afterwards
+#   (empirically confirmed on Docker 29.4.0). `docker restart
+#   --timeout=0` sends SIGKILL + brings the container back in one
+#   atomic operation — same chaos effect (process dies abruptly),
+#   no dependency on the daemon's restart policy.
+echo "t=0 ($(date -u +%H:%M:%SZ)): restarting $CONTAINER (SIGKILL + restart)"
+docker restart --timeout=0 "$CONTAINER" > /dev/null
 
 echo "Waiting for recovery (target: ${RECOVERY_TARGET}s)..."
 RECOVERED_AT=""

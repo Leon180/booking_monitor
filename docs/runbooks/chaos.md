@@ -38,9 +38,9 @@ All scripts live in [`scripts/chaos/`](../../scripts/chaos/) and are wired into 
 
 **Hypothesis**: `booking_app` container dying → docker compose `restart: unless-stopped` brings it back within 30s → `/readyz` returns 200. During the kill window, `/livez` external probes get 5xx (acceptable; less than 1 minute → fits within availability SLO's monthly 216 min budget).
 
-**Tool**: `docker kill booking_app` (SIGKILL, immediate termination — no graceful shutdown).
+**Tool**: `docker restart --timeout=0 booking_app` (SIGKILL the process + restart the container atomically). NOT `docker kill` — see § "Docker kill semantic" below for why.
 
-**Steady-state check**: `curl -fsS http://localhost:8080/livez` returns 200.
+**Steady-state check**: `curl -fsS http://localhost/readyz` returns 200 (probe via nginx — the `app` service only publishes pprof:6060).
 
 **Recovery target**: `/readyz` returns 200 within 30s of injection.
 
@@ -97,6 +97,26 @@ Each target prints the hypothesis + the metric to watch BEFORE injecting. Operat
 - **chaos-mesh CRDs** — CNCF Incubating (not graduated as I'd initially claimed; [CNCF chaos-mesh](https://www.cncf.io/projects/chaosmesh/) lists status accurately). Wait until k8s migration (PR 8 apply) is done; chaos-mesh is k8s-only.
 - **Automated chaos schedule** — game days are operator-driven for now. Adding to CI cron creates risk during job-hunt period when something breaks unattended.
 - **Multi-scenario combination tests** — kill Redis AND PG simultaneously, etc. The 5 scenarios above cover the foundation; combinations are exploratory + best done in a dedicated game-day session.
+
+## Docker kill semantic (the live-test gotcha)
+
+When running the chaos scripts against the VM-phase docker compose stack, you might expect `docker kill <container>` + `restart: unless-stopped` to auto-recover the container. **It doesn't.** Empirically verified on Docker 29.4.0:
+
+```
+docker kill booking_app          # exit code 137 (SIGKILL)
+# 6 minutes later:
+docker ps                         # booking_app still missing
+docker inspect booking_app        # Exited, Restarting=false
+```
+
+Docker treats `docker kill` as an explicit user-initiated stop, even though the restart-policy docs are ambiguous. `unless-stopped` deliberately doesn't restart in this case.
+
+Workarounds in 2026:
+- **`docker restart --timeout=0 <c>`** — what `kill_app.sh` uses. SIGKILL + restart in one atomic operation. Doesn't depend on docker's restart-policy interpretation.
+- **`docker exec <c> kill -9 1`** — would simulate a "real crash" (process dies, docker sees exit, restart policy fires). DOES NOT WORK on distroless images (no `/bin/kill`), so it's not viable for the booking_monitor app which uses distroless per PR 2.
+- **Migrate to k8s + chaos-mesh PodChaos** — k8s does have proper PID-namespace-level kill primitives and triggers Deployment's auto-restart. Tracked in PR 8's migration plan.
+
+`kill_redis.sh` and `kill_kafka.sh` keep using `docker kill` deliberately — those scripts WANT a downtime window to verify fail-closed behavior. They `docker start` the container back up manually after observing the system during the window.
 
 ## Tooling alternatives (documented for next-step)
 

@@ -16,8 +16,9 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-booking_redis}"
-READY_URL="${READY_URL:-http://localhost:8080/readyz}"
-BOOK_URL="${BOOK_URL:-http://localhost:8080/api/v1/book}"
+# Probe via nginx (port 80) — see kill_app.sh comment. Same reason.
+READY_URL="${READY_URL:-http://localhost/readyz}"
+BOOK_URL="${BOOK_URL:-http://localhost/api/v1/book}"
 
 printf '\033[1mScenario B — Kill Redis\033[0m\n'
 printf 'Hypothesis:\n'
@@ -36,8 +37,13 @@ read -rp "Type INJECT to proceed: " confirm
 [[ "$confirm" == "INJECT" ]] || { echo "aborted"; exit 1; }
 
 T0=$(date -u +%s)
+# Unlike kill_app.sh, this script EXPECTS a downtime window to verify
+# fail-closed behavior. So we use `docker kill` (no auto-restart from
+# `unless-stopped` policy) + manually `docker start` later. Auto-restart
+# would close the window before we can observe the system's behavior
+# while Redis is unreachable.
 echo "t=0: killing $CONTAINER"
-docker kill "$CONTAINER"
+docker kill "$CONTAINER" > /dev/null
 
 echo ""
 echo "Verifying hypothesis 1: /readyz should return 503..."
