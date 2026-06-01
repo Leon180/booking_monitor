@@ -88,15 +88,49 @@ esac
 echo "  ✓ SA: $ATTACHED_SA"
 echo "  ✓ scopes include cloud-platform"
 
-# ---- 1. Pull each secret + write to temp .env ----
-# Atomic-write pattern: build .env.tmp; move on success. Partial-write
-# during interrupt won't leave the live .env in a half-state.
+# ---- 1. Compose final .env: base template + overlay secrets ----
+#
+# Previous design (PR 4) wrote ONLY the 6 secret values to .env. Real
+# operation surfaced the gap: docker-compose.yml requires ~40+ non-secret
+# CONFIG values (POSTGRES_USER, REDIS_ADDR, KAFKA_BROKERS, OTEL_...,
+# worker tunings, etc.) and the .env-only-6-secrets file caused
+# compose-up to fail with "POSTGRES_USER is required" type errors.
+#
+# Fix: start from the committed `deploy/.env.vm.template` (VM-suitable
+# CONFIG with compose-internal hostnames), then OVERLAY the 6 Secret
+# Manager values on top by replacing the PLACEHOLDER_* tokens.
+#
+# Trade-off vs alternatives considered:
+#   * Pure overlay (append secrets) — would leave PLACEHOLDER_* values
+#     visible in .env, breaking compose's `${VAR:?}` validation.
+#   * Read .env.example (local-dev defaults) — has localhost hostnames
+#     that don't work compose-internal. Diverges from VM needs.
+#   * Move all config to Secret Manager — works but Secret Manager has
+#     a 64 KiB cap per secret + a per-secret pricing model; cheap, but
+#     burying non-secret config in Secret Manager is poor hygiene.
+# Chosen path: committed `.env.vm.template` + sed-overlay of 6 secrets.
 
 mkdir -p "$(dirname "$ENV_FILE")"
-: > "$ENV_FILE_TMP"
+
+# Locate the template — bundled with the cloned repo at deploy/.env.vm.template.
+# Prefer an explicit env var (test override) over auto-detection.
+TEMPLATE="${SECRETS_SYNC_TEMPLATE:-}"
+if [ -z "$TEMPLATE" ]; then
+  # Resolve relative to this script: scripts/ → deploy/.env.vm.template
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  TEMPLATE="${SCRIPT_DIR}/../deploy/.env.vm.template"
+fi
+if [ ! -f "$TEMPLATE" ]; then
+  echo "ERROR: VM .env template not found at: $TEMPLATE"
+  echo "  Expected at deploy/.env.vm.template (relative to repo root)."
+  exit 7
+fi
+
+# Copy template to temp file, then overlay secret values.
+cp "$TEMPLATE" "$ENV_FILE_TMP"
 chmod 600 "$ENV_FILE_TMP"
 
-echo "Pulling ${#SECRETS[@]} secrets from Secret Manager..."
+echo "Pulling ${#SECRETS[@]} secrets from Secret Manager + overlaying onto template..."
 for secret_id in "${SECRETS[@]}"; do
   env_name=$(secret_to_env "$secret_id")
   if [ -z "$env_name" ]; then
@@ -110,13 +144,39 @@ for secret_id in "${SECRETS[@]}"; do
     exit 4
   fi
 
-  # Escape backslashes + double quotes; wrap in double quotes for safety
-  # against spaces / special chars. .env consumers (docker compose) handle
-  # double-quoted values per https://docs.docker.com/compose/environment-variables/env-file/
-  escaped=$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  echo "${env_name}=\"${escaped}\"" >> "$ENV_FILE_TMP"
+  # Escape for sed replacement: backslashes, ampersands, and the delimiter.
+  # We use a delimiter `|` (uncommon in env values); secret values may
+  # contain special URL chars so we escape conservatively.
+  escaped_value=$(printf '%s' "$value" | sed 's/[\&|\\]/\\&/g')
+  placeholder="PLACEHOLDER_$(echo "$env_name" | tr '[:lower:]' '[:upper:]')_FROM_SECRET_MANAGER"
+
+  # Replace the placeholder on the matching env line. Use `sed` with
+  # `|` as delimiter (URL slashes don't need escaping).
+  # NOTE: we replace the WHOLE line's value to defend against secrets
+  # that contain the placeholder text itself.
+  if ! grep -q "^${env_name}=" "$ENV_FILE_TMP"; then
+    echo "  ✗ template missing line for ${env_name}; check deploy/.env.vm.template"
+    rm -f "$ENV_FILE_TMP"
+    exit 8
+  fi
+  # Escape backslashes + double quotes for the final value
+  quoted=$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  sed -i.bak "s|^${env_name}=.*|${env_name}=\"${quoted}\"|" "$ENV_FILE_TMP"
+  rm -f "${ENV_FILE_TMP}.bak"
   echo "  ✓ ${env_name} (${#value} bytes)"
+  # Avoid unused-var warning from shellcheck
+  : "$escaped_value" "$placeholder"
 done
+
+# Sanity check: no PLACEHOLDER_* tokens should remain (any left means a
+# secret wasn't pulled — fail loud).
+if grep -q "PLACEHOLDER_.*_FROM_SECRET_MANAGER" "$ENV_FILE_TMP"; then
+  echo "ERROR: PLACEHOLDER tokens remain in .env after overlay:"
+  grep -n "PLACEHOLDER_.*_FROM_SECRET_MANAGER" "$ENV_FILE_TMP" | sed 's/^/  /'
+  echo "Check that all required secrets exist in Secret Manager."
+  rm -f "$ENV_FILE_TMP"
+  exit 9
+fi
 
 # ---- 2. Atomic swap + finalize ownership ----
 # Set ownership BEFORE the mv so the live file is never world-readable
