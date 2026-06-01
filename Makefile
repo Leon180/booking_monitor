@@ -7,7 +7,8 @@ CMD_PATH := ./cmd/booking-cli
 -include .env
 export
 
-.PHONY: all build clean test lint modernize run-server run-stress deps help
+.PHONY: all build clean test lint modernize run-server run-stress deps help \
+        chaos-kill-app chaos-kill-redis chaos-network-latency chaos-pg-saturation chaos-kill-kafka
 
 all: build
 
@@ -598,3 +599,25 @@ migrate-force: ## Force set migration version
 migrate-status: ## Show the current migration version (N5)
 	@test -n "$(DB_URL)" || { echo "MIGRATE_DB_URL is not set. Copy .env.example to .env and fill it in."; exit 1; }
 	migrate -path deploy/postgres/migrations -database "$(DB_URL)" version
+
+# ============================================================================
+# PR 9 — Chaos engineering scenarios. Each script states a hypothesis,
+# verifies steady state, prompts the operator to confirm, injects the
+# failure, and (where applicable) auto-cleans up. See
+# docs/runbooks/chaos.md for the full methodology + per-scenario detail.
+# ============================================================================
+
+chaos-kill-app: ## Chaos Scenario A: kill booking_app, verify recovery <30s
+	@bash scripts/chaos/kill_app.sh
+
+chaos-kill-redis: ## Chaos Scenario B: kill booking_redis, verify fail-closed behavior + recovery
+	@bash scripts/chaos/kill_redis.sh
+
+chaos-network-latency: ## Chaos Scenario C: 500ms tc netem on booking_app eth0 for 60s
+	@bash scripts/chaos/network_latency.sh
+
+chaos-pg-saturation: ## Chaos Scenario D: 95 idle pg_sleep connections (consume max_connections), verify retry-with-backoff
+	@bash scripts/chaos/pg_saturation.sh
+
+chaos-kill-kafka: ## Chaos Scenario E: kill booking_kafka, verify outbox pattern preserves events + drains on restart
+	@bash scripts/chaos/kill_kafka.sh
