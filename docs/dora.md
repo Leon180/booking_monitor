@@ -1,6 +1,6 @@
 # DORA metrics — rolling 90 days
 
-Auto-generated 2026-06-01 07:54 UTC by [`booking-cli dora`](../cmd/booking-cli/dora.go). See [docs/runbooks/dora.md](runbooks/dora.md) for the runbook + heuristic honesty notes.
+Auto-generated 2026-06-02 07:45 UTC by [`booking-cli dora`](../cmd/booking-cli/dora.go). See [docs/runbooks/dora.md](runbooks/dora.md) for the runbook + heuristic honesty notes.
 
 Per DORA 2024+ this report tracks **5 metrics** (FDRT replaces MTTR; Rework Rate added). Per DORA 2025 the tier-based ranking model was retired — this report shows raw values + trend, not benchmarks.
 
@@ -19,8 +19,8 @@ Per DORA 2024+ this report tracks **5 metrics** (FDRT replaces MTTR; Rework Rate
 ## Daily deploys (sparkline)
 
 ```
-                                                                                         █ 
-Mar 03          Jun 01
+                                                                                        █  
+Mar 04          Jun 02
 ```
 
 ## Heuristic honesty notes
