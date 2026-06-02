@@ -102,5 +102,16 @@ type OrderQueue interface {
 	// otherwise. handler is invoked per-message with the parsed
 	// QueuedBookingMessage; the queue manages retry / ACK / DLQ
 	// based on what handler returns and the injected retry policy.
+	//
+	// PR #126 B4 — delivery invariant: AT-LEAST-ONCE.
+	// The implementation (Redis Streams + consumer group) ACKs the
+	// underlying message only after handler returns nil. Crash /
+	// timeout / non-retriable error paths leave the message in the
+	// PEL where another consumer (or this consumer on restart) will
+	// re-deliver it. Handler implementations MUST therefore be
+	// idempotent on (message_id, payload) — the worker side relies on
+	// the DB UNIQUE(orders.idempotency_key, user_id) constraint plus
+	// the saga's compensation_id-keyed `revert.lua` to absorb the
+	// duplicate-delivery risk. There is NO exactly-once mode.
 	Subscribe(ctx context.Context, handler func(ctx context.Context, msg *QueuedBookingMessage) error) error
 }
