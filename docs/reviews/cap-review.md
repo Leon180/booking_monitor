@@ -295,7 +295,9 @@ Body-fingerprint design is sound and matches industry contract. Race window 1 is
 
 ## Findings (numbered, sorted by severity)
 
-### [MAJOR-1] Outbox advisory-lock cached-conn assumption is structurally weak under PG failover
+### [MAJOR-1 → NIT-deferred pending Phase 4] Outbox advisory-lock cached-conn assumption is structurally weak under PG failover
+
+> **Severity downgraded by round-2 meta-review + final-decisions D5**: the v1.0.0 stack has no PG replica and no PgBouncer transaction pooling, so the architectural risk described below is real but not reachable today. Re-promote to MAJOR when Phase 4 HA work introduces either dependency. See [`final-decisions.md` § D5](final-decisions.md) for the authoritative classification. The code-path analysis and recommendations are retained as a Phase-4 prep reference.
 
 **Where**: [`internal/infrastructure/persistence/postgres/advisory_lock.go:24-53`](../../internal/infrastructure/persistence/postgres/advisory_lock.go)
 
@@ -309,11 +311,13 @@ Body-fingerprint design is sound and matches industry contract. Race window 1 is
 3. Independently, add `FOR UPDATE SKIP LOCKED` to the outbox `ListPending` query — belt-and-braces, see MAJOR-2.
 
 **References**:
-- [Stormatics — Understanding split-brain scenarios in HA PostgreSQL — accessed 2026-05-27](https://stormatics.tech/blogs/understanding-split-brain-scenarios-in-highly-available-postgresql-clusters): "While PostgreSQL advisory locks alone can support leader election, they have limitations for preventing split-brain scenarios. Tools like Patroni integrated with etcd ensure a majority of nodes agree before promoting a new leader."
-- [Kerkour — Leader election with PostgreSQL's advisory locks — accessed 2026-05-27](https://kerkour.com/postgresql-leader-election-advisory-lock): "Advisory locks do not work reliably with PgBouncer when it is in transaction pooling mode."
-- [GreptimeDB issue #7670 — Leader Election Stall: PostgreSQL Advisory Locks Leak on Task Cancellation — accessed 2026-05-27](https://github.com/GreptimeTeam/greptimedb/issues/7670): confirms the cached-conn anti-pattern is a real, recently-reported production problem.
+- [GreptimeDB issue #7670 — Leader Election Stall: PostgreSQL Advisory Locks Leak on Task Cancellation — accessed 2026-05-27](https://github.com/GreptimeTeam/greptimedb/issues/7670): confirms the cached-conn anti-pattern is a real, recently-reported production problem. Meta-review verified this citation as accurate.
+- [Kerkour — Leader election with PostgreSQL's advisory locks — accessed 2026-05-27](https://kerkour.com/postgresql-leader-election-advisory-lock): URL exists; the PgBouncer-transaction-pool warning attributed verbatim in round-1 could not be confirmed verbatim by round-2 verification. The PgBouncer + advisory-lock incompatibility is independently true as an engineering fact (session-scoped locks released on transaction return when pool mode is `transaction`); rely on the engineering fact, not the quote.
+- *(Stormatics split-brain HA Postgres quote removed: round-2 meta-review verified the article does not mention advisory locks at all; the verbatim quote was a fabricated paraphrase. See `final-decisions.md` § X1 for the drop verdict.)*
 
-### [MAJOR-2] Outbox `ListPending` has no row-level claim; relies entirely on the advisory lock
+### [MAJOR-2 → NIT-deferred pending Phase 4] Outbox `ListPending` has no row-level claim; relies entirely on the advisory lock
+
+> **Severity downgraded by round-2 meta-review + final-decisions D5**: same Phase-4 gating as MAJOR-1. Without a second relay replica (current deployment is single-pod), the advisory-lock-only serialisation is operationally sufficient. Re-promote when HA scale-out introduces a second relay. The recommendation remains the correct shape when that happens. See [`final-decisions.md` § D5](final-decisions.md).
 
 **Where**: [`internal/application/outbox/relay.go:117-153`](../../internal/application/outbox/relay.go) calling `r.outboxRepo.ListPending(ctx, r.batchSize)`
 
@@ -324,15 +328,17 @@ Body-fingerprint design is sound and matches industry contract. Race window 1 is
 **Recommendation**: Change `ListPending` to issue `SELECT ... FROM events_outbox WHERE processed_at IS NULL ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED` inside a transaction; keep MarkProcessed inside the same tx (UPDATE → COMMIT). This gives true row-level claim semantics, makes the advisory lock optional (it becomes a throughput optimisation: keep the single-active-relay model to avoid wasted PG round-trips, but the row claim is now safe even when the lock isn't held exclusively). Effort: M (one SQL change + one transaction-boundary refactor).
 
 **References**:
-- [AWS Prescriptive Guidance — Transactional outbox pattern — accessed 2026-05-27](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html): canonical reference architecture lists `SKIP LOCKED` as the primary primitive.
-- [Software Craftsperson — Transactional Outbox Pattern: A Practical Guide to Trade-offs — 2025-10-08](https://www.softwarecraftsperson.com/posts/2025-10-08-transactional-outbox-pattern/): "To address concurrency issues with multiple relay instances, databases use techniques like `FOR UPDATE SKIP LOCKED` which locks the selected rows during the transaction and skips any rows already locked by other transactions."
+- [Software Craftsperson — Transactional Outbox Pattern: A Practical Guide to Trade-offs — 2025-10-08](https://www.softwarecraftsperson.com/posts/2025-10-08-transactional-outbox-pattern/): the article describes `FOR UPDATE SKIP LOCKED` as the row-claim primitive used to safely scale outbox relays. Meta-review verified the substantive claim; verbatim quotation removed in favour of paraphrase.
 - [Microservices.io — Transactional outbox pattern — accessed 2026-05-27](https://microservices.io/patterns/data/transactional-outbox.html)
+- *(AWS Prescriptive Guidance "lists SKIP LOCKED as the primary primitive" claim removed: round-2 meta-review verified the AWS page's sample code uses Spring JPA `findAllByOrderByIdAsc + deleteAllInBatch` with NO row-level locking; the round-1 attribution was a fabricated paraphrase. See `final-decisions.md` § X1.)*
 
 ### [MAJOR-3] `payment_failed` webhook triggers immediate saga compensation; no in-window retry
 
+> **Resolution path per `final-decisions.md` § D3**: the code at `webhook_service.go:482-485` carries a verbatim comment *"NO reservation-window guard here — failure is failure, the saga has to run regardless of TTL"* — this is an EXPLICIT counter-decision, not an oversight. The correct action is **open ADR-0002 (`docs/adr/0002_payment_failed_compensation_semantics.md`)** to either ratify the current behaviour or reverse it after weighing the in-window-retry scenarios, NOT a unilateral "two-line fix". The technical recommendation below remains correct ONLY if the ADR concludes the retry-window behaviour is preferred. See [`final-decisions.md` § D3](final-decisions.md) for the deferred-deliberate classification.
+
 **Where**: [`internal/application/payment/webhook_service.go:482-538`](../../internal/application/payment/webhook_service.go) (`handleFailure`)
 
-**What**: A `payment_intent.payment_failed` event from Stripe immediately transitions the order to `payment_failed` and emits `order.failed` to the outbox → saga compensator reverts Redis inventory. The reservation window (`reserved_until`, default 15m) is not honoured for retry.
+**What**: A `payment_intent.payment_failed` event from Stripe immediately transitions the order to `payment_failed` and emits `order.failed` to the outbox → saga compensator reverts Redis inventory. The reservation window (`reserved_until`, default 15m) is not honoured for retry **specifically in `handleFailure`**; the `reserved_until` field IS checked on the `/pay` intent-creation endpoint at `webhook_service.go:324` (`if !order.ReservedUntil().After(s.now())`), so the system is aware of the window — it just doesn't use it on the failure-webhook path.
 
 **Why it matters**: The mainstream payment flow is `payment_intent.payment_failed` → client retries (most cards 3-D-Secure-redirect, fix CVV, etc.) within the reservation window → `payment_intent.succeeded`. The current design has no path for this — the moment the first webhook lands, the order is dead. Industry SOP (Stripe Payment Intents lifecycle docs, Adyen, Worldpay) is: keep the order in `awaiting_payment` for the reservation window; only declare `payment_failed` if `reserved_until` passes AND the most-recent attempt was failed. The D6 expiry sweeper already handles the timeout side; the missing piece is "don't auto-fail on first webhook".
 
