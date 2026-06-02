@@ -606,6 +606,89 @@ func (o Order) HasPriceSnapshot() bool {
 	return o.amountCents > 0 && o.currency != ""
 }
 
+// IsTerminalForWebhook reports whether the order's status is one of
+// the resolved states that mean "an inbound payment webhook is a
+// duplicate redelivery — 200 no-op". Includes Pattern A terminals
+// (Paid / Expired / PaymentFailed) plus Compensated, so a slow
+// provider redelivery cannot retro-actively revert the saga
+// compensator's MarkCompensated transition.
+//
+// PR #127 A5 moved this predicate from `application/payment` onto
+// the entity because the question — "is this status a webhook
+// no-op?" — is a property of the order's state machine, not of the
+// webhook handler. Application-layer call sites read
+// `order.IsTerminalForWebhook()` instead of importing a domain-
+// shaped predicate from the application package.
+func (o Order) IsTerminalForWebhook() bool {
+	switch o.status {
+	case OrderStatusPaid,
+		OrderStatusPaymentFailed,
+		OrderStatusCompensated,
+		OrderStatusExpired:
+		return true
+	}
+	return false
+}
+
+// IsFailureTerminalAfterPay reports whether the order is in one of
+// the failure-terminal states where a `succeeded` webhook landing
+// represents an out-of-band recovery the customer's money moved at
+// the provider AFTER we declared the booking dead (D6 expired, saga
+// compensated, prior payment_failed that then resolved on retry).
+// All three paths share the same operational consequence: a manual
+// refund is required, even though no further DB transition is
+// possible.
+//
+// `Paid` is intentionally NOT included — a `succeeded` event on an
+// already-Paid order is the canonical clean redelivery.
+//
+// PR #127 A5: see [IsTerminalForWebhook] for the rationale of
+// hosting the predicate on the entity vs in the webhook service.
+func (o Order) IsFailureTerminalAfterPay() bool {
+	switch o.status {
+	case OrderStatusExpired,
+		OrderStatusPaymentFailed,
+		OrderStatusCompensated:
+		return true
+	}
+	return false
+}
+
+// IsReservationActive reports whether the order is currently within
+// its Pattern A reservation window: status is AwaitingPayment AND
+// `reserved_until > now`. The D6 expiry sweeper flips
+// AwaitingPayment → Expired once the window elapses; until then
+// the reservation is alive and the order can be paid.
+//
+// PR #127 A5: caller passes its own `now` rather than reading
+// `time.Now()` directly so this method stays mockable and
+// deterministic in tests. Mirrors the pattern at
+// `webhook_service.go`'s `s.now()` field.
+func (o Order) IsReservationActive(now time.Time) bool {
+	return o.status == OrderStatusAwaitingPayment && o.reservedUntil.After(now)
+}
+
+// RequiresCompensation reports whether the order is in a state where
+// inventory has been deducted on Redis but not consumed — i.e. the
+// saga compensator must revert the Redis inventory. Today this is
+// the Failed / Expired / PaymentFailed set; Compensated and the
+// success-side terminals (Paid / Confirmed) do not.
+//
+// PR #127 A5: provided here for the saga compensator's eventual
+// migration off raw status comparison. Not yet wired by the
+// compensator — adding the method now keeps the entity-side
+// predicate surface complete so future compensator refactors can
+// adopt it without a churn-PR.
+func (o Order) RequiresCompensation() bool {
+	switch o.status {
+	case OrderStatusFailed,
+		OrderStatusExpired,
+		OrderStatusPaymentFailed:
+		return true
+	}
+	return false
+}
+
 //go:generate mockgen -source=order.go -destination=../mocks/order_repository_mock.go -package=mocks
 type OrderRepository interface {
 	// Create persists the order and returns it back unchanged. The

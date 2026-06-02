@@ -127,43 +127,15 @@ func NewWebhookService(
 	}
 }
 
-// isTerminalForWebhook reports whether `s` is a status that means
-// "this order has already been resolved; an inbound webhook is a
-// duplicate redelivery and should 200 no-op". Includes both Pattern A
-// terminal states (Paid / Expired / PaymentFailed / Compensated) so
-// the saga compensator's eventual `MarkCompensated` doesn't get
-// retro-actively reverted by a slow provider redelivery.
-func isTerminalForWebhook(s domain.OrderStatus) bool {
-	switch s {
-	case domain.OrderStatusPaid,
-		domain.OrderStatusPaymentFailed,
-		domain.OrderStatusCompensated,
-		domain.OrderStatusExpired:
-		return true
-	}
-	return false
-}
-
-// isFailureTerminalAfterPay reports whether `s` is one of the terminal
-// failure states a `succeeded` webhook should NOT be silently 200'd
-// against. The customer's money moved at the provider AFTER we
-// declared the booking dead (D6 expired the reservation, or saga
-// compensated, or D5 itself recorded a prior payment_failure that
-// then resolved into a successful charge on retry). All three paths
-// share the same operational consequence: a manual refund is
-// required, even though no further DB transition is possible.
+// PR #127 A5: webhook classification predicates moved onto domain.Order.
+// Application code now reads `order.IsTerminalForWebhook()` /
+// `order.IsFailureTerminalAfterPay()` directly — see
+// internal/domain/order.go.
 //
-// `paid` is intentionally NOT included — a `succeeded` event landing
-// on an already-paid order is the canonical clean redelivery.
-func isFailureTerminalAfterPay(s domain.OrderStatus) bool {
-	switch s {
-	case domain.OrderStatusExpired,
-		domain.OrderStatusPaymentFailed,
-		domain.OrderStatusCompensated:
-		return true
-	}
-	return false
-}
+// Hosting the predicates on the entity puts the "is this status a
+// webhook no-op?" question where it belongs (the state machine the
+// order owns) instead of in an application package that re-derives
+// the answer from raw status comparisons.
 
 func (s *webhookService) HandleWebhook(ctx context.Context, env Envelope) error {
 	// 1. Cross-env guard. A test-mode signature reaching a prod
@@ -235,8 +207,8 @@ func (s *webhookService) HandleWebhook(ctx context.Context, env Envelope) error 
 	//
 	//    `paid` is the only event where every redelivery is a true
 	//    no-op (succeeded webhook + already-paid order = clean retry).
-	if isTerminalForWebhook(order.Status()) {
-		if env.Type == EventTypePaymentIntentSucceeded && isFailureTerminalAfterPay(order.Status()) {
+	if order.IsTerminalForWebhook() {
+		if env.Type == EventTypePaymentIntentSucceeded && order.IsFailureTerminalAfterPay() {
 			return s.handleLateSuccess(ctx, order, obj.ID, "post_terminal")
 		}
 		s.log.Info(ctx, "webhook: duplicate against terminal order",
@@ -366,7 +338,7 @@ func (s *webhookService) handleSuccess(ctx context.Context, order domain.Order, 
 				tag.Error(getErr))
 			return getErr
 		}
-		if isTerminalForWebhook(cur.Status()) {
+		if cur.IsTerminalForWebhook() {
 			s.log.Info(ctx, "webhook: lost concurrent race — terminal already",
 				tag.OrderID(order.ID()),
 				tag.Status(string(cur.Status())))
@@ -459,7 +431,7 @@ func (s *webhookService) handleLateSuccess(ctx context.Context, order domain.Ord
 		if getErr != nil {
 			return getErr
 		}
-		if isTerminalForWebhook(cur.Status()) {
+		if cur.IsTerminalForWebhook() {
 			s.log.Info(ctx, "webhook: late success — D6 sweeper raced; terminal already",
 				tag.OrderID(order.ID()),
 				tag.Status(string(cur.Status())))
@@ -517,7 +489,7 @@ func (s *webhookService) handleFailure(ctx context.Context, order domain.Order, 
 		if getErr != nil {
 			return getErr
 		}
-		if isTerminalForWebhook(cur.Status()) {
+		if cur.IsTerminalForWebhook() {
 			s.log.Info(ctx, "webhook: handleFailure lost race — terminal already",
 				tag.OrderID(order.ID()),
 				tag.Status(string(cur.Status())))
