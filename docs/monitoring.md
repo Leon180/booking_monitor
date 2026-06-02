@@ -263,9 +263,11 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 [deploy/grafana/provisioning/dashboards/admin_war_room.json](../deploy/grafana/provisioning/dashboards/admin_war_room.json) — flash-sale ops dashboard composing Layer A (business) + Layer B (streaming infra) signals per the design doc [§Q16](design/admin_event_streaming.md). Visit it at **Dashboards → Browse → Admin War-Room (PR #121)**.
 
 9-panel composition:
-- **Hero row (stat panels)**: Bookings/s, Pay conversion % (5m), Saga events/s, Admin SSE connections
-- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/duplicate/error), Saga + DLQ anomaly overlay
+- **Hero row (stat panels)**: Bookings/s (`admin_event_bus_published_total{event_type="order.created"}` — see Stage 5 compatibility note below), Pay conversion % (5m) — `payment_webhook_received_total{result="succeeded"}` ÷ `admin_event_bus_published_total{event_type="order.created"}`, Saga events/s, Admin SSE connections
+- **Trends row (timeseries)**: Booking outcomes stacked by `event_type` from `admin_event_bus_published_total` (order.created / order.paid / order.failed / order.expired / order.compensated / saga.triggered / dlq.received / inventory.low), Saga + DLQ anomaly overlay
 - **Streaming health row (timeseries)**: Bus channel depth + drop rate, Subscriber consec failures, SSE message lag p95/p99
+
+**Stage 5 compatibility note**: the war-room dashboard intentionally queries `admin_event_bus_published_total` instead of `bookings_total` for the booking-rate / outcome panels because the Stage 5 binary's worker path does not increment `bookings_total` (the metric is registered service-wide but the Stage 5 worker emits via the admin event bus only). `admin_event_bus_published_total` is incremented by `worker.MessageProcessor.Process` and works whether the active binary is Stage 4 or Stage 5 — cross-stage compatible. For Stage 4 binaries you can still use `bookings_total{status}` directly (see §3 cookbook); the war-room panels switched to the bus signal to stay accurate under both stages.
 
 Refresh: 30s. Default window: last 15 minutes. Live event timeline is a separate visualization layer (SSE stream → custom JS), not included in the Grafana JSON.
 

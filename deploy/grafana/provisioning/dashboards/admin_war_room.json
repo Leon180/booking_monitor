@@ -133,7 +133,7 @@
       },
       "targets": [
         {
-          "expr": "100 * sum(rate(payment_webhook_received_total{result=\"succeeded\"}[5m])) / sum(rate(bookings_total{status=\"success\"}[5m]))",
+          "expr": "100 * sum(rate(payment_webhook_received_total{result=\"succeeded\"}[5m])) / sum(rate(admin_event_bus_published_total{event_type=\"order.created\"}[5m]))",
           "refId": "A"
         }
       ],
