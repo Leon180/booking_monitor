@@ -24,11 +24,12 @@ func init() { gin.SetMode(gin.TestMode) }
 // cache hits or misses. The Set side records last-write so tests can
 // verify that the middleware caches the new response shape.
 type stubIdempotencyRepo struct {
-	getFn   func(ctx context.Context, key string) (*domain.IdempotencyResult, string, error)
-	setFn   func(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error
-	lastIn  *domain.IdempotencyResult
-	lastFP  string
-	lastKey string
+	getFn    func(ctx context.Context, key string) (*domain.IdempotencyResult, string, error)
+	setFn    func(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error
+	setNXFn  func(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) (bool, error)
+	lastIn   *domain.IdempotencyResult
+	lastFP   string
+	lastKey  string
 }
 
 func (s *stubIdempotencyRepo) Get(ctx context.Context, key string) (*domain.IdempotencyResult, string, error) {
@@ -46,6 +47,20 @@ func (s *stubIdempotencyRepo) Set(ctx context.Context, key string, r *domain.Ide
 		return nil
 	}
 	return s.setFn(ctx, key, r, fp)
+}
+
+func (s *stubIdempotencyRepo) SetNX(ctx context.Context, key string, r *domain.IdempotencyResult, fp string) (bool, error) {
+	s.lastIn = r
+	s.lastFP = fp
+	s.lastKey = key
+	if s.setNXFn == nil {
+		// Default behaviour: act like Set succeeded with first-writer-wins
+		// landing the write. Existing test fixtures assert on lastIn/lastFP
+		// after the handler returns; they all currently exercise the
+		// no-prior-entry path so wasSet=true keeps them green.
+		return true, nil
+	}
+	return s.setNXFn(ctx, key, r, fp)
 }
 
 // fingerprintFor mirrors the middleware's hex-SHA256-of-raw-bytes

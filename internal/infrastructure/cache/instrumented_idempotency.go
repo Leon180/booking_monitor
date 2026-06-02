@@ -78,3 +78,10 @@ func (i *instrumentedIdempotencyRepository) Get(ctx context.Context, key string)
 func (i *instrumentedIdempotencyRepository) Set(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) error {
 	return i.inner.Set(ctx, key, result, fingerprint)
 }
+
+// SetNX is a transparent pass-through. The middleware logs the
+// race-loss case (wasSet=false) at call site for context; no
+// separate counter today.
+func (i *instrumentedIdempotencyRepository) SetNX(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) (bool, error) {
+	return i.inner.SetNX(ctx, key, result, fingerprint)
+}

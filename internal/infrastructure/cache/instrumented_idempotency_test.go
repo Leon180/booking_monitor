@@ -39,6 +39,11 @@ func (f *fakeIdempotencyRepo) Set(_ context.Context, _ string, _ *domain.Idempot
 	return f.setErr
 }
 
+func (f *fakeIdempotencyRepo) SetNX(_ context.Context, _ string, _ *domain.IdempotencyResult, _ string) (bool, error) {
+	f.setCalls++
+	return f.setErr == nil, f.setErr
+}
+
 func TestInstrumentedIdempotency_Get_Hit_IncrementsHitCounter(t *testing.T) {
 	hitsBefore := testutil.ToFloat64(observability.CacheHitsTotal.WithLabelValues(cacheLabelIdempotency))
 	missesBefore := testutil.ToFloat64(observability.CacheMissesTotal.WithLabelValues(cacheLabelIdempotency))

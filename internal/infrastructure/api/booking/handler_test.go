@@ -130,6 +130,9 @@ func (noopIdempotencyRepo) Get(_ context.Context, _ string) (*domain.Idempotency
 func (noopIdempotencyRepo) Set(_ context.Context, _ string, _ *domain.IdempotencyResult, _ string) error {
 	return nil
 }
+func (noopIdempotencyRepo) SetNX(_ context.Context, _ string, _ *domain.IdempotencyResult, _ string) (bool, error) {
+	return true, nil
+}
 
 func newRouter(svc bookingapp.Service) *gin.Engine {
 	return newRouterWith(svc, &stubEventService{}, &stubPaymentService{})

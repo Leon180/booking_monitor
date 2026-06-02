@@ -105,3 +105,27 @@ func (r *redisIdempotencyRepository) Set(ctx context.Context, key string, result
 	}
 	return nil
 }
+
+// SetNX implements first-writer-wins replay-cache semantics via
+// Redis `SET key value NX EX <ttl>`. PR #130 A17: the post-handler
+// fill path uses this so the slow handler's body cannot overwrite
+// the fast handler's body for the same idempotency key. The
+// `wasSet` return surfaces the race for observability — false
+// means the cache already held an entry; the caller does not
+// rewrite it.
+func (r *redisIdempotencyRepository) SetNX(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) (bool, error) {
+	rec := idempotencyRecord{
+		StatusCode:  result.StatusCode,
+		Body:        result.Body,
+		Fingerprint: fingerprint,
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return false, fmt.Errorf("idempotency SetNX: marshal: %w", err)
+	}
+	wasSet, err := r.client.SetNX(ctx, idempotencyKey(key), data, r.idempotencyTTL).Result()
+	if err != nil {
+		return false, fmt.Errorf("idempotency SetNX: redis: %w", err)
+	}
+	return wasSet, nil
+}

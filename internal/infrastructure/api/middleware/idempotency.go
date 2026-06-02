@@ -304,14 +304,30 @@ func Idempotency(repo domain.IdempotencyRepository) gin.HandlerFunc {
 		// (response is already committed), so a Redis blip here is
 		// logged but does not surface to the user.
 		setCtx := context.WithoutCancel(ctx)
-		if setErr := repo.Set(setCtx, key, &domain.IdempotencyResult{
+		// PR #130 A17: SetNX so the FIRST request to finish wins the
+		// cache. Two concurrent retries of the same Idempotency-Key
+		// without this can race so the slower handler's envelope
+		// overwrites the faster one — Lua deduct + DB UNIQUE already
+		// prevent the correctness issue (the second handler's order_id
+		// matches the first via DB-side dedup), but the cached body
+		// shape was non-deterministic. wasSet=false is a benign "we
+		// raced and lost"; log it at Info so it shows up under load
+		// without spamming Warn.
+		wasSet, setErr := repo.SetNX(setCtx, key, &domain.IdempotencyResult{
 			StatusCode: statusCode,
 			Body:       capture.body.String(),
-		}, fp); setErr != nil {
-			log.Warn(ctx, "idempotency cache Set failed (response already sent; next retry will re-process)",
+		}, fp)
+		switch {
+		case setErr != nil:
+			log.Warn(ctx, "idempotency cache SetNX failed (response already sent; next retry will re-process)",
 				tag.Error(setErr),
 				log.String("idempotency_key", key),
-				log.String("idempotency_op", "final_set"),
+				log.String("idempotency_op", "final_set_nx"),
+				log.Int("body_size_bytes", capture.body.Len()))
+		case !wasSet:
+			log.Info(ctx, "idempotency cache SetNX lost race (first writer's envelope wins)",
+				log.String("idempotency_key", key),
+				log.String("idempotency_op", "final_set_nx"),
 				log.Int("body_size_bytes", capture.body.Len()))
 		}
 	}
