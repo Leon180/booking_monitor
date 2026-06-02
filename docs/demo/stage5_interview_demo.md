@@ -26,7 +26,7 @@ Grafana 開著 `http://localhost:3000`，先把 dashboard 調好。
 
 開口框架：
 
-> 「Stage 5 是這個系統的 production-standard，核心決策是把 Kafka produce 放進 booking hot path——用 38% 吞吐量換 crash-safe intake，類似 Damai / Ticketmaster 的做法。」
+> 「Stage 5 是這個系統的 production-standard，核心決策是把 Kafka produce 放進 booking hot path——用約 34% intake 吞吐量換 crash-safe intake（Stage 4 → Stage 5：8,374 → 5,533 accepted/s，-33.9%），類似 Damai / Ticketmaster 的做法。」
 
 ```
 Client
@@ -143,7 +143,7 @@ k6 run \
 ```promql
 sum(rate(accepted_bookings_total[10s]))
 ```
-> 「Redis Lua deduct 成功速率，約 5,500/s。對比 Stage 3 的 8,400/s——差的 2,900/s 就是 Kafka produce 的 durability tax。」
+> 「Redis Lua deduct 成功速率，約 5,533/s。對比 Stage 3 的 8,475/s——差的 ~2,940/s 就是 Kafka produce 的 durability tax。」
 
 **Panel 2 — Kafka Produce Duration**
 ```promql
@@ -176,8 +176,8 @@ Stage 4 → Stage 5 tradeoff:
 ┌─────────────────┬──────────┬──────────┬────────┐
 │                 │ Stage 4  │ Stage 5  │   Δ    │
 ├─────────────────┼──────────┼──────────┼────────┤
-│ intake 吞吐     │ 8,378/s  │ 5,533/s  │ −34%   │
-│ intake p(95)    │ 33.6 ms  │ 111.9 ms │ +3.3×  │
+│ intake 吞吐     │ 8,377/s  │ 5,533/s  │ −34%   │
+│ intake p(95)    │ 34.4 ms  │ 111.9 ms │ +3.25× │
 │ full-flow crash │  YES     │   NO     │ ✓      │
 │ 資料遺失        │  有可能  │   不可能 │ ✓      │
 └─────────────────┴──────────┴──────────┴────────┘
