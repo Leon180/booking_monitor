@@ -185,14 +185,18 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 			if err != nil {
 				return &stepError{step: "list_ticket_type", err: err}
 			}
-			// PR #127 B7: discard `found` here. On the already-compensated
-			// idempotent-replay path the Redis revert below uses
-			// ticketTypeIDForRevert defensively — uuid.Nil propagates
-			// through revert.lua's namespace lookup as the legacy
-			// `orderID`-scoped key (per the dual-namespace contract
-			// surfaced by CAP A7). Discarding the explicit found flag is
-			// safe because this branch ends with `return nil` after the
-			// idempotency check, not with a path that calls IncrementTicket.
+			// PR #127 B7: discard `found` here. Safe because this branch
+			// ends with `return nil` immediately after the idempotency
+			// check (the already-compensated replay path); IncrementTicket
+			// is NOT called. If `ticketTypeID` came back as `uuid.Nil`
+			// (Path C — unrecoverable), `ticketTypeIDForRevert` will
+			// carry that value out of the UoW, and the outer guard at
+			// line 322 (`if ticketTypeIDForRevert == uuid.Nil`) then
+			// skips the entire `RevertInventory` call. revert.lua is
+			// never reached on the Path-C-from-replay shape, so the
+			// dual-namespace contract from CAP A7 doesn't come into
+			// play here — the safety lives in the outer guard, not in
+			// the Lua script.
 			ticketTypeIDForRevert = ticketTypeID
 			return nil
 		}

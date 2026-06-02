@@ -619,6 +619,17 @@ func (o Order) HasPriceSnapshot() bool {
 // webhook handler. Application-layer call sites read
 // `order.IsTerminalForWebhook()` instead of importing a domain-
 // shaped predicate from the application package.
+//
+// Scope note (PR #127 review): `Confirmed` is the legacy A4 booking
+// path's terminal status and is intentionally NOT in this set. The
+// webhook handler at `application/payment/webhook_service.go:221`
+// gates on `order.Status() != domain.OrderStatusAwaitingPayment`
+// BEFORE this predicate is evaluated, returning
+// ErrWebhookUnexpectedStatus (→ 409) for `Pending`/`Charging`/
+// `Confirmed`/`Failed` (the legacy A4 lifecycle). So `Confirmed`
+// can never reach this predicate in production. Adding it to the
+// set would be harmless but misleading — the layering is already
+// enforced upstream.
 func (o Order) IsTerminalForWebhook() bool {
 	switch o.status {
 	case OrderStatusPaid,
