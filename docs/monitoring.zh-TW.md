@@ -187,7 +187,9 @@ Admin SSE 事件管線暴露自己的基礎設施指標(Layer B,見 [§Q16](desi
 **值得收藏的查詢:**
 
 ```promql
-# 訂票漏斗 — 成功 vs 售完 vs 重複 vs 錯誤
+# 訂票漏斗 — 成功 vs 售完 vs 錯誤
+# (PR #129 A15:`duplicate` 已移除 — 見 §2 row 註解;重複請求
+#  的觀測請改用 `idempotency_replays_total`。)
 sum by (status) (rate(bookings_total[1m]))
 
 # Worker 吞吐
@@ -264,7 +266,7 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 
 9 個 panel 的構成:
 - **Hero row(stat 面板)**:Bookings/s、Pay conversion %(5m)、Saga events/s、Admin SSE 連線數
-- **Trends row(時序圖)**:Booking 結果分層堆疊(success/sold_out/duplicate/error)、Saga + DLQ 異常疊圖
+- **Trends row(時序圖)**:Booking 結果分層堆疊(success/sold_out/error — PR #129 A15 移除了 `duplicate`)、Saga + DLQ 異常疊圖
 - **串流健康 row(時序圖)**:Bus channel 深度 + drop 速率、Subscriber 連續失敗、SSE 訊息延遲 p95/p99
 
 刷新頻率:30 秒。預設區間:最近 15 分鐘。即時事件 timeline 是另一個視覺化層(SSE 串流 → 自製 JS),不包含在 Grafana JSON 裡。

@@ -35,10 +35,10 @@ These are the three SLIs the project would track once the SRE Workbook pattern i
 
 ### SLI-3 — Webhook ack p95
 
-- **Definition**: `histogram_quantile(0.95, sum by (le) (rate(payment_webhook_duration_seconds_bucket[5m])))`
+- **Definition (aspirational)**: `histogram_quantile(0.95, sum by (le) (rate(payment_webhook_duration_seconds_bucket[5m])))`
 - **Rationale**: Stripe webhooks have a 30s timeout before they consider the endpoint unhealthy and back off. Sustained p95 above 5s puts the deployment on Stripe's degraded-listener list, which slows redeliveries for the entire account.
 - **Candidate target**: p95 ≤ 2s.
-- **Current source-of-truth metric**: `payment_webhook_duration_seconds` histogram (defined in `internal/infrastructure/observability/metrics_webhook.go`).
+- **Implementation gap (PR #129 review fixup)**: The `payment_webhook_duration_seconds` histogram **does not yet exist** in the codebase. [`internal/infrastructure/observability/metrics_payment_webhook.go`](../internal/infrastructure/observability/metrics_payment_webhook.go) (note: the file is `metrics_payment_webhook.go`, NOT the `metrics_webhook.go` referenced in an earlier draft of this stub) defines only counter-type metrics (`PaymentWebhookReceivedTotal`, `PaymentWebhookSignatureInvalidTotal`, etc.) — no histogram. SLI-3 therefore requires adding a webhook-duration histogram alongside the existing counters BEFORE the SLO query above can return any data. Track as part of the Phase 3 SLO implementation; not blocked on anything other than the histogram definition + recording in the webhook handler entry/exit.
 
 ## Methodology when implementing
 

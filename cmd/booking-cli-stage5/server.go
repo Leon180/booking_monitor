@@ -74,8 +74,18 @@ func runServer(_ *cobra.Command, _ []string) {
 		// base service was provided directly, bypassing
 		// NewMetricsDecorator. PR #125 worked around this by pointing
 		// the dashboard at `admin_event_bus_published_total` instead;
-		// with this wiring in place the dashboard can use either signal
-		// honestly (see docs/monitoring.md § Stage-5-compatibility note).
+		// with this wiring in place the dashboard can use either signal,
+		// but the two signals are NOT equivalent:
+		//   - bookings_total counts API-boundary outcomes (success /
+		//     sold_out / error) — what the client sees.
+		//   - admin_event_bus_published_total counts admin-bus publish
+		//     successes by event_type — what fans out to the SSE stream.
+		// Pick the one that matches the panel question; for a "booking
+		// throughput" panel `bookings_total{status="success"}` is the
+		// honest signal post-A2. The PR #125 panel pivot to
+		// admin_event_bus_published_total remains valid (it was the
+		// only signal that worked on Stage 5 pre-A2) but no longer
+		// the only viable option.
 		fx.Provide(
 			observability.NewStage5Metrics,
 			observability.NewBookingMetrics,

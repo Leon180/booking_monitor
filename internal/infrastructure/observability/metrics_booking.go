@@ -20,7 +20,11 @@ var PageViewsTotal = promauto.NewCounterVec(
 )
 
 // BookingsTotal tracks booking outcomes at the API layer.
-// Labels: status = "success" | "sold_out" | "duplicate" | "error"
+// Labels: status = "success" | "sold_out" | "error"
+// (PR #129 A15 dropped "duplicate" — since N4 the Idempotency
+// middleware short-circuits duplicates before they reach the
+// booking service, so the decorator never emits status="duplicate".
+// Replay activity is observable via idempotency_replays_total.)
 var BookingsTotal = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "bookings_total",

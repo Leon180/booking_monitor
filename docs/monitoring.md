@@ -187,7 +187,9 @@ Open http://localhost:9090.
 **Useful queries to bookmark:**
 
 ```promql
-# Booking funnel — successes vs sold-out vs duplicate vs error
+# Booking funnel — successes vs sold-out vs error
+# (PR #129 A15: `duplicate` removed — see §2 row note; replay
+#  activity is observable via `idempotency_replays_total` instead.)
 sum by (status) (rate(bookings_total[1m]))
 
 # Worker throughput
@@ -264,7 +266,7 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 
 9-panel composition:
 - **Hero row (stat panels)**: Bookings/s, Pay conversion % (5m), Saga events/s, Admin SSE connections
-- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/duplicate/error), Saga + DLQ anomaly overlay
+- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/error — PR #129 A15 dropped `duplicate`), Saga + DLQ anomaly overlay
 - **Streaming health row (timeseries)**: Bus channel depth + drop rate, Subscriber consec failures, SSE message lag p95/p99
 
 Refresh: 30s. Default window: last 15 minutes. Live event timeline is a separate visualization layer (SSE stream → custom JS), not included in the Grafana JSON.
