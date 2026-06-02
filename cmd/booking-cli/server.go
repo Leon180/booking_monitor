@@ -229,7 +229,19 @@ func installInventoryRehydrate(
 	logger *mlog.Logger,
 ) {
 	lc.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
+		OnStart: func(_ context.Context) error {
+			// PR #128 A11: derive ctx from context.Background() with an
+			// explicit RehydrateTimeout instead of inheriting the fx
+			// OnStart ctx (~15s default). A slow rehydrate against a
+			// large ticket-type catalogue could otherwise be cancelled
+			// mid-SETNX, leaving Redis half-populated and the worker
+			// emitting `metadata_missing` on every booking until pod
+			// restart. Mirrors the relay's background-ctx pattern at
+			// server.go:181. The rehydrate is still synchronous inside
+			// OnStart — HTTP must wait for it to complete — but it is
+			// no longer subject to the OnStart lifecycle deadline.
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.Redis.RehydrateTimeout)
+			defer cancel()
 			return cache.RehydrateInventory(ctx, cache.RehydrateInventoryParams{
 				EventRepo:      eventRepo,
 				TicketTypeRepo: ticketTypeRepo,

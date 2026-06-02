@@ -98,15 +98,18 @@ func (p *IntakePublisher) PublishIntake(ctx context.Context, msg booking.IntakeM
 		return fmt.Errorf("intake publisher: encode message: %w", err)
 	}
 
-	// Bound the publish by the configured WriteTimeout in addition to
-	// the caller's ctx. The kafka.Writer respects WriteTimeout for
-	// network I/O but not the broker ack roundtrip — the explicit
-	// ctx-with-timeout is the belt to kafka.Writer.WriteTimeout's
-	// suspenders.
-	publishCtx, cancel := context.WithTimeout(ctx, p.writeTimeout)
-	defer cancel()
-
-	err = p.writer.WriteMessages(publishCtx, kafka.Message{
+	// PR #128 A10: removed redundant `context.WithTimeout(ctx, writeTimeout)`.
+	// The kafka.Writer is constructed with `WriteTimeout: timeout`
+	// (same value); per kafka-go's internal select-on-WriteTimeout,
+	// this DOES cover the broker-ack roundtrip when RequiredAcks=All,
+	// not just the network write — the pre-A10 comment was incorrect.
+	// The previous belt-and-suspenders shape allocated ~80B *timerCtx
+	// + a runtime timer pair per call. At the 8k-publish-per-second
+	// Stage 5 intake ceiling that's ~640 KB/s of avoidable garbage +
+	// 8k timer-create/cancel pairs/s (16k discrete timer ops). The
+	// caller's ctx still bounds the call via gin request lifecycle
+	// (and ctx.Done() is honored by the same select).
+	err = p.writer.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(msg.OrderID.String()),
 		Value: payload,
 		Time:  time.Now().UTC(),

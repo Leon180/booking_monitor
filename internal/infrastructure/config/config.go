@@ -549,6 +549,19 @@ type RedisConfig struct {
 	// flows that retry across days.
 	IdempotencyTTL time.Duration `yaml:"idempotency_ttl" env:"REDIS_IDEMPOTENCY_TTL" env-default:"24h"`
 
+	// RehydrateTimeout caps the inventory rehydrate (DB → Redis SETNX
+	// sweep on startup) so a slow rehydrate can never be cancelled
+	// mid-sweep by the fx OnStart lifecycle deadline. PR #128 A11:
+	// without this knob the rehydrate inherited the OnStart ctx
+	// (~15s fx default); a deployment with many ticket_types could
+	// land in half-populated Redis on slow boot, causing the worker
+	// to emit `metadata_missing` errors on every fresh booking until
+	// pod restart. Default 2 min is generous; raise for very large
+	// catalogues. The rehydrate runs synchronously inside OnStart
+	// (must complete before HTTP starts) but uses a ctx derived from
+	// context.Background() instead of the OnStart ctx.
+	RehydrateTimeout time.Duration `yaml:"rehydrate_timeout" env:"REDIS_REHYDRATE_TIMEOUT" env-default:"2m"`
+
 	// DLQRetention is the bounded retention window for the
 	// `orders:dlq` stream. Translated to a Redis Streams MINID
 	// directive on every XADD so entries older than NOW-DLQRetention
@@ -640,7 +653,12 @@ type WorkerConfig struct {
 type PostgresConfig struct {
 	DSN          string        `yaml:"dsn" env:"DATABASE_URL"` // Constructed or direct override
 	MaxOpenConns int           `yaml:"max_open_conns" env:"DB_MAX_OPEN_CONNS" env-default:"50"`
-	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"5"`
+	// MaxIdleConns default raised 5 → 25 (PR #128 A9). At 50% of
+	// MaxOpenConns this prevents the sustained-then-bursty pattern
+	// from tearing down + re-opening ~45 connections per burst
+	// (each ~1ms TCP + TLS + auth). Cheap ops fix; verify via
+	// `db_pool_wait_count` / `db_pool_wait_duration` after a k6 burst.
+	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"25"`
 	MaxIdleTime  time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME" env-default:"5m"`
 	// MaxLifetime bounds how long a single Postgres connection may live.
 	// Unlike MaxIdleTime (which evicts idle conns), MaxLifetime forces
