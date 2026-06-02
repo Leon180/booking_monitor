@@ -147,19 +147,22 @@ for secret_id in "${SECRETS[@]}"; do
   # Escape for sed replacement: backslashes, ampersands, and the delimiter.
   # We use a delimiter `|` (uncommon in env values); secret values may
   # contain special URL chars so we escape conservatively.
+  # CAVEAT: sed is line-oriented; secret values MUST NOT contain literal
+  # newlines (rare, but cert / multi-line PEM data would break this).
+  # The current 6 secrets are URL / token / password strings — all safe.
   escaped_value=$(printf '%s' "$value" | sed 's/[\&|\\]/\\&/g')
-  placeholder="PLACEHOLDER_$(echo "$env_name" | tr '[:lower:]' '[:upper:]')_FROM_SECRET_MANAGER"
 
-  # Replace the placeholder on the matching env line. Use `sed` with
-  # `|` as delimiter (URL slashes don't need escaping).
-  # NOTE: we replace the WHOLE line's value to defend against secrets
-  # that contain the placeholder text itself.
   # Global token replacement (not line-anchored on env_name). This
   # handles the case where the same secret is referenced by MULTIPLE
   # env vars in the template — e.g. MIGRATE_DB_URL reuses
   # PLACEHOLDER_DATABASE_URL_FROM_SECRET_MANAGER so it picks up the same
   # value as DATABASE_URL. Line-anchored replace would leave the second
   # placeholder dangling and the sanity check would fail.
+  #
+  # Note: secret_to_env() always returns UPPER_SNAKE_CASE, so the
+  # placeholder name's case matches the template tokens directly — no
+  # tr-uppercase needed (earlier version had a redundant tr-call here,
+  # removed per PR #150 review round 1 CRIT).
   placeholder="PLACEHOLDER_${env_name}_FROM_SECRET_MANAGER"
   if ! grep -q "$placeholder" "$ENV_FILE_TMP"; then
     echo "  ✗ template has no $placeholder; check deploy/.env.vm.template"
