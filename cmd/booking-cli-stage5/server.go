@@ -65,10 +65,34 @@ func runServer(_ *cobra.Command, _ []string) {
 		),
 
 		// Booking intake chain: metrics → publisher → service → worker → consumer.
+		//
+		// PR #129 A2: Stage 5 wraps NewKafkaIntakeService with the same
+		// metrics decorator that internal/application/module.go applies
+		// for the main binary, so `bookings_total{status="success"}` etc.
+		// emit on Stage 5 too. Pre-A2 the war-room dashboard's
+		// booking-rate panels read flat-zero on Stage 5 because the
+		// base service was provided directly, bypassing
+		// NewMetricsDecorator. PR #125 worked around this by pointing
+		// the dashboard at `admin_event_bus_published_total` instead;
+		// with this wiring in place the dashboard can use either signal
+		// honestly (see docs/monitoring.md § Stage-5-compatibility note).
 		fx.Provide(
 			observability.NewStage5Metrics,
+			observability.NewBookingMetrics,
 			newIntakePublisher,
-			booking.NewKafkaIntakeService,
+			func(
+				orderRepo domain.OrderRepository,
+				ticketTypeRepo domain.TicketTypeRepository,
+				inventoryRepo domain.Stage5InventoryRepository,
+				publisher booking.IntakePublisher,
+				s5metrics booking.Stage5Metrics,
+				bmetrics booking.Metrics,
+				cfg *config.Config,
+				logger *mlog.Logger,
+			) booking.Service {
+				base := booking.NewKafkaIntakeService(orderRepo, ticketTypeRepo, inventoryRepo, publisher, s5metrics, cfg, logger)
+				return booking.NewMetricsDecorator(base, bmetrics)
+			},
 			observability.NewWorkerMetrics,
 			newWorkerMessageProcessor,
 			newIntakeConsumer,

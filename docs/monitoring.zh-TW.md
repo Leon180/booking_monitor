@@ -99,7 +99,7 @@ Collector 在 scrape 當下讀 `*redis.Client.PoolStats()`(已經有鎖保護 + 
 
 | 問題 | 指標 |
 | :-- | :-- |
-| 成功訂票 vs 售完 vs 重複下單 | `bookings_total{status}` |
+| 成功訂票 vs 售完 vs 錯誤 | `bookings_total{status}` — status 列舉:`success` / `sold_out` / `error`。PR #129 A15 移除了 `duplicate` 這個 label:自 N4 起 Idempotency middleware 會在請求進入 booking service 之前就短路掉重複請求,因此 booking-decorator 不會發出 `status="duplicate"`。重複下單的觀測請改用 `idempotency_replays_total`。 |
 | Worker 處理結果 | `worker_orders_total{status}`、`worker_processing_duration_seconds` |
 | Redis 與 DB 庫存漂移 | `inventory_conflicts_total`(worker 端,Redis 通過但 DB 拒絕); `inventory_rehydrate_drift_total`(啟動時,Redis key 存在且值 > DB available_tickets — 見 [`cache/rehydrate.go`](../internal/infrastructure/cache/rehydrate.go))。多次部署後仍看到 `rate(inventory_rehydrate_drift_total[1h]) > 0` 持續 = 有人/事在把錯的值寫進 Redis(毀損、手動操作、或 `architectural_backlog.md` § Cache-truth architecture 紀錄的 NOGROUP 後遺症)。 |
 | Dead-letter 路由 | `dlq_messages_total{topic,reason}`、`redis_dlq_routed_total{reason}` — `reason` 列舉:`malformed_classified`(handler invariant 拒絕)、`exhausted_retries`、`malformed_reverted_legacy`(parse 失敗但已透過 legacy hints 補償退還 Redis 庫存 — rolling-upgrade 預期會逐漸 taper)、`malformed_unrecoverable`(parse 失敗且 revert hints 無法解析,或 RevertInventory 自身失敗 — 庫存已洩漏,需要 page)。舊 `malformed_parse` label 保留 pre-warm 以相容舊 alert,但已不再有新 emit;新 alert 應使用更明確的 label。 |

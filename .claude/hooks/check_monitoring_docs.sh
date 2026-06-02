@@ -30,7 +30,14 @@ rel_path="${file_path#"$repo_root"/}"
 # is the right cost for the reminder being precise.
 should_remind=0
 case "$rel_path" in
-  internal/infrastructure/observability/metrics.go)             should_remind=1 ;;
+  # PR #129 A4: metrics.go (singular) no longer exists — registry was
+  # split into ~22 per-concern files (metrics_booking.go,
+  # metrics_inventory_low.go, metrics_admin_stream.go, etc.) during
+  # the D4-D7 observability buildout. The pre-A4 case matched only
+  # the bare singular, so every modern metric addition silently
+  # bypassed the doc-reminder hook. Glob matches all per-concern
+  # files plus the legacy singular name if it ever returns.
+  internal/infrastructure/observability/metrics*.go)            should_remind=1 ;;
   internal/infrastructure/observability/streams_collector.go)   should_remind=1 ;;
   internal/infrastructure/observability/db_pool_collector.go)   should_remind=1 ;;
   internal/infrastructure/observability/*_collector.go)         should_remind=1 ;;

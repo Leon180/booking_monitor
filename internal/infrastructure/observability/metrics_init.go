@@ -41,7 +41,15 @@ import (
 // init pre-initializes all label combinations so they appear in
 // /metrics from startup.
 func init() {
-	for _, status := range []string{"success", "sold_out", "duplicate", "error"} {
+	// PR #129 A15: `duplicate` is unreachable on the API booking path
+	// since N4 — the Idempotency middleware short-circuits before the
+	// handler runs (cache hit → replay; fingerprint mismatch → 409
+	// without reaching the booking service). The decorator at
+	// service_metrics.go reports `success` / `sold_out` / `error`
+	// only; pre-warming `duplicate` produces a permanently-zero label
+	// in /metrics that misleads dashboard authors into believing it's
+	// an active signal.
+	for _, status := range []string{"success", "sold_out", "error"} {
 		BookingsTotal.WithLabelValues(status)
 	}
 	for _, status := range []string{"success", "sold_out", "duplicate", "db_error", "malformed_message"} {
