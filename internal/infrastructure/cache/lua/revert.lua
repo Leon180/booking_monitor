@@ -6,9 +6,16 @@
 -- arrives in TWO shapes from TWO callers:
 --
 --   * worker path: compensation_id = rawMsg.ID — a Redis Streams
---     entry id like "1715000000-0" (parse-fail compensation in
---     `redis_queue.go::handleParseFailure`). Bounds idempotency
---     to "per failed stream-delivery attempt".
+--     entry id like "1715000000-0". TWO call sites in
+--     `redis_queue.go` use this shape:
+--       - `handleFailure` (line 488): the exhausted-retry path
+--         that fires on every message whose retry budget runs
+--         out. This is the DOMINANT worker compensation path.
+--       - `handleParseFailure` (line 443): the unrecoverable
+--         parse-fail path, fires when a stream entry can't be
+--         deserialized into a domain.Order at all.
+--     Both bound idempotency to "per failed stream-delivery
+--     attempt".
 --
 --   * saga path: compensation_id = "order:" + orderID (UUID) —
 --     "order:01234567-89ab-cdef-...". Bounds idempotency to

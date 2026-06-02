@@ -108,8 +108,15 @@ type InventoryRepository interface {
 	// (built as `saga:reverted:{compensationID}`). Two callers, two
 	// shapes — see PR #126 A7. The dual-namespace contract:
 	//
-	//   * Worker path (`redis_queue.go::handleParseFailure`):
-	//     pass `rawMsg.ID` (Redis Streams entry id, "<ms>-<seq>"
+	//   * Worker path (TWO call sites in `redis_queue.go`):
+	//       - `handleFailure` (line 488): the exhausted-retry path
+	//         that fires when a message's per-message retry budget
+	//         is depleted. This is the DOMINANT worker compensation
+	//         path.
+	//       - `handleParseFailure` (line 443): the unrecoverable
+	//         parse-fail path, fires when a stream entry can't be
+	//         deserialized into a domain.Order at all.
+	//     Both pass `rawMsg.ID` (Redis Streams entry id, "<ms>-<seq>"
 	//     e.g. "1715000000-0"). Bounds idempotency to "per failed
 	//     stream-delivery attempt".
 	//

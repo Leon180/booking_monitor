@@ -23,10 +23,13 @@ const (
 	// a HA-grade leader election. Limitations the audit surfaced
 	// (re-promoted to MAJOR when Phase 4 HA introduces them):
 	//
-	//   * Cached-connection short-circuit at advisory_lock.go:29-32
-	//     means under PG failover or PgBouncer transaction-pool the
-	//     held-lock check would not re-validate. Two replicas could
-	//     both think they hold the lock through a connection drift.
+	//   * Cached-connection short-circuit in `advisory_lock.go::TryLock`
+	//     (the `if l.conn != nil { return true, nil }` early-return
+	//     guard) means under PG failover or PgBouncer transaction-
+	//     pool the held-lock check would not re-validate. Two
+	//     replicas could both think they hold the lock through a
+	//     connection drift. (Prose reference instead of line numbers
+	//     — file-line refs age poorly across refactors.)
 	//
 	//   * `ListPending` does NOT use FOR UPDATE SKIP LOCKED — the
 	//     advisory lock is the ONLY serialisation. Industry-standard
