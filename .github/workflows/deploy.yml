@@ -76,7 +76,14 @@ jobs:
     # settings). Also surfaces in the Deployments tab UI.
     environment:
       name: production
-      url: https://${{ vars.PUBLIC_HOST }}/
+      # CRIT-C2 fix (PR #151 review round 1): when PUBLIC_HOST is empty
+      # (soft-skip mode), the URL would resolve to `https:///` and
+      # pollute the GH Deployments tab with malformed entries — each
+      # deployment record is IMMUTABLE, so this would corrupt PR #144's
+      # DORA dashboard data. The conditional expression returns the
+      # full URL when configured, empty string when not, which GH
+      # treats as "no env URL".
+      url: ${{ vars.PUBLIC_HOST != '' && format('https://{0}/', vars.PUBLIC_HOST) || '' }}
     permissions:
       contents: read
       id-token: write # WIF auth + sigstore OIDC
@@ -134,6 +141,13 @@ jobs:
       # 1. Resolve which tag we're deploying.
       # ------------------------------------------------------------------
       - name: Resolve image tag
+        # CRIT-C1 fix (PR #151 review round 1): without this gate, a
+        # workflow_dispatch run with PUBLIC_HOST empty would resolve the
+        # tag, exit the workflow with conclusion=success (because no
+        # subsequent step ran or failed), and mislead the operator into
+        # thinking they deployed. Gate this step so the soft-skip path
+        # exits cleanly without ANY downstream work.
+        if: steps.cd_guard.outputs.skip != 'true'
         id: tag
         run: |
           if [ -n "${{ inputs.image_tag }}" ]; then

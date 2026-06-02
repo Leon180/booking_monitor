@@ -382,8 +382,8 @@ Approximate per-service RAM budget on this stack:
 
 **Two paths to a working live deploy**:
 
-1. **Resize the VM to e2-small** (`gcloud compute instances set-machine-type booking-app --machine-type=e2-small`) — 2 GB RAM, fits the stack. Loses Always-Free; costs ~$13/month while running.
-2. **Migrate to GKE Autopilot per [docs/k8s-migration-plan.md](../k8s-migration-plan.md)** — node-managed, $0/month cluster fee (Google's free credit covers it), ~$20/month for the application pod. The "correct" answer; PR 8 already planned this.
+1. **Resize the VM to e2-small** — `gcloud compute instances set-machine-type booking-app --machine-type=e2-small`. 2 GB RAM, fits the stack. Loses Always-Free; approximately **$14-16/month** for the VM (us-central1 on-demand; sustained-use discount may lower this). Verify current pricing at [GCE pricing](https://cloud.google.com/compute/all-pricing).
+2. **Migrate to GKE Autopilot per [docs/k8s-migration-plan.md](../k8s-migration-plan.md)** — node-managed, $0/month cluster fee (Google's free credit covers one cluster). Application pod resource costs depend on requested CPU/memory; for the full Kafka-bearing compose-equivalent workload, expect **~$30-35/month** (vs ~$20/month for a lighter Go-only pod without Kafka). The "correct" answer; PR 8 already planned this.
 
 See [docs/runbooks/cd_completion_checklist.md](cd_completion_checklist.md) for the exact steps to complete CD setup once a tier decision is made.
 

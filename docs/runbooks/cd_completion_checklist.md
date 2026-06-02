@@ -8,8 +8,8 @@
 
 - [ ] PR #149 + PR #150 are both merged on `main`
 - [ ] Tier decision made:
-  - **Option A**: resize VM to `e2-small` (~$13/month, 2 GB RAM)
-  - **Option B**: apply `deploy/k8s-terraform/` to provision GKE Autopilot (~$30-35/month, see [k8s-migration-plan.md](../k8s-migration-plan.md))
+  - **Option A**: resize VM to `e2-small` (~**$14-16/month** us-central1 on-demand, 2 GB RAM; verify at [GCE pricing](https://cloud.google.com/compute/all-pricing))
+  - **Option B**: apply `deploy/k8s-terraform/` to provision GKE Autopilot (~**$30-35/month** for full Kafka-bearing pod profile, see [k8s-migration-plan.md](../k8s-migration-plan.md))
 - [ ] A domain available — either:
   - Cloudflare-managed `.com` from Cloudflare Registrar (~$10.44/year) for a stable named tunnel
   - OR accept ephemeral `*.trycloudflare.com` URL (need to update `PUBLIC_HOST` after every cloudflared restart)
