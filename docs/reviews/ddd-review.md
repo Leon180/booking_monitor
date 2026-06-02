@@ -18,7 +18,7 @@ The notable fidelity gaps are narrow and concrete:
 2. **No Money value object.** `(amountCents int64, currency string)` is duplicated on `Order`, `TicketType`, `PaymentIntent`, `OrderFailedEvent`, the DTOs, and the gateway adapter — six copies of the invariant. The PR-39 backlog item names this; it's not yet acted on.
 3. **Booking decorators use a stale `eventID` parameter name** that disagrees with the underlying `Service.BookTicket(ticketTypeID …)` signature (a D4.1 miss). Pure cosmetic bug today because Go is positional, but it's a real maintenance hazard.
 4. **`application/booking/service.go` imports `infrastructure/config`** — this is a layer-direction violation. The fix is a 5-line struct param.
-5. **Repository interfaces are correctly placed in domain**, but the actual interfaces are **too wide** — `OrderRepository` carries 13 methods including reconciliation-specific queries (`FindStuckCharging`, `FindStuckFailed`, `FindExpiredReservations`, `CountOverdueAfterCutoff`). Vernon would split these into role interfaces.
+5. **Repository interfaces are correctly placed in domain**, but the actual interfaces are **too wide** — `OrderRepository` carries 17 methods including reconciliation-specific queries (`FindStuckCharging`, `FindStuckFailed`, `FindExpiredReservations`, `CountOverdueAfterCutoff`). Vernon would split these into role interfaces.
 6. **Bounded-context seam**: the codebase is realistically 3 contexts (Catalog / Booking / Payment) mashed into one module. The current layout doesn't pretend otherwise (subpackages `event/`, `booking/`, `payment/`, `saga/`), but the `application.Repositories` bundle wires all five repos into every UoW closure — that's the only place the seam is visible as friction.
 
 None of these are CRIT. The architecture is **A-/B+ in the Vernon sense, A in the Go-pragmatic sense**. The risk if left alone is gradual drift into the "fat application service + anemic domain" anti-pattern as ticketing rules grow (early-bird windows, per-user limits, multi-section pricing) — the schema is ready for those, the domain isn't.
@@ -170,7 +170,7 @@ Same — boundary DTO.
 
 ## 4. Domain Events vs Integration Events
 
-Cited Microsoft Learn definition: *"Domain events represent something that has happened in the past within a specific bounded context that domain experts care about… Integration events are boundary artifacts whose purpose is interoperability."* ([Microsoft Learn](https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/domain-events-design-implementation), citation in §References below).
+Cited Microsoft Learn framing — paraphrased: a domain event is something that happened in the domain (in-process) that other parts of the same domain need to be aware of; integration events serve cross-bounded-context interoperability and are typically the wire-format published to a broker. (Source: [Microsoft Learn — Domain events: design and implementation](https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/domain-events-design-implementation); the verbatim MS wording is *"A domain event is, something that happened in the domain that you want other parts of the same domain (in-process) to be aware of"*. The "integration events are boundary artifacts" half is this report's gloss, not MS wording.)
 
 This project conflates them, but in a **principled way** that the docstrings acknowledge:
 
@@ -204,7 +204,7 @@ err := uow.Do(ctx, func(repos) error {
 
 A textbook DDD version would have `Order` raise a domain event during `MarkPaymentFailed`, an in-process handler pull it off the aggregate, and the outbox-bridge handler serialize. That's three more types and one in-process bus for what the current code does in 8 lines.
 
-**Verdict**: NIT. The current pattern works and the names are honest. If the team grows or this monolith becomes a candidate for splitting into Catalog / Booking / Payment services, that's the moment to introduce true domain events. **For a 100-PR monolith run by one person, it would be over-engineering today.** Cited sources agree: [Three Dots Labs "Is Clean Architecture Overengineering?"](https://threedots.tech/episode/is-clean-architecture-overengineering/) explicitly endorses this kind of pragmatic compression.
+**Verdict**: NIT. The current pattern works and the names are honest. If the team grows or this monolith becomes a candidate for splitting into Catalog / Booking / Payment services, that's the moment to introduce true domain events. **For a 100-PR monolith run by one person, it would be over-engineering today.** This is a context-fit argument grounded in the codebase's actual scale, not in any single external source; the Three Dots Labs piece [Is Clean Architecture Overengineering?](https://threedots.tech/episode/is-clean-architecture-overengineering/) is relevant background reading (it argues CA pays off when a project is complex enough to merit the layering) but does not directly endorse compressing domain-event publication into application-service procedural code.
 
 The version field (`OrderEventVersion = 3` at line 49 of `order_events.go`) is **excellent practice** — it's the explicit schema-versioning contract you want at the integration-event boundary.
 
@@ -215,7 +215,7 @@ The version field (`OrderEventVersion = 3` at line 49 of `order_events.go`) is *
 ### Repository interfaces — placement: ✓
 
 All defined in `domain/`, all implemented in `infrastructure/persistence/postgres/`:
-- [domain/order.go:610-765](../../internal/domain/order.go) — `OrderRepository` (13 methods)
+- [domain/order.go:610-765](../../internal/domain/order.go) — `OrderRepository` (17 methods)
 - [domain/event.go:111-146](../../internal/domain/event.go) — `EventRepository` (7 methods)
 - [domain/ticket_type.go:255-327](../../internal/domain/ticket_type.go) — `TicketTypeRepository` (7 methods)
 - [domain/event.go:226-230](../../internal/domain/event.go) — `OutboxRepository` (3 methods)
@@ -228,7 +228,7 @@ All interface positions correct. DIP discipline is intact.
 
 ### Repository interfaces — sizing: ✗ (MAJOR-3)
 
-`OrderRepository` has 13 methods. Per Go idiom ("[Accept interfaces, return structs](../.claude/rules/golang/coding-style.md)") and the cited critique ([dentedlogic.com](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14): *"The interface grows and becomes a Pandora's box of hundreds of tangentially related queries"*), this is the wrong shape. Concrete suggestion: split into **role interfaces consumed where used**:
+`OrderRepository` has 17 methods (Create, ListOrders, GetByID, FindStuckCharging, FindStuckFailed, FindExpiredReservations, CountOverdueAfterCutoff, MarkCharging, MarkConfirmed, MarkFailed, MarkCompensated, MarkAwaitingPayment, MarkPaid, MarkExpired, MarkPaymentFailed, SetPaymentIntentID, FindByPaymentIntentID). Per Go idiom ("[Accept interfaces, return structs](../.claude/rules/golang/coding-style.md)") and the consumer-defined-interfaces argument from [dentedlogic.com](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14) — paraphrased: *a single repository interface drifts toward a god-object as feature surface grows, accumulating tangentially-related queries that share an interface but not a use case* — this is the wrong shape. Concrete suggestion: split into **role interfaces consumed where used**:
 
 | Role interface | Methods | Consumers |
 |---|---|---|
@@ -238,7 +238,7 @@ All interface positions correct. DIP discipline is intact.
 | `OrderExpiryFinder` | `FindExpiredReservations`, `CountOverdueAfterCutoff` | expiry sweeper only |
 | `OrderLegacy` (deprecated, removed post-D7) | `MarkCharging`, `MarkConfirmed`, `MarkFailed` | none (legacy path retired) |
 
-The repo struct stays one struct. **The interface is split where it's consumed**, which is the Go convention. The current code forces the saga-watchdog (which needs 2 methods) and the expiry sweeper (which needs 2 methods) to receive a 13-method bundle they can mock-overhead at test time.
+The repo struct stays one struct. **The interface is split where it's consumed**, which is the Go convention. The current code forces the saga-watchdog (which needs 2 methods) and the expiry sweeper (which needs 2 methods) to receive a 17-method bundle they can mock-overhead at test time.
 
 Confirmed legacy methods are dead in production hot paths (CLAUDE.md says "legacy edges remain available because Pattern A is shipping across multiple PRs"). The `architectural_backlog.md` already tracks this — § "Legacy `MarkCharging` / `MarkConfirmed` interface methods". The plan is good; ship it.
 
@@ -284,14 +284,14 @@ func (c Currency) String() string { return string(c) }
 
 ### `Money` — absent
 
-There is no `Money` type. `(amount_cents int64, currency string)` appears as paired fields in **at least seven places**:
+There is no `Money` type. `(amount_cents int64, currency string)` appears as paired fields in **six confirmed sites today** (a seventh is reserved in `order_events.OrderFailedEvent`'s schema but not yet wired):
 - [domain/order.go:289-291](../../internal/domain/order.go)
 - [domain/ticket_type.go:92-93](../../internal/domain/ticket_type.go)
 - [domain/payment.go:163-168](../../internal/domain/payment.go) — `PaymentIntent.AmountCents` + `PaymentIntent.Currency`
-- [application/order_events.go](../../internal/application/order_events.go) — `OrderFailedEvent` (doesn't carry money currently, but the schema in `docs/design/ticket_pricing.md` reserves it)
 - [infrastructure/api/dto/response.go:46-47](../../internal/infrastructure/api/dto/response.go)
 - [infrastructure/api/dto/response.go:238-239](../../internal/infrastructure/api/dto/response.go)
 - [infrastructure/payment/stripe_gateway.go:298-305](../../internal/infrastructure/payment/stripe_gateway.go)
+- *(reserved, not yet carried)* [application/order_events.go](../../internal/application/order_events.go) — `OrderFailedEvent`'s schema in `docs/design/ticket_pricing.md` includes the pair, but the wire-DTO doesn't currently emit them.
 
 The design rationale at [docs/design/ticket_pricing.md §9](../design/ticket_pricing.md) is explicit:
 > 結論:現在用 int64,真的需要 Money 抽象時(multi-currency 不同 minor unit 或 tax/discount 進入 scope),引入 `domain.Money` value object …
@@ -516,11 +516,11 @@ Each subpackage exposes its own `Metrics` interface (`booking.Metrics`, `recon.M
 **Don't do**: introduce Money everywhere in one PR. Too much surface to review.
 **References**: [docs/design/ticket_pricing.md §9](../design/ticket_pricing.md) (project's own deferred-decision; this finding is the operational nudge).
 
-### [MAJOR-3] `OrderRepository` is too wide — 13 methods including recon/expiry queries
+### [MAJOR-3] `OrderRepository` is too wide — 17 methods including recon/expiry queries
 
 **Where**: [internal/domain/order.go:610-765](../../internal/domain/order.go)
-**What**: The single interface bundles writes, plain reads, reconciliation-only queries (`FindStuckCharging`, `FindStuckFailed`), expiry-only queries (`FindExpiredReservations`, `CountOverdueAfterCutoff`), and one CRUD-style write that's only used by the saga (`SetPaymentIntentID`). Consumers (saga-watchdog, expiry sweeper, recon) receive all 13 methods when they need 2-3.
-**Why it matters in 2025**: Cited critique ([dentedlogic 2025 Repository Pattern Done Right](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14)) explicitly names this anti-pattern. Pragmatically: `gomock` generates a 13-method mock for tests that need 2, which adds boilerplate per test (you have to mock-block all unused methods). Each new method added is a breaking change for every mock site.
+**What**: The single interface bundles writes, plain reads, reconciliation-only queries (`FindStuckCharging`, `FindStuckFailed`), expiry-only queries (`FindExpiredReservations`, `CountOverdueAfterCutoff`), and one CRUD-style write that's only used by the saga (`SetPaymentIntentID`). Consumers (saga-watchdog, expiry sweeper, recon) receive all 17 methods when they need 2-3.
+**Why it matters in 2025**: Cited critique ([dentedlogic 2025 Repository Pattern Done Right](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14)) explicitly names this anti-pattern. Pragmatically: `gomock` generates a 17-method mock for tests that need 2, which adds boilerplate per test (you have to mock-block all unused methods). Each new method added is a breaking change for every mock site.
 **Recommendation**: Split into role interfaces consumed-where-used (see §5 table). The concrete `postgresOrderRepository` keeps all methods. Each role interface lives in `domain/order.go` next to the entity. Consumers depend on the narrow interface. This is the Go convention — small interfaces defined at the consumer side.
 **References**: [Three Dots Labs Repository Pattern in Go](https://threedots.tech/post/repository-pattern-in-go/); the project's own [coding-style.md](../../.claude/rules/common/coding-style.md) ("Keep interfaces small (1-3 methods)").
 
@@ -676,7 +676,7 @@ The caller branches on `found`, not on `id != uuid.Nil`. **Estimated effort**: ~
 6. **NILUS Consulting · Domain Events vs Integration Events in DDD** — [www.nilus.be/blog/domain_events_vs_integration_events_in_ddd](https://www.nilus.be/blog/domain_events_vs_integration_events_in_ddd/). Cited for §4 framing.
 7. **Adrian Bailador · Anti-Corruption Layer in .NET: Protecting Your Domain from External APIs** (April 2026) — [medium.com/@adrianbailador/anti-corruption-layer-in-net-protecting-your-domain-from-external-apis-2e239532d195](https://medium.com/@adrianbailador/anti-corruption-layer-in-net-protecting-your-domain-from-external-apis-2e239532d195). Cited for §9 on Stripe ACL. Quote: *"The ACL translates external system responses into domain results, and the domain should never handle payment provider exceptions."*
 8. **DEV.to · Payment Gateways as Anti-Corruption Layers: Applying Hexagonal Architecture in Real-World PHP** — [dev.to/jadlamed007007007/payment-gateways-as-anti-corruption-layers-applying-hexagonal-architecture-in-real-world-php-4c27](https://dev.to/jadlamed007007007/payment-gateways-as-anti-corruption-layers-applying-hexagonal-architecture-in-real-world-php-4c27). Cited for §9 on payment-gateway ACL pattern.
-9. **DEV.to · The Repository Pattern Done Right: Consumer-Defined Interfaces in Go** — [dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14). Cited for §5 / MAJOR-3 on small interfaces. Snippet (2026 article via search): *"The interface grows and becomes a Pandora's box of hundreds of tangentially related queries, with implementations easily breaking 10k+ lines of unoptimized SQL in a single file."*
+9. **DEV.to · The Repository Pattern Done Right: Consumer-Defined Interfaces in Go** — [dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14](https://dev.to/dentedlogic/the-repository-pattern-done-right-consumer-defined-interfaces-in-go-1f14). Cited for §5 / MAJOR-3 on small interfaces. Paraphrased argument (no verbatim quote — round-2 meta-review verified the round-1 verbatim attribution above was not literally on the article page): a single shared repository interface drifts toward god-object accumulation as features accrete; consumer-defined small interfaces declared at the call site keep coupling local. The argument applies independently to this codebase's 17-method `OrderRepository`.
 10. **Andrew Dodd · Thoughts on the repository pattern in Golang** — [adodd.net/post/go-ddd-repository-pattern](https://adodd.net/post/go-ddd-repository-pattern/). Cited for §5: *"These repository implementations do not really differ much from ORMs, and they are really too generic to be considered Repositories in the DDD sense, as they are more SQL-wrapper-tooling than business logic / application logic representations."*
 11. **Three Dots Labs · The Repository pattern in Go** — [threedots.tech/post/repository-pattern-in-go](https://threedots.tech/post/repository-pattern-in-go/). Cited for §5.
 12. **Ricardo Lüders · Demystifying Clean Architecture in Go** — [medium.com/@rluders/demystifying-clean-architecture-in-go-separating-fact-from-fiction-26fc8e81b99b](https://medium.com/@rluders/demystifying-clean-architecture-in-go-separating-fact-from-fiction-26fc8e81b99b). Cited for §1 framing.
