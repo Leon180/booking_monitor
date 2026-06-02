@@ -658,6 +658,16 @@ type PostgresConfig struct {
 	// from tearing down + re-opening ~45 connections per burst
 	// (each ~1ms TCP + TLS + auth). Cheap ops fix; verify via
 	// `db_pool_wait_count` / `db_pool_wait_duration` after a k6 burst.
+	//
+	// Scope note (PR #128 review): the shipped `config/config.yml`
+	// explicitly sets `max_idle_conns: 50` (= MaxOpenConns), which
+	// takes precedence over this struct-tag default at LoadConfig
+	// time. So this default is the value that NEW environments
+	// without a config.yml see (e.g. bare env-var-only deployments,
+	// test harnesses); existing compose / k8s deployments running
+	// the bundled config.yml already get 50. The bump is for
+	// new-environment ergonomics, not a runtime change for the
+	// shipped stack.
 	MaxIdleConns int           `yaml:"max_idle_conns" env:"DB_MAX_IDLE_CONNS" env-default:"25"`
 	MaxIdleTime  time.Duration `yaml:"max_idle_time" env:"DB_MAX_IDLE_TIME" env-default:"5m"`
 	// MaxLifetime bounds how long a single Postgres connection may live.
