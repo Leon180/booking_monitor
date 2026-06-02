@@ -31,7 +31,7 @@ Per request, from the moment Gin dispatches `bookingHandler.HandleBook` ([`inter
 |---|---|---|---|---|
 | Gin context per request | `gin.Context` pool | reused | ✓ | Gin pools it. |
 | Correlation-id mint + ctx attach | `middleware.Combined` | 1× `uuid.New()` (16 B array on stack) + `uuid.String()` (~40 B heap) + 1× `context.WithValue` + 1× `r.WithContext` | ✓ | Already optimized via PR #14/15. **Header reads do not allocate** (textproto canonical match is in-place). |
-| Idempotency body-read + capture | `middleware.Idempotency` | `bytes.Buffer{}` (zero size, grows to body), `io.NopCloser(bytes.NewReader(bodyBytes))` (24 B + 16 B header), `&captureWriter{}` (32 B + buf), final `bytes.Buffer.String()` copy on cache write | partial | **MAJOR-1 below.** `captureWriter.body` + the `NopCloser`+`Reader` round-trip are net ~120 B of fresh heap per booking with no pool. |
+| Idempotency body-read + capture | `middleware.Idempotency` | `bytes.Buffer{}` (zero size, grows to body), `io.NopCloser(bytes.NewReader(bodyBytes))` (24 B + 16 B header), `&captureWriter{}` (32 B + buf), final `bytes.Buffer.String()` copy on cache write | partial | **MAJOR-1 below.** `captureWriter.body` + the `NopCloser`+`Reader` round-trip are net ~150 B of fresh heap per booking with no pool (80 B fixed headers + body grown into `captureWriter.body` for a typical ~70 B booking request). |
 | Fingerprint hash | `Fingerprint(bodyBytes)` | `sha256.Sum256` is stack-only; `hex.EncodeToString` allocates 64 B string | partial | The hex string itself is unavoidable for the Redis key; the alternative (`[32]byte` array key) saves the alloc but burns a `sync.Pool` slot or breaks the cache wire format. **MINOR**. |
 | ShouldBindJSON request body | `c.ShouldBindJSON(&req)` | `encoding/json` standard decoder — 1× decoder state + small (`BookingRequest` is 3 fields) | ✓ | Body is small (<200 B); `encoding/json` is fine here, NOT a hot spot. |
 | UUID v7 mint | `uuid.NewV7()` (line 112) | 16 B on stack + `crypto/rand.Read` internal pool | ✓ | google/uuid `NewV7` does NOT escape under normal conditions — verify via `-m=2`. |
@@ -192,7 +192,7 @@ Defaults from [`config.go:521-525`](../../internal/infrastructure/config/config.
 | `PoolTimeout` | 2 s | ✓ |
 | `DialTimeout` | (default 5 s in go-redis) | ✓ implicitly |
 
-The pool config is well-set. Worth noting per the [go-redis v9 release notes research](#references): **v9.12+ ships 32 KiB default read/write buffers** (up from 4 KiB stdlib default). The repo's go.mod pins `v9.17.3` (a 1.25-toolchain-compatible 9.x release) — so the upgraded buffers ARE in effect. No action needed.
+The pool config is well-set. Worth noting per the [go-redis v9 release notes research](#references): the buffer-size default was tuned across the v9.12.x → v9.17.x line (v9.12.0 introduced configurable buffers at 512 KiB → v9.12.1 reduced to 256 KiB → later 9.x patches landed on **32 KiB default read/write buffers** per `options.go` in v9.17.3, up from the 4 KiB stdlib default). The repo's go.mod pins `v9.17.3` so the 32 KiB defaults ARE in effect. No action needed; just don't read "v9.12+" as a synonym for "32 KiB" — v9.12.0 itself shipped 512 KiB.
 
 **Cache `RedisPoolCollector`** is registered ([`redis.go:135`](../../internal/infrastructure/cache/redis.go)). At the latest benchmark, `booking_redis` sits at 7.41% CPU / 336 MiB RAM — well under-loaded. The Lua deduct path is exactly what you'd hope: cheap, atomic, and pooled.
 
@@ -313,7 +313,7 @@ go tool pprof -http=:8081 ./cpu.pprof
 
 ## 12. Inlining hot-path audit
 
-Go 1.25 inlining budget is 80 nodes per caller (per [`memory/go_perf_internals.md`](../../../../.claude/projects/-Users-lileon-project-booking-monitor/memory/go_perf_internals.md) line 56). Borderline functions:
+Go 1.25 inlining budget is 80 nodes per function — measured per callee (the function being considered for inlining), not per caller; a caller can inline multiple callees each up to 80 nodes independently (per [`memory/go_perf_internals.md`](../../../../.claude/projects/-Users-lileon-project-booking-monitor/memory/go_perf_internals.md) line 56). Borderline functions:
 
 - **`enrichFields`** ([`log.go:184-215`](../../internal/log/log.go)) — has a `trace.SpanContextFromContext` call inside which is itself a function call (57-node cost!). This likely pushes `enrichFields` over the 80-node budget. Run the verification command in §2 to confirm. If non-inlinable, the trade-off is acceptable because: (a) the disabled-level fast path doesn't call this at all (returns from `Check(lvl,...) == nil`); (b) enabled-level calls are off the request hot path almost by definition (error/warn paths only).
 - **`pkgEmit`** / **`Logger.emit`** ([`log.go:169-175` and `260-265`](../../internal/log/log.go)) — likely inlinable. The `Check` call returns `*zapcore.CheckedEntry`; the nil-test branches early.
@@ -435,7 +435,7 @@ go test -bench=BenchmarkBookTicket -benchmem -count=10 ./internal/application/bo
 
 **Where**: [`internal/infrastructure/messaging/kafka_intake_publisher.go:106-107`](../../internal/infrastructure/messaging/kafka_intake_publisher.go).
 
-**What**: Every booking publish wraps the request ctx with a `context.WithTimeout(ctx, p.writeTimeout)` then defers `cancel()`. Each `WithTimeout` allocates ~80 B of `*timerCtx` and creates a runtime timer that the deferred cancel must stop. At 8 k publishes/s that's 640 KB/s + 16 k timer-create/cancel pairs/s. The source comment justifies this as "belt to kafka.Writer.WriteTimeout's suspenders" — defensible historically, but the cost adds up.
+**What**: Every booking publish wraps the request ctx with a `context.WithTimeout(ctx, p.writeTimeout)` then defers `cancel()`. Each `WithTimeout` allocates ~80 B of `*timerCtx` and creates a runtime timer that the deferred cancel must stop. At 8 k publishes/s that's 640 KB/s + 8 k timer-create/cancel pairs/s (16 k discrete timer operations: 8 k creates + 8 k deferred stops). The source comment justifies this as "belt to kafka.Writer.WriteTimeout's suspenders" — defensible historically, but the cost adds up.
 
 **Measured/estimated impact**: 1-2% CPU + ~5% of the steady allocation budget on the Stage 5 hot path.
 
@@ -573,6 +573,8 @@ capture-profile:
 
 ## Recommendations summary
 
+> **Priority ordering note (added in PR #128 fixup)**: this table reflects the primary review's EV-per-effort ordering (perf-win-first), which the [meta-review](go-performance-meta-review.md) and [final-decisions.md](final-decisions.md) supersede in favour of an operational-correctness-first ordering. For the action-plan ordering that will actually be executed, read `final-decisions.md` § Priority A first — the rehydrate-ctx fix (CRIT-1 / A11) ships before PGO (B3), the operational fixes before the perf experiments. The table below is preserved as the primary review's original analytical signal.
+
 | Priority | Action | Estimated win | Effort |
 |---|---|---|---|
 | 1 | **PGO** (`default.pgo` collected from k6 run) | +3-5% accepted/s, -5-10% p99 | 1 hour |
@@ -616,7 +618,7 @@ capture-profile:
 
 **Go drivers:**
 - [pq or pgx — Preslav Rachev, May 2022 (still authoritative)](https://preslav.me/2022/05/13/pq-or-pgx-choosing-the-right-postgresql-golang-driver/) — pgx 10-20% faster via database/sql; ~2× via native
-- [go-redis v9 buffer optimization (v9.12+, early 2026)](https://github.com/redis/go-redis/releases) — 32KiB default buffers
+- [go-redis v9 buffer optimization (v9.12.x → v9.17.x, early 2026)](https://github.com/redis/go-redis/releases) — buffer-size default tuned across the line; **32 KiB default in v9.17.3** (`options.go`). v9.12.0 originally shipped 512 KiB → v9.12.1 reduced to 256 KiB → later 9.x patches landed on 32 KiB.
 
 **Goroutine leak detection:**
 - [uber-go/goleak](https://github.com/uber-go/goleak) — for tests
