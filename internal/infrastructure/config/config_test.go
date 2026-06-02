@@ -229,9 +229,16 @@ func TestValidate_AppEnvProductionGuards(t *testing.T) {
 			"production", false, false, ""},
 		{"empty env with test endpoints disabled — passes (closed default)",
 			"", false, false, ""},
-		{"development with test endpoints enabled — passes",
+		// PR #130 A1 fixup: these PASS cases use the rk_test_* override
+		// applied inside the loop below — the literal name now reads as
+		// "dev/staging + test-endpoints + (test key)" rather than
+		// "dev/staging + test-endpoints + ANY key", because the new
+		// env-independent live-key guard would reject the validBase()
+		// rk_live_* combo. See TestValidate_TestEndpointsAndLiveKeyGuard
+		// for the live-key REJECT axis.
+		{"development with test endpoints enabled — passes (test key injected)",
 			"development", true, false, ""},
-		{"staging with test endpoints enabled — passes",
+		{"staging with test endpoints enabled — passes (test key injected)",
 			"staging", true, false, ""},
 	}
 
@@ -308,6 +315,17 @@ func TestValidate_TestEndpointsAndLiveKeyGuard(t *testing.T) {
 			"staging", false, "rk_live_stagingNoTestEndpoints_xxx", false, ""},
 		{"development + rk_test + test endpoints — PASS",
 			"development", true, "rk_test_devSafeKey_xxxxxxxxxxxxxx", false, ""},
+		// PR #130 A1 review fixup: document the empty-APIKey escape
+		// hatch explicitly. Empty APIKey + test endpoints is the
+		// canonical dev-loop combo (PAYMENT_PROVIDER=mock + no Stripe
+		// keys). The new guard is prefix-scoped to `sk_live_*`/`rk_live_*`
+		// so an empty string slips through — that case is gated by the
+		// downstream "STRIPE_API_KEY required when PAYMENT_PROVIDER=stripe"
+		// check at config.go:868 (mock provider + empty key + test
+		// endpoints is genuinely safe because MockGateway moves no
+		// real money).
+		{"staging + EMPTY APIKey + test endpoints — PASS (mock provider implied; live-key guard intentionally prefix-scoped)",
+			"staging", true, "", false, ""},
 	}
 
 	for _, tt := range tests {
@@ -317,6 +335,18 @@ func TestValidate_TestEndpointsAndLiveKeyGuard(t *testing.T) {
 			c.App.Env = tt.env
 			c.Server.EnableTestEndpoints = tt.enableTests
 			c.Payment.Stripe.APIKey = tt.apiKey
+			// PR #130 review fixup: when apiKey is empty, the test is
+			// exercising the prefix-scoped escape hatch — the canonical
+			// dev-loop combo is mock provider + no Stripe keys at all,
+			// so flip the provider AND clear the webhook secret too.
+			// (validBase() defaults to Provider=stripe with non-empty
+			// APIKey + WebhookSecret; mock + lingering Stripe credentials
+			// trips a separate "likely misconfiguration" guard.)
+			if tt.apiKey == "" {
+				c.Payment.Provider = "mock"
+				c.Payment.Stripe.WebhookSecret = ""
+				c.Payment.WebhookSecret = ""
+			}
 
 			err := c.Validate()
 			if tt.wantErr {

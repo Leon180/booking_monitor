@@ -306,13 +306,34 @@ func Idempotency(repo domain.IdempotencyRepository) gin.HandlerFunc {
 		setCtx := context.WithoutCancel(ctx)
 		// PR #130 A17: SetNX so the FIRST request to finish wins the
 		// cache. Two concurrent retries of the same Idempotency-Key
-		// without this can race so the slower handler's envelope
-		// overwrites the faster one — Lua deduct + DB UNIQUE already
-		// prevent the correctness issue (the second handler's order_id
-		// matches the first via DB-side dedup), but the cached body
-		// shape was non-deterministic. wasSet=false is a benign "we
-		// raced and lost"; log it at Info so it shows up under load
-		// without spamming Warn.
+		// without SetNX can race so the slower handler's envelope
+		// overwrites the faster one — the cached body shape becomes
+		// non-deterministic (depends on which goroutine returned last).
+		//
+		// What SetNX does NOT solve, for context: the booking handler
+		// mints a fresh UUIDv7 order_id at the API boundary on every
+		// invocation. If two concurrent POST /book requests share an
+		// Idempotency-Key, both hit the cache-miss branch, both run
+		// the handler, and both mint different order_ids. In the
+		// common case the Redis Lua deduct script is atomic — only
+		// one decrement succeeds and the second returns 409 (sold-out
+		// or already-deducted) which `shouldCacheStatus` excludes
+		// from caching. But if inventory is sufficient for both AND
+		// the requests share Idempotency-Key, BOTH return 202 with
+		// distinct order_ids; SetNX caches the first 202's body, and
+		// the second client gets back order_id_A on every subsequent
+		// retry — its own order_id_B is never reflected in /metrics
+		// against this key. The worker side's DB UNIQUE(idempotency_key,
+		// user_id) constraint rejects the second order at persistence
+		// time, so the second client's order_id_B 404s forever when
+		// polled. This is a pre-existing handler-side race that
+		// SetNX neither creates nor closes; it is documented at
+		// docs/architectural_backlog.md for the eventual handler-side
+		// idempotency-key claim (e.g. SETNX on a claim key before the
+		// handler mints the UUID).
+		//
+		// wasSet=false here is a benign "we raced and lost"; log at
+		// Info so it shows up under load without spamming Warn.
 		wasSet, setErr := repo.SetNX(setCtx, key, &domain.IdempotencyResult{
 			StatusCode: statusCode,
 			Body:       capture.body.String(),

@@ -841,7 +841,23 @@ func (c *Config) Validate() error {
 	// guard the misconfiguration ships silently. Reject the combo
 	// regardless of APP_ENV. The live-key + test-endpoint pair has
 	// no legitimate operational use case.
-	if c.Server.EnableTestEndpoints &&
+	//
+	// Scope note: this guard is prefix-scoped to Stripe's known
+	// `sk_live_*` / `rk_live_*` shapes. An empty APIKey is intentionally
+	// NOT rejected here — that case is covered by other guards
+	// (PAYMENT_PROVIDER=stripe + empty key fails the "APIKey required"
+	// check below; PAYMENT_PROVIDER=mock + empty key + test endpoints
+	// is the canonical dev-loop combo and safe by definition because
+	// MockGateway moves no real money). A future non-Stripe gateway
+	// or a Stripe key format change would need this prefix list updated.
+	//
+	// Production review-cycle fix: skip this check when APP_ENV=production
+	// because the production-only block above already rejects
+	// EnableTestEndpoints=true at all (regardless of key shape) — letting
+	// both fire produced a duplicate error message for the
+	// production+live+test triple combination.
+	if normalizedAppEnv(c.App.Env) != "production" &&
+		c.Server.EnableTestEndpoints &&
 		(strings.HasPrefix(c.Payment.Stripe.APIKey, "sk_live_") ||
 			strings.HasPrefix(c.Payment.Stripe.APIKey, "rk_live_")) {
 		missing = append(missing,

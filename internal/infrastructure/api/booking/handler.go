@@ -254,6 +254,15 @@ func (h *bookingHandler) HandleGetOrder(c *gin.Context) {
 			// 1 second matches the worker p99 persist latency.
 			// Indistinguishable-by-design from a truly-missing order:
 			// callers retry until either a 2xx lands or they give up.
+			//
+			// Caching note (PR #130 review): a 404 is cacheable by
+			// default per RFC 9110 §15.5.5. Today no caching proxy sits
+			// in front of /api/v1/orders/:id (nginx config has no
+			// proxy_cache for the API tier) so this is a non-issue.
+			// If a CDN or shared cache is ever placed in front of
+			// this endpoint, pair with Cache-Control: no-store on the
+			// 404 to avoid serving stale 404s for the Retry-After
+			// duration to clients that retry within the window.
 			c.Header("Retry-After", "1")
 			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "order not found"})
 			return
