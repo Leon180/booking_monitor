@@ -26,6 +26,12 @@ global:
 # (`./deploy/prometheus:/etc/prometheus`) makes alerts.yml resolve.
 rule_files:
   - "alerts.yml"
+  # PR 9 — SLI/SLO + chaos baseline. Hierarchical recording rules
+  # (Tier 1 5m → Tier 2 windowed aggregations → Tier 3 30d SLO surface)
+  # plus 3-tier multi-window/multi-burn-rate alerts per SRE Workbook
+  # ch. 5 Table 5-8.
+  - "recording_rules.yml"
+  - "slo_alerts.yml"
 
 # alerting — where Prometheus pushes "alert is firing" notifications.
 # Without this block, alerts evaluated by rule_files are visible in

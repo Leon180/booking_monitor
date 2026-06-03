@@ -1,0 +1,34 @@
+# PodMonitoring CRD — Managed Service for Prometheus scrape config.
+#
+# Per fact-check (2026-06): GMP does NOT auto-scrape; you must declare
+# PodMonitoring (or ClusterPodMonitoring) CRDs that say "scrape these
+# pods on this port path". Format is documented at:
+# https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed
+#
+# Once applied: Managed Prometheus polls each booking-monitor pod's
+# /metrics endpoint every 30s, ships to Cloud Monitoring. Our existing
+# Grafana (running outside or inside the cluster) can use Managed
+# Prometheus as a Prometheus-compatible data source via the gmp data
+# source proxy.
+#
+# Cost note: free for the first 1,500 Cloud Monitoring system metric
+# series. Beyond that, $0.06 per million sample ingestions. Our
+# booking_monitor has ~30 active series; well within free tier.
+# Alerting on these metrics is FREE until 2026-09-01, then becomes
+# $0.35/month per metric + $0.50 per 1M query points (per Cloud
+# Monitoring pricing changes announced 2026-Q1).
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: booking-monitor
+  namespace: booking-monitor
+  labels:
+    app.kubernetes.io/name: booking-monitor
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: booking-monitor
+  endpoints:
+    - port: http
+      interval: 30s
+      path: /metrics

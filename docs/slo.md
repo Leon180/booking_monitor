@@ -1,54 +1,114 @@
-# SLO Catalog (stub)
+# SLI/SLO — booking_monitor
 
-> Status: **STUB** (PR #129 A13). Candidate SLI definitions only — burn-rate alerts are NOT yet implemented. The full SLO + multi-window burn-rate alert work is documented as Phase 3 deferral in [`docs/architectural_backlog.md`](architectural_backlog.md#slo--multi-window-burn-rate-alerts).
->
-> This file exists so the audit-trail question "does the project have an SLO doc?" can be answered "yes, here are the candidate SLIs and the deferral rationale" rather than "no, no document exists at all".
+> PR 9 of the 8+1 PR CI/CD roadmap. Adds SLI/SLO definitions + multi-burn-rate alerts to upgrade the previous "production-LEAN" framing to legitimately "production-grade".
 
-## Why this is a stub
+## What this document does
 
-Implementing the SRE Workbook Ch.5 multi-window burn-rate alert pattern requires:
+Defines the **service-level indicators** (numeric metrics) and **service-level objectives** (targets over windows) for booking_monitor. Encodes them as Prometheus [recording rules](../deploy/prometheus/recording_rules.yml) (pre-computed SLI ratios) + [SLO alerts](../deploy/prometheus/slo_alerts.yml) (multi-window/multi-burn-rate, per Google SRE Workbook ch. 5).
 
-1. **Recording rules** — pre-aggregated availability + latency series so the alert evaluator doesn't recompute the SLI every query.
-2. **Six alert rules per SLO** — short-window-fast-burn + long-window-slow-burn × three severity windows (the canonical 1h/6h/3d × page/ticket layering).
-3. **Error-budget panel additions** — Grafana panels showing burn rate vs error budget consumed for each SLI.
-4. **Runbook entries per alert** — what to do when each burn-rate alert pages.
+The companion document is [`docs/runbooks/chaos.md`](runbooks/chaos.md) — chaos engineering experiments that **verify the SLOs hold under failure injection**.
 
-Estimated effort: ~2-3 days of focused work, primarily Prometheus + Grafana JSON, not Go code. Deferred to Phase 3 (production-shape demo) per the architectural-backlog deferral. The PR #129 audit landing this stub explicitly demotes the "implement SLO + burn-rate alerts" finding to NIT-deferred and treats the absence of any SLO document as the durable correctness gap.
+## SLI methodology (Google SRE)
 
-## Candidate SLIs (not yet measured as SLOs)
+Per the [SRE Workbook ch. 2 — Implementing SLOs](https://sre.google/workbook/implementing-slos/), an SLI is **"the rate at which valid events succeed."** The two-part definition matters:
 
-These are the three SLIs the project would track once the SRE Workbook pattern is implemented. Numeric targets are placeholders — the methodology section below explains how to calibrate them against real production traffic.
+- **valid events** — exclude events that aren't user-facing (e.g. health checks, internal metric scrapes). For our case: only `/api/v1/*` traffic counts.
+- **succeed** — defined as `status != 5xx AND duration < threshold` for latency-sensitive endpoints.
 
-### SLI-1 — Booking availability
+## SLO targets
 
-- **Definition**: `sum(rate(http_requests_total{path="/api/v1/book",status=~"2..|409"}[5m])) / sum(rate(http_requests_total{path="/api/v1/book"}[5m]))`
-- **Rationale**: 200 (booked) and 409 (sold-out / idempotent-duplicate) are both *successful* business outcomes from the booking endpoint's perspective — the load-shed gate worked. 4xx fingerprint mismatches and 5xx infrastructure failures are SLI failures.
-- **Candidate target**: 99.5% (allows ~3.6h of degradation per month).
-- **Current source-of-truth metric**: `http_requests_total` (path / status labels).
+Three SLOs, all measured over a **30-day rolling window** (calendar-window SLOs introduce reset cliffs that mask sustained problems):
 
-### SLI-2 — Pay endpoint p99 latency
+| Domain | SLI | SLO target | Error budget (30d) |
+|---|---|---|---|
+| **Availability** | `success_rate(api requests)` | **99.5%** of valid `/api/v1/*` requests succeed | 0.5% = **216 min/month** |
+| **Latency (booking)** | `p99_latency(POST /api/v1/book)` | **99% of bookings respond < 500ms** | 1% = **432 min/month** |
+| **Booking acceptance** | `accepted_bookings_per_second_under_load` | **≥ 500 acc/s sustained at 500 VUs for 60s** (per benchmark canonical scenario) | n/a — capacity SLO, not error-rate |
 
-- **Definition**: `histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{path="/api/v1/orders/:id/pay"}[5m])))`
-- **Rationale**: `/pay` is the user-perceived checkout-completion path. p99 latency directly drives conversion drop-off; Stripe documents 800ms as the perceived-snappy threshold.
-- **Candidate target**: p99 ≤ 500ms (industry convention for checkout flows).
-- **Current source-of-truth metric**: `http_request_duration_seconds` histogram (path label).
+### Why these three
 
-### SLI-3 — Webhook ack p95
+- **Availability** is the absolute baseline — without it nothing else matters
+- **Booking latency p99** is the specific UX-critical path. Bookings within 500ms is the difference between "snappy" and "I clicked but did it work?". Aligned with PR 5's smoke probe response-time expectation.
+- **Booking acceptance throughput** is the *capacity* SLO. Unlike error-rate SLOs, throughput SLOs are validated by **load tests** (see [PR 7 benchmarks](benchmarks/)), not by 24/7 monitoring. Documented here because it's a real user-facing promise (system is built for flash-sale traffic).
 
-- **Definition (aspirational)**: `histogram_quantile(0.95, sum by (le) (rate(payment_webhook_duration_seconds_bucket[5m])))`
-- **Rationale**: Stripe webhooks have a 30s timeout before they consider the endpoint unhealthy and back off. Sustained p95 above 5s puts the deployment on Stripe's degraded-listener list, which slows redeliveries for the entire account.
-- **Candidate target**: p95 ≤ 2s.
-- **Implementation gap (PR #129 review fixup)**: The `payment_webhook_duration_seconds` histogram **does not yet exist** in the codebase. [`internal/infrastructure/observability/metrics_payment_webhook.go`](../internal/infrastructure/observability/metrics_payment_webhook.go) (note: the file is `metrics_payment_webhook.go`, NOT the `metrics_webhook.go` referenced in an earlier draft of this stub) defines only counter-type metrics (`PaymentWebhookReceivedTotal`, `PaymentWebhookSignatureInvalidTotal`, etc.) — no histogram. SLI-3 therefore requires adding a webhook-duration histogram alongside the existing counters BEFORE the SLO query above can return any data. Track as part of the Phase 3 SLO implementation; not blocked on anything other than the histogram definition + recording in the webhook handler entry/exit.
+### What we DON'T track
 
-## Methodology when implementing
+- **Internal CPU / memory utilization** — these are saturation indicators (good for capacity planning) but **not** SLIs (user doesn't experience CPU%)
+- **Redis hit rate** — internal optimization metric
+- **Kafka consumer lag** — could become an SLI if we had a user-facing "guaranteed processing within N seconds" promise; we don't yet
 
-1. **Calibrate baseline** — capture two weeks of production traffic, compute current 95th-percentile + outage-rate envelope, set the SLO target a bit looser than the observed baseline so a stable system isn't immediately in error budget.
-2. **Recording rules first** — add `availability:booking:ratio_rate5m` + analogous latency series to `deploy/prometheus/recording_rules.yml`. Implementation-side alerts evaluate the pre-aggregated series, not the underlying counters.
-3. **Six alerts per SLI** — the SRE Workbook 1h/6h/3d × short/long windows for each. Page on the short-window-fast-burn pair; ticket on the long-window-slow-burn pair.
-4. **Runbook per alert** — co-located in `docs/runbooks/` keyed off the alert name.
+## Error budget math
+
+For each error-rate SLO, the error budget is:
+
+```
+error_budget_minutes = window_minutes × (1 - SLO)
+```
+
+Concrete:
+- **Availability SLO 99.5% over 30 days** → `30 × 24 × 60 × 0.005 = 216 min/month`
+- **Booking latency SLO 99% over 30 days** → `30 × 24 × 60 × 0.01 = 432 min/month`
+
+The error budget **drives prioritization** (per SRE book ch. 3 — Embracing Risk):
+- Budget healthy → ship new features
+- Budget burning fast → freeze features, focus on reliability work
+- Budget exhausted → reliability lockdown until next rolling-window resets the budget
+
+## Burn rate alerting — the SRE Workbook ch. 5 pattern
+
+We don't alert on "SLO already broken" because by then user pain is already happening. We alert on **burn rate** — the speed at which the error budget is being consumed.
+
+**The 14.4x multiplier** (key derivation):
+- 14.4x = "consuming 2% of 30-day error budget in 1 hour"
+- At 14.4x burn rate continuously, the 30-day budget is exhausted in `30 ÷ 14.4 = 2.08 days` (~50 hours)
+- Source: [SRE Workbook ch. 5 — Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/) Table 5-8
+
+**Three alert tiers** per SRE Workbook Table 5-8:
+
+| Burn rate | Long window | Short window | Budget consumed | Severity |
+|---|---|---|---|---|
+| **14.4x** | 1 hour | 5 minutes | 2% | **Page** (immediate response required) |
+| **6x** | 6 hours | 30 minutes | 5% | **Page** (slower burn but still serious) |
+| **1x** | 3 days | 6 hours | 10% | **Ticket** (creeping degradation; investigate next business day) |
+
+**Why multi-window** (long + short, both must fire):
+- Short window alone → false positives from brief bursts (a single retry storm triggers a 5m spike)
+- Long window alone → too slow to catch sustained-but-acute problems (5m of 50% error rate gets averaged to 4% over 1h)
+- Both required → catches sustained issues AND filters out one-off bursts
+
+## Where it lives in code
+
+### Recording rules
+
+[`deploy/prometheus/recording_rules.yml`](../deploy/prometheus/recording_rules.yml) — hierarchical computation:
+
+- **Tier 1** (5m windows, evaluated every 30s): cheap to compute, drives the short window of each alert
+- **Tier 2** (30m / 6h windows, evaluated every 1m): aggregates Tier 1, drives the long window
+- **Tier 3** (30d aggregation, evaluated every 5m): produces the error-budget-remaining ratio for the SLO dashboard
+
+Hierarchical because `rate(http_requests_total[30d])` evaluated at the alert-eval frequency would scan 30 days of raw samples on every tick — expensive at scale. The pre-aggregation pattern is the [Prometheus rules best practices recommendation](https://prometheus.io/docs/practices/rules/).
+
+### SLO alerts
+
+[`deploy/prometheus/slo_alerts.yml`](../deploy/prometheus/slo_alerts.yml) — 3 tiers × 2 SLOs (availability + booking latency) = 6 alert rules. Each fires only when BOTH its long-window and short-window burn rate cross threshold.
+
+### Dashboard
+
+Not yet implemented — Grafana panels reading the recording rules. Tracked as a follow-up. The Prometheus-side wiring is the load-bearing part; the dashboard is the UI on top.
+
+## Modern alternatives (not adopted in PR 9, documented for next-step)
+
+- **[Sloth](https://sloth.dev/)** — generates Prometheus recording + alert rules from a YAML SLO spec. Cleaner than hand-writing rules; supports [OpenSLO](https://openslo.com/) (vendor-neutral SLO spec).
+- **Grafana Cloud SLO** — managed SLO product. Adds a managed-service dependency we don't need at portfolio scale.
+
+For booking_monitor PR 9 we hand-write the rules to keep the entire SLO stack visible + diffable in this repo. If we later migrate to a multi-service codebase, Sloth becomes the right answer.
 
 ## References
 
-- [Google SRE Workbook Ch.5 — Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/)
-- [`docs/architectural_backlog.md` § SLO + multi-window burn-rate alerts](architectural_backlog.md#slo--multi-window-burn-rate-alerts) — the deferral rationale + revisit triggers.
-- [`docs/monitoring.md`](monitoring.md) — current static-threshold alert catalog the burn-rate work eventually supersedes.
+- [Google SRE Book ch. 4 — Service Level Objectives](https://sre.google/sre-book/service-level-objectives/)
+- [Google SRE Workbook ch. 2 — Implementing SLOs](https://sre.google/workbook/implementing-slos/)
+- [Google SRE Workbook ch. 5 — Alerting on SLOs](https://sre.google/workbook/alerting-on-slos/)
+- [Prometheus recording rules best practices](https://prometheus.io/docs/practices/rules/)
+- [The Four Golden Signals — SRE Book ch. 6](https://sre.google/sre-book/monitoring-distributed-systems/)
+- [Sloth SLO generator](https://sloth.dev/)
+- [OpenSLO spec](https://openslo.com/)

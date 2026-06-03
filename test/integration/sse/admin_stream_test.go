@@ -153,11 +153,19 @@ func (s *stack) publishAndWait(t *testing.T, eventType string) admin.AdminEvent 
 		ToStatus:     "reserved",
 	})
 	require.NoError(t, err)
+	// Sample stream length BEFORE publishing — bus.Publish is async
+	// (channel-send to a background XADD worker), so the previous
+	// `n > 0` predicate would return immediately on calls #2+ even
+	// when the new event hadn't landed yet. Caught CI-flaking
+	// TestIntegration_E2E_LastEventIDReplay where evt3's XADD lost
+	// the race against the next test step. Fix: wait for n to GROW
+	// past the pre-publish snapshot.
+	before, err := s.redis.XLen(context.Background(), cache.DefaultAdminStreamKey).Result()
+	require.NoError(t, err)
 	s.bus.Publish(evt)
-	// Wait for XADD to land
 	require.Eventually(t, func() bool {
 		n, _ := s.redis.XLen(context.Background(), cache.DefaultAdminStreamKey).Result()
-		return n > 0
+		return n > before
 	}, 2*time.Second, 10*time.Millisecond)
 	return evt
 }
