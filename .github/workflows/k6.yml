@@ -223,22 +223,22 @@ jobs:
         # `docker compose exec` inside the app container — wget is
         # part of the alpine base image.
         #
-        # 180s budget on iter-5+: iter 4 showed the app reached
-        # `[Fx] RUNNING` just past the 120s mark (fx dependency-
-        # graph wiring is verbose, cloud runners are ~50% slower
-        # than the dev laptop for cold-start). Faster polling
-        # (every 1s) to catch transition without burning extra
-        # wall-clock.
+        # 300s budget on iter-6+: iter 5 showed cold-start at
+        # ~203s (`[Fx] RUNNING` reached 23s after the 180s wait
+        # gave up). Cloud runners are noticeably slower than the
+        # dev laptop AND have variable Kafka broker-discovery
+        # latency that dominates the tail. 300s gives 1.5× headroom
+        # over observed worst case.
         run: |
           set -euo pipefail
-          for i in $(seq 1 180); do
+          for i in $(seq 1 300); do
             if docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null | grep -q '"status":"ok"'; then
               echo "✓ app ready after ${i}s"
               exit 0
             fi
             sleep 1
           done
-          echo "✗ app did not become ready within 180s"
+          echo "✗ app did not become ready within 300s"
           docker compose logs --tail=120 app postgres redis kafka
           exit 1
 
