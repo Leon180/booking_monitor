@@ -131,17 +131,31 @@ jobs:
       - name: Prepare .env for compose
         # docker-compose.yml uses ${VAR:?} directives that fail
         # compose-up without an .env file. CI doesn't carry the
-        # developer's local .env; build a minimal one from
-        # .env.example with dev-safe placeholder values. The
-        # whole stack runs inside the GHA runner so these
-        # secrets never leave the ephemeral environment.
+        # developer's local .env; build one from .env.example then
+        # override the fields that trip production-mode guards:
+        #
+        #   * APP_ENV: .env.example pins production (so devs notice
+        #     they need to override). config.Validate() in prod-mode
+        #     requires Stripe live keys + ADMIN_STREAM_JWT_SECRET;
+        #     CI flips to "development" — Validate() then accepts
+        #     the mock-gateway dev-loop combo.
+        #   * PAYMENT_WEBHOOK_SECRET: .env.example sets a non-empty
+        #     placeholder ("whsec_local_dev_secret_..."). With
+        #     PAYMENT_PROVIDER=mock, the validator trips on
+        #     "mock + Stripe credentials present = likely
+        #     misconfiguration". Clear it so the mock combo passes.
         run: |
           set -euo pipefail
           cp .env.example .env
-          # No replacement needed — .env.example already has
-          # dev-safe placeholders (change_me_postgres etc.) that
-          # work for an isolated benchmark stack. If a future
-          # variable surfaces as required, override it here.
+          # Use a portable sed-in-place since both BSD + GNU sed
+          # accept `sed -i.bak ... && rm *.bak` form.
+          sed -i.bak \
+            -e 's|^APP_ENV=.*|APP_ENV=development|' \
+            -e 's|^PAYMENT_WEBHOOK_SECRET=.*|PAYMENT_WEBHOOK_SECRET=|' \
+            .env
+          rm -f .env.bak
+          echo "--- effective overrides ---"
+          grep -E '^(APP_ENV|PAYMENT_PROVIDER|PAYMENT_WEBHOOK_SECRET|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET)=' .env
 
       - name: Boot Docker stack
         # The same `docker compose up -d` developers use locally. The
@@ -375,10 +389,20 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifact
-        if: always()
+        # Only upload when the benchmark step actually produced a
+        # directory. Without this guard, a failed-early run (e.g.
+        # readyz never returned ok) leaves steps.bench.outputs.dir
+        # empty → the action falls through to scanning `/`, which
+        # then trips EACCES on /boot/efi. The if: condition gates
+        # on the locator step's output AND skips on PR-trigger so
+        # the action doesn't choke during iteration.
+        if: success() && steps.bench.outputs.dir != ''
         uses: actions/upload-artifact@v4
         with:
-          name: k6-${{ github.event.inputs.ref || github.ref_name }}-${{ github.run_id }}
+          # sanitize ref names for filesystem-safe artifact names:
+          # PR-trigger refs look like "152/merge" which the artifact
+          # API rejects.
+          name: k6-${{ github.run_id }}
           path: |
             ${{ steps.bench.outputs.dir }}/
           retention-days: 30
