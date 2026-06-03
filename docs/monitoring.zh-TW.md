@@ -99,7 +99,7 @@ Collector 在 scrape 當下讀 `*redis.Client.PoolStats()`(已經有鎖保護 + 
 
 | 問題 | 指標 |
 | :-- | :-- |
-| 成功訂票 vs 售完 vs 重複下單 | `bookings_total{status}` |
+| 成功訂票 vs 售完 vs 錯誤 | `bookings_total{status}` — status 列舉:`success` / `sold_out` / `error`。PR #129 A15 移除了 `duplicate` 這個 label:自 N4 起 Idempotency middleware 會在請求進入 booking service 之前就短路掉重複請求,因此 booking-decorator 不會發出 `status="duplicate"`。重複下單的觀測請改用 `idempotency_replays_total`。 |
 | Worker 處理結果 | `worker_orders_total{status}`、`worker_processing_duration_seconds` |
 | Redis 與 DB 庫存漂移 | `inventory_conflicts_total`(worker 端,Redis 通過但 DB 拒絕); `inventory_rehydrate_drift_total`(啟動時,Redis key 存在且值 > DB available_tickets — 見 [`cache/rehydrate.go`](../internal/infrastructure/cache/rehydrate.go))。多次部署後仍看到 `rate(inventory_rehydrate_drift_total[1h]) > 0` 持續 = 有人/事在把錯的值寫進 Redis(毀損、手動操作、或 `architectural_backlog.md` § Cache-truth architecture 紀錄的 NOGROUP 後遺症)。 |
 | Dead-letter 路由 | `dlq_messages_total{topic,reason}`、`redis_dlq_routed_total{reason}` — `reason` 列舉:`malformed_classified`(handler invariant 拒絕)、`exhausted_retries`、`malformed_reverted_legacy`(parse 失敗但已透過 legacy hints 補償退還 Redis 庫存 — rolling-upgrade 預期會逐漸 taper)、`malformed_unrecoverable`(parse 失敗且 revert hints 無法解析,或 RevertInventory 自身失敗 — 庫存已洩漏,需要 page)。舊 `malformed_parse` label 保留 pre-warm 以相容舊 alert,但已不再有新 emit;新 alert 應使用更明確的 label。 |
@@ -204,7 +204,9 @@ Admin SSE 事件管線暴露自己的基礎設施指標(Layer B,見 [§Q16](desi
 **值得收藏的查詢:**
 
 ```promql
-# 訂票漏斗 — 成功 vs 售完 vs 重複 vs 錯誤
+# 訂票漏斗 — 成功 vs 售完 vs 錯誤
+# (PR #129 A15:`duplicate` 已移除 — 見 §2 row 註解;重複請求
+#  的觀測請改用 `idempotency_replays_total`。)
 sum by (status) (rate(bookings_total[1m]))
 
 # Worker 吞吐
@@ -281,7 +283,7 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 
 9 個 panel 的構成:
 - **Hero row(stat 面板)**:Bookings/s、Pay conversion %(5m)、Saga events/s、Admin SSE 連線數
-- **Trends row(時序圖)**:Booking 結果分層堆疊(success/sold_out/duplicate/error)、Saga + DLQ 異常疊圖
+- **Trends row(時序圖)**:Booking 結果分層堆疊(success/sold_out/error — PR #129 A15 移除了 `duplicate`)、Saga + DLQ 異常疊圖
 - **串流健康 row(時序圖)**:Bus channel 深度 + drop 速率、Subscriber 連續失敗、SSE 訊息延遲 p95/p99
 
 刷新頻率:30 秒。預設區間:最近 15 分鐘。即時事件 timeline 是另一個視覺化層(SSE 串流 → 自製 JS),不包含在 Grafana JSON 裡。

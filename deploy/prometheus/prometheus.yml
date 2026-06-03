@@ -71,6 +71,15 @@ scrape_configs:
     # exceeded" scrape failures on Linux hosts. Closes action-list
     # item M12.
     metrics_path: '/metrics'
+    # PR #129 A14: cardinality regression guard. Today's metric set
+    # is well under 10k series (per-concern metrics_*.go discipline,
+    # label sets bounded to low-cardinality enums). sample_limit
+    # makes the bound EXPLICIT — a future regression that introduces
+    # a high-cardinality label (e.g. user_id-on-a-histogram) blows
+    # the scrape rather than silently 10×-ing storage cost. 10000
+    # gives ~10× headroom over the current ~1k surface for
+    # legitimate growth before requiring an explicit bump.
+    sample_limit: 10000
     static_configs:
       - targets: ['app:8080']
 

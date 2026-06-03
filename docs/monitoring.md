@@ -99,7 +99,7 @@ The collector reads `*redis.Client.PoolStats()` at scrape time (lock-protected, 
 
 | Question | Metric |
 | :-- | :-- |
-| Successful bookings vs sold-out vs duplicate | `bookings_total{status}` |
+| Successful bookings vs sold-out vs error | `bookings_total{status}` — status enum: `success` / `sold_out` / `error`. PR #129 A15 removed the `duplicate` label: since N4 the Idempotency middleware short-circuits duplicate requests before they reach the booking service, so the booking-decorator never emits `status="duplicate"`. Replay activity is observable via `idempotency_replays_total` instead. |
 | Worker outcomes | `worker_orders_total{status}`, `worker_processing_duration_seconds` |
 | Inventory drift between Redis and DB | `inventory_conflicts_total` (worker-side, Redis approved but DB rejected); `inventory_rehydrate_drift_total` (startup-time, Redis key existed with value > DB available_tickets — see [`cache/rehydrate.go`](../internal/infrastructure/cache/rehydrate.go)). Sustained `rate(inventory_rehydrate_drift_total[1h]) > 0` across multiple deploys = something is putting wrong values into Redis (corruption, manual tinkering, or the NOGROUP-aftermath tracked in `architectural_backlog.md` § Cache-truth architecture). |
 | Dead-letter routing | `dlq_messages_total{topic,reason}`, `redis_dlq_routed_total{reason}` — `reason` enumerates `malformed_classified` (handler invariant) / `exhausted_retries` / `malformed_reverted_legacy` (parse fail BUT compensation reverted Redis inventory via legacy hints — expected rolling-upgrade taper) / `malformed_unrecoverable` (parse fail AND revert hints unparseable OR RevertInventory failed — inventory leaked, page on). Legacy `malformed_parse` retained as pre-warm for old alert compatibility but no new emits; new alerts SHOULD branch on the more specific labels. |
@@ -204,7 +204,9 @@ Open http://localhost:9090.
 **Useful queries to bookmark:**
 
 ```promql
-# Booking funnel — successes vs sold-out vs duplicate vs error
+# Booking funnel — successes vs sold-out vs error
+# (PR #129 A15: `duplicate` removed — see §2 row note; replay
+#  activity is observable via `idempotency_replays_total` instead.)
 sum by (status) (rate(bookings_total[1m]))
 
 # Worker throughput
@@ -281,7 +283,7 @@ Panels are organised by collapsible row. Top-of-dashboard "golden signals" first
 
 9-panel composition:
 - **Hero row (stat panels)**: Bookings/s, Pay conversion % (5m), Saga events/s, Admin SSE connections
-- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/duplicate/error), Saga + DLQ anomaly overlay
+- **Trends row (timeseries)**: Booking outcomes stacked (success/sold_out/error — PR #129 A15 dropped `duplicate`), Saga + DLQ anomaly overlay
 - **Streaming health row (timeseries)**: Bus channel depth + drop rate, Subscriber consec failures, SSE message lag p95/p99
 
 Refresh: 30s. Default window: last 15 minutes. Live event timeline is a separate visualization layer (SSE stream → custom JS), not included in the Grafana JSON.
