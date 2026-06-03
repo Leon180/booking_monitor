@@ -4,6 +4,68 @@ All notable architectural milestones in this project, written in reverse chronol
 
 This is a portfolio / learning project, not a published library — versions mark **architecture inflection points**, not API stability promises. Use the GitHub Releases page (https://github.com/Leon180/booking_monitor/releases) for the rendered timeline; this file is the authoritative source.
 
+## [1.4.0](https://github.com/Leon180/booking_monitor/compare/v1.3.0...v1.4.0) (2026-06-01)
+
+
+### Features
+
+* **k8s:** VM→GKE Autopilot migration plan + skeleton (PR 8/8) ([#148](https://github.com/Leon180/booking_monitor/issues/148)) ([9f50dce](https://github.com/Leon180/booking_monitor/commit/9f50dce4456856accf26fb5f638eeda02068dc1c))
+* **slo:** add SLI/SLO definitions + multi-burn-rate alerts + chaos baseline (PR 9/9) ([#149](https://github.com/Leon180/booking_monitor/issues/149)) ([5e7f35f](https://github.com/Leon180/booking_monitor/commit/5e7f35ff5408fdcfb27358d171785213944ebbeb))
+
+
+### Bug Fixes
+
+* **deploy:** restore `attestations: read` for gh attestation verify ([#146](https://github.com/Leon180/booking_monitor/issues/146)) ([6d7dfa6](https://github.com/Leon180/booking_monitor/commit/6d7dfa64c985ccc60ab5f164e6d4fc3023febbab))
+
+## [1.3.0](https://github.com/Leon180/booking_monitor/compare/v1.2.0...v1.3.0) (2026-05-31)
+
+
+### Features
+
+* **dora:** 5-metric DORA dashboard via Go CLI + daily cron (PR 7/8) ([#144](https://github.com/Leon180/booking_monitor/issues/144)) ([7e152c7](https://github.com/Leon180/booking_monitor/commit/7e152c788b02cc3d4192f095c4a12b93c044de39))
+
+## [1.2.0](https://github.com/Leon180/booking_monitor/compare/v1.1.0...v1.2.0) (2026-05-31)
+
+
+### Features
+
+* **admin-stream:** per-subsystem resource monitoring + buffer-pool decision ([eca2ff8](https://github.com/Leon180/booking_monitor/commit/eca2ff8fd0b0e122cb77078e185af853518d12b3))
+* **admin-stream:** per-subsystem resource monitoring + buffer-pool decision report ([996c3f9](https://github.com/Leon180/booking_monitor/commit/996c3f9ad12e5dbee3314ae697404dc460f684a7))
+* **admin:** AdminEvent envelope + 8 typed payloads + factories ([529a792](https://github.com/Leon180/booking_monitor/commit/529a7920bd267e0aa83d480a244f0182158f8cef))
+* **admin:** event bus with bounded-async drop policy ([63f0ee3](https://github.com/Leon180/booking_monitor/commit/63f0ee3c1aa32edd85c4a3e6c037e1edbf22ef94))
+* **admin:** war-room dashboard HTML + interview talking-point sheet + gitignore fix ([0febfcf](https://github.com/Leon180/booking_monitor/commit/0febfcf41370e7523fa428e63aaa8caf2d4fce0c))
+* **admin:** war-room dashboard HTML + interview talking-points ([44c6a63](https://github.com/Leon180/booking_monitor/commit/44c6a6366d043616d675a6382945f269106fe5d4))
+* **bootstrap:** fx wiring + graceful drain lifecycle for admin SSE ([86d05ee](https://github.com/Leon180/booking_monitor/commit/86d05ee3b94dc26350915c6bce124eb94fe9a4ec))
+* **cli,server:** admin-token mint + SSE route wiring on booking-cli ([349ec42](https://github.com/Leon180/booking_monitor/commit/349ec42b0c2cb551dd36c35a11bcbdbd20fddd71))
+* **demo:** add demo-stage5-rush-edge — through-nginx flash-sale demo ([a303b7a](https://github.com/Leon180/booking_monitor/commit/a303b7ab8ad8edea64fe52784385f2ef6d8bb2fd))
+* **demo:** grafana-open target + canonical-aligned demo-stage5-rush ([ec3b091](https://github.com/Leon180/booking_monitor/commit/ec3b09154d002e8b173624cfd1ef4b8064628e43))
+* **deploy:** GitHub Actions deploy workflow — WIF + cosign + smoke (PR 5/8) ([#136](https://github.com/Leon180/booking_monitor/issues/136)) ([1aad65d](https://github.com/Leon180/booking_monitor/commit/1aad65d4b2390308c5090dd3ea2a455d05587343))
+* **deploy:** operator deploy pipeline — Cloudflare Tunnel + migrate + secrets sync (PR 4/8) ([#135](https://github.com/Leon180/booking_monitor/issues/135)) ([48cca9c](https://github.com/Leon180/booking_monitor/commit/48cca9c01793881f53f8b3ee545dc672c080099b))
+* **middleware:** JWT HS256 admin auth + MintAdminJWT helper ([8ef4f11](https://github.com/Leon180/booking_monitor/commit/8ef4f115668d12c7151504a30931e91ad1690512))
+* **observability:** admin stream metrics + inventory_low_alerts_total ([c540537](https://github.com/Leon180/booking_monitor/commit/c5405371e47d4e94227255f5fe16fa13eb7e5d7d))
+* **sse:** hub + subscriber + handler (subscribe-then-replay) ([111d4ab](https://github.com/Leon180/booking_monitor/commit/111d4abfd632cb75cf631f05d008b48cbad668fb))
+* **stage5:** wire admin SSE event stream + war-room dashboard into demo binary ([b169bd4](https://github.com/Leon180/booking_monitor/commit/b169bd406b9190c574b686d9dd2ea2da02d64c6b))
+* **stage5:** wire admin SSE event stream + war-room dashboard into demo binary ([6bf745b](https://github.com/Leon180/booking_monitor/commit/6bf745b33aa4b0fbe9c077309bc716a0e312bf55))
+* **streaming:** SSE admin event stream — design + domain layer (WIP) ([d7b44e3](https://github.com/Leon180/booking_monitor/commit/d7b44e3933431d942a801e9f092fa1eaef829eee))
+
+
+### Bug Fixes
+
+* **deps:** bump otel + grpc to patch Trivy HIGH/CRIT CVEs ([#140](https://github.com/Leon180/booking_monitor/issues/140)) ([1a79907](https://github.com/Leon180/booking_monitor/commit/1a79907ff5c7142bc6eeaa204f846b8db0b3763b))
+* **release:** attest job — docker login for oras-based AR push ([#141](https://github.com/Leon180/booking_monitor/issues/141)) ([dd8958b](https://github.com/Leon180/booking_monitor/commit/dd8958b847f3ec5a80ab73e7416d921ef1d4ae84))
+* **release:** correct trivy-action ref to v0.36.0 (v-prefix required) ([#138](https://github.com/Leon180/booking_monitor/issues/138)) ([a06c7ac](https://github.com/Leon180/booking_monitor/commit/a06c7ac851d16e3f2dbc5bfe05fc6b0b4a70a5be))
+* **sse:** eliminate two test-self-race conditions in hub_test ([a05fa0d](https://github.com/Leon180/booking_monitor/commit/a05fa0dc2d81281285bd29b82d2be6776f61f76e))
+* **streaming:** address multi-agent review round 1 (CRIT-1/2 + 4 HIGH + 4 MED) ([06515fc](https://github.com/Leon180/booking_monitor/commit/06515fc2f4037d1383cdea5ab128b1bb6ead1104))
+* **streaming:** address multi-agent review round 2 (2 REG + 1 NEW) ([95c510b](https://github.com/Leon180/booking_monitor/commit/95c510be9f60b65d011bbe8ace752f28bbbb7ebb))
+* **streaming:** address multi-agent review round 3 (3 real + 1 false-positive verified) ([6648fee](https://github.com/Leon180/booking_monitor/commit/6648fee3fc33d9e0e6b81312ca1bc4afe324b087))
+* **streaming:** smoke fixes — *redis.Client + worker publish wiring ([89f4869](https://github.com/Leon180/booking_monitor/commit/89f4869ee09da6c6d7e93dfddb1f0707d2a83ee7))
+* **streaming:** smoke round 4 — wire stage3 integration test to NoopBus ([614bff1](https://github.com/Leon180/booking_monitor/commit/614bff1e74afc1c9b3acfac085e7608da8e2d807))
+
+
+### Refactoring
+
+* **stage5:** move cmd-resident business logic into internal/ ([#119](https://github.com/Leon180/booking_monitor/issues/119)) ([2dea898](https://github.com/Leon180/booking_monitor/commit/2dea8983013e485506082db8389410a9b399f586))
+
 ## [Unreleased]
 
 Post-v1.1.0 follow-ups:

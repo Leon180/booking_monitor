@@ -2,9 +2,16 @@ version: '3.8'
 
 services:
   app:
+    # PR 4: in production deploys, scripts/deploy.sh exports BOOKING_IMAGE to
+    # the signed digest from Artifact Registry (set via `make deploy`). When
+    # BOOKING_IMAGE is unset (local dev), falls through to `build: .` and
+    # produces the dev image. Without the `image:` directive, deploy.sh's
+    # signed-image contract is silently bypassed (compose would always
+    # rebuild from source on the VM). 3-agent review CRIT — see PR #135.
+    image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_app
-    command: [ "/app/booking-cli", "server" ]
+    command: [ "server" ]
     ports:
       - "6060:6060"   # pprof (only active when ENABLE_PPROF=true)
     # `unless-stopped` so a hung container caught by the HEALTHCHECK
@@ -108,9 +115,11 @@ services:
     # Default loop mode (run forever, sweep every RECON_SWEEP_INTERVAL).
     # For k8s CronJob hosting, deploy with `--once` instead and let
     # the cluster scheduler drive the cadence.
+    # PR 4: see comment on `app` service for BOOKING_IMAGE rationale.
+    image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_recon
-    command: [ "/app/booking-cli", "recon" ]
+    command: [ "recon" ]
     restart: unless-stopped
     depends_on:
       - postgres
@@ -154,9 +163,11 @@ services:
     # `--once` invocations, so SagaStuckFailedOrders /
     # SagaWatchdogFindStuckErrors / SagaMaxFailedAgeExceeded alerts
     # had no producer process in the dev stack.
+    # PR 4: see comment on `app` service for BOOKING_IMAGE rationale.
+    image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_saga_watchdog
-    command: [ "/app/booking-cli", "saga-watchdog" ]
+    command: [ "saga-watchdog" ]
     restart: unless-stopped
     depends_on:
       - postgres
@@ -210,9 +221,11 @@ services:
     # owns the Redis revert; D6 only writes to Postgres (Order +
     # Outbox). Skipping the Redis dep makes D6 useful even during a
     # transient Redis outage.
+    # PR 4: see comment on `app` service for BOOKING_IMAGE rationale.
+    image: ${BOOKING_IMAGE:-booking_monitor-app}
     build: .
     container_name: booking_expiry_sweeper
-    command: [ "/app/booking-cli", "expiry-sweeper" ]
+    command: [ "expiry-sweeper" ]
     restart: unless-stopped
     depends_on:
       - postgres
