@@ -1,0 +1,251 @@
+# k6 load tests — Tier 2 async (NOT a PR-merge gate)
+#
+# Why this is async and not per-PR:
+#   * Run takes ~10-12min wall-clock (Docker stack boot + warm + 60s × 2
+#     comparison runs + report write). Per-PR gating would 6× the CI
+#     budget for every documentation typo PR.
+#   * Shared cloud-runner k6 has 5-15% run-to-run variance from
+#     neighbor noise + scheduler jitter. A 5% genuine regression is
+#     indistinguishable from noise on a single run; we'd need ≥3 runs
+#     to get signal, multiplying the budget further.
+#   * The interesting regressions (memory leak, lock contention under
+#     soak, GC pause growth) don't show up in a 60s window — they
+#     surface in 30+ minute soaks. Per-PR k6 gives false confidence
+#     against the wrong threat model.
+#
+# What it actually does:
+#   * Boots the regular `docker-compose.yml` stack (the production-
+#     equivalent layout, not the 5-stage comparison composition).
+#   * Runs `make benchmark-compare VUS=500 DURATION=60s` against the
+#     checked-out ref — same A-vs-B contract `scripts/benchmark_compare.sh`
+#     implements for local runs.
+#   * Uploads the resulting `docs/benchmarks/comparisons/<ts>/` directory
+#     as a workflow artifact (retain 30 days) for human inspection.
+#
+# How to use:
+#   * Nightly cron on main — catches throughput regressions within 24h.
+#   * workflow_dispatch with `ref` input — fire on demand against any
+#     branch / tag / SHA. The workflow checks out that ref and runs
+#     against it, so a hot-path PR can be benchmarked without rebasing
+#     onto main first (provided the PR branch has this workflow file).
+#   * The workflow does NOT auto-compare against main. Compare the
+#     uploaded artifact against the most recent main run by hand (or
+#     the prior comparison.md under docs/benchmarks/). A future
+#     enhancement could automate this via a separate "k6-trend" job
+#     that downloads the prior artifact and diffs the headline metrics.
+
+name: k6 (load test)
+
+on:
+  schedule:
+    # Nightly @ 03:00 UTC — quiet hour for most contributors.
+    # Yields ~24h-old throughput numbers on main without any human
+    # intervention. Cron lives on the default branch (main), so this
+    # only fires for main regardless of other branches.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch / tag / SHA) to benchmark — defaults to main'
+        required: false
+        default: 'main'
+      vus:
+        description: 'k6 Virtual Users (default 500 matches the project benchmark convention)'
+        required: false
+        default: '500'
+      duration:
+        description: 'k6 test duration (default 60s matches the project benchmark convention)'
+        required: false
+        default: '60s'
+
+# One k6 run at a time per branch — avoids two cron + workflow_dispatch
+# runs trampling each other's stack.
+concurrency:
+  group: k6-${{ github.workflow }}-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  k6:
+    name: k6 (VUs=${{ github.event.inputs.vus || '500' }} duration=${{ github.event.inputs.duration || '60s' }})
+    runs-on: ubuntu-latest
+    # 30min budget: ~5min for docker compose pull + build, ~2min for
+    # readyz wait + migrations + seed, 2× ~60s for the k6 A/B runs,
+    # ~1min reset between runs, ~2min margin for slow runners.
+    # Anything longer than this is a sign the stack is hung — fail-fast.
+    timeout-minutes: 30
+
+    env:
+      VUS: ${{ github.event.inputs.vus || '500' }}
+      DURATION: ${{ github.event.inputs.duration || '60s' }}
+      # benchmark_compare.sh reads MIGRATE_DB_URL via the regular
+      # docker-compose.yml convention (port 5433, password set in
+      # the compose env). Pin here so the script doesn't pick up
+      # whatever the runner shell happens to have.
+      REDIS_PASSWORD: 'smoketest_redis_local'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Defaults to github.ref on push / schedule events; explicit
+          # ref input for workflow_dispatch lets developers benchmark
+          # any branch.
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Go
+        # `make migrate-up` shells out to the golang-migrate binary;
+        # install it via `go install` since the runner has Go but not
+        # `migrate`. Pin via go.mod's toolchain directive so the
+        # version tracks the project's stdlib CVE baseline.
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '1.25' }}
+          cache: true
+
+      - name: Install golang-migrate
+        run: |
+          set -euo pipefail
+          go install -tags='postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare .env for compose
+        # docker-compose.yml uses ${VAR:?} directives that fail
+        # compose-up without an .env file. CI doesn't carry the
+        # developer's local .env; build a minimal one from
+        # .env.example with dev-safe placeholder values. The
+        # whole stack runs inside the GHA runner so these
+        # secrets never leave the ephemeral environment.
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          # No replacement needed — .env.example already has
+          # dev-safe placeholders (change_me_postgres etc.) that
+          # work for an isolated benchmark stack. If a future
+          # variable surfaces as required, override it here.
+
+      - name: Boot Docker stack
+        # The same `docker compose up -d` developers use locally. The
+        # full stack (app + nginx + postgres + redis + kafka +
+        # prometheus + grafana + jaeger) is what the benchmark
+        # convention measures against; using a subset would change
+        # the cost profile of every booking.
+        run: |
+          set -euo pipefail
+          docker compose up -d --build app postgres redis kafka
+
+      - name: Wait for app readyz
+        # /readyz returns 200 only when PG + Redis + Kafka all answer
+        # within 1s — same gate the k8s probe uses. Bounded 2min wait
+        # so a stuck dep surfaces here rather than as a confusing k6
+        # failure later. The app container does NOT expose 8080 to
+        # the host (nginx is the public entrypoint, port 80); reach
+        # /readyz via `docker compose exec` inside the app container
+        # — wget is part of the alpine base image.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "✓ app ready after ${i}×2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "✗ app did not become ready within 120s"
+          docker compose logs --tail=80 app postgres redis kafka
+          exit 1
+
+      - name: Apply migrations
+        # benchmark_compare.sh assumes the schema is up-to-date.
+        # The compose app entrypoint does NOT auto-migrate today —
+        # only `make migrate-up` does. Force-pass the DB URL via
+        # MIGRATE_DB_URL so the Makefile target picks it up.
+        env:
+          MIGRATE_DB_URL: 'postgres://booking:change_me_postgres@localhost:5433/booking?sslmode=disable'
+        run: |
+          set -euo pipefail
+          make migrate-up
+
+      - name: Seed flash-sale event
+        # The 500k-ticket flash-sale event the benchmark convention
+        # requires. Without seeded inventory every k6 booking returns
+        # 409 sold-out and the throughput number is meaningless.
+        # Uses the existing make target to keep the seeding logic in
+        # one place.
+        # Container name is `booking_db` (set in docker-compose.yml
+        # under the postgres service), NOT `booking_postgres` — match
+        # whatever the compose file actually creates.
+        run: |
+          set -euo pipefail
+          make reset-db
+          # Bump the seeded event to 500k tickets (default is 100).
+          # benchmark_compare.sh expects 500k per the convention.
+          docker exec booking_db psql -U booking -d booking -c \
+            "UPDATE events SET total_tickets = 500000, available_tickets = 500000;"
+
+      - name: Run k6 comparison benchmark
+        # The same script the project uses locally. Outputs land
+        # under docs/benchmarks/<timestamp>_compare_c<vus>/ as
+        # run_a_raw.txt + run_b_raw.txt + comparison.md.
+        run: |
+          set -euo pipefail
+          make benchmark-compare VUS="${VUS}" DURATION="${DURATION}"
+
+      - name: Locate benchmark output directory
+        id: bench
+        # Find the directory the script just wrote. It's the most
+        # recent dir under docs/benchmarks/ matching the timestamp
+        # naming convention.
+        run: |
+          set -euo pipefail
+          out_dir=$(ls -1dt docs/benchmarks/*compare_c* 2>/dev/null | head -1 || true)
+          if [ -z "$out_dir" ]; then
+            echo "✗ no benchmark output directory found"
+            ls -la docs/benchmarks/ || true
+            exit 1
+          fi
+          echo "✓ benchmark output: $out_dir"
+          echo "dir=${out_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Print comparison summary
+        # Echo the comparison.md to the job log so reviewers can see
+        # the headline numbers without downloading the artifact.
+        run: |
+          set -euo pipefail
+          if [ -f "${{ steps.bench.outputs.dir }}/comparison.md" ]; then
+            cat "${{ steps.bench.outputs.dir }}/comparison.md"
+          else
+            echo "(no comparison.md generated — check artifacts for raw output)"
+          fi
+
+      - name: Upload benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-${{ github.event.inputs.ref || github.ref_name }}-${{ github.run_id }}
+          path: |
+            ${{ steps.bench.outputs.dir }}/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Compose logs on failure
+        # If anything failed, dump the stack logs for post-mortem.
+        # Truncated to last 200 lines per service to keep the artifact
+        # under reasonable size.
+        if: failure()
+        run: |
+          for svc in app postgres redis kafka; do
+            echo "=== ${svc} ==="
+            docker compose logs --tail=200 "${svc}" || true
+          done
+
+      - name: Tear down Docker stack
+        # Always clean up so the runner doesn't accumulate state
+        # across re-runs. -v removes named volumes (postgres data,
+        # kafka logs) so a re-run starts clean.
+        if: always()
+        run: docker compose down -v
