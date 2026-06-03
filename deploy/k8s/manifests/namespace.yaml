@@ -1,0 +1,9 @@
+# Namespace for booking_monitor in GKE.
+# Single namespace per application is the GKE Autopilot convention.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: booking-monitor
+  labels:
+    app.kubernetes.io/name: booking-monitor
+    app.kubernetes.io/part-of: booking-monitor

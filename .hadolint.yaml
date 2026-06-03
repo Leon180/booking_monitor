@@ -1,0 +1,21 @@
+# Hadolint configuration. Read automatically by both:
+#   * `hadolint Dockerfile` (local Makefile target)
+#   * `hadolint/hadolint-action@v3.1.0` (CI job, when no `ignore:` input)
+#
+# Single source of truth — keeps local + CI behavior identical.
+
+ignored:
+  # Alpine `apk add` version pin (e.g. `apk add git=2.45.1-r0`).
+  # Reason for ignoring: alpine package versions churn weekly as the
+  # repos rotate; pinning forces a CI break every time the upstream
+  # repo prunes the old version. The supply-chain protection it offers
+  # is weak relative to the noise — we already pin the base image to a
+  # SHA digest, which transitively pins every package available to the
+  # apk command. Revisit if a CVE specifically requires a fixed version.
+  - DL3018
+
+# Note: DL3006 (untagged image) is suppressed INLINE via
+# `# hadolint ignore=DL3006` directives in the Dockerfile because the
+# false positive is specific to ARG-based FROM (hadolint can't resolve
+# ARG values to see the digest pin). Inline lets DL3006 still fire on
+# any future non-ARG FROM line that genuinely lacks a tag.

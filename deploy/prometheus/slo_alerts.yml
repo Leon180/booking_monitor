@@ -1,0 +1,139 @@
+# Multi-window/multi-burn-rate SLO alerts per Google SRE Workbook
+# ch. 5 Table 5-8.
+#
+# For each SLO (availability + booking latency), three tiers:
+#   1h+5m at 14.4x   → page; consumes 2% of 30d budget in 1h
+#   6h+30m at 6x     → page; consumes 5% of 30d budget in 6h
+#   3d+6h at 1x      → ticket; consumes 10% of 30d budget in 3d
+#
+# Both windows must cross threshold (the long+short combo). Filters out
+# transient bursts (short alone) and slow-detection misses (long alone).
+#
+# Threshold math: alert fires when budget burn ≥ N × SLO error rate.
+# For availability SLO=99.5% (error rate=0.5%):
+#   14.4x  → error rate threshold = 0.072 (7.2%)
+#   6x     → error rate threshold = 0.030 (3.0%)
+#   1x     → error rate threshold = 0.005 (0.5%)
+# For latency SLO=99% (error rate=1%):
+#   14.4x  → fast_ratio threshold = 1 - 0.144 = 0.856
+#   6x     → fast_ratio threshold = 1 - 0.060 = 0.940
+#   1x     → fast_ratio threshold = 1 - 0.010 = 0.990
+
+groups:
+  # ===========================================================================
+  # Availability SLO: 99.5% of /api/v1/* succeed (non-5xx) over 30 days
+  # ===========================================================================
+  - name: booking_slo_availability
+    rules:
+      - alert: BookingAvailabilitySLOBurnRateFast
+        # 1h + 5m windows, 14.4x burn rate → 2% of 30d budget per 1h
+        expr: |
+          (1 - booking:availability:ratio_rate1h) > (14.4 * 0.005)
+          and
+          (1 - booking:availability:ratio_rate5m) > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: page
+          slo: availability
+          burn_window: 1h_5m
+        annotations:
+          summary: "Availability SLO burning at 14.4x (2% budget consumed in 1h)"
+          description: |
+            1h availability is below 92.8% (SLO 99.5%; 14.4x burn means
+            consuming 2% of monthly budget per hour). Investigate ASAP
+            — at this rate, 30-day error budget exhausted in ~2 days.
+            See docs/slo.md and docs/runbooks/chaos.md.
+
+      - alert: BookingAvailabilitySLOBurnRateMedium
+        # 6h + 30m windows, 6x burn rate → 5% of 30d budget per 6h
+        expr: |
+          (1 - booking:availability:ratio_rate6h) > (6 * 0.005)
+          and
+          (1 - booking:availability:ratio_rate30m) > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: page
+          slo: availability
+          burn_window: 6h_30m
+        annotations:
+          summary: "Availability SLO burning at 6x (5% budget consumed in 6h)"
+          description: |
+            Sustained availability degradation — neither a brief spike
+            nor a transient burst. At 6x burn, 30-day budget exhausted
+            in ~5 days. See docs/slo.md.
+
+      - alert: BookingAvailabilitySLOBurnRateSlow
+        # 3d + 6h windows, 1x burn rate → 10% of 30d budget per 3 days
+        expr: |
+          (1 - booking:availability:ratio_rate3d) > (1 * 0.005)
+          and
+          (1 - booking:availability:ratio_rate6h) > (1 * 0.005)
+        for: 1h
+        labels:
+          severity: ticket
+          slo: availability
+          burn_window: 3d_6h
+        annotations:
+          summary: "Availability SLO burning at 1x (creeping problem)"
+          description: |
+            Slow but persistent SLO degradation. Not urgent — but if
+            uncorrected, 30-day budget exhausted in 30 days. Open a
+            ticket; investigate next business day.
+
+  # ===========================================================================
+  # Booking latency SLO: 99% of POST /api/v1/book < 500ms over 30 days
+  # ===========================================================================
+  - name: booking_slo_book_latency
+    rules:
+      - alert: BookingLatencySLOBurnRateFast
+        # 1h + 5m at 14.4x burn (consume 14.4% of 1% budget per hour)
+        expr: |
+          (1 - booking:book_latency:fast_ratio_rate1h) > (14.4 * 0.01)
+          and
+          (1 - booking:book_latency:fast_ratio_rate5m) > (14.4 * 0.01)
+        for: 2m
+        labels:
+          severity: page
+          slo: book_latency
+          burn_window: 1h_5m
+        annotations:
+          summary: "POST /api/v1/book latency SLO burning at 14.4x"
+          description: |
+            < 85.6% of bookings completing under 500ms in last 1h.
+            SLO is 99% < 500ms. Likely upstream pressure (Redis/PG
+            saturation, GC pauses, deploy rollback in progress).
+
+      - alert: BookingLatencySLOBurnRateMedium
+        expr: |
+          (1 - booking:book_latency:fast_ratio_rate6h) > (6 * 0.01)
+          and
+          (1 - booking:book_latency:fast_ratio_rate30m) > (6 * 0.01)
+        for: 15m
+        labels:
+          severity: page
+          slo: book_latency
+          burn_window: 6h_30m
+        annotations:
+          summary: "POST /api/v1/book latency SLO burning at 6x"
+          description: |
+            Sustained latency degradation over 6h. < 94% of bookings
+            completing under 500ms. Check connection pool sizing,
+            Redis hot-key contention, and recent deploys.
+
+      - alert: BookingLatencySLOBurnRateSlow
+        expr: |
+          (1 - booking:book_latency:fast_ratio_rate3d) > (1 * 0.01)
+          and
+          (1 - booking:book_latency:fast_ratio_rate6h) > (1 * 0.01)
+        for: 1h
+        labels:
+          severity: ticket
+          slo: book_latency
+          burn_window: 3d_6h
+        annotations:
+          summary: "POST /api/v1/book latency SLO burning at 1x"
+          description: |
+            Slow latency creep — < 99% under 500ms over 3 days.
+            Plausibly a slow PG bloat, accumulating Redis key count,
+            or accumulating goroutine leak. Investigate next business
+            day; not page-worthy.

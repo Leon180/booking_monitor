@@ -1,0 +1,479 @@
+# k6 load tests — Tier 2 async (NOT a PR-merge gate)
+#
+# Why this is async and not per-PR:
+#   * Run takes ~10-12min wall-clock (Docker stack boot + warm + 60s × 2
+#     comparison runs + report write). Per-PR gating would 6× the CI
+#     budget for every documentation typo PR.
+#   * Shared cloud-runner k6 has 5-15% run-to-run variance from
+#     neighbor noise + scheduler jitter. A 5% genuine regression is
+#     indistinguishable from noise on a single run; we'd need ≥3 runs
+#     to get signal, multiplying the budget further.
+#   * The interesting regressions (memory leak, lock contention under
+#     soak, GC pause growth) don't show up in a 60s window — they
+#     surface in 30+ minute soaks. Per-PR k6 gives false confidence
+#     against the wrong threat model.
+#
+# What it actually does:
+#   * Boots the regular `docker-compose.yml` stack (the production-
+#     equivalent layout, not the 5-stage comparison composition).
+#   * Runs `make benchmark-compare VUS=500 DURATION=60s` against the
+#     checked-out ref — same A-vs-B contract `scripts/benchmark_compare.sh`
+#     implements for local runs.
+#   * Uploads the resulting `docs/benchmarks/comparisons/<ts>/` directory
+#     as a workflow artifact (retain 30 days) for human inspection.
+#
+# How to use:
+#   * Nightly cron on main — catches throughput regressions within 24h.
+#   * workflow_dispatch with `ref` input — fire on demand against any
+#     branch / tag / SHA. The workflow checks out that ref and runs
+#     against it, so a hot-path PR can be benchmarked without rebasing
+#     onto main first (provided the PR branch has this workflow file).
+#   * The workflow does NOT auto-compare against main. Compare the
+#     uploaded artifact against the most recent main run by hand (or
+#     the prior comparison.md under docs/benchmarks/). A future
+#     enhancement could automate this via a separate "k6-trend" job
+#     that downloads the prior artifact and diffs the headline metrics.
+
+name: k6 (load test)
+
+on:
+  schedule:
+    # Nightly @ 03:00 UTC — quiet hour for most contributors.
+    # Yields ~24h-old throughput numbers on main without any human
+    # intervention. Cron lives on the default branch (main), so this
+    # only fires for main regardless of other branches.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch / tag / SHA) to benchmark — defaults to main'
+        required: false
+        default: 'main'
+      vus:
+        description: 'k6 Virtual Users (default 500 matches the project benchmark convention)'
+        required: false
+        default: '500'
+      duration:
+        description: 'k6 test duration (default 60s matches the project benchmark convention)'
+        required: false
+        default: '60s'
+
+# One k6 run at a time per branch — avoids two cron + workflow_dispatch
+# runs trampling each other's stack.
+concurrency:
+  group: k6-${{ github.workflow }}-${{ github.event.inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  k6:
+    name: k6 (VUs=${{ github.event.inputs.vus || '500' }} duration=${{ github.event.inputs.duration || '60s' }})
+    runs-on: ubuntu-latest
+    # 30min budget: ~5min for docker compose pull + build, ~2min for
+    # readyz wait + migrations + seed, 2× ~60s for the k6 A/B runs,
+    # ~1min reset between runs, ~2min margin for slow runners.
+    # Anything longer than this is a sign the stack is hung — fail-fast.
+    timeout-minutes: 30
+
+    env:
+      VUS: ${{ github.event.inputs.vus || '500' }}
+      DURATION: ${{ github.event.inputs.duration || '60s' }}
+      # benchmark_compare.sh reads MIGRATE_DB_URL via the regular
+      # docker-compose.yml convention (port 5433, password set in
+      # the compose env). Pin here so the script doesn't pick up
+      # whatever the runner shell happens to have.
+      REDIS_PASSWORD: 'smoketest_redis_local'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Defaults to github.ref on push / schedule events; explicit
+          # ref input for workflow_dispatch lets developers benchmark
+          # any branch.
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Go
+        # `make migrate-up` shells out to the golang-migrate binary;
+        # install it via `go install` since the runner has Go but not
+        # `migrate`. Pin via go.mod's toolchain directive so the
+        # version tracks the project's stdlib CVE baseline.
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '1.25' }}
+          cache: true
+
+      - name: Install golang-migrate
+        run: |
+          set -euo pipefail
+          go install -tags='postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare .env for compose
+        # docker-compose.yml uses ${VAR:?} directives that fail
+        # compose-up without an .env file. Build one from
+        # .env.example then override several fields that interact
+        # to either trip startup validators OR fail compose-up:
+        #
+        #   * APP_ENV: .env.example pins production (so devs notice
+        #     they need to override). production-mode validate
+        #     requires real Stripe live keys + ADMIN_STREAM_JWT_SECRET.
+        #     Flip to development so those don't fire.
+        #
+        #   * PAYMENT_PROVIDER + STRIPE_API_KEY: the obvious
+        #     "PAYMENT_PROVIDER=mock + empty STRIPE_*" combo doesn't
+        #     work because config.LoadConfig has a legacy fallback
+        #     that copies non-empty PAYMENT_WEBHOOK_SECRET into
+        #     STRIPE_WEBHOOK_SECRET — which then trips the always-on
+        #     "mock + Stripe credentials present" guard. Clearing
+        #     PAYMENT_WEBHOOK_SECRET to escape the fallback then
+        #     trips compose's PAYMENT_WEBHOOK_SECRET:? requirement.
+        #
+        #     Resolution: switch to PAYMENT_PROVIDER=stripe + a
+        #     fake sk_test_* key. The validator passes (stripe + key
+        #     present), and the k6_comparison.js script never calls
+        #     /pay (only /events + /book), so the Stripe SDK is
+        #     never actually exercised. The fake key never touches
+        #     real Stripe — pure validation-satisfier.
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i.bak \
+            -e 's|^APP_ENV=.*|APP_ENV=development|' \
+            -e 's|^PAYMENT_PROVIDER=.*|PAYMENT_PROVIDER=stripe|' \
+            -e 's|^STRIPE_API_KEY=.*|STRIPE_API_KEY=sk_test_ci_workflow_fake_never_calls_stripe|' \
+            .env
+          rm -f .env.bak
+          echo "--- effective overrides ---"
+          grep -E '^(APP_ENV|PAYMENT_PROVIDER|PAYMENT_WEBHOOK_SECRET|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET)=' .env
+
+      - name: Boot Docker stack (dependencies first)
+        # Two-phase boot:
+        #   1. dependencies (postgres + redis + kafka) — app NOT yet
+        #      because the app's fx graph runs an inventoryRehydrate
+        #      OnStart hook that does SELECT FROM events. Without
+        #      migrations applied, that fails with `pq: relation
+        #      "events" does not exist` and the app crashloops.
+        #   2. app (next step, after migrations).
+        run: |
+          set -euo pipefail
+          docker compose up -d postgres redis kafka
+
+      - name: Wait for postgres ready
+        # Bounded wait for postgres to accept connections before
+        # we shell out to migrate. pg_isready inside the container
+        # avoids needing a postgres-client install on the runner.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if docker exec booking_db pg_isready -U booking -d booking 2>/dev/null; then
+              echo "✓ postgres ready after ${i}×2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "✗ postgres did not become ready within 60s"
+          docker compose logs --tail=40 postgres
+          exit 1
+
+      - name: Apply migrations
+        # Migrations MUST land before app boot — the app's
+        # inventoryRehydrate OnStart hook does `SELECT FROM events`
+        # which fails if migrations haven't been applied yet (the
+        # exact failure mode iter 3 hit). DB URL goes via the
+        # 5433 host port mapping in docker-compose.yml.
+        env:
+          MIGRATE_DB_URL: 'postgres://booking:change_me_postgres@localhost:5433/booking?sslmode=disable'
+        run: |
+          set -euo pipefail
+          make migrate-up
+
+      - name: Boot app
+        # Now that the schema exists, start the app. --build so the
+        # local source on the runner gets compiled (rather than
+        # pulling a stale image from somewhere).
+        run: |
+          set -euo pipefail
+          docker compose up -d --build app
+
+      - name: Wait for app live (sidecar curl probe)
+        # Iter 9 finding: compose's docker-level healthcheck flipped
+        # to "unhealthy" at 56s because:
+        #   * start_period=15s, retries=5, interval=10s — so the
+        #     "unhealthy" verdict fires at 15 + 50 = 65s if every
+        #     check fails during that window.
+        #   * App's actual cold-start to HTTP-listening is ~200s on
+        #     cloud runners (per iter 7) — much longer than the
+        #     5×retry budget.
+        #
+        # Can't easily change the project's healthcheck config (it's
+        # tuned for production where boot is fast). So bypass docker's
+        # healthcheck verdict entirely: spin up a sidecar curl container
+        # attached to the compose network and probe app:8080/livez
+        # directly. This works regardless of:
+        #   * distroless app image (no shell, no wget on host side)
+        #   * docker's "unhealthy" status (we don't care about its
+        #     verdict, we care if the endpoint responds)
+        #   * port 8080 not being mapped to host (we're in-network)
+        #
+        # 300s budget covers cold-start + variance with comfortable
+        # headroom. Each iteration is `docker run --rm curl` which
+        # is ~200ms — so 300 iters = ~60s of wall-clock overhead
+        # beyond the actual sleep.
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          for i in $(seq 1 300); do
+            if docker run --rm --network booking_monitor_default \
+                  curlimages/curl:latest \
+                  -sfm 2 "http://app:8080/livez" 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "✓ app live after $((SECONDS - start))s (${i} polls)"
+              echo ""
+              echo "--- /readyz status snapshot (informational, not gating) ---"
+              docker run --rm --network booking_monitor_default \
+                curlimages/curl:latest \
+                -sm 3 "http://app:8080/readyz" 2>/dev/null || true
+              echo ""
+              exit 0
+            fi
+            if [ $((i % 30)) -eq 0 ]; then
+              status=$(docker inspect --format='{{.State.Health.Status}}' booking_app 2>/dev/null || echo "missing")
+              echo "  still waiting (health=$status) at $((SECONDS - start))s..."
+              docker compose logs --tail=3 app 2>/dev/null | tail -3 || true
+            fi
+            sleep 1
+          done
+          echo "✗ app did not become live within $((SECONDS - start))s"
+          docker compose logs --tail=120 app postgres redis kafka
+          exit 1
+
+      - name: Seed flash-sale event
+        # The 500k-ticket flash-sale event the benchmark convention
+        # requires. Without seeded inventory every k6 booking returns
+        # 409 sold-out and the throughput number is meaningless.
+        # Uses the existing make target to keep the seeding logic in
+        # one place.
+        # Container name is `booking_db` (set in docker-compose.yml
+        # under the postgres service), NOT `booking_postgres` — match
+        # whatever the compose file actually creates.
+        run: |
+          set -euo pipefail
+          make reset-db
+          # Bump the seeded event to 500k tickets (default is 100).
+          # benchmark_compare.sh expects 500k per the convention.
+          docker exec booking_db psql -U booking -d booking -c \
+            "UPDATE events SET total_tickets = 500000, available_tickets = 500000;"
+
+      - name: Run k6 comparison benchmark
+        # The same script the project uses locally. Outputs land
+        # under docs/benchmarks/<timestamp>_compare_c<vus>/ as
+        # run_a_raw.txt + run_b_raw.txt + comparison.md.
+        run: |
+          set -euo pipefail
+          make benchmark-compare VUS="${VUS}" DURATION="${DURATION}"
+
+      - name: Locate benchmark output directory
+        id: bench
+        # Find the directory the script just wrote. It's the most
+        # recent dir under docs/benchmarks/ matching the timestamp
+        # naming convention.
+        run: |
+          set -euo pipefail
+          out_dir=$(ls -1dt docs/benchmarks/*compare_c* 2>/dev/null | head -1 || true)
+          if [ -z "$out_dir" ]; then
+            echo "✗ no benchmark output directory found"
+            ls -la docs/benchmarks/ || true
+            exit 1
+          fi
+          echo "✓ benchmark output: $out_dir"
+          echo "dir=${out_dir}" >> "$GITHUB_OUTPUT"
+
+      - name: Print comparison summary
+        # Echo the comparison.md to the job log so reviewers can see
+        # the headline numbers without downloading the artifact.
+        run: |
+          set -euo pipefail
+          if [ -f "${{ steps.bench.outputs.dir }}/comparison.md" ]; then
+            cat "${{ steps.bench.outputs.dir }}/comparison.md"
+          else
+            echo "(no comparison.md generated — check artifacts for raw output)"
+          fi
+
+      - name: Reconcile vs latest main baseline
+        # Compare this run's headline metrics against the most recent
+        # SUCCESSFUL k6.yml run on main. Soft-only (warning, never fail)
+        # because the 5-15% cloud-runner noise floor makes a hard gate
+        # too false-prone — but the delta surfacing in the job log +
+        # PR comment + GITHUB_STEP_SUMMARY gives operators the signal
+        # they need without blocking merges.
+        #
+        # Why this is here (paired with the user's "do we reconcile?"
+        # review question on PR #152): the bare workflow without this
+        # step only proves "we ran k6" — not "throughput is in range".
+        # Reconcile is the difference between "drift catch" and "ritual
+        # run".
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Use gh API to find the most recent main run of THIS
+          # workflow that completed successfully. Limit=1 returns
+          # just the newest. If no prior main run exists (first-ever
+          # baseline run), gracefully no-op so the workflow doesn't
+          # fail on its own debut.
+          baseline_run_id=$(gh run list \
+            --workflow=k6.yml \
+            --branch=main \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            --jq '.[0].databaseId' 2>/dev/null || echo "")
+          if [ -z "$baseline_run_id" ] || [ "$baseline_run_id" = "null" ]; then
+            echo "::notice::No prior successful main run found. This run will be the baseline; future runs will reconcile against it."
+            exit 0
+          fi
+          echo "Reconciling against main run #${baseline_run_id}"
+
+          # Download the baseline artifact. There may be multiple
+          # artifacts per run if the workflow ever produces them;
+          # the k6.yml currently uploads exactly one named
+          # k6-<ref>-<run_id>. Pattern-match on prefix.
+          mkdir -p /tmp/k6-baseline
+          if ! gh run download "$baseline_run_id" \
+                --dir /tmp/k6-baseline \
+                --pattern 'k6-*'; then
+            echo "::warning::Failed to download baseline artifact from run ${baseline_run_id}; skipping reconcile."
+            exit 0
+          fi
+
+          # Find run_b_raw.txt in the downloaded baseline (run B is
+          # the stable steady-state; run A is the warm-up first pass).
+          baseline_raw=$(find /tmp/k6-baseline -name 'run_b_raw.txt' | head -1)
+          this_raw="${{ steps.bench.outputs.dir }}/run_b_raw.txt"
+          if [ -z "$baseline_raw" ] || [ ! -f "$this_raw" ]; then
+            echo "::warning::Missing run_b_raw.txt (this='$this_raw', baseline='$baseline_raw'); skipping reconcile."
+            exit 0
+          fi
+
+          # Extract headline metrics. Reuses the same grep+awk
+          # patterns benchmark_compare.sh's extract_* functions use,
+          # so this stays in sync with the local-dev comparison.
+          extract_rps() {
+            grep "http_reqs" "$1" \
+              | grep -v "expected_response" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9]+\.[0-9]+\/s$/) print $i}' \
+              | head -1 \
+              | sed 's|/s||'
+          }
+          extract_p95() {
+            grep "http_req_duration" "$1" \
+              | grep -v "expected_response" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /^p\(95\)=/) {sub(/p\(95\)=/,"",$i); print $i}}' \
+              | head -1
+          }
+          extract_accepted() {
+            # accepted_bookings line emits "rate=<n>/s" in the
+            # custom-metrics section of k6 stdout.
+            grep "accepted_bookings" "$1" \
+              | grep -E "[0-9]+\.?[0-9]*/s" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.?[0-9]*\/s$/) print $i}' \
+              | head -1 \
+              | sed 's|/s||'
+          }
+
+          this_rps=$(extract_rps "$this_raw")
+          base_rps=$(extract_rps "$baseline_raw")
+          this_p95=$(extract_p95 "$this_raw")
+          base_p95=$(extract_p95 "$baseline_raw")
+          this_accepted=$(extract_accepted "$this_raw")
+          base_accepted=$(extract_accepted "$baseline_raw")
+
+          # Compute percentage delta via awk. Strips any trailing
+          # unit ("ms", "s") before parsing as float. Returns "n/a"
+          # for any input that doesn't parse cleanly (handles the
+          # extract_* returning an empty string when the metric is
+          # missing from the raw output).
+          pct() {
+            awk -v a="$1" -v b="$2" 'BEGIN {
+              gsub(/ms$|s$/, "", a)
+              gsub(/ms$|s$/, "", b)
+              if (a == "" || b == "" || b+0 == 0) { print "n/a"; exit }
+              d = (a-b)/b*100
+              printf("%+.1f%%", d)
+            }'
+          }
+
+          delta_rps=$(pct "$this_rps" "$base_rps")
+          delta_accepted=$(pct "$this_accepted" "$base_accepted")
+          delta_p95=$(pct "$this_p95" "$base_p95")
+
+          # Compose the summary table via printf — avoids heredoc
+          # indentation issues inside the YAML block scalar.
+          summary=$(printf '%s\n' \
+            "| Metric | This run | Baseline (main) | Δ |" \
+            "|---|---:|---:|---:|" \
+            "| http_reqs/s | ${this_rps:-n/a} | ${base_rps:-n/a} | ${delta_rps:-n/a} |" \
+            "| accepted_bookings/s | ${this_accepted:-n/a} | ${base_accepted:-n/a} | ${delta_accepted:-n/a} |" \
+            "| p(95) latency | ${this_p95:-n/a} | ${base_p95:-n/a} | ${delta_p95:-n/a} |")
+
+          # Soft-warn on > 10% accepted/s regression. Never fails the
+          # job — the 5-15% cloud-runner variance argument applies.
+          # awk-only test; bash's [[ ]] integer comparison doesn't
+          # do float, and `bc` isn't guaranteed on every runner.
+          warn=$(awk -v a="$this_accepted" -v b="$base_accepted" -v run="$baseline_run_id" 'BEGIN {
+            if (a == "" || b == "" || b+0 == 0) exit
+            d = (a-b)/b*100
+            if (d < -10) printf("::warning::accepted_bookings/s regressed %.1f%% vs main baseline (run %s). Investigate before merging.", d, run)
+          }')
+
+          # Emit to job log AND to the GITHUB_STEP_SUMMARY surface
+          # (visible at the top of the run page in the GH UI without
+          # opening the log).
+          {
+            echo "## k6 reconcile vs main baseline (run ${baseline_run_id})"
+            echo ""
+            echo "$summary"
+            if [ -n "$warn" ]; then echo; echo "$warn"; fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifact
+        # Only upload when the benchmark step actually produced a
+        # directory. Without this guard, a failed-early run (e.g.
+        # readyz never returned ok) leaves steps.bench.outputs.dir
+        # empty → the action falls through to scanning `/`, which
+        # then trips EACCES on /boot/efi. The if: condition gates
+        # on the locator step's output AND skips on PR-trigger so
+        # the action doesn't choke during iteration.
+        if: success() && steps.bench.outputs.dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          # sanitize ref names for filesystem-safe artifact names:
+          # PR-trigger refs look like "152/merge" which the artifact
+          # API rejects.
+          name: k6-${{ github.run_id }}
+          path: |
+            ${{ steps.bench.outputs.dir }}/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Compose logs on failure
+        # If anything failed, dump the stack logs for post-mortem.
+        # Truncated to last 200 lines per service to keep the artifact
+        # under reasonable size.
+        if: failure()
+        run: |
+          for svc in app postgres redis kafka; do
+            echo "=== ${svc} ==="
+            docker compose logs --tail=200 "${svc}" || true
+          done
+
+      - name: Tear down Docker stack
+        # Always clean up so the runner doesn't accumulate state
+        # across re-runs. -v removes named volumes (postgres data,
+        # kafka logs) so a re-run starts clean.
+        if: always()
+        run: docker compose down -v
