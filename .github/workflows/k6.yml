@@ -166,24 +166,62 @@ jobs:
           echo "--- effective overrides ---"
           grep -E '^(APP_ENV|PAYMENT_PROVIDER|PAYMENT_WEBHOOK_SECRET|STRIPE_API_KEY|STRIPE_WEBHOOK_SECRET)=' .env
 
-      - name: Boot Docker stack
-        # The same `docker compose up -d` developers use locally. The
-        # full stack (app + nginx + postgres + redis + kafka +
-        # prometheus + grafana + jaeger) is what the benchmark
-        # convention measures against; using a subset would change
-        # the cost profile of every booking.
+      - name: Boot Docker stack (dependencies first)
+        # Two-phase boot:
+        #   1. dependencies (postgres + redis + kafka) — app NOT yet
+        #      because the app's fx graph runs an inventoryRehydrate
+        #      OnStart hook that does SELECT FROM events. Without
+        #      migrations applied, that fails with `pq: relation
+        #      "events" does not exist` and the app crashloops.
+        #   2. app (next step, after migrations).
         run: |
           set -euo pipefail
-          docker compose up -d --build app postgres redis kafka
+          docker compose up -d postgres redis kafka
+
+      - name: Wait for postgres ready
+        # Bounded wait for postgres to accept connections before
+        # we shell out to migrate. pg_isready inside the container
+        # avoids needing a postgres-client install on the runner.
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if docker exec booking_db pg_isready -U booking -d booking 2>/dev/null; then
+              echo "✓ postgres ready after ${i}×2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "✗ postgres did not become ready within 60s"
+          docker compose logs --tail=40 postgres
+          exit 1
+
+      - name: Apply migrations
+        # Migrations MUST land before app boot — the app's
+        # inventoryRehydrate OnStart hook does `SELECT FROM events`
+        # which fails if migrations haven't been applied yet (the
+        # exact failure mode iter 3 hit). DB URL goes via the
+        # 5433 host port mapping in docker-compose.yml.
+        env:
+          MIGRATE_DB_URL: 'postgres://booking:change_me_postgres@localhost:5433/booking?sslmode=disable'
+        run: |
+          set -euo pipefail
+          make migrate-up
+
+      - name: Boot app
+        # Now that the schema exists, start the app. --build so the
+        # local source on the runner gets compiled (rather than
+        # pulling a stale image from somewhere).
+        run: |
+          set -euo pipefail
+          docker compose up -d --build app
 
       - name: Wait for app readyz
-        # /readyz returns 200 only when PG + Redis + Kafka all answer
-        # within 1s — same gate the k8s probe uses. Bounded 2min wait
-        # so a stuck dep surfaces here rather than as a confusing k6
-        # failure later. The app container does NOT expose 8080 to
-        # the host (nginx is the public entrypoint, port 80); reach
-        # /readyz via `docker compose exec` inside the app container
-        # — wget is part of the alpine base image.
+        # /readyz returns 200 only when PG + Redis + Kafka all
+        # answer within 1s — same gate the k8s probe uses. App
+        # container does NOT expose 8080 to the host (nginx is the
+        # public entrypoint, port 80); reach /readyz via
+        # `docker compose exec` inside the app container — wget is
+        # part of the alpine base image.
         run: |
           set -euo pipefail
           for i in $(seq 1 60); do
@@ -196,17 +234,6 @@ jobs:
           echo "✗ app did not become ready within 120s"
           docker compose logs --tail=80 app postgres redis kafka
           exit 1
-
-      - name: Apply migrations
-        # benchmark_compare.sh assumes the schema is up-to-date.
-        # The compose app entrypoint does NOT auto-migrate today —
-        # only `make migrate-up` does. Force-pass the DB URL via
-        # MIGRATE_DB_URL so the Makefile target picks it up.
-        env:
-          MIGRATE_DB_URL: 'postgres://booking:change_me_postgres@localhost:5433/booking?sslmode=disable'
-        run: |
-          set -euo pipefail
-          make migrate-up
 
       - name: Seed flash-sale event
         # The 500k-ticket flash-sale event the benchmark convention
