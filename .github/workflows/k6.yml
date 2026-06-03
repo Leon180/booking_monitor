@@ -130,28 +130,37 @@ jobs:
 
       - name: Prepare .env for compose
         # docker-compose.yml uses ${VAR:?} directives that fail
-        # compose-up without an .env file. CI doesn't carry the
-        # developer's local .env; build one from .env.example then
-        # override the fields that trip production-mode guards:
+        # compose-up without an .env file. Build one from
+        # .env.example then override several fields that interact
+        # to either trip startup validators OR fail compose-up:
         #
         #   * APP_ENV: .env.example pins production (so devs notice
-        #     they need to override). config.Validate() in prod-mode
-        #     requires Stripe live keys + ADMIN_STREAM_JWT_SECRET;
-        #     CI flips to "development" — Validate() then accepts
-        #     the mock-gateway dev-loop combo.
-        #   * PAYMENT_WEBHOOK_SECRET: .env.example sets a non-empty
-        #     placeholder ("whsec_local_dev_secret_..."). With
-        #     PAYMENT_PROVIDER=mock, the validator trips on
-        #     "mock + Stripe credentials present = likely
-        #     misconfiguration". Clear it so the mock combo passes.
+        #     they need to override). production-mode validate
+        #     requires real Stripe live keys + ADMIN_STREAM_JWT_SECRET.
+        #     Flip to development so those don't fire.
+        #
+        #   * PAYMENT_PROVIDER + STRIPE_API_KEY: the obvious
+        #     "PAYMENT_PROVIDER=mock + empty STRIPE_*" combo doesn't
+        #     work because config.LoadConfig has a legacy fallback
+        #     that copies non-empty PAYMENT_WEBHOOK_SECRET into
+        #     STRIPE_WEBHOOK_SECRET — which then trips the always-on
+        #     "mock + Stripe credentials present" guard. Clearing
+        #     PAYMENT_WEBHOOK_SECRET to escape the fallback then
+        #     trips compose's PAYMENT_WEBHOOK_SECRET:? requirement.
+        #
+        #     Resolution: switch to PAYMENT_PROVIDER=stripe + a
+        #     fake sk_test_* key. The validator passes (stripe + key
+        #     present), and the k6_comparison.js script never calls
+        #     /pay (only /events + /book), so the Stripe SDK is
+        #     never actually exercised. The fake key never touches
+        #     real Stripe — pure validation-satisfier.
         run: |
           set -euo pipefail
           cp .env.example .env
-          # Use a portable sed-in-place since both BSD + GNU sed
-          # accept `sed -i.bak ... && rm *.bak` form.
           sed -i.bak \
             -e 's|^APP_ENV=.*|APP_ENV=development|' \
-            -e 's|^PAYMENT_WEBHOOK_SECRET=.*|PAYMENT_WEBHOOK_SECRET=|' \
+            -e 's|^PAYMENT_PROVIDER=.*|PAYMENT_PROVIDER=stripe|' \
+            -e 's|^STRIPE_API_KEY=.*|STRIPE_API_KEY=sk_test_ci_workflow_fake_never_calls_stripe|' \
             .env
           rm -f .env.bak
           echo "--- effective overrides ---"
