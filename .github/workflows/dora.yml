@@ -1,0 +1,96 @@
+# DORA metrics dashboard refresh — PR 7 of the 8-PR CI/CD roadmap.
+#
+# Runs once a day at 06:00 UTC, pulls deployment + release + commit
+# data from the GitHub API, computes the 5 DORA metrics, writes the
+# report to docs/dora.md, and commits if the file changed.
+#
+# Why daily: source data updates roughly once per release (and our
+# release cadence is daily-to-weekly). Hourly would burn API quota
+# without changing the answer. Weekly would let lead-time anomalies
+# go unnoticed too long.
+#
+# Why markdown-in-repo (not GH Pages, not Pushgateway): the git
+# history of docs/dora.md is itself a long-form trend artifact (each
+# day's snapshot is a commit). Zero new infrastructure. Plays cleanly
+# with the verified-against-real-projects pattern from PR 7's
+# fact-check (DeveloperMetrics/lead-time-for-changes,
+# ministryofjustice/dora-the-explora, aws-samples/balance-deployment-
+# speed-and-stability-with-dora-metrics).
+
+name: DORA Refresh
+
+on:
+  schedule:
+    # 06:00 UTC daily — outside US/EU working hours, low GH API
+    # contention. Cron syntax: minute hour day-of-month month day-of-week.
+    - cron: "0 6 * * *"
+  # Manual trigger for ad-hoc refresh (e.g. after a tag landed and
+  # the operator wants today's report immediately).
+  workflow_dispatch:
+
+# Cancel duplicate refreshes — the bot is idempotent (same input ⇒
+# same report). Cancellation is cheap.
+concurrency:
+  group: dora-refresh
+  cancel-in-progress: true
+
+# Default minimal permissions; the job below upgrades only what it
+# needs for the commit-back step.
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: refresh docs/dora.md
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Write the regenerated docs/dora.md back to main. The PR
+      # 7 design uses a single `chore(dora)` commit per day — by
+      # virtue of release-please-config.json hiding `chore` from the
+      # CHANGELOG, these daily commits don't pollute releases.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build booking-cli
+        # Just the binary — no need to vet / test. The CI workflow
+        # has already gated the codebase on every push.
+        run: go build -o bin/booking-cli ./cmd/booking-cli
+
+      - name: Generate DORA report
+        env:
+          # secrets.GITHUB_TOKEN has `metadata: read` + `contents:
+          # read` + `deployments: read` by default, which is exactly
+          # what `booking-cli dora` needs to read deployments,
+          # releases, and commits.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./bin/booking-cli dora \
+            --output docs/dora.md \
+            --days 90 \
+            --repo "${{ github.repository }}"
+
+      - name: Commit if changed
+        # Only commits if `git diff` shows changes. Avoids empty
+        # commits on days with zero new data (rare but possible if
+        # deploy cadence dips below the 90-day window's resolution).
+        run: |
+          if git diff --quiet docs/dora.md; then
+            echo "DORA: no changes to docs/dora.md, skipping commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # `chore(dora):` is the convention. Per release-please-
+          # config.json, type=chore is hidden from the CHANGELOG, so
+          # the daily refresh commits don't pollute the release PR.
+          git add docs/dora.md
+          git commit -m "chore(dora): refresh metrics ($(date -u +%Y-%m-%d))"
+          git push origin HEAD:${{ github.ref_name }}

@@ -1,0 +1,371 @@
+# GitHub Actions — release workflow (PR 3, supply-chain hardened).
+#
+# Triggered on push to main + version tags. Does the full chain:
+#   1. Build the production image (uses PR 2's hardened Dockerfile)
+#   2. Trivy CVE scan — gate before publish
+#   3. Push to GCP Artifact Registry (auth via PR 1's WIF)
+#   4. SLSA L3 build provenance via actions/attest-build-provenance
+#      (GitHub-native; runs in isolated runner satisfying SLSA L3
+#      "signing key isolated from user code" requirement)
+#   5. SBOM (SPDX-JSON) via Syft + cosign attest
+#   6. Cosign verify smoke test before declaring release good
+#
+# The CI workflow (.github/workflows/ci.yml) still runs `docker build`
+# without push on every PR — that's the fast PR-time correctness gate.
+# This release workflow only runs on main/tag and is the publication
+# pipeline.
+#
+# Pre-merge checklist for the operator (one-time):
+#   * Apply PR 1's Terraform to your GCP project:
+#       cd deploy/terraform && make apply
+#   * Set GH Actions repository variables from `terraform output`:
+#       GCP_WORKLOAD_IDENTITY_PROVIDER
+#       GCP_CI_DEPLOY_SA
+#       GCP_ARTIFACT_REGISTRY        (e.g. us-central1-docker.pkg.dev/<proj>/booking)
+#   * Push a test tag (e.g. v0.0.0-rc1) and verify the run is fully green
+#
+# Verification design choice (per Topic 3 fact-check):
+# Switched FROM `slsa-framework/slsa-github-generator` TO
+# `actions/attest-build-provenance@v4.1.0`. Both achieve SLSA L3, but
+# the GitHub-native action lets us own the DAG (insert Trivy gate
+# before push). The reusable workflow approach bundled build+push+
+# provenance into one job, locking out per-step controls.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to release (defaults to current)'
+        required: false
+        default: ''
+
+# Concurrency grouped by COMMIT SHA, not ref. Rationale (per agent A
+# review): GitHub Actions concurrency `cancel-in-progress: false` does
+# NOT serialize all queued runs — the default `queue: single` means
+# only ONE pending run is held; intermediate pushes cancel the held
+# pending. With `group: refs/heads/main`, 5 rapid main pushes would
+# leave only runs 1 and 5 executed (2/3/4 cancelled while pending).
+# Breaks "every commit gets attested" guarantee.
+#
+# Per-SHA grouping makes each commit its own concurrency group —
+# every commit runs to completion independently. The only race is
+# concurrent tag-mutating pushes (`:main`, `:latest`) which the OCI
+# registry handles atomically; later push wins, which is acceptable
+# because the per-digest attestation is what we verify against in PR 5.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+# Default minimal permissions. Per-job overrides expand explicitly
+# where needed (id-token for OIDC, attestations for provenance).
+permissions:
+  contents: read
+
+env:
+  # GCP_ARTIFACT_REGISTRY shape: <region>-docker.pkg.dev/<project>/<repo>
+  # Example: us-central1-docker.pkg.dev/booking-monitor-sandbox/booking
+  REGISTRY: ${{ vars.GCP_ARTIFACT_REGISTRY }}
+  IMAGE_NAME: booking-monitor
+
+jobs:
+  # ===========================================================================
+  # build: produce hardened image + Trivy gate + push to AR
+  # ===========================================================================
+  build:
+    name: build + scan + push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # GCP WIF auth — exchanges GH OIDC for GCP token
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        id: auth
+        # PR 1 provisioned the WIF pool + provider + deploy SA. We
+        # pass the OIDC JWT to GCP STS and receive a short-lived
+        # GCP access token. No long-lived service-account key
+        # anywhere in this workflow.
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_DEPLOY_SA }}
+
+      - name: Configure docker for Artifact Registry
+        # `gcloud auth configure-docker` writes ~/.docker/config.json with
+        # a credential helper entry for the AR host. Subsequent `docker
+        # push` calls use the credentials minted by the auth step above.
+        run: |
+          gcloud auth configure-docker \
+            "$(echo '${{ env.REGISTRY }}' | cut -d'/' -f1)" \
+            --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags + build identity
+        id: meta
+        # Compute ONCE upfront so build + push steps see the same
+        # commit_sha/build_date/version. Otherwise BUILD_DATE drifts
+        # between local build and push, breaking reproducibility.
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          # Tag list — always include sha-prefixed for traceability.
+          # Tags get :v* + :latest; main pushes get :main + :sha-<short>.
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          # Export short_sha as a step output so subsequent steps (Trivy
+          # in particular) reference the SAME tag the build step produced.
+          # Earlier version used ${{ github.sha }} (40-char) for Trivy's
+          # image-ref but :sha-<short> (7-char) for the build tag — mismatch
+          # silently broke the gate. Caught in 3-agent review.
+          {
+            echo "image=${IMAGE}"
+            echo "short_sha=${SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:sha-${SHORT_SHA}"
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              echo "${IMAGE}:${{ github.ref_name }}"
+              echo "${IMAGE}:latest"
+            else
+              echo "${IMAGE}:main"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          # Build identity for OCI labels + ldflags injection.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="main-${SHORT_SHA}"
+          fi
+          {
+            echo "commit_sha=${{ github.sha }}"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build image (no push — Trivy gate next)
+        id: build
+        # Build locally first so Trivy can scan the actual layers
+        # before we publish. `load: true` puts the image in the
+        # runner's docker daemon for scanning.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            COMMIT_SHA=${{ steps.meta.outputs.commit_sha }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+
+      - name: Trivy CVE scan — gate publish on HIGH/CRITICAL
+        # `--exit-code 1` fails CI if any HIGH or CRITICAL CVE is found.
+        # `--ignore-unfixed` excludes vulns without a known fix (so we
+        # don't block on noise that we can't action against). Adjust
+        # threshold by env var if needed.
+        #
+        # image-ref MUST use the same tag the build step produced
+        # (sha-<7-char>), NOT the full 40-char sha. Otherwise Trivy
+        # falls through to a remote pull of a non-existent tag and
+        # the gate silently no-ops.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          # vuln-type defaults to os,library — covers both Alpine apk and Go deps.
+
+      - name: Push to Artifact Registry (Trivy passed)
+        id: push
+        # Re-uses the BuildKit cache from the previous build step, so
+        # this is fast (~few seconds). Sets push=true and outputs the
+        # registry-side digest, which is what we attest against in the
+        # next job.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            COMMIT_SHA=${{ steps.meta.outputs.commit_sha }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=release
+          provenance: false
+          # provenance: false here — the build-push-action's built-in
+          # BuildKit provenance is a different, lower-SLSA-level thing
+          # than what `actions/attest-build-provenance` emits. We
+          # intentionally suppress to avoid confusion in `cosign tree`.
+
+  # ===========================================================================
+  # attest: SLSA L3 build provenance + SBOM, cryptographically signed
+  # ===========================================================================
+  attest:
+    name: attest (SLSA L3 + SBOM)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC for Sigstore (cosign) + GCP WIF
+      attestations: write # Required by actions/attest-build-provenance
+      # NOTE: `packages: write` removed — it's only required when the
+      # subject image is in GHCR. Our subject lives in GCP Artifact
+      # Registry (auth via WIF in the previous step), so attestation
+      # write happens through GCP creds, not GH packages. Cleared by
+      # PR 3 review.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (WIF)
+        # Need GCP auth again — attestations push to AR alongside image.
+        # `id: auth` exposes outputs.access_token for the docker login
+        # step below (attest-build-provenance uses oras, not BuildKit).
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_DEPLOY_SA }}
+          token_format: access_token
+
+      - name: Login to Artifact Registry (for attest oras client)
+        # `actions/attest-build-provenance@v4.1.0` with `push-to-registry:
+        # true` uses `oras` (OCI Registry As Storage client) under the
+        # hood. `oras` does NOT honor docker credential helpers
+        # (the `gcloud auth configure-docker` mechanism that the BUILD
+        # job uses successfully via BuildKit). oras requires an explicit
+        # `auths` entry in `~/.docker/config.json`, which is exactly
+        # what `docker login` writes.
+        #
+        # First end-to-end run after go-live failed at the attest step
+        # with "No credentials found for registry us-central1-
+        # docker.pkg.dev" — diagnosed by Agent 2 in PR #138's review
+        # (predicted as MAYBE-M1). Replaced gcloud-configure-docker
+        # with docker login here; the build job keeps the gcloud path
+        # because docker/build-push-action@v6 + BuildKit DO honor
+        # credHelpers (so build push works as-is).
+        run: |
+          AR_HOST="$(echo '${{ env.REGISTRY }}' | cut -d'/' -f1)"
+          echo "${{ steps.auth.outputs.access_token }}" \
+            | docker login "${AR_HOST}" \
+              -u oauth2accesstoken \
+              --password-stdin
+
+      # -----------------------------------------------------------------------
+      # SLSA L3 BUILD PROVENANCE
+      # actions/attest-build-provenance runs in an isolated GitHub-managed
+      # runner that satisfies SLSA L3 "signing key isolated from user code"
+      # requirement. The user workflow (this file) never sees the signing
+      # key — GitHub's infra signs the provenance via Sigstore Fulcio +
+      # Rekor and pushes the in-toto attestation to the registry next to
+      # the image. Verification later: `cosign verify-attestation
+      # --type slsaprovenance1 ...`
+      # -----------------------------------------------------------------------
+      - name: Generate + attach SLSA L3 build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-name: ${{ needs.build.outputs.image }}
+          subject-digest: ${{ needs.build.outputs.digest }}
+          push-to-registry: true
+
+      # -----------------------------------------------------------------------
+      # SBOM (Software Bill of Materials) via Syft
+      # SPDX-JSON format — Linux Foundation standard, ISO/IEC 5962:2021.
+      # CycloneDX is the alternative; format choice is largely consumer-
+      # driven and most tools accept both in 2026. We use SPDX for OCI
+      # registry + cosign integration ergonomics.
+      # -----------------------------------------------------------------------
+      - name: Install Syft
+        # Pin BOTH the install script (via release tag) AND the installed
+        # binary version (positional argument). Earlier draft used `main`
+        # branch script + latest-implied binary; reviewer flagged this as
+        # an unsigned supply-chain link in an otherwise signed pipeline.
+        env:
+          SYFT_VERSION: v1.44.0
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
+            | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
+          syft --version
+
+      - uses: sigstore/cosign-installer@v4.1.2
+
+      - name: Generate SBOM (SPDX-JSON)
+        run: |
+          syft "${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}" \
+            -o spdx-json=sbom.spdx.json
+          # Sanity-print: number of packages cataloged
+          echo "Packages in SBOM: $(jq '.packages | length' sbom.spdx.json)"
+
+      - name: Attest SBOM via cosign keyless
+        # Uses the GH Actions OIDC token automatically. The SBOM becomes
+        # an in-toto attestation pushed to the registry next to the image.
+        # `--type spdxjson` is the predicate-type identifier per Sigstore
+        # cosign enum (other types: slsaprovenance1, cyclonedx, openvex).
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"
+
+      # -----------------------------------------------------------------------
+      # Smoke test: verify both attestations are discoverable and valid.
+      # Catches misconfiguration before the release is declared good.
+      # -----------------------------------------------------------------------
+      - name: Verify SLSA + SBOM attestations (smoke test)
+        # certificate-identity-regexp MUST anchor on `release.yml@refs/...`
+        # — not just `<repo>/`. An unanchored repo-prefix would also
+        # accept any other workflow in the repo (e.g. a future `evil.yml`
+        # on a feature branch with id-token: write). Anchor explicitly
+        # to release.yml + main branch OR version tag. SAME regex shape
+        # as Makefile `VERIFY_IDENTITY_REGEX` — single source of trust.
+        #
+        # `--insecure-ignore-tlog` is intentional for THIS smoke test:
+        # Rekor inclusion proof propagation can take seconds-to-minutes,
+        # and we just published the attestation seconds ago. Falling
+        # back to Fulcio cert + signature validation is acceptable
+        # because we're verifying a signature we JUST created. The
+        # operator's `make verify-image` runs later (DOES require
+        # Rekor inclusion) — that's the real trust gate.
+        run: |
+          IMAGE="${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"
+          IDENTITY_REGEX="^https://github\.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$"
+
+          echo "=== Verify SLSA build provenance ==="
+          cosign verify-attestation \
+            --type slsaprovenance1 \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --insecure-ignore-tlog \
+            "$IMAGE" > /dev/null
+          echo "✓ SLSA provenance attestation verified"
+
+          echo "=== Verify SBOM attestation ==="
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-identity-regexp "$IDENTITY_REGEX" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --insecure-ignore-tlog \
+            "$IMAGE" > /dev/null
+          echo "✓ SBOM attestation verified"
+
+          echo ""
+          echo "=== Discover all attestations attached to image ==="
+          cosign tree "$IMAGE"

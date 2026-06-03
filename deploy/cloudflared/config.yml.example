@@ -1,0 +1,46 @@
+# Cloudflare Tunnel config (locally-managed).
+#
+# 2026-05 fact-check note: Cloudflare's official 2026 recommendation is
+# REMOTE-managed tunnels (config lives in CF dashboard, cloudflared just
+# needs a --token). We deliberately choose LOCALLY-managed for IaC/GitOps
+# reasons: config-in-repo means review is on PR, drift is detectable,
+# tunnel config is reproducible. The trade-off is one more file to keep
+# in sync with the live CF setup. See docs/runbooks/cloudflare_tunnel.md
+# for the rationale + the operator setup steps that produce the UUID +
+# credentials.
+#
+# Copy this file to deploy/cloudflared/config.yml and substitute:
+#   <TUNNEL_UUID>                  — output of `cloudflared tunnel create`
+#   <YOUR_HOSTNAME>                — the public hostname you registered
+#                                    (e.g. booking.your-domain.com)
+# config.yml itself is in .gitignore — only this .example template is committed.
+
+tunnel: <TUNNEL_UUID>
+credentials-file: /etc/cloudflared/<TUNNEL_UUID>.json
+
+# Default config — adjust originRequest values if needed.
+originRequest:
+  connectTimeout: 10s
+  noTLSVerify: true              # origin is localhost:8080 over plaintext
+  httpHostHeader: <YOUR_HOSTNAME>
+
+# Ingress rules. First match wins. The catch-all 404 at the end is
+# REQUIRED by Cloudflare Tunnel — without it `cloudflared tunnel run`
+# refuses to start.
+ingress:
+  # Main app
+  - hostname: <YOUR_HOSTNAME>
+    service: http://localhost:8080
+
+  # Admin war-room dashboard (PR #121-#124)
+  # Same backend, different host header lets you use a separate
+  # public hostname for the operator dashboard if desired. Comment
+  # out if not needed; remember to also delete the corresponding
+  # DNS route in CF.
+  # - hostname: admin.<YOUR_HOSTNAME>
+  #   service: http://localhost:8080
+  #   originRequest:
+  #     httpHostHeader: admin.<YOUR_HOSTNAME>
+
+  # MANDATORY catch-all — anything not matched above returns 404.
+  - service: http_status:404

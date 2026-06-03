@@ -170,6 +170,23 @@ The admin SSE event pipeline exposes its own infrastructure metrics (Layer B per
 | `admin_event_bus_xadd_duration_seconds` | histogram | — | Per-XADD latency from the bus drainer. p99 approaching the 2 s `XAddTimeout` indicates Redis-side pressure. |
 | `inventory_low_alerts_total` | counter | — | Low-stock threshold crossings (Layer A gap filler) |
 
+### SLO recording rules (PR 9)
+
+Hierarchical pre-computed SLIs that drive the [SLO burn-rate alerts](#5-alerts) below. See [docs/slo.md](slo.md) for the SLO definitions + error-budget math. File: [deploy/prometheus/recording_rules.yml](../deploy/prometheus/recording_rules.yml). Three tiers (Tier 1 → 2 → 3):
+
+| Recording rule | Type | Purpose |
+|---|---|---|
+| `booking:requests:rate5m` / `booking:errors:rate5m` | tier 1, 30s eval | Cheap 5m window; drives short-window of alerts |
+| `booking:book_latency:fast_rate5m` / `..._total_rate5m` | tier 1, 30s eval | Same as above for `POST /api/v1/book` < 500ms count vs total |
+| `booking:availability:ratio_rate{5m,30m,1h,6h,3d}` | tier 2, 1m eval | Aggregated availability success ratios per alert-tier window |
+| `booking:book_latency:fast_ratio_rate{5m,30m,1h,6h,3d}` | tier 2, 1m eval | Same for booking latency SLO |
+| `booking:availability:ratio_rate30d` | tier 3, 5m eval | 30-day SLI for dashboard |
+| `booking:availability:slo_budget_remaining` | tier 3, 5m eval | Error budget remaining (0..1), negative = SLO broken |
+| `booking:book_latency:fast_ratio_rate30d` | tier 3, 5m eval | 30-day SLI for booking latency |
+| `booking:book_latency:slo_budget_remaining` | tier 3, 5m eval | Booking-latency error budget remaining |
+
+Why hierarchical: `rate(...[30d])` evaluated every 30s scans 30 days of raw samples per tick (expensive at scale). Pre-aggregating to 5m windows then averaging over the SLO window is the [Prometheus rules best practice](https://prometheus.io/docs/practices/rules/).
+
 ---
 
 ## 3. Prometheus UI workflow
@@ -350,6 +367,12 @@ The current alert catalog:
 | `AdminSSEReconnectsBursting` | warning | `rate(admin_sse_reconnects_total[1m]) > 5 for 30s` — Reconnect rate elevated. Expected briefly after deploy (clients reconnect with jittered `retry:` hint per § Q15). Sustained beyond shutdown window suggests network instability, LB idle-timeout misconfiguration, or pod restart loop. |
 | `AdminSSEEventsTruncated` | warning | `increase(admin_sse_events_truncated_total[10m]) > 0` — At least one client reconnected with a Last-Event-ID older than stream MAXLEN trim. Server emitted synthetic `stream_truncated` event and resumed from live. Expected during high-volume flash sales; outside flash periods suggests clients disconnected long enough to fall past the ~100k entry retention window. |
 | `InventoryLowAlerts` | warning | `rate(inventory_low_alerts_total[5m]) > 0 for 1m` — One or more ticket_types crossed below the low-stock threshold (default 10%). Edge-triggered — fires only on transition, not while inventory remains low. Drill via the SSE event log or query `event_ticket_types` for specific ticket_type_ids. |
+| `BookingAvailabilitySLOBurnRateFast` (PR 9) | page | 1h + 5m burn rate > 14.4× over SLO error rate (= consume 2% of 30-day error budget per 1h). Two-window guard filters out transient bursts. At this rate the entire 30-day budget exhausts in ~2.08 days. Source: [SRE Workbook ch. 5 Table 5-8](https://sre.google/workbook/alerting-on-slos/). |
+| `BookingAvailabilitySLOBurnRateMedium` (PR 9) | page | 6h + 30m burn rate > 6× (= consume 5% of 30-day budget per 6h). Catches sustained but not flash-fast degradation. At this rate budget exhausts in ~5 days. |
+| `BookingAvailabilitySLOBurnRateSlow` (PR 9) | ticket | 3d + 6h burn rate > 1× (= consume 10% of 30-day budget per 3 days). Creeping degradation — not page-worthy but should be investigated next business day. |
+| `BookingLatencySLOBurnRateFast` (PR 9) | page | Same shape as availability fast burn but on the booking-latency SLI: < 85.6% of `POST /api/v1/book` completing under 500ms over both 1h and 5m windows. SLO target = 99% under 500ms over 30d. |
+| `BookingLatencySLOBurnRateMedium` (PR 9) | page | 6h + 30m burn at 6× on booking-latency SLI. Likely upstream pressure (Redis/PG saturation, GC pauses, deploy rollback). |
+| `BookingLatencySLOBurnRateSlow` (PR 9) | ticket | 3d + 6h burn at 1× — slow latency creep (Postgres bloat, accumulating Redis keys, possible goroutine leak). Investigate next business day. |
 
 > **Worker-process metric scrape — closed by O3 follow-up.** The `recon_*`, `saga_watchdog_*`, `expiry_*`, and saga `db_*` / `redis_*` failure counters are registered inside the `booking-cli {recon,saga-watchdog,expiry-sweeper}` worker processes' default Prometheus registries. Each binary starts a metrics-only HTTP listener on `:9091` (configurable via `WORKER_METRICS_ADDR`; empty disables — useful for `--once` CronJob hosting), and `prometheus.yml` has matching scrape jobs (`recon`, `saga-watchdog`, `expiry-sweeper`). Verify with `up{job=~"recon|saga-watchdog|expiry-sweeper"} == 1` in Prometheus → Graph; the listener also exposes `/healthz` so the compose `HEALTHCHECK` can use the same port.
 >

@@ -1,0 +1,100 @@
+# Hierarchical SLI recording rules for booking_monitor.
+#
+# Per Prometheus rules best practices (and Google SRE Workbook ch. 5),
+# don't compute `rate(...[30d])` on every alert tick — it scans 30 days
+# of raw samples each evaluation. Instead, use hierarchical aggregation:
+#   Tier 1: cheap 5-minute windows (eval every 30s)
+#   Tier 2: aggregate Tier 1 to 30m / 6h / 3d windows (eval every 1m)
+#   Tier 3: project Tier 2 to the SLO surface — error budget remaining
+#           (eval every 5m, used by Grafana dashboards)
+#
+# Recording rule naming convention per Prometheus docs:
+#   <level>:<metric>:<aggregations>
+# Where level = `booking` (single-service scope), metric = the SLI,
+# aggregations describe the window/function applied.
+
+groups:
+  # ===========================================================================
+  # Tier 1 — 5-minute windows. Drives the SHORT window of each alert.
+  # ===========================================================================
+  - name: booking_sli_tier1_5m
+    interval: 30s
+    rules:
+      # Availability: 1 - (5xx / total) over rolling 5m
+      - record: booking:requests:rate5m
+        expr: sum(rate(http_requests_total{job="booking-monitor"}[5m]))
+      - record: booking:errors:rate5m
+        expr: sum(rate(http_requests_total{job="booking-monitor", status=~"5.."}[5m]))
+      # Booking latency: count of /api/v1/book requests taking < 500ms
+      # vs total. Requires the app to expose http_request_duration_seconds
+      # as a histogram with le=0.5 bucket; verified in
+      # internal/infrastructure/observability/metrics.go.
+      - record: booking:book_latency:fast_rate5m
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{
+            job="booking-monitor",
+            path="/api/v1/book",
+            le="0.5"
+          }[5m]))
+      - record: booking:book_latency:total_rate5m
+        expr: |
+          sum(rate(http_request_duration_seconds_count{
+            job="booking-monitor",
+            path="/api/v1/book"
+          }[5m]))
+
+  # ===========================================================================
+  # Tier 2 — Aggregations of Tier 1 over longer windows. Drives the LONG
+  # window of each alert tier.
+  # ===========================================================================
+  - name: booking_sli_tier2_aggregations
+    interval: 1m
+    rules:
+      # Availability ratios per window
+      - record: booking:availability:ratio_rate5m
+        expr: 1 - booking:errors:rate5m / clamp_min(booking:requests:rate5m, 1e-9)
+      - record: booking:availability:ratio_rate1h
+        expr: avg_over_time(booking:availability:ratio_rate5m[1h])
+      - record: booking:availability:ratio_rate6h
+        expr: avg_over_time(booking:availability:ratio_rate5m[6h])
+      - record: booking:availability:ratio_rate30m
+        expr: avg_over_time(booking:availability:ratio_rate5m[30m])
+      - record: booking:availability:ratio_rate3d
+        expr: avg_over_time(booking:availability:ratio_rate5m[3d])
+      # Booking latency ratios per window
+      - record: booking:book_latency:fast_ratio_rate5m
+        expr: |
+          booking:book_latency:fast_rate5m /
+          clamp_min(booking:book_latency:total_rate5m, 1e-9)
+      - record: booking:book_latency:fast_ratio_rate1h
+        expr: avg_over_time(booking:book_latency:fast_ratio_rate5m[1h])
+      - record: booking:book_latency:fast_ratio_rate6h
+        expr: avg_over_time(booking:book_latency:fast_ratio_rate5m[6h])
+      - record: booking:book_latency:fast_ratio_rate30m
+        expr: avg_over_time(booking:book_latency:fast_ratio_rate5m[30m])
+      - record: booking:book_latency:fast_ratio_rate3d
+        expr: avg_over_time(booking:book_latency:fast_ratio_rate5m[3d])
+
+  # ===========================================================================
+  # Tier 3 — Error budget remaining for Grafana SLO dashboard. NOT used
+  # by alerts (those use burn rate). This is the "how much breathing room
+  # do we have left" view.
+  # ===========================================================================
+  - name: booking_sli_tier3_error_budget
+    interval: 5m
+    rules:
+      # availability_30d_ratio is the avg-of-avg of all the 5m windows over
+      # the 30 days. Approximation of `success / total` over the full window;
+      # exact at any tick is `1 - errors:rate30d / requests:rate30d` but
+      # that scan-30d-samples cost is what we're avoiding.
+      - record: booking:availability:ratio_rate30d
+        expr: avg_over_time(booking:availability:ratio_rate5m[30d])
+      # Budget remaining as a 0..1 fraction. Positive = budget left,
+      # negative = SLO broken. Grafana renders this as a horizontal bar.
+      - record: booking:availability:slo_budget_remaining
+        expr: (booking:availability:ratio_rate30d - 0.995) / (1 - 0.995)
+
+      - record: booking:book_latency:fast_ratio_rate30d
+        expr: avg_over_time(booking:book_latency:fast_ratio_rate5m[30d])
+      - record: booking:book_latency:slo_budget_remaining
+        expr: (booking:book_latency:fast_ratio_rate30d - 0.99) / (1 - 0.99)

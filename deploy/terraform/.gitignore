@@ -1,0 +1,24 @@
+# Local terraform state and provider cache
+.terraform/
+
+# State files — NEVER commit
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+
+# Variable files contain project IDs + billing IDs — treat as secret
+*.tfvars
+!terraform.tfvars.example
+
+# Crash log (terraform writes one of these on panic)
+crash.log
+crash.*.log
+
+# Override files (used for local-only experiments)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Lock file IS committed — it pins provider versions for reproducible
+# builds. Do NOT add .terraform.lock.hcl here.
