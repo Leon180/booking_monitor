@@ -215,47 +215,54 @@ jobs:
           set -euo pipefail
           docker compose up -d --build app
 
-      - name: Wait for app healthy (via docker healthcheck)
-        # Iter 8 finding: the app image is distroless (no shell, no
-        # busybox) per Dockerfile design. `docker compose exec -T app
-        # wget ...` fails because there's no /bin/sh to interpret
-        # the command, even though wget itself IS in the image (it's
-        # what the compose healthcheck uses directly via CMD form).
+      - name: Wait for app live (sidecar curl probe)
+        # Iter 9 finding: compose's docker-level healthcheck flipped
+        # to "unhealthy" at 56s because:
+        #   * start_period=15s, retries=5, interval=10s — so the
+        #     "unhealthy" verdict fires at 15 + 50 = 65s if every
+        #     check fails during that window.
+        #   * App's actual cold-start to HTTP-listening is ~200s on
+        #     cloud runners (per iter 7) — much longer than the
+        #     5×retry budget.
         #
-        # Pivot to waiting on docker's healthcheck status, which
-        # docker manages independently via the compose-defined
-        # healthcheck — that runs `wget --spider /livez` directly
-        # without invoking a shell. Status transitions:
-        #   starting → (healthcheck passes 1×) → healthy
-        #   starting → (5 retries fail) → unhealthy
-        # We wait for "healthy" and surface "unhealthy" as failure.
+        # Can't easily change the project's healthcheck config (it's
+        # tuned for production where boot is fast). So bypass docker's
+        # healthcheck verdict entirely: spin up a sidecar curl container
+        # attached to the compose network and probe app:8080/livez
+        # directly. This works regardless of:
+        #   * distroless app image (no shell, no wget on host side)
+        #   * docker's "unhealthy" status (we don't care about its
+        #     verdict, we care if the endpoint responds)
+        #   * port 8080 not being mapped to host (we're in-network)
         #
-        # 300s budget covers cold-start variance (iters 4-6 showed
-        # 128s-338s to [Fx] RUNNING) plus the healthcheck's 15s
-        # start_period + ~10s of retry budget.
+        # 300s budget covers cold-start + variance with comfortable
+        # headroom. Each iteration is `docker run --rm curl` which
+        # is ~200ms — so 300 iters = ~60s of wall-clock overhead
+        # beyond the actual sleep.
         run: |
           set -euo pipefail
           start=$SECONDS
           for i in $(seq 1 300); do
-            status=$(docker inspect --format='{{.State.Health.Status}}' booking_app 2>/dev/null || echo "missing")
-            case "$status" in
-              healthy)
-                echo "✓ app healthy after $((SECONDS - start))s"
-                exit 0
-                ;;
-              unhealthy)
-                echo "✗ app reported unhealthy after $((SECONDS - start))s"
-                docker compose logs --tail=120 app postgres redis kafka
-                exit 1
-                ;;
-            esac
+            if docker run --rm --network booking_monitor_default \
+                  curlimages/curl:latest \
+                  -sfm 2 "http://app:8080/livez" 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "✓ app live after $((SECONDS - start))s (${i} polls)"
+              echo ""
+              echo "--- /readyz status snapshot (informational, not gating) ---"
+              docker run --rm --network booking_monitor_default \
+                curlimages/curl:latest \
+                -sm 3 "http://app:8080/readyz" 2>/dev/null || true
+              echo ""
+              exit 0
+            fi
             if [ $((i % 30)) -eq 0 ]; then
-              echo "  still waiting (status=$status) at $((SECONDS - start))s..."
+              status=$(docker inspect --format='{{.State.Health.Status}}' booking_app 2>/dev/null || echo "missing")
+              echo "  still waiting (health=$status) at $((SECONDS - start))s..."
               docker compose logs --tail=3 app 2>/dev/null | tail -3 || true
             fi
             sleep 1
           done
-          echo "✗ app did not become healthy within $((SECONDS - start))s (final status: $status)"
+          echo "✗ app did not become live within $((SECONDS - start))s"
           docker compose logs --tail=120 app postgres redis kafka
           exit 1
 
