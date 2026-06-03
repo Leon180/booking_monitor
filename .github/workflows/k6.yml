@@ -57,6 +57,15 @@ on:
         description: 'k6 test duration (default 60s matches the project benchmark convention)'
         required: false
         default: '60s'
+  # TEMPORARY one-shot trigger — fires only for this PR's branch
+  # while we iterate on CI-specific issues. The `if:` gate at job
+  # level limits the actual run to `ci/k6-workflow`; the trigger
+  # itself only saves us from having to merge an untested workflow
+  # to main + fix-forward. REMOVE this trigger before final merge
+  # so future PRs don't accidentally consume 10min of CI budget
+  # on every push.
+  pull_request:
+    branches: [main]
 
 # One k6 run at a time per branch — avoids two cron + workflow_dispatch
 # runs trampling each other's stack.
@@ -70,6 +79,12 @@ permissions:
 jobs:
   k6:
     name: k6 (VUs=${{ github.event.inputs.vus || '500' }} duration=${{ github.event.inputs.duration || '60s' }})
+    # TEMPORARY gate (paired with the pull_request trigger above): only
+    # this PR's branch fires the k6 job on PR events; other PR events
+    # skip the job entirely. Schedule + workflow_dispatch events run
+    # unconditionally because their event.pull_request is null and the
+    # head_ref check falls through to true.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'ci/k6-workflow'
     runs-on: ubuntu-latest
     # 30min budget: ~5min for docker compose pull + build, ~2min for
     # readyz wait + migrations + seed, 2× ~60s for the k6 A/B runs,
@@ -221,6 +236,143 @@ jobs:
           else
             echo "(no comparison.md generated — check artifacts for raw output)"
           fi
+
+      - name: Reconcile vs latest main baseline
+        # Compare this run's headline metrics against the most recent
+        # SUCCESSFUL k6.yml run on main. Soft-only (warning, never fail)
+        # because the 5-15% cloud-runner noise floor makes a hard gate
+        # too false-prone — but the delta surfacing in the job log +
+        # PR comment + GITHUB_STEP_SUMMARY gives operators the signal
+        # they need without blocking merges.
+        #
+        # Why this is here (paired with the user's "do we reconcile?"
+        # review question on PR #152): the bare workflow without this
+        # step only proves "we ran k6" — not "throughput is in range".
+        # Reconcile is the difference between "drift catch" and "ritual
+        # run".
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Use gh API to find the most recent main run of THIS
+          # workflow that completed successfully. Limit=1 returns
+          # just the newest. If no prior main run exists (first-ever
+          # baseline run), gracefully no-op so the workflow doesn't
+          # fail on its own debut.
+          baseline_run_id=$(gh run list \
+            --workflow=k6.yml \
+            --branch=main \
+            --status=success \
+            --limit=1 \
+            --json databaseId \
+            --jq '.[0].databaseId' 2>/dev/null || echo "")
+          if [ -z "$baseline_run_id" ] || [ "$baseline_run_id" = "null" ]; then
+            echo "::notice::No prior successful main run found. This run will be the baseline; future runs will reconcile against it."
+            exit 0
+          fi
+          echo "Reconciling against main run #${baseline_run_id}"
+
+          # Download the baseline artifact. There may be multiple
+          # artifacts per run if the workflow ever produces them;
+          # the k6.yml currently uploads exactly one named
+          # k6-<ref>-<run_id>. Pattern-match on prefix.
+          mkdir -p /tmp/k6-baseline
+          if ! gh run download "$baseline_run_id" \
+                --dir /tmp/k6-baseline \
+                --pattern 'k6-*'; then
+            echo "::warning::Failed to download baseline artifact from run ${baseline_run_id}; skipping reconcile."
+            exit 0
+          fi
+
+          # Find run_b_raw.txt in the downloaded baseline (run B is
+          # the stable steady-state; run A is the warm-up first pass).
+          baseline_raw=$(find /tmp/k6-baseline -name 'run_b_raw.txt' | head -1)
+          this_raw="${{ steps.bench.outputs.dir }}/run_b_raw.txt"
+          if [ -z "$baseline_raw" ] || [ ! -f "$this_raw" ]; then
+            echo "::warning::Missing run_b_raw.txt (this='$this_raw', baseline='$baseline_raw'); skipping reconcile."
+            exit 0
+          fi
+
+          # Extract headline metrics. Reuses the same grep+awk
+          # patterns benchmark_compare.sh's extract_* functions use,
+          # so this stays in sync with the local-dev comparison.
+          extract_rps() {
+            grep "http_reqs" "$1" \
+              | grep -v "expected_response" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /[0-9]+\.[0-9]+\/s$/) print $i}' \
+              | head -1 \
+              | sed 's|/s||'
+          }
+          extract_p95() {
+            grep "http_req_duration" "$1" \
+              | grep -v "expected_response" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /^p\(95\)=/) {sub(/p\(95\)=/,"",$i); print $i}}' \
+              | head -1
+          }
+          extract_accepted() {
+            # accepted_bookings line emits "rate=<n>/s" in the
+            # custom-metrics section of k6 stdout.
+            grep "accepted_bookings" "$1" \
+              | grep -E "[0-9]+\.?[0-9]*/s" \
+              | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.?[0-9]*\/s$/) print $i}' \
+              | head -1 \
+              | sed 's|/s||'
+          }
+
+          this_rps=$(extract_rps "$this_raw")
+          base_rps=$(extract_rps "$baseline_raw")
+          this_p95=$(extract_p95 "$this_raw")
+          base_p95=$(extract_p95 "$baseline_raw")
+          this_accepted=$(extract_accepted "$this_raw")
+          base_accepted=$(extract_accepted "$baseline_raw")
+
+          # Compute percentage delta via awk. Strips any trailing
+          # unit ("ms", "s") before parsing as float. Returns "n/a"
+          # for any input that doesn't parse cleanly (handles the
+          # extract_* returning an empty string when the metric is
+          # missing from the raw output).
+          pct() {
+            awk -v a="$1" -v b="$2" 'BEGIN {
+              gsub(/ms$|s$/, "", a)
+              gsub(/ms$|s$/, "", b)
+              if (a == "" || b == "" || b+0 == 0) { print "n/a"; exit }
+              d = (a-b)/b*100
+              printf("%+.1f%%", d)
+            }'
+          }
+
+          delta_rps=$(pct "$this_rps" "$base_rps")
+          delta_accepted=$(pct "$this_accepted" "$base_accepted")
+          delta_p95=$(pct "$this_p95" "$base_p95")
+
+          # Compose the summary table via printf — avoids heredoc
+          # indentation issues inside the YAML block scalar.
+          summary=$(printf '%s\n' \
+            "| Metric | This run | Baseline (main) | Δ |" \
+            "|---|---:|---:|---:|" \
+            "| http_reqs/s | ${this_rps:-n/a} | ${base_rps:-n/a} | ${delta_rps:-n/a} |" \
+            "| accepted_bookings/s | ${this_accepted:-n/a} | ${base_accepted:-n/a} | ${delta_accepted:-n/a} |" \
+            "| p(95) latency | ${this_p95:-n/a} | ${base_p95:-n/a} | ${delta_p95:-n/a} |")
+
+          # Soft-warn on > 10% accepted/s regression. Never fails the
+          # job — the 5-15% cloud-runner variance argument applies.
+          # awk-only test; bash's [[ ]] integer comparison doesn't
+          # do float, and `bc` isn't guaranteed on every runner.
+          warn=$(awk -v a="$this_accepted" -v b="$base_accepted" -v run="$baseline_run_id" 'BEGIN {
+            if (a == "" || b == "" || b+0 == 0) exit
+            d = (a-b)/b*100
+            if (d < -10) printf("::warning::accepted_bookings/s regressed %.1f%% vs main baseline (run %s). Investigate before merging.", d, run)
+          }')
+
+          # Emit to job log AND to the GITHUB_STEP_SUMMARY surface
+          # (visible at the top of the run page in the GH UI without
+          # opening the log).
+          {
+            echo "## k6 reconcile vs main baseline (run ${baseline_run_id})"
+            echo ""
+            echo "$summary"
+            if [ -n "$warn" ]; then echo; echo "$warn"; fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifact
         if: always()
