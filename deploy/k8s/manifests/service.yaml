@@ -1,0 +1,22 @@
+# ClusterIP Service in front of the booking_monitor pods. cloudflared
+# (in a separate Deployment) targets this Service via its DNS name
+# (booking-monitor.booking-monitor.svc.cluster.local).
+#
+# NOT LoadBalancer or NodePort — we want NO public IP. All external
+# traffic enters via Cloudflare Tunnel terminating inside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-monitor
+  namespace: booking-monitor
+  labels:
+    app.kubernetes.io/name: booking-monitor
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: booking-monitor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

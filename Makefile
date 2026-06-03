@@ -7,7 +7,8 @@ CMD_PATH := ./cmd/booking-cli
 -include .env
 export
 
-.PHONY: all build clean test lint modernize run-server run-stress deps help
+.PHONY: all build clean test lint modernize run-server run-stress deps help \
+        chaos-kill-app chaos-kill-redis chaos-network-latency chaos-pg-saturation chaos-kill-kafka
 
 all: build
 
@@ -270,6 +271,136 @@ docker-restart: ## Restart the API server in Docker (Rebuild and Up)
 	@docker-compose up -d app
 	@echo "App restarted in Docker."
 
+# ----- PR 2: Production-grade image build + lint -----
+# `docker-build` wraps `docker build` with the canonical build-arg set
+# so OCI labels + ldflags version injection happen consistently between
+# local + CI. The Dockerfile pins base images to SHA digest; do NOT
+# add `--pull` here (would re-resolve tags + break reproducibility).
+DOCKER_IMAGE ?= booking-monitor:dev
+DOCKER_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+DOCKER_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+DOCKER_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+docker-build: ## PR 2 — build the production image with OCI labels + ldflags injection (DOCKER_IMAGE=tag).
+	docker build \
+	  --build-arg COMMIT_SHA=$(DOCKER_COMMIT_SHA) \
+	  --build-arg BUILD_DATE=$(DOCKER_BUILD_DATE) \
+	  --build-arg VERSION=$(DOCKER_VERSION) \
+	  -t $(DOCKER_IMAGE) .
+
+docker-lint: ## PR 2 — run hadolint against the Dockerfile (requires hadolint or Docker).
+	@# Both invocations pick up .hadolint.yaml at the repo root for the
+	@# shared ignore-list (DL3018 etc.). Docker-run version must mount
+	@# cwd so hadolint can see the config file (stdin-redirect via `<`
+	@# would skip the working-directory config lookup).
+	@if command -v hadolint >/dev/null; then \
+	  hadolint Dockerfile; \
+	else \
+	  docker run --rm -v "$(PWD):/work" -w /work hadolint/hadolint hadolint Dockerfile; \
+	fi
+
+docker-inspect: ## PR 2 — inspect OCI labels + ENTRYPOINT of the built image.
+	@docker inspect $(DOCKER_IMAGE) \
+	  --format='{{json .Config.Labels}}' | jq .
+	@docker inspect $(DOCKER_IMAGE) \
+	  --format='ENTRYPOINT: {{.Config.Entrypoint}}{{"\n"}}CMD: {{.Config.Cmd}}{{"\n"}}USER: {{.Config.User}}'
+
+docker-dive: ## PR 2 — interactive layer browser for the built image (requires `dive`).
+	@command -v dive >/dev/null || (echo "Install: brew install dive  OR  go install github.com/wagoodman/dive@latest"; exit 1)
+	dive $(DOCKER_IMAGE)
+
+docker-version-check: ## PR 2 — verify the running binary reports the build-time commit + version.
+	docker run --rm $(DOCKER_IMAGE) --version 2>&1 || true
+	@echo "Note: --version output depends on cmd/booking-cli; if absent, check /metrics for app_info{...} once running."
+
+# ----- PR 3: supply-chain verification (post-release, consumed by PR 5 deploy gate) -----
+
+# NO default for VERIFY_IMAGE — caller must pass it explicitly.
+# Previous draft constructed `<registry>/.../booking-monitor:sha-$(git rev-parse --short HEAD)`
+# from local git HEAD; that mismatches the registry tag if the operator
+# rebased/amended after pushing. Force explicit so failures are loud
+# and obvious. (3-agent PR 3 review caught this.)
+VERIFY_IMAGE ?=
+VERIFY_IDENTITY_REGEX ?= ^https://github\.com/Leon180/booking_monitor/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$
+VERIFY_OIDC_ISSUER ?= https://token.actions.githubusercontent.com
+
+verify-image: ## PR 3 — verify SLSA L3 provenance + SBOM attestation on an image (usage: make verify-image VERIFY_IMAGE=<ref>).
+	@test -n "$(VERIFY_IMAGE)" || (echo "ERROR: VERIFY_IMAGE not set. Usage: make verify-image VERIFY_IMAGE=<registry>/booking-monitor:<tag-or-digest>"; exit 1)
+	@command -v cosign >/dev/null || (echo "Install cosign: brew install cosign  OR  go install github.com/sigstore/cosign/v2/cmd/cosign@latest"; exit 1)
+	@echo "Verifying SLSA L3 build provenance..."
+	cosign verify-attestation \
+	  --type slsaprovenance1 \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  "$(VERIFY_IMAGE)" > /dev/null
+	@echo "✓ SLSA provenance verified"
+	@echo ""
+	@echo "Verifying SBOM attestation..."
+	cosign verify-attestation \
+	  --type spdxjson \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  "$(VERIFY_IMAGE)" > /dev/null
+	@echo "✓ SBOM attestation verified"
+	@echo ""
+	@echo "All attestations attached to image:"
+	@cosign tree "$(VERIFY_IMAGE)"
+
+verify-image-sbom: ## PR 3 — extract + print the SBOM predicate as readable JSON.
+	@test -n "$(VERIFY_IMAGE)" || (echo "ERROR: VERIFY_IMAGE not set. Usage: make verify-image-sbom VERIFY_IMAGE=<ref>"; exit 1)
+	@command -v cosign >/dev/null || (echo "Install cosign first"; exit 1)
+	@command -v jq >/dev/null || (echo "Install jq"; exit 1)
+	cosign verify-attestation \
+	  --type spdxjson \
+	  --certificate-identity-regexp "$(VERIFY_IDENTITY_REGEX)" \
+	  --certificate-oidc-issuer "$(VERIFY_OIDC_ISSUER)" \
+	  --output text \
+	  "$(VERIFY_IMAGE)" | jq -r '.payload' | base64 -d | jq '.predicate'
+
+# Declare PR 4 targets phony — `deploy` collides with the `deploy/`
+# directory name and Make would otherwise short-circuit as "already
+# up to date". `.PHONY` forces the recipe to run every invocation.
+.PHONY: deploy secrets-sync vm-ssh vm-logs vm-status
+
+# ----- PR 4: operator-driven deploy + secrets sync to GCP VM -----
+#
+# All targets here SSH to the VM via gcloud IAP tunnel — no port 22 ever
+# opens publicly. The scripts they call (deploy.sh / secrets_sync.sh)
+# encapsulate the full chain (cosign verify, repo sync, migrate, compose
+# up --wait, smoke, rollback). PR 5 will wrap this same logic in a
+# GH Actions workflow via google-github-actions/ssh-compute@v2.
+
+DEPLOY_PROJECT_ID  ?= booking-monitor-sandbox
+DEPLOY_ZONE        ?= us-central1-a
+DEPLOY_VM          ?= booking-app
+IMAGE_TAG          ?=
+
+deploy: ## PR 4 — deploy a signed image to the VM (usage: make deploy IMAGE_TAG=v1.0.0).
+	@test -n "$(IMAGE_TAG)" || (echo "ERROR: IMAGE_TAG not set. Usage: make deploy IMAGE_TAG=v1.0.0  OR  IMAGE_TAG=main  OR  IMAGE_TAG=sha-abc1234"; exit 1)
+	PROJECT_ID=$(DEPLOY_PROJECT_ID) ZONE=$(DEPLOY_ZONE) VM_NAME=$(DEPLOY_VM) \
+	  bash scripts/deploy.sh $(IMAGE_TAG)
+
+secrets-sync: ## PR 4 — refresh /opt/booking-monitor/.env on the VM from Secret Manager (without a full deploy).
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='sudo bash /opt/booking-monitor/scripts/secrets_sync.sh'
+	@echo ""
+	@printf 'Note: app needs %sdocker compose restart app%s to pick up new env values.\n' "'" "'"
+
+vm-ssh: ## PR 4 — SSH into the deploy VM via IAP tunnel.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap
+
+vm-logs: ## PR 4 — tail the booking-app container logs on the VM.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='cd /opt/booking-monitor && docker compose logs --tail=200 -f app'
+
+vm-status: ## PR 4 — show what's currently deployed on the VM.
+	gcloud compute ssh $(DEPLOY_VM) \
+	  --project=$(DEPLOY_PROJECT_ID) --zone=$(DEPLOY_ZONE) --tunnel-through-iap --quiet \
+	  --command='cd /opt/booking-monitor && docker compose ps && echo "---" && docker inspect booking-monitor --format="image: {{.Config.Image}}{{println}}digest: {{.RepoDigests}}{{println}}commit: {{index .Config.Labels \"org.opencontainers.image.revision\"}}"'
+
 # D12.5 — comparison harness control surface (originally 4-stage; PR #113
 # extended to 5 stages). The compose file `docker-compose.comparison.yml`
 # brings up bench-isolated Postgres + Redis + Kafka + 5 stage binaries on
@@ -468,3 +599,25 @@ migrate-force: ## Force set migration version
 migrate-status: ## Show the current migration version (N5)
 	@test -n "$(DB_URL)" || { echo "MIGRATE_DB_URL is not set. Copy .env.example to .env and fill it in."; exit 1; }
 	migrate -path deploy/postgres/migrations -database "$(DB_URL)" version
+
+# ============================================================================
+# PR 9 — Chaos engineering scenarios. Each script states a hypothesis,
+# verifies steady state, prompts the operator to confirm, injects the
+# failure, and (where applicable) auto-cleans up. See
+# docs/runbooks/chaos.md for the full methodology + per-scenario detail.
+# ============================================================================
+
+chaos-kill-app: ## Chaos Scenario A: kill booking_app, verify recovery <30s
+	@bash scripts/chaos/kill_app.sh
+
+chaos-kill-redis: ## Chaos Scenario B: kill booking_redis, verify fail-closed behavior + recovery
+	@bash scripts/chaos/kill_redis.sh
+
+chaos-network-latency: ## Chaos Scenario C: 500ms tc netem on booking_app eth0 for 60s
+	@bash scripts/chaos/network_latency.sh
+
+chaos-pg-saturation: ## Chaos Scenario D: 95 idle pg_sleep connections (consume max_connections), verify retry-with-backoff
+	@bash scripts/chaos/pg_saturation.sh
+
+chaos-kill-kafka: ## Chaos Scenario E: kill booking_kafka, verify outbox pattern preserves events + drains on restart
+	@bash scripts/chaos/kill_kafka.sh

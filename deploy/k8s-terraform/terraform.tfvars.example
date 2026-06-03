@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars + fill in your values.
+# Do NOT commit terraform.tfvars — it's in .gitignore.
+
+# Required: must match PR 1's deploy/terraform/ project.
+project_id = "booking-monitor-sandbox"
+
+# Optional overrides — defaults in variables.tf are sensible.
+# region              = "us-central1"
+# cluster_name        = "booking-monitor-prod"
+# release_channel     = "STABLE"
+# cloudsql_tier       = "db-f1-micro"
+# cloudsql_disk_size_gb = 10
+# deletion_protection = false

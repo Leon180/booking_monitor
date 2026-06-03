@@ -1,0 +1,105 @@
+# Release automation — PR 6 of the 8-PR CI/CD roadmap.
+#
+# Watches `main` for Conventional Commits, opens / updates a "release PR"
+# with the next SemVer bump + auto-generated CHANGELOG diff. When you
+# merge that PR, release-please tags it (e.g. `v1.2.0`) which then
+# triggers PR 3's release.yml (build + sign + push image) + PR 5's
+# deploy.yml (verify + deploy to VM).
+#
+# Pattern: tag → fan out to two independent workflows on the same trigger.
+# This is the *real-team* pattern (Grafana, Cosign, HashiCorp providers
+# — not workflow_run chaining, which has 3-40 min latency variance in
+# production). Deploy.yml absorbs the race with retry-with-backoff on
+# digest lookup.
+#
+# Bootstrapping note: we tagged v1.1.0 retroactively at PR #118 merge
+# (commit 32c78e4) because the CHANGELOG documented [1.1.0] but the
+# tag was missed at close-out. release-please-config.json's
+# `bootstrap-sha` is pinned to that commit so the bot doesn't try to
+# regenerate history before v1.1.0. Future releases (v1.2.0+) will be
+# proposed by the bot from commits between the current manifest version
+# and HEAD.
+
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  # workflow_dispatch lets us re-run release-please if a previous
+  # release PR was closed without merging (e.g. discovered a bug
+  # mid-release-PR, wanted a fresh proposal after a fixup landed).
+  workflow_dispatch:
+
+# Cancel superseded release-please runs on rapid pushes. release-please
+# is read-then-write over main's full history; the latest run subsumes
+# any earlier in-flight scan. Cancelling mid-run is safe (no partial
+# state — the bot fully recomputes the release PR each run). Switching
+# from cancel-in-progress: false to true (review round 1, MAJOR-M2)
+# eliminates the "missing status on rapidly-superseded commit" noise.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: maintain release PR + tag on merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # PR 8 of CI/CD roadmap switched release-please to a GitHub App
+      # token (minted JIT below). Even with the App handling the actual
+      # API calls, the workflow itself still needs an OIDC token to
+      # exchange with the App's installation endpoint — hence
+      # `id-token: write`. The `contents` + `pull-requests` perms below
+      # are now nominal (the App's installation token, not the
+      # workflow's GITHUB_TOKEN, is what release-please uses for
+      # writes) but kept declared for clarity to reviewers.
+      id-token: write
+      contents: write
+      pull-requests: write
+    steps:
+      # Mint a short-lived (~1 hour) GitHub App installation token.
+      # Why: a tag push event created by `GITHUB_TOKEN` is dropped by
+      # GitHub's anti-loop protection and never reaches sibling
+      # workflows. So when release-please bot tagged v1.2.0 using
+      # GITHUB_TOKEN, release.yml + deploy.yml never fired. Switching
+      # the token source to a GitHub App installation token bypasses
+      # that restriction: tag pushes from the App DO fan-trigger
+      # downstream workflows.
+      #
+      # Setup (one-time, see docs/runbooks/release_pipeline.md):
+      #   1. Create GitHub App (contents + pull-requests + issues = write)
+      #   2. Install on this repo
+      #   3. Store RELEASE_PLEASE_APP_ID + RELEASE_PLEASE_APP_PRIVATE_KEY
+      #      as repo secrets
+      #
+      # Pinned to @v3 (major-tag float) — v3.x started April 2026; any
+      # v4 release would be a breaking change we update deliberately.
+      - name: Mint GitHub App installation token
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      # Pin by minor tag — v5.x is the major track that started in
+      # April 2026 (Node runtime bump 20→24). Pinning to `@v5` (not
+      # `@v5.0.0`) opts into safe patch updates within the major; if
+      # release-please ever ships a breaking change in v6, we update
+      # this line deliberately.
+      - uses: googleapis/release-please-action@v5
+        with:
+          # Bot reads the two config files from the repo root. Single
+          # source of truth — operators read the same config the bot
+          # uses, no second YAML to maintain.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # Use the App's installation token (NOT GITHUB_TOKEN). This
+          # is the line that fixes the GITHUB_TOKEN-can't-trigger-
+          # sibling-workflows problem documented in earlier release
+          # cycles. Every tag created via this token DOES fan-trigger
+          # release.yml + deploy.yml on `push: tags: ['v*']`.
+          token: ${{ steps.app_token.outputs.token }}

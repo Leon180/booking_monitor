@@ -1,0 +1,45 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars
+# (the .gitignore in this directory excludes it; do not bypass).
+
+# ----- Required -----
+
+# GCP project to deploy into. If create_project=false, must already exist.
+project_id = "booking-monitor-prod"
+
+# GitHub owner + repo NAMES — informational only, displayed in outputs
+# and used as human-readable hints. NOT used in WIF trust (see below).
+github_owner = "Leon180"
+github_repo  = "booking_monitor"
+
+# GitHub owner + repo IDS — IMMUTABLE numeric identifiers. THESE drive
+# the WIF trust relationship so that an owner/repo rename or transfer
+# does not silently change which workflows can impersonate the CI
+# service accounts.
+#
+# Look up via gh CLI (one-time, paste the output here as strings):
+#   gh api /users/Leon180                  --jq .id
+#   gh api /repos/Leon180/booking_monitor  --jq .id
+#
+# Or via REST API: https://api.github.com/users/<owner>
+github_owner_id = "00000000" # replace with `gh api /users/<owner> --jq .id` output
+github_repo_id  = "00000000" # replace with `gh api /repos/<owner>/<repo> --jq .id` output
+
+# ----- Optional -----
+
+# If true, Terraform creates the project from scratch and links the
+# billing account. If false, the project must exist; Terraform just
+# manages resources inside it.
+create_project = false
+
+# Required only when create_project=true. Look up via:
+#   gcloud beta billing accounts list
+billing_account_id = ""
+
+# Region. e2-micro Always-Free is only available in:
+#   us-central1, us-east1, us-west1
+# Any other region drops to paid tier (~$7/mo for the same instance).
+region = "us-central1"
+
+# Zone suffix (a/b/c) within the region. Cosmetic; e2-micro tier is
+# per-project not per-zone.
+vm_zone_suffix = "a"
