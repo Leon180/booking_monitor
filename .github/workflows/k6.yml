@@ -57,15 +57,6 @@ on:
         description: 'k6 test duration (default 60s matches the project benchmark convention)'
         required: false
         default: '60s'
-  # TEMPORARY one-shot trigger — fires only for this PR's branch
-  # while we iterate on CI-specific issues. The `if:` gate at job
-  # level limits the actual run to `ci/k6-workflow`; the trigger
-  # itself only saves us from having to merge an untested workflow
-  # to main + fix-forward. REMOVE this trigger before final merge
-  # so future PRs don't accidentally consume 10min of CI budget
-  # on every push.
-  pull_request:
-    branches: [main]
 
 # One k6 run at a time per branch — avoids two cron + workflow_dispatch
 # runs trampling each other's stack.
@@ -79,12 +70,6 @@ permissions:
 jobs:
   k6:
     name: k6 (VUs=${{ github.event.inputs.vus || '500' }} duration=${{ github.event.inputs.duration || '60s' }})
-    # TEMPORARY gate (paired with the pull_request trigger above): only
-    # this PR's branch fires the k6 job on PR events; other PR events
-    # skip the job entirely. Schedule + workflow_dispatch events run
-    # unconditionally because their event.pull_request is null and the
-    # head_ref check falls through to true.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'ci/k6-workflow'
     runs-on: ubuntu-latest
     # 30min budget: ~5min for docker compose pull + build, ~2min for
     # readyz wait + migrations + seed, 2× ~60s for the k6 A/B runs,
