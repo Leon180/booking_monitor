@@ -215,48 +215,47 @@ jobs:
           set -euo pipefail
           docker compose up -d --build app
 
-      - name: Wait for app live + ready
-        # Two-stage check (per iter-7 finding):
+      - name: Wait for app healthy (via docker healthcheck)
+        # Iter 8 finding: the app image is distroless (no shell, no
+        # busybox) per Dockerfile design. `docker compose exec -T app
+        # wget ...` fails because there's no /bin/sh to interpret
+        # the command, even though wget itself IS in the image (it's
+        # what the compose healthcheck uses directly via CMD form).
         #
-        # Stage A: poll /livez — confirms the process is up and the
-        #   HTTP server is bound. Returns {"status":"ok"} as soon as
-        #   gin starts listening (microseconds after [Fx] RUNNING).
-        #   This was previously the readyz check; switching to livez
-        #   bypasses the dependency-check 503 path which iter 7
-        #   showed was the actual blocker — the app reached
-        #   [Fx] RUNNING at +5s but /readyz returned 503 for the
-        #   next 11min because one of the dep pings (likely Kafka
-        #   broker discovery during the readyz handler's 1s budget)
-        #   kept timing out under cloud-runner load.
+        # Pivot to waiting on docker's healthcheck status, which
+        # docker manages independently via the compose-defined
+        # healthcheck — that runs `wget --spider /livez` directly
+        # without invoking a shell. Status transitions:
+        #   starting → (healthcheck passes 1×) → healthy
+        #   starting → (5 retries fail) → unhealthy
+        # We wait for "healthy" and surface "unhealthy" as failure.
         #
-        # Stage B: dump the current /readyz body so we know which
-        #   dependency was slow. Don't fail on 503 — k6 hitting
-        #   /api/v1/book will surface real broken-dep issues
-        #   downstream as benchmark failures rather than wait-step
-        #   timeouts.
-        #
-        # 300s budget on Stage A — process-up should happen near
-        # instantly after boot completes; if it doesn't within 5min
-        # something else is wrong.
+        # 300s budget covers cold-start variance (iters 4-6 showed
+        # 128s-338s to [Fx] RUNNING) plus the healthcheck's 15s
+        # start_period + ~10s of retry budget.
         run: |
           set -euo pipefail
           start=$SECONDS
           for i in $(seq 1 300); do
-            if docker compose exec -T app wget -qO- "http://localhost:8080/livez" 2>/dev/null | grep -q '"status":"ok"'; then
-              echo "✓ app live after $((SECONDS - start))s (${i} polls)"
-              echo ""
-              echo "--- /readyz status snapshot (informational, not gating) ---"
-              docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null || true
-              echo ""
-              exit 0
-            fi
+            status=$(docker inspect --format='{{.State.Health.Status}}' booking_app 2>/dev/null || echo "missing")
+            case "$status" in
+              healthy)
+                echo "✓ app healthy after $((SECONDS - start))s"
+                exit 0
+                ;;
+              unhealthy)
+                echo "✗ app reported unhealthy after $((SECONDS - start))s"
+                docker compose logs --tail=120 app postgres redis kafka
+                exit 1
+                ;;
+            esac
             if [ $((i % 30)) -eq 0 ]; then
-              echo "  still waiting at $((SECONDS - start))s..."
+              echo "  still waiting (status=$status) at $((SECONDS - start))s..."
               docker compose logs --tail=3 app 2>/dev/null | tail -3 || true
             fi
             sleep 1
           done
-          echo "✗ app did not become LIVE within $((SECONDS - start))s"
+          echo "✗ app did not become healthy within $((SECONDS - start))s (final status: $status)"
           docker compose logs --tail=120 app postgres redis kafka
           exit 1
 
