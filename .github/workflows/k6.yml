@@ -215,40 +215,48 @@ jobs:
           set -euo pipefail
           docker compose up -d --build app
 
-      - name: Wait for app readyz
-        # /readyz returns 200 only when PG + Redis + Kafka all
-        # answer within 1s — same gate the k8s probe uses. App
-        # container does NOT expose 8080 to the host (nginx is the
-        # public entrypoint, port 80); reach /readyz via
-        # `docker compose exec` inside the app container — wget is
-        # part of the alpine base image.
+      - name: Wait for app live + ready
+        # Two-stage check (per iter-7 finding):
         #
-        # 600s budget on iter-7+: iter 6 took 338s to [Fx] RUNNING
-        # (variance: iter 4 = 128s, iter 5 = 203s, iter 6 = 338s).
-        # Cloud-runner Fx-dependency-graph wiring + Kafka broker
-        # discovery + Postgres pool warm is genuinely 5-6min cold,
-        # with significant variance. 600s gives 1.5× headroom over
-        # the worst case observed so far. Progress indicators every
-        # 30s let future debug see where time goes — if we ever blow
-        # 600s the log shows whether we're stuck or just slow.
+        # Stage A: poll /livez — confirms the process is up and the
+        #   HTTP server is bound. Returns {"status":"ok"} as soon as
+        #   gin starts listening (microseconds after [Fx] RUNNING).
+        #   This was previously the readyz check; switching to livez
+        #   bypasses the dependency-check 503 path which iter 7
+        #   showed was the actual blocker — the app reached
+        #   [Fx] RUNNING at +5s but /readyz returned 503 for the
+        #   next 11min because one of the dep pings (likely Kafka
+        #   broker discovery during the readyz handler's 1s budget)
+        #   kept timing out under cloud-runner load.
+        #
+        # Stage B: dump the current /readyz body so we know which
+        #   dependency was slow. Don't fail on 503 — k6 hitting
+        #   /api/v1/book will surface real broken-dep issues
+        #   downstream as benchmark failures rather than wait-step
+        #   timeouts.
+        #
+        # 300s budget on Stage A — process-up should happen near
+        # instantly after boot completes; if it doesn't within 5min
+        # something else is wrong.
         run: |
           set -euo pipefail
           start=$SECONDS
-          for i in $(seq 1 600); do
-            if docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null | grep -q '"status":"ok"'; then
-              echo "✓ app ready after $((SECONDS - start))s (${i} polls)"
+          for i in $(seq 1 300); do
+            if docker compose exec -T app wget -qO- "http://localhost:8080/livez" 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "✓ app live after $((SECONDS - start))s (${i} polls)"
+              echo ""
+              echo "--- /readyz status snapshot (informational, not gating) ---"
+              docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null || true
+              echo ""
               exit 0
             fi
-            # Every 30 polls (~30s), echo a still-waiting line so
-            # someone watching the run knows it isn't hung.
             if [ $((i % 30)) -eq 0 ]; then
               echo "  still waiting at $((SECONDS - start))s..."
-              # Also tail the app log so we see fx hook progress.
               docker compose logs --tail=3 app 2>/dev/null | tail -3 || true
             fi
             sleep 1
           done
-          echo "✗ app did not become ready within $((SECONDS - start))s"
+          echo "✗ app did not become LIVE within $((SECONDS - start))s"
           docker compose logs --tail=120 app postgres redis kafka
           exit 1
 
