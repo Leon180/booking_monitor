@@ -223,22 +223,32 @@ jobs:
         # `docker compose exec` inside the app container — wget is
         # part of the alpine base image.
         #
-        # 300s budget on iter-6+: iter 5 showed cold-start at
-        # ~203s (`[Fx] RUNNING` reached 23s after the 180s wait
-        # gave up). Cloud runners are noticeably slower than the
-        # dev laptop AND have variable Kafka broker-discovery
-        # latency that dominates the tail. 300s gives 1.5× headroom
-        # over observed worst case.
+        # 600s budget on iter-7+: iter 6 took 338s to [Fx] RUNNING
+        # (variance: iter 4 = 128s, iter 5 = 203s, iter 6 = 338s).
+        # Cloud-runner Fx-dependency-graph wiring + Kafka broker
+        # discovery + Postgres pool warm is genuinely 5-6min cold,
+        # with significant variance. 600s gives 1.5× headroom over
+        # the worst case observed so far. Progress indicators every
+        # 30s let future debug see where time goes — if we ever blow
+        # 600s the log shows whether we're stuck or just slow.
         run: |
           set -euo pipefail
-          for i in $(seq 1 300); do
+          start=$SECONDS
+          for i in $(seq 1 600); do
             if docker compose exec -T app wget -qO- "http://localhost:8080/readyz" 2>/dev/null | grep -q '"status":"ok"'; then
-              echo "✓ app ready after ${i}s"
+              echo "✓ app ready after $((SECONDS - start))s (${i} polls)"
               exit 0
+            fi
+            # Every 30 polls (~30s), echo a still-waiting line so
+            # someone watching the run knows it isn't hung.
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "  still waiting at $((SECONDS - start))s..."
+              # Also tail the app log so we see fx hook progress.
+              docker compose logs --tail=3 app 2>/dev/null | tail -3 || true
             fi
             sleep 1
           done
-          echo "✗ app did not become ready within 300s"
+          echo "✗ app did not become ready within $((SECONDS - start))s"
           docker compose logs --tail=120 app postgres redis kafka
           exit 1
 
