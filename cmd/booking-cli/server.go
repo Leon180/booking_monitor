@@ -229,7 +229,42 @@ func installInventoryRehydrate(
 	logger *mlog.Logger,
 ) {
 	lc.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
+		OnStart: func(startCtx context.Context) error {
+			// PR #128 A11 (review fixup): bounded by RehydrateTimeout AND
+			// cancellable by SIGINT.
+			//
+			// Earlier A11 form discarded the fx OnStart ctx entirely
+			// (root at Background only), which made the rehydrate
+			// uninterruptible — a SIGINT during a slow boot couldn't
+			// cancel the call.
+			//
+			// Naive merge `WithTimeout(startCtx, RehydrateTimeout)` is
+			// ALSO wrong: fx's default OnStart timeout (15s per fx.Hook
+			// default) becomes the EARLIER of the two deadlines and
+			// silently wins, reintroducing the original A11 problem
+			// (rehydrate cancelled mid-SETNX → half-populated Redis).
+			//
+			// Correct shape: root the rehydrate ctx at Background with
+			// the explicit RehydrateTimeout ceiling, AND arm a
+			// watchdog goroutine that cancels it when startCtx fires.
+			// This gives us:
+			//   (1) Bounded wall-clock — RehydrateTimeout (default 2m)
+			//       is the ceiling regardless of fx's OnStart timeout.
+			//   (2) Shutdown-responsive — SIGINT (which fx propagates
+			//       via startCtx) cancels the rehydrate promptly.
+			// The watchdog goroutine has a bounded lifetime: it exits
+			// when EITHER startCtx fires OR rehydrate-ctx fires (via
+			// the explicit `cancel()` on function return). No goroutine
+			// leak.
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.Redis.RehydrateTimeout)
+			defer cancel()
+			go func() {
+				select {
+				case <-startCtx.Done():
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
 			return cache.RehydrateInventory(ctx, cache.RehydrateInventoryParams{
 				EventRepo:      eventRepo,
 				TicketTypeRepo: ticketTypeRepo,
