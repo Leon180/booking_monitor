@@ -248,6 +248,22 @@ func (h *bookingHandler) HandleGetOrder(c *gin.Context) {
 			// the worker persists.
 			log.Debug(ctx, "order not found (may be in async-processing window)",
 				tag.OrderID(id))
+			// PR #130 A16: emit Retry-After to give clients a
+			// machine-readable backoff hint during the async-processing
+			// window. RFC 9110 §10.2.3 allows a delta-seconds value;
+			// 1 second matches the worker p99 persist latency.
+			// Indistinguishable-by-design from a truly-missing order:
+			// callers retry until either a 2xx lands or they give up.
+			//
+			// Caching note (PR #130 review): a 404 is cacheable by
+			// default per RFC 9110 §15.5.5. Today no caching proxy sits
+			// in front of /api/v1/orders/:id (nginx config has no
+			// proxy_cache for the API tier) so this is a non-issue.
+			// If a CDN or shared cache is ever placed in front of
+			// this endpoint, pair with Cache-Control: no-store on the
+			// 404 to avoid serving stale 404s for the Retry-After
+			// duration to clients that retry within the window.
+			c.Header("Retry-After", "1")
 			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "order not found"})
 			return
 		}
@@ -284,6 +300,12 @@ func (h *bookingHandler) HandleCreateEvent(c *gin.Context) {
 		return
 	}
 
+	// PR #130 A16: RFC 9110 §10.2.2 says a 201 response SHOULD include a
+	// Location header pointing at the resource that was created. The
+	// canonical view URL is /api/v1/events/<id> (HandleViewEvent below
+	// is its stub today; the body still carries the full event +
+	// ticket_types so clients aren't forced to follow Location).
+	c.Header("Location", fmt.Sprintf("/api/v1/events/%s", result.Event.ID()))
 	c.JSON(http.StatusCreated, dto.EventResponseFromDomain(result.Event, result.TicketTypes))
 }
 

@@ -70,3 +70,18 @@ func (mr *MockIdempotencyRepositoryMockRecorder) Set(ctx, key, result, fingerpri
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockIdempotencyRepository)(nil).Set), ctx, key, result, fingerprint)
 }
+
+// SetNX mocks base method.
+func (m *MockIdempotencyRepository) SetNX(ctx context.Context, key string, result *domain.IdempotencyResult, fingerprint string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetNX", ctx, key, result, fingerprint)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SetNX indicates an expected call of SetNX.
+func (mr *MockIdempotencyRepositoryMockRecorder) SetNX(ctx, key, result, fingerprint any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetNX", reflect.TypeOf((*MockIdempotencyRepository)(nil).SetNX), ctx, key, result, fingerprint)
+}

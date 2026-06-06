@@ -229,9 +229,16 @@ func TestValidate_AppEnvProductionGuards(t *testing.T) {
 			"production", false, false, ""},
 		{"empty env with test endpoints disabled — passes (closed default)",
 			"", false, false, ""},
-		{"development with test endpoints enabled — passes",
+		// PR #130 A1 fixup: these PASS cases use the rk_test_* override
+		// applied inside the loop below — the literal name now reads as
+		// "dev/staging + test-endpoints + (test key)" rather than
+		// "dev/staging + test-endpoints + ANY key", because the new
+		// env-independent live-key guard would reject the validBase()
+		// rk_live_* combo. See TestValidate_TestEndpointsAndLiveKeyGuard
+		// for the live-key REJECT axis.
+		{"development with test endpoints enabled — passes (test key injected)",
 			"development", true, false, ""},
-		{"staging with test endpoints enabled — passes",
+		{"staging with test endpoints enabled — passes (test key injected)",
 			"staging", true, false, ""},
 	}
 
@@ -241,6 +248,105 @@ func TestValidate_AppEnvProductionGuards(t *testing.T) {
 			c := validBase()
 			c.App.Env = tt.env
 			c.Server.EnableTestEndpoints = tt.enableTests
+			// PR #130 A1: validBase() uses rk_live_* (production-shaped).
+			// The new env-independent guard would reject every
+			// EnableTestEndpoints=true case in this table on the live-key
+			// axis. The cases that legitimately *should* pass with test
+			// endpoints enabled (dev/staging) must therefore use a test key.
+			if tt.enableTests && !tt.wantErr {
+				c.Payment.Stripe.APIKey = "rk_test_devOrStagingFakeKey_xxxxxxxx"
+			}
+
+			err := c.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate must reject %s", tt.name)
+				assert.Contains(t, err.Error(), tt.errSubstr,
+					"error must name the offending field for diagnosability")
+				return
+			}
+			require.NoError(t, err, "Validate must accept %s", tt.name)
+		})
+	}
+}
+
+// TestValidate_TestEndpointsAndLiveKeyGuard covers PR #130 A1 (CRIT) —
+// the env-INDEPENDENT cross-field guard rejecting EnableTestEndpoints=true
+// + sk_live_*/rk_live_* in ANY environment. The /test/payment/confirm
+// endpoint forges webhooks bypassing payment auth; against a real Stripe
+// account that's a payment-confirmation oracle for any guessable order_id.
+//
+// Distinct from TestValidate_AppEnvProductionGuards, which only covers the
+// production-only EnableTestEndpoints rejection. This test specifically
+// verifies dev / staging / empty-env all reject the live-key + test-endpoint
+// combo too.
+func TestValidate_TestEndpointsAndLiveKeyGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		env         string
+		enableTests bool
+		apiKey      string
+		wantErr     bool
+		errSubstr   string
+	}{
+		// REJECT cases — the live-key + test-endpoint combination is
+		// unconditionally rejected regardless of APP_ENV value.
+		{"staging + rk_live + test endpoints — REJECT",
+			"staging", true, "rk_live_stagingMisconfigured_xxxxxx", true,
+			"server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS cannot be true while payment.stripe.api_key"},
+		{"staging + sk_live + test endpoints — REJECT",
+			"staging", true, "sk_live_stagingMisconfigured_xxxxxx", true,
+			"server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS cannot be true while payment.stripe.api_key"},
+		{"development + rk_live + test endpoints — REJECT",
+			"development", true, "rk_live_devMisconfigured_xxxxxxxxx", true,
+			"server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS cannot be true while payment.stripe.api_key"},
+		{"empty env + sk_live + test endpoints — REJECT (covered by both production-only and env-independent guards)",
+			"", true, "sk_live_emptyEnvLiveKey_xxxxxxxxxx", true,
+			"ENABLE_TEST_ENDPOINTS"},
+
+		// ACCEPT cases — either test endpoints are disabled OR the key
+		// is a test key.
+		{"staging + rk_test + test endpoints — PASS (test key is the safe combo)",
+			"staging", true, "rk_test_stagingSafeKey_xxxxxxxxxxxx", false, ""},
+		{"staging + sk_test + test endpoints — PASS",
+			"staging", true, "sk_test_stagingSafeKey_xxxxxxxxxxxx", false, ""},
+		{"staging + rk_live + test endpoints DISABLED — PASS (live key alone is fine without /test/* mounted)",
+			"staging", false, "rk_live_stagingNoTestEndpoints_xxx", false, ""},
+		{"development + rk_test + test endpoints — PASS",
+			"development", true, "rk_test_devSafeKey_xxxxxxxxxxxxxx", false, ""},
+		// PR #130 A1 review fixup: document the empty-APIKey escape
+		// hatch explicitly. Empty APIKey + test endpoints is the
+		// canonical dev-loop combo (PAYMENT_PROVIDER=mock + no Stripe
+		// keys). The new guard is prefix-scoped to `sk_live_*`/`rk_live_*`
+		// so an empty string slips through — that case is gated by the
+		// downstream "STRIPE_API_KEY required when PAYMENT_PROVIDER=stripe"
+		// check at config.go:868 (mock provider + empty key + test
+		// endpoints is genuinely safe because MockGateway moves no
+		// real money).
+		{"staging + EMPTY APIKey + test endpoints — PASS (mock provider implied; live-key guard intentionally prefix-scoped)",
+			"staging", true, "", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validBase()
+			c.App.Env = tt.env
+			c.Server.EnableTestEndpoints = tt.enableTests
+			c.Payment.Stripe.APIKey = tt.apiKey
+			// PR #130 review fixup: when apiKey is empty, the test is
+			// exercising the prefix-scoped escape hatch — the canonical
+			// dev-loop combo is mock provider + no Stripe keys at all,
+			// so flip the provider AND clear the webhook secret too.
+			// (validBase() defaults to Provider=stripe with non-empty
+			// APIKey + WebhookSecret; mock + lingering Stripe credentials
+			// trips a separate "likely misconfiguration" guard.)
+			if tt.apiKey == "" {
+				c.Payment.Provider = "mock"
+				c.Payment.Stripe.WebhookSecret = ""
+				c.Payment.WebhookSecret = ""
+			}
 
 			err := c.Validate()
 			if tt.wantErr {

@@ -823,6 +823,47 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// PR #130 A1 (CRIT) — unconditional cross-field guard, env-INDEPENDENT.
+	//
+	// /test/payment/confirm/:order_id forges webhook events that bypass
+	// payment-provider authentication. Combining it with a Stripe LIVE
+	// key (sk_live_* / rk_live_*) — in ANY environment — turns the
+	// unauthenticated test endpoint into a payment-confirmation oracle
+	// for real-money orders: anyone who can guess an order_id can
+	// settle the corresponding PaymentIntent against the real Stripe
+	// account.
+	//
+	// Threat model: a staging deployment (APP_ENV=staging) sets
+	// EnableTestEndpoints=true for integration tests (legitimate) and
+	// STRIPE_API_KEY=rk_live_* through operator copy-paste from the
+	// prod secret bundle. The production-only EnableTestEndpoints
+	// guard above does NOT fire for APP_ENV=staging — without this
+	// guard the misconfiguration ships silently. Reject the combo
+	// regardless of APP_ENV. The live-key + test-endpoint pair has
+	// no legitimate operational use case.
+	//
+	// Scope note: this guard is prefix-scoped to Stripe's known
+	// `sk_live_*` / `rk_live_*` shapes. An empty APIKey is intentionally
+	// NOT rejected here — that case is covered by other guards
+	// (PAYMENT_PROVIDER=stripe + empty key fails the "APIKey required"
+	// check below; PAYMENT_PROVIDER=mock + empty key + test endpoints
+	// is the canonical dev-loop combo and safe by definition because
+	// MockGateway moves no real money). A future non-Stripe gateway
+	// or a Stripe key format change would need this prefix list updated.
+	//
+	// Production review-cycle fix: skip this check when APP_ENV=production
+	// because the production-only block above already rejects
+	// EnableTestEndpoints=true at all (regardless of key shape) — letting
+	// both fire produced a duplicate error message for the
+	// production+live+test triple combination.
+	if normalizedAppEnv(c.App.Env) != "production" &&
+		c.Server.EnableTestEndpoints &&
+		(strings.HasPrefix(c.Payment.Stripe.APIKey, "sk_live_") ||
+			strings.HasPrefix(c.Payment.Stripe.APIKey, "rk_live_")) {
+		missing = append(missing,
+			"server.enable_test_endpoints / ENABLE_TEST_ENDPOINTS cannot be true while payment.stripe.api_key / STRIPE_API_KEY is a LIVE key (sk_live_*/rk_live_*) regardless of APP_ENV — /test/payment/confirm forges webhooks bypassing payment-provider auth; against a real Stripe account this lets any order be settled by URL guess. Use a Stripe test key (sk_test_/rk_test_) in any environment where test endpoints are enabled.")
+	}
+
 	// D4.2 Plan-review M2: whitelist Provider FIRST. Reject typo'ed
 	// values with a single clear message. If we get past this switch
 	// the Provider is known-valid (mock / stripe / empty-as-mock).

@@ -60,17 +60,29 @@ type IdempotencyRepository interface {
 	// three states above — never the fourth (non-nil result + err).
 	Get(ctx context.Context, key string) (result *IdempotencyResult, fingerprint string, err error)
 
-	// Set stores result + fingerprint atomically under key. The
-	// fingerprint argument MUST be a non-empty hex SHA-256 of the
-	// originating request body in production code paths — passing
-	// "" here is reserved for out-of-band cache-rebuild tooling
-	// (none today). An empty fingerprint round-trips through Get as
-	// the legacy-entry signal, so production callers passing "" by
-	// mistake would invert the lazy-migration semantics: every
-	// subsequent replay would treat the new entry as legacy and
-	// re-run the write-back loop. The handler's `fingerprint(...)`
-	// always returns a 64-char hex string (SHA-256 of any input,
-	// including zero bytes, is non-empty), so this constraint holds
-	// trivially for the only production caller.
+	// Set stores result + fingerprint atomically under key,
+	// UNCONDITIONALLY overwriting any prior value. Used only on the
+	// lazy-migration write-back path (pre-N4 legacy entries with no
+	// fingerprint get rewritten with one). The fingerprint argument
+	// MUST be a non-empty hex SHA-256 of the originating request body
+	// in production code paths — passing "" here is reserved for
+	// out-of-band cache-rebuild tooling (none today). An empty
+	// fingerprint round-trips through Get as the legacy-entry signal,
+	// so production callers passing "" by mistake would invert the
+	// lazy-migration semantics: every subsequent replay would treat
+	// the new entry as legacy and re-run the write-back loop. The
+	// handler's `fingerprint(...)` always returns a 64-char hex
+	// string (SHA-256 of any input, including zero bytes, is
+	// non-empty), so this constraint holds trivially.
 	Set(ctx context.Context, key string, result *IdempotencyResult, fingerprint string) error
+
+	// SetNX stores result + fingerprint under key ONLY IF no entry
+	// exists. Returns wasSet=true when the write happened, false when
+	// a prior entry already won the race. The post-handler cache-fill
+	// path (PR #130 A17) uses this so the FIRST request to finish
+	// wins the cache — slow-path retries don't overwrite the cached
+	// envelope of an earlier completion. Semantically correct for
+	// idempotency: the canonical reply IS the first complete reply,
+	// not the most-recent-write.
+	SetNX(ctx context.Context, key string, result *IdempotencyResult, fingerprint string) (wasSet bool, err error)
 }
