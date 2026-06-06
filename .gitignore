@@ -23,6 +23,12 @@ go.work
 # Private interview prep notes — never commit
 docs/interview_prep.md
 docs/interview_prep_notion.md
+# Root-level private notes (cheat sheet + demo runbook + slide deck).
+# Anchored to repo root with a leading slash so they don't accidentally
+# match similarly-named files under docs/, deploy/, etc.
+/interview_prep*.md
+/demo_runbook*.md
+/demo_slides*.md
 
 # Private resume drafts — never commit
 docs/resume_en.md

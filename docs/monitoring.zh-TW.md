@@ -280,9 +280,11 @@ Panel 以可摺疊的 row 分組。最上方放「黃金訊號」,reliability / 
 [deploy/grafana/provisioning/dashboards/admin_war_room.json](../deploy/grafana/provisioning/dashboards/admin_war_room.json) — 閃購戰情室 ops dashboard,組合 Layer A(業務)與 Layer B(串流基礎設施)訊號,設計依據見 [§Q16](design/admin_event_streaming.md)。位置在 **Dashboards → Browse → Admin War-Room (PR #121)**。
 
 9 個 panel 的構成:
-- **Hero row(stat 面板)**:Bookings/s、Pay conversion %(5m)、Saga events/s、Admin SSE 連線數
-- **Trends row(時序圖)**:Booking 結果分層堆疊(success/sold_out/duplicate/error)、Saga + DLQ 異常疊圖
+- **Hero row(stat 面板)**:Bookings/s(`admin_event_bus_published_total{event_type="order.created"}` — 詳見下方 Stage 5 相容性說明)、Pay conversion %(5m)— `payment_webhook_received_total{result="succeeded"}` ÷ `admin_event_bus_published_total{event_type="order.created"}`、Saga events/s、Admin SSE 連線數
+- **Trends row(時序圖)**:Booking 結果以 `event_type` 分層堆疊,資料來自 `admin_event_bus_published_total`(order.created / order.paid / order.failed / order.expired / order.compensated / saga.triggered / dlq.received / inventory.low)、Saga + DLQ 異常疊圖
 - **串流健康 row(時序圖)**:Bus channel 深度 + drop 速率、Subscriber 連續失敗、SSE 訊息延遲 p95/p99
+
+**Stage 5 相容性說明**:War-Room dashboard 在 booking-rate / outcome 面板上刻意查詢 `admin_event_bus_published_total` 而非 `bookings_total`,因為 Stage 5 binary 的 worker 路徑沒有遞增 `bookings_total`(該 metric 雖然在服務啟動時註冊,但 Stage 5 worker 僅透過 admin event bus 發布事件)。`admin_event_bus_published_total` 由 `worker.MessageProcessor.Process` 遞增,不論執行的是 Stage 4 還是 Stage 5 binary 都能運作 — 跨 stage 相容。如果你執行的是 Stage 4 binary,仍可直接使用 `bookings_total{status}`(見 §3 cookbook);War-Room 面板切換到 bus 訊號是為了讓兩個 stage 都保持準確。
 
 刷新頻率:30 秒。預設區間:最近 15 分鐘。即時事件 timeline 是另一個視覺化層(SSE 串流 → 自製 JS),不包含在 Grafana JSON 裡。
 

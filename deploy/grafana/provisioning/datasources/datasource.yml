@@ -33,11 +33,21 @@
 #   isDefault: true
 #     New dashboards pick this data source by default. Only one
 #     data source can be the default per Grafana organisation.
+#
+#   uid: PROMETHEUS
+#     Explicit UID matches what the provisioned dashboard JSON
+#     references (e.g., admin_war_room.json uses "uid": "PROMETHEUS").
+#     Without this, Grafana auto-generates a random hash UID
+#     ("PBFA97CFB590B2093"), and the dashboard's panel queries fail
+#     to bind → "Datasource PROMETHEUS was not found" on every panel.
+#     The UID is a STABLE pointer that survives datasource rename,
+#     while `name` is for human display.
 
 apiVersion: 1
 
 datasources:
   - name: Prometheus
+    uid: PROMETHEUS
     type: prometheus
     access: proxy
     url: http://prometheus:9090
