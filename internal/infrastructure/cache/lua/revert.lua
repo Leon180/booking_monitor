@@ -2,6 +2,34 @@
 -- KEYS[2]: idempotency_key (saga:reverted:{compensation_id})
 -- ARGV[1]: count
 --
+-- DUAL-NAMESPACE NOTE (PR #126 A7): KEYS[2]'s `compensation_id`
+-- arrives in TWO shapes from TWO callers:
+--
+--   * worker path: compensation_id = rawMsg.ID — a Redis Streams
+--     entry id like "1715000000-0". TWO call sites in
+--     `redis_queue.go` use this shape:
+--       - `handleFailure` (line 488): the exhausted-retry path
+--         that fires on every message whose retry budget runs
+--         out. This is the DOMINANT worker compensation path.
+--       - `handleParseFailure` (line 443): the unrecoverable
+--         parse-fail path, fires when a stream entry can't be
+--         deserialized into a domain.Order at all.
+--     Both bound idempotency to "per failed stream-delivery
+--     attempt".
+--
+--   * saga path: compensation_id = "order:" + orderID (UUID) —
+--     "order:01234567-89ab-cdef-...". Bounds idempotency to
+--     "per saga-compensated order, across all retries".
+--
+-- The two shapes DO NOT collide in practice (stream-id shape is
+-- "<ms>-<seq>", order shape is "order:<uuid>"), but the dual usage
+-- is implicit. The Go-side interface is `RevertInventory(...,
+-- compensationID string)` — both callers pass through the same
+-- parameter, so this lua sees both string forms. Re-prefixing
+-- (worker:msg:* / saga:order:*) at the call sites would make the
+-- namespace explicit but breaks the 7-day TTL key fingerprints
+-- already in flight; documented here instead.
+--
 -- Reverts Redis inventory for a compensated order. Idempotent via an
 -- EXISTS check on the idempotency key rather than SETNX so we can reason
 -- about crash semantics precisely:

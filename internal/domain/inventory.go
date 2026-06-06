@@ -103,7 +103,32 @@ type InventoryRepository interface {
 	) (DeductInventoryResult, error)
 
 	// RevertInventory restores inventory count.
-	// compensationID is used for idempotency (e.g. order:{id} or stream msg_id)
+	//
+	// `compensationID` is used as the idempotency key inside `revert.lua`
+	// (built as `saga:reverted:{compensationID}`). Two callers, two
+	// shapes — see PR #126 A7. The dual-namespace contract:
+	//
+	//   * Worker path (TWO call sites in `redis_queue.go`):
+	//       - `handleFailure` (line 488): the exhausted-retry path
+	//         that fires when a message's per-message retry budget
+	//         is depleted. This is the DOMINANT worker compensation
+	//         path.
+	//       - `handleParseFailure` (line 443): the unrecoverable
+	//         parse-fail path, fires when a stream entry can't be
+	//         deserialized into a domain.Order at all.
+	//     Both pass `rawMsg.ID` (Redis Streams entry id, "<ms>-<seq>"
+	//     e.g. "1715000000-0"). Bounds idempotency to "per failed
+	//     stream-delivery attempt".
+	//
+	//   * Saga path (`saga/compensator.go::HandleOrderFailed`):
+	//     pass `"order:" + orderID.String()` ("order:<uuid>"). Bounds
+	//     idempotency to "per compensated order across all retries".
+	//
+	// The two key shapes don't collide in practice (stream-id is
+	// "<ms>-<seq>", order is "order:<uuid>"), but the namespace is
+	// implicit. New callers MUST pick one of these two existing
+	// shapes — do NOT introduce a third without first reviewing
+	// `revert.lua` and the saga TTL contract.
 	RevertInventory(ctx context.Context, ticketTypeID uuid.UUID, count int, compensationID string) error
 
 	// GetInventory returns the cached inventory count for a ticket type,
