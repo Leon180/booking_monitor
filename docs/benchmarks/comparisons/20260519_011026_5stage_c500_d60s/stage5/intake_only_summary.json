@@ -1,0 +1,150 @@
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+            "setup": {
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "event created": {
+                            "name": "event created",
+                            "path": "::setup::event created",
+                            "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                            "passes": 1,
+                            "fails": 0
+                        }
+                    }
+            }
+        },
+        "checks": {}
+    },
+    "metrics": {
+        "http_req_sending": {
+            "med": 0.002,
+            "max": 41.619,
+            "p(90)": 0.003,
+            "p(95)": 0.005,
+            "avg": 0.005896345057339732,
+            "min": 0.001
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        },
+        "http_req_receiving": {
+            "max": 14.048,
+            "p(90)": 0.021,
+            "p(95)": 0.026,
+            "avg": 0.010151099429835232,
+            "min": 0.003,
+            "med": 0.007
+        },
+        "business_errors": {
+            "passes": 0,
+            "fails": 332535,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "accepted_bookings": {
+            "count": 332535,
+            "rate": 5533.066124628573
+        },
+        "data_sent": {
+            "count": 73453109,
+            "rate": 1222189.872213602
+        },
+        "http_req_duration": {
+            "avg": 90.1964917422462,
+            "min": 8.595,
+            "med": 87.243,
+            "max": 179.068,
+            "p(90)": 102.758,
+            "p(95)": 111.9
+        },
+        "http_req_duration{expected_response:true}": {
+            "avg": 90.1964917422462,
+            "min": 8.595,
+            "med": 87.243,
+            "max": 179.068,
+            "p(90)": 102.758,
+            "p(95)": 111.9
+        },
+        "data_received": {
+            "count": 164898588,
+            "rate": 2743755.668611977
+        },
+        "iteration_duration": {
+            "p(95)": 111.93567949999999,
+            "avg": 90.22475098574823,
+            "min": 8.755,
+            "med": 87.265292,
+            "max": 179.086958,
+            "p(90)": 102.79118360000001
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0
+        },
+        "vus": {
+            "min": 500,
+            "max": 500,
+            "value": 500
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "http_req_blocked": {
+            "max": 49.198,
+            "p(90)": 0.001,
+            "p(95)": 0.001,
+            "avg": 0.007162908677645603,
+            "min": 0,
+            "med": 0
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 49.174,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.006139605937402262
+        },
+        "http_reqs": {
+            "count": 332536,
+            "rate": 5533.082763677468
+        },
+        "http_req_failed": {
+            "fails": 332536,
+            "passes": 0,
+            "value": 0
+        },
+        "http_req_waiting": {
+            "p(90)": 102.74450000000002,
+            "p(95)": 111.87824999999998,
+            "avg": 90.18044429776175,
+            "min": 7.482,
+            "med": 87.231,
+            "max": 179.058
+        },
+        "iterations": {
+            "count": 332535,
+            "rate": 5533.066124628573
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e3c1d-3d94-7f01-93da-bf1573de730c"
+    }
+}

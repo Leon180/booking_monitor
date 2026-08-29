@@ -1,0 +1,150 @@
+{
+    "metrics": {
+        "http_req_waiting": {
+            "avg": 17.44139928573936,
+            "min": 0.184,
+            "med": 16.085,
+            "max": 180.421,
+            "p(90)": 28.02,
+            "p(95)": 34.401
+        },
+        "http_req_receiving": {
+            "med": 0.005,
+            "max": 30.628,
+            "p(90)": 0.012,
+            "p(95)": 0.017,
+            "avg": 0.013972918619744451,
+            "min": 0.002
+        },
+        "vus_max": {
+            "min": 500,
+            "max": 500,
+            "value": 500
+        },
+        "http_req_duration": {
+            "p(95)": 34.426,
+            "avg": 17.458674069802655,
+            "min": 0.199,
+            "med": 16.1,
+            "max": 180.608,
+            "p(90)": 28.046
+        },
+        "data_sent": {
+            "count": 378714153,
+            "rate": 6309870.245958281
+        },
+        "accepted_bookings": {
+            "rate": 8376.751987797263,
+            "count": 502767
+        },
+        "iteration_duration": {
+            "p(90)": 28.076292,
+            "p(95)": 34.469662499999984,
+            "avg": 17.492143556955455,
+            "min": 0.276083,
+            "med": 16.1274795,
+            "max": 180.636209
+        },
+        "business_errors": {
+            "passes": 0,
+            "fails": 502767,
+            "thresholds": {
+                "rate<0.05": false
+            },
+            "value": 0
+        },
+        "http_reqs": {
+            "rate": 28565.782770799236,
+            "count": 1714499
+        },
+        "http_req_blocked": {
+            "avg": 0.003950456664123048,
+            "min": 0,
+            "med": 0.001,
+            "max": 40.694,
+            "p(90)": 0.001,
+            "p(95)": 0.001
+        },
+        "data_received": {
+            "count": 493626641,
+            "rate": 8224461.721287268
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "http_req_sending": {
+            "avg": 0.003301865443012823,
+            "min": 0,
+            "med": 0.002,
+            "max": 17.191,
+            "p(90)": 0.004,
+            "p(95)": 0.005
+        },
+        "vus": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "http_req_failed": {
+            "passes": 1211731,
+            "fails": 502768,
+            "value": 0.7067551512132699
+        },
+        "http_req_connecting": {
+            "avg": 0.0032289030206491824,
+            "min": 0,
+            "med": 0,
+            "max": 37.019,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "iterations": {
+            "count": 1714498,
+            "rate": 28565.766109498898
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        },
+        "http_req_duration{expected_response:true}": {
+            "avg": 16.041548000270907,
+            "min": 0.199,
+            "med": 15.143,
+            "max": 107.874,
+            "p(90)": 22.634,
+            "p(95)": 25.946
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e3c1a-e3c0-7aac-9cba-7ee9a1770466"
+    },
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+            "setup": {
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "event created": {
+                            "fails": 0,
+                            "name": "event created",
+                            "path": "::setup::event created",
+                            "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                            "passes": 1
+                        }
+                    }
+            }
+        },
+        "checks": {}
+    }
+}
