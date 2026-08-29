@@ -98,12 +98,37 @@ func (p *IntakePublisher) PublishIntake(ctx context.Context, msg booking.IntakeM
 		return fmt.Errorf("intake publisher: encode message: %w", err)
 	}
 
-	// Bound the publish by the configured WriteTimeout in addition to
-	// the caller's ctx. The kafka.Writer respects WriteTimeout for
-	// network I/O but not the broker ack roundtrip — the explicit
-	// ctx-with-timeout is the belt to kafka.Writer.WriteTimeout's
-	// suspenders.
-	publishCtx, cancel := context.WithTimeout(ctx, p.writeTimeout)
+	// PR #128 A10 (review fixup): keep a bounded context but root it at
+	// Background, NOT the caller's ctx. The pre-A10 shape used
+	// `context.WithTimeout(ctx, p.writeTimeout)` which is fine but
+	// inherits cancellation from the gin request ctx — if the client
+	// disconnects mid-publish, the publish is cancelled before broker
+	// ack, leaving Redis inventory deducted with no Kafka durability
+	// guarantee. Stage 5's whole point is at-least-once Kafka durability
+	// on the booking hot path, so we want the publish to complete (or
+	// time out on its own clock) regardless of client disconnect.
+	//
+	// Why not just pass `ctx` directly: the audit's claim that
+	// `kafka.Writer.WriteTimeout` ALONE bounds the gin handler was
+	// incorrect. Per kafka-go's WriteMessages select loop, only the
+	// caller's ctx Done channel arms the early-cancel path; the
+	// Writer's internal Background-rooted produce ctx only unblocks
+	// `batch.done` *after* WriteTimeout elapses, but the gin goroutine
+	// is still pinned for that full duration. More importantly, the
+	// ErrPublishTimeout sentinel detection (`errors.Is(err,
+	// context.DeadlineExceeded)`) only fires when the *caller's* ctx
+	// carries the deadline — kafka-go wraps the internal timeout into
+	// a network/protocol error that does NOT unwrap to
+	// context.DeadlineExceeded. Restoring an explicit deadline keeps
+	// both the bounded wall-clock AND the typed-sentinel behaviour.
+	//
+	// The alloc cost (~80B *timerCtx + timer pair per publish ≈
+	// 640 KB/s + 8k timer create/cancel pairs/s at the 8k publish/s
+	// intake ceiling) is real but the wrong trade-off vs the
+	// durability + observability regression A10's first form
+	// introduced. Pooling the timer is the proper optimisation if
+	// the alloc surface ever shows up as material on the hot path.
+	publishCtx, cancel := context.WithTimeout(context.Background(), p.writeTimeout)
 	defer cancel()
 
 	err = p.writer.WriteMessages(publishCtx, kafka.Message{
