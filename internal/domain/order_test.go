@@ -491,3 +491,148 @@ func TestOrderStatus_IsValid_Exhaustiveness(t *testing.T) {
 			"IsValid must reject empty string")
 	})
 }
+
+// orderAtStatus is a thin local helper that reconstructs an Order at a
+// specific status for the predicate tests below. Reduces noise from
+// the 10-arg ReconstructOrder signature when the test only cares about
+// status / reserved_until.
+func orderAtStatus(t *testing.T, status domain.OrderStatus, reservedUntil time.Time) domain.Order {
+	t.Helper()
+	return domain.ReconstructOrder(
+		uuid.New(), 1, uuid.New(), uuid.Nil, 1,
+		status, time.Now(), reservedUntil, "", 0, "",
+	)
+}
+
+// TestOrder_IsTerminalForWebhook covers PR #127 A5 — the predicate
+// moved from application/payment onto domain.Order. Locks down the
+// terminal-status set: a webhook redelivery against any of these
+// statuses is a 200 no-op (avoiding double saga emit + retroactive
+// state-machine reversal by slow provider redelivery).
+func TestOrder_IsTerminalForWebhook(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status domain.OrderStatus
+		want   bool
+	}{
+		// Terminal — webhook is a no-op.
+		{domain.OrderStatusPaid, true},
+		{domain.OrderStatusPaymentFailed, true},
+		{domain.OrderStatusCompensated, true},
+		{domain.OrderStatusExpired, true},
+		// Non-terminal — webhook must process.
+		{domain.OrderStatusAwaitingPayment, false},
+		{domain.OrderStatusPending, false},
+		{domain.OrderStatusCharging, false},
+		{domain.OrderStatusFailed, false},
+		{domain.OrderStatusConfirmed, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			o := orderAtStatus(t, tt.status, time.Time{})
+			assert.Equal(t, tt.want, o.IsTerminalForWebhook())
+		})
+	}
+}
+
+// TestOrder_IsFailureTerminalAfterPay covers the late-success
+// detection set: a `succeeded` webhook landing on one of these
+// statuses means money moved at the provider AFTER we declared
+// the booking dead — manual-refund flag, not a state transition.
+// `Paid` is intentionally NOT in this set (clean redelivery).
+func TestOrder_IsFailureTerminalAfterPay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status domain.OrderStatus
+		want   bool
+	}{
+		{domain.OrderStatusExpired, true},
+		{domain.OrderStatusPaymentFailed, true},
+		{domain.OrderStatusCompensated, true},
+		// Paid is intentionally NOT terminal-after-pay — clean redelivery.
+		{domain.OrderStatusPaid, false},
+		// Non-terminal statuses also return false (the caller gates on
+		// IsTerminalForWebhook first; this is belt-and-suspenders).
+		{domain.OrderStatusAwaitingPayment, false},
+		{domain.OrderStatusPending, false},
+		{domain.OrderStatusCharging, false},
+		{domain.OrderStatusFailed, false},
+		{domain.OrderStatusConfirmed, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			o := orderAtStatus(t, tt.status, time.Time{})
+			assert.Equal(t, tt.want, o.IsFailureTerminalAfterPay())
+		})
+	}
+}
+
+// TestOrder_IsReservationActive covers the Pattern A reservation
+// window predicate: AwaitingPayment AND reserved_until > now.
+func TestOrder_IsReservationActive(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	future := now.Add(10 * time.Minute)
+	past := now.Add(-10 * time.Minute)
+
+	tests := []struct {
+		name          string
+		status        domain.OrderStatus
+		reservedUntil time.Time
+		want          bool
+	}{
+		{"AwaitingPayment + future reserved_until = active",
+			domain.OrderStatusAwaitingPayment, future, true},
+		{"AwaitingPayment + past reserved_until = expired-but-not-flipped",
+			domain.OrderStatusAwaitingPayment, past, false},
+		{"AwaitingPayment + reserved_until == now (not strictly After) = inactive",
+			domain.OrderStatusAwaitingPayment, now, false},
+		{"Paid + future reserved_until = inactive (status wrong)",
+			domain.OrderStatusPaid, future, false},
+		{"Expired + future reserved_until = inactive",
+			domain.OrderStatusExpired, future, false},
+		{"PaymentFailed + future reserved_until = inactive",
+			domain.OrderStatusPaymentFailed, future, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			o := orderAtStatus(t, tt.status, tt.reservedUntil)
+			assert.Equal(t, tt.want, o.IsReservationActive(now))
+		})
+	}
+}
+
+// TestOrder_RequiresCompensation covers the inventory-revert
+// predicate set used by the saga compensator: orders where Redis
+// inventory was deducted but the seat was not consumed.
+func TestOrder_RequiresCompensation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status domain.OrderStatus
+		want   bool
+	}{
+		// Inventory deducted, seat not consumed → revert.
+		{domain.OrderStatusFailed, true},
+		{domain.OrderStatusExpired, true},
+		{domain.OrderStatusPaymentFailed, true},
+		// Already compensated — no second revert.
+		{domain.OrderStatusCompensated, false},
+		// Success-side terminals — seat consumed, no revert.
+		{domain.OrderStatusPaid, false},
+		{domain.OrderStatusConfirmed, false},
+		// In-flight statuses — no compensation yet.
+		{domain.OrderStatusPending, false},
+		{domain.OrderStatusCharging, false},
+		{domain.OrderStatusAwaitingPayment, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			t.Parallel()
+			o := orderAtStatus(t, tt.status, time.Time{})
+			assert.Equal(t, tt.want, o.RequiresCompensation())
+		})
+	}
+}
