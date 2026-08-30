@@ -1,6 +1,6 @@
 # DORA metrics — rolling 90 days
 
-Auto-generated 2026-08-29 12:22 UTC by [`booking-cli dora`](../cmd/booking-cli/dora.go). See [docs/runbooks/dora.md](runbooks/dora.md) for the runbook + heuristic honesty notes.
+Auto-generated 2026-08-30 11:21 UTC by [`booking-cli dora`](../cmd/booking-cli/dora.go). See [docs/runbooks/dora.md](runbooks/dora.md) for the runbook + heuristic honesty notes.
 
 Per DORA 2024+ this report tracks **5 metrics** (FDRT replaces MTTR; Rework Rate added). Per DORA 2025 the tier-based ranking model was retired — this report shows raw values + trend, not benchmarks.
 
@@ -8,21 +8,19 @@ Per DORA 2024+ this report tracks **5 metrics** (FDRT replaces MTTR; Rework Rate
 
 | Metric | Value | Window |
 | --- | --- | --- |
-| Deploys (total) | 4 | 90 days |
+| Deploys (total) | 0 | 90 days |
 | Deploys (successful) | 0 | 90 days |
 | **Deployment Frequency** (median per day) | 0.00 /day | 90 days |
 | **Lead Time for Changes** (p50 / p90 hours) | n/a / n/a | 90 days |
 | **Failed Deployment Recovery Time** (p50 / p90 hours) | n/a / n/a | 90 days |
-| **Change Failure Rate** | 100.0% | 90 days |
-| **Deployment Rework Rate** | 0.0% | 90 days |
+| **Change Failure Rate** | n/a | 90 days |
+| **Deployment Rework Rate** | n/a | 90 days |
 
 ## Daily deploys (sparkline)
 
 ```
-█                                                                                          
-May 31          Aug 29
+(no deploys in window)
 ```
-
 ## Heuristic honesty notes
 
 These metrics are computed from public GitHub APIs (Deployments + Releases) without an explicit incident-tracking system. Several values are **approximations** — directional, not authoritative.
