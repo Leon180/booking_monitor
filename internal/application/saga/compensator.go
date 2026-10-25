@@ -181,10 +181,22 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 			// legacy rolling-upgrade payloads we must re-run the fallback
 			// resolution so ticketTypeIDForRevert is non-zero.
 			wasAlreadyCompensated = true
-			ticketTypeID, err := s.resolveTicketTypeID(ctx, repos, event)
+			ticketTypeID, _, err := s.resolveTicketTypeID(ctx, repos, event)
 			if err != nil {
 				return &stepError{step: "list_ticket_type", err: err}
 			}
+			// PR #127 B7: discard `found` here. Safe because this branch
+			// ends with `return nil` immediately after the idempotency
+			// check (the already-compensated replay path); IncrementTicket
+			// is NOT called. If `ticketTypeID` came back as `uuid.Nil`
+			// (Path C — unrecoverable), `ticketTypeIDForRevert` will
+			// carry that value out of the UoW, and the outer guard at
+			// line 322 (`if ticketTypeIDForRevert == uuid.Nil`) then
+			// skips the entire `RevertInventory` call. revert.lua is
+			// never reached on the Path-C-from-replay shape, so the
+			// dual-namespace contract from CAP A7 doesn't come into
+			// play here — the safety lives in the outer guard, not in
+			// the Lua script.
 			ticketTypeIDForRevert = ticketTypeID
 			return nil
 		}
@@ -214,12 +226,17 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 		//     no row means manual review (the order's `failed` status
 		//     is preserved so ops can find it). The Redis revert below
 		//     also skips because the runtime key is ticket_type scoped.
-		ticketTypeID, err := s.resolveTicketTypeID(ctx, repos, event)
+		ticketTypeID, found, err := s.resolveTicketTypeID(ctx, repos, event)
 		if err != nil {
 			return &stepError{step: "list_ticket_type", err: err}
 		}
 		ticketTypeIDForRevert = ticketTypeID
-		if ticketTypeID != uuid.Nil {
+		// PR #127 B7: branch on the explicit `found` flag instead of
+		// comparing against uuid.Nil. Path C (unrecoverable) returns
+		// (uuid.Nil, false, nil); the DB IncrementTicket is skipped
+		// (wrong-row corruption is worse than counter drift, which ops
+		// can reconcile out-of-band — see Path-C comment above).
+		if found {
 			if err := repos.TicketType.IncrementTicket(ctx, ticketTypeID, event.Quantity); err != nil {
 				return &stepError{step: "incrementticket", err: fmt.Errorf("ticketTypeRepo.IncrementTicket ticket_type=%s: %w", ticketTypeID, err)}
 			}
@@ -387,25 +404,30 @@ func (s *compensator) HandleOrderFailed(ctx context.Context, payload []byte, ori
 // IncrementTicket should target, per the three-path resolution
 // documented in HandleOrderFailed:
 //
-//   - Path A (clean):       event.TicketTypeID != uuid.Nil → return it.
-//   - Path B (legacy):      ListByEventID returns exactly 1 row → use it.
+//   - Path A (clean):       event.TicketTypeID != uuid.Nil → (id, true, nil).
+//   - Path B (legacy):      ListByEventID returns exactly 1 row → (id, true, nil).
 //                           Logs Warn so ops see the rolling-upgrade window.
-//   - Path C (unrecoverable): ListByEventID returns 0 or > 1 rows → return
-//                           (uuid.Nil, nil). Caller skips DB increment but
-//                           continues to Redis revert + MarkCompensated.
+//   - Path C (unrecoverable): ListByEventID returns 0 or > 1 rows →
+//                           (uuid.Nil, false, nil). Caller skips DB increment
+//                           but continues to Redis revert + MarkCompensated.
 //                           Logs Error so the case is operator-visible.
 //
 // ListByEventID lookup errors propagate up wrapped.
-func (s *compensator) resolveTicketTypeID(ctx context.Context, repos *application.Repositories, event application.OrderFailedEvent) (uuid.UUID, error) {
+//
+// PR #127 B7: replaced the (uuid.Nil, nil) magic-value sentinel with an
+// explicit `found bool` return so caller branches are obvious from the
+// signature and don't depend on the caller remembering to compare
+// against uuid.Nil.
+func (s *compensator) resolveTicketTypeID(ctx context.Context, repos *application.Repositories, event application.OrderFailedEvent) (uuid.UUID, bool, error) {
 	if event.TicketTypeID != uuid.Nil {
-		return event.TicketTypeID, nil
+		return event.TicketTypeID, true, nil
 	}
 
 	// Legacy event (wire format v < 3) caught in Kafka during rolling
 	// upgrade. Try a per-event lookup as a recovery path.
 	ticketTypes, err := repos.TicketType.ListByEventID(ctx, event.EventID)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("ticketTypeRepo.ListByEventID event_id=%s (legacy event fallback): %w", event.EventID, err)
+		return uuid.Nil, false, fmt.Errorf("ticketTypeRepo.ListByEventID event_id=%s (legacy event fallback): %w", event.EventID, err)
 	}
 	switch len(ticketTypes) {
 	case 1:
@@ -417,7 +439,7 @@ func (s *compensator) resolveTicketTypeID(ctx context.Context, repos *applicatio
 			tag.EventID(event.EventID),
 			tag.TicketTypeID(ticketTypes[0].ID()),
 		)
-		return ticketTypes[0].ID(), nil
+		return ticketTypes[0].ID(), true, nil
 	case 0:
 		// Event has no ticket_types — data corruption (event was
 		// created pre-D4.1 and never migrated). Manual review needed.
@@ -425,7 +447,7 @@ func (s *compensator) resolveTicketTypeID(ctx context.Context, repos *applicatio
 			tag.OrderID(event.OrderID),
 			tag.EventID(event.EventID),
 		)
-		return uuid.Nil, nil
+		return uuid.Nil, false, nil
 	default:
 		// > 1 ticket_type — D8 multi-ticket-type expansion + a legacy
 		// pre-v3 message still in Kafka. We CANNOT pick the right one
@@ -435,6 +457,6 @@ func (s *compensator) resolveTicketTypeID(ctx context.Context, repos *applicatio
 			tag.EventID(event.EventID),
 			mlog.Int("ticket_type_count", len(ticketTypes)),
 		)
-		return uuid.Nil, nil
+		return uuid.Nil, false, nil
 	}
 }

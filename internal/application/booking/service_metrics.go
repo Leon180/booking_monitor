@@ -22,8 +22,12 @@ func NewMetricsDecorator(next Service, metrics Metrics) Service {
 	return &metricsDecorator{next: next, metrics: metrics}
 }
 
-func (d *metricsDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) (domain.Order, error) {
-	order, err := d.next.BookTicket(ctx, userID, eventID, quantity)
+func (d *metricsDecorator) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.UUID, quantity int) (domain.Order, error) {
+	// PR #127 A6: parameter renamed eventID → ticketTypeID. Stale name
+	// post-D4.1 (no OTel attribute is emitted from this decorator, but
+	// the misleading variable name in the function signature was the
+	// other half of the bug pair flagged by the audit).
+	order, err := d.next.BookTicket(ctx, userID, ticketTypeID, quantity)
 
 	switch {
 	case err == nil:

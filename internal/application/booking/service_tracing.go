@@ -22,15 +22,20 @@ func NewTracingDecorator(next Service) Service {
 	return &tracingDecorator{next: next}
 }
 
-func (s *tracingDecorator) BookTicket(ctx context.Context, userID int, eventID uuid.UUID, quantity int) (domain.Order, error) {
+func (s *tracingDecorator) BookTicket(ctx context.Context, userID int, ticketTypeID uuid.UUID, quantity int) (domain.Order, error) {
+	// PR #127 A6: D4.1 renamed the second arg from event_id to
+	// ticket_type_id (KKTIX-shape: inventory + price live on ticket
+	// types, not events). The decorator parameter name and OTel
+	// attribute label were not updated then, so spans emitted
+	// `event_id=<ticket_type_uuid>` — observability data wrong post-D4.1.
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "BookTicket", trace.WithAttributes(
 		attribute.Int("user_id", userID),
-		attribute.String("event_id", eventID.String()),
+		attribute.String("ticket_type_id", ticketTypeID.String()),
 		attribute.Int("quantity", quantity),
 	))
 	defer span.End()
 
-	order, err := s.next.BookTicket(ctx, userID, eventID, quantity)
+	order, err := s.next.BookTicket(ctx, userID, ticketTypeID, quantity)
 	if err != nil {
 		// RecordError adds the exception event but doesn't change the
 		// span status. SetStatus(Error) is what flips the span to red
