@@ -1,0 +1,169 @@
+{
+    "metrics": {
+        "http_req_failed": {
+            "passes": 5646,
+            "fails": 60353,
+            "value": 0.08554675070834407
+        },
+        "http_req_tls_handshaking": {
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0
+        },
+        "http_req_duration{expected_response:true}": {
+            "avg": 1.7357693072423788,
+            "min": 0.202,
+            "med": 0.906,
+            "max": 82.907,
+            "p(90)": 2.029,
+            "p(95)": 3.368
+        },
+        "data_sent": {
+            "count": 8308027,
+            "rate": 92261.33678313505
+        },
+        "http_req_blocked": {
+            "avg": 0.02462269125286014,
+            "min": 0,
+            "med": 0.002,
+            "max": 9.799,
+            "p(90)": 0.004,
+            "p(95)": 0.007
+        },
+        "checks": {
+            "passes": 1,
+            "fails": 0,
+            "value": 1
+        },
+        "accepted_bookings": {
+            "count": 2471,
+            "rate": 27.440662288546573
+        },
+        "http_req_waiting": {
+            "med": 0.891,
+            "max": 30690.634,
+            "p(90)": 2.5122000000000013,
+            "p(95)": 8.297899999999974,
+            "avg": 91.12748487098251,
+            "min": 0.186
+        },
+        "business_errors": {
+            "passes": 2353,
+            "fails": 0,
+            "thresholds": {
+                "rate<0.05": true
+            },
+            "value": 1
+        },
+        "end_to_end_paid_duration": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "thresholds": {
+                "p(95)<30000": false
+            }
+        },
+        "http_reqs": {
+            "count": 65999,
+            "rate": 732.9244315587961
+        },
+        "http_req_sending": {
+            "avg": 0.013086728586800015,
+            "min": 0.001,
+            "med": 0.005,
+            "max": 3.874,
+            "p(90)": 0.014,
+            "p(95)": 0.021
+        },
+        "http_req_duration": {
+            "max": 30690.64,
+            "p(90)": 2.549,
+            "p(95)": 8.344499999999984,
+            "avg": 91.15543605206182,
+            "min": 0.202,
+            "med": 0.912
+        },
+        "http_req_connecting": {
+            "max": 8.82,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.02137164199457567,
+            "min": 0,
+            "med": 0
+        },
+        "book_to_reserved_duration": {
+            "max": 1506,
+            "p(90)": 1003,
+            "p(95)": 1004,
+            "avg": 626.7696674776967,
+            "min": 0,
+            "med": 503
+        },
+        "iterations": {
+            "count": 2353,
+            "rate": 26.13026238970056
+        },
+        "http_req_receiving": {
+            "min": 0,
+            "med": 0.011,
+            "max": 12.394,
+            "p(90)": 0.023,
+            "p(95)": 0.03,
+            "avg": 0.014864452491703088
+        },
+        "data_received": {
+            "count": 31921048,
+            "rate": 354485.91584964993
+        },
+        "vus": {
+            "value": 118,
+            "min": 118,
+            "max": 500
+        },
+        "vus_max": {
+            "value": 500,
+            "min": 500,
+            "max": 500
+        },
+        "iteration_duration": {
+            "avg": 12645.097988958782,
+            "min": 542.425833,
+            "med": 2129.879708,
+            "max": 61713.623209,
+            "p(90)": 60704.7484498,
+            "p(95)": 60819.6923254
+        }
+    },
+    "setup_data": {
+        "ticketTypeID": "019e3c19-76e0-7321-abec-6fd3ed8f9e74"
+    },
+    "root_group": {
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+            "setup": {
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "event created": {
+                            "path": "::setup::event created",
+                            "id": "1f1f5459ceb43cd5ccabd96402cc8889",
+                            "passes": 1,
+                            "fails": 0,
+                            "name": "event created"
+                        }
+                    },
+                "name": "setup"
+            }
+        },
+        "checks": {},
+        "name": "",
+        "path": ""
+    }
+}

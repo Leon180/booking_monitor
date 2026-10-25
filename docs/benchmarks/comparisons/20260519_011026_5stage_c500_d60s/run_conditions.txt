@@ -1,0 +1,23 @@
+═══ D12.5 4-stage comparison run conditions ═══
+captured_at_utc: 2026-05-18T17:10:26Z
+vus: 500
+duration: 60s
+
+── host ──
+Darwin MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+uptime:  1:10  up 34 days,  9:32, 3 users, load averages: 4.60 3.45 3.10
+
+── toolchain versions ──
+Docker version 29.3.1, build c2be9cc
+Docker Compose version v5.1.1
+k6 v1.6.0 (commit/devel, go1.25.7, darwin/arm64)
+psql (PostgreSQL) 14.17 (Homebrew)
+go version go1.25.10 darwin/arm64
+
+── git state ──
+branch: refactor/stage5-clean-architecture
+commit: 520698e
+dirty: ?? booking-cli-stage5
+?? docs/benchmarks/comparisons/20260519_011026_5stage_c500_d60s/
+?? "docs/interview_prep_notion 35e732caeee4804ea987f0f28c4014ae.md"
+3 changed files
